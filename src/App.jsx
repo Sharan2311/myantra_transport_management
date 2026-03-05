@@ -569,15 +569,209 @@ function Dashboard({trips, vehicles, employees, indents, activity, settings, set
   );
 }
 
+
+// ─── DI / GR COPY UPLOADER ───────────────────────────────────────────────────
+// Sends photo or PDF to Claude AI → extracts all trip fields automatically
+function DIUploader({ onExtracted, trips, settings, isIn }) {
+  const [state,   setState]   = useState("idle"); // idle | reading | scanning | done | error
+  const [preview, setPreview] = useState(null);   // base64 for image preview
+  const [error,   setError]   = useState("");
+  const inputRef = useRef(null);
+
+  const PROMPT = `You are reading a Delivery Instruction (DI) or GR copy for a cement transport company in India.
+Extract the following fields from this document image and return ONLY a JSON object with these exact keys:
+{
+  "lrNo": "LR number / Lorry Receipt number",
+  "diNo": "DI number / Delivery Instruction number",
+  "grNo": "GR number / Goods Receipt number",
+  "truckNo": "Vehicle/Truck registration number",
+  "consignee": "Consignee name / destination party",
+  "from": "Source/loading location",
+  "to": "Destination/unloading location",
+  "grade": "Material grade - use exactly 'Cement Packed' or 'Cement Bulk' for cement, else actual material name",
+  "qty": "Quantity in MT as a number only (no units)",
+  "bags": "Number of bags as a number only (0 if not applicable)",
+  "frRate": "Freight rate per MT in rupees as a number only (the Shree/company rate, not driver rate)",
+  "date": "Date in YYYY-MM-DD format"
+}
+Rules:
+- Return ONLY the JSON object, no explanation, no markdown, no backticks
+- If a field is not found in the document, use empty string "" for text fields and 0 for number fields
+- For truck numbers, format as uppercase with no spaces e.g. KA34C4617
+- For qty and bags, return only the number e.g. 35 not "35 MT"
+- For frRate, look for "freight", "rate", "F.Rate", "Fr.Rate" or similar — this is the per-MT rate Shree pays`;
+
+  const fileToBase64 = (file) => new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result.split(",")[1]);
+    r.onerror = rej;
+    r.readAsDataURL(file);
+  });
+
+  const handleFile = async (file) => {
+    if (!file) return;
+    setError(""); setState("reading");
+
+    try {
+      const base64 = await fileToBase64(file);
+      const isImage = file.type.startsWith("image/");
+      const isPDF   = file.type === "application/pdf";
+
+      if (!isImage && !isPDF) {
+        setError("Please upload a photo (JPG/PNG) or PDF file.");
+        setState("error"); return;
+      }
+
+      // Show preview for images
+      if (isImage) setPreview(`data:${file.type};base64,${base64}`);
+      else setPreview(null);
+
+      setState("scanning");
+
+      // Call Claude API
+      const contentBlock = isImage
+        ? { type: "image", source: { type: "base64", media_type: file.type, data: base64 } }
+        : { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } };
+
+      const resp = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 1000,
+          messages: [{ role: "user", content: [contentBlock, { type: "text", text: PROMPT }] }],
+        }),
+      });
+
+      const data = await resp.json();
+      const text = (data.content||[]).find(b => b.type === "text")?.text || "";
+
+      // Parse JSON — strip any accidental markdown
+      const clean = text.replace(/```json|```/g, "").trim();
+      const extracted = JSON.parse(clean);
+
+      // Check if same LR already exists
+      const lrNo = (extracted.lrNo || "").trim();
+      const existingTrip = lrNo ? trips.find(t => t.lrNo === lrNo) : null;
+
+      setState("done");
+      onExtracted({
+        ...extracted,
+        qty:    String(extracted.qty    || ""),
+        bags:   String(extracted.bags   || "0"),
+        frRate: String(extracted.frRate || ""),
+        tafal:  String(settings?.tafalPerTrip || 300),
+        advance: "0", shortage: "0", dieselEstimate: "0",
+        type: isIn ? "inbound" : "outbound",
+      }, existingTrip);
+
+    } catch(e) {
+      console.error("DI scan error:", e);
+      setError("Could not read document. Try a clearer photo. (" + e.message + ")");
+      setState("error");
+    }
+  };
+
+  const onDrop = (e) => {
+    e.preventDefault();
+    const file = e.dataTransfer?.files?.[0];
+    if (file) handleFile(file);
+  };
+
+  return (
+    <div style={{marginBottom:16}}>
+      {/* Upload zone */}
+      {(state === "idle" || state === "error") && (
+        <div
+          onClick={() => inputRef.current?.click()}
+          onDrop={onDrop}
+          onDragOver={e => e.preventDefault()}
+          style={{
+            border: `2px dashed ${state==="error" ? C.red : C.blue}`,
+            borderRadius: 14, padding: "20px 16px", textAlign: "center",
+            cursor: "pointer", background: C.bg,
+            display: "flex", flexDirection: "column", alignItems: "center", gap: 8,
+          }}
+        >
+          <div style={{fontSize: 32}}>📄</div>
+          <div style={{color: C.blue, fontWeight: 800, fontSize: 14}}>
+            Upload DI / GR Copy
+          </div>
+          <div style={{color: C.muted, fontSize: 12}}>
+            Take a photo or upload PDF — AI will fill all fields
+          </div>
+          {error && <div style={{color:C.red, fontSize:12, marginTop:4}}>{error}</div>}
+        </div>
+      )}
+
+      {/* Scanning state */}
+      {(state === "reading" || state === "scanning") && (
+        <div style={{
+          border: `2px solid ${C.blue}44`, borderRadius: 14, padding: "20px 16px",
+          textAlign: "center", background: C.bg,
+          display: "flex", flexDirection: "column", alignItems: "center", gap: 10,
+        }}>
+          {preview && (
+            <img src={preview} alt="DI preview"
+              style={{maxHeight: 120, maxWidth: "100%", borderRadius: 8, objectFit: "contain"}} />
+          )}
+          <div style={{color: C.blue, fontWeight: 800, fontSize: 14}}>
+            {state === "reading" ? "📖 Reading file…" : "🤖 AI scanning document…"}
+          </div>
+          <div style={{color: C.muted, fontSize: 12}}>
+            {state === "scanning" ? "Extracting LR, DI, GR, quantity, rate…" : "Preparing…"}
+          </div>
+          <div style={{display:"flex", gap:4}}>
+            {[0,1,2].map(i => (
+              <div key={i} style={{
+                width:8, height:8, borderRadius:"50%", background:C.blue,
+                opacity: 0.3 + (i * 0.3),
+                animation:`bounce 1s ${i*0.2}s infinite`,
+              }} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Done — show scan again button */}
+      {state === "done" && (
+        <div style={{
+          border: `2px solid ${C.green}44`, borderRadius: 14, padding: "10px 16px",
+          background: C.green+"11", display:"flex", justifyContent:"space-between", alignItems:"center",
+        }}>
+          <div style={{color: C.green, fontWeight: 700, fontSize: 13}}>
+            ✓ Document scanned — fields filled below
+          </div>
+          <button onClick={() => { setState("idle"); setPreview(null); }}
+            style={{background:"none", border:`1px solid ${C.green}44`, color:C.green,
+              borderRadius:8, padding:"4px 10px", fontSize:12, cursor:"pointer"}}>
+            Scan another
+          </button>
+        </div>
+      )}
+
+      <input ref={inputRef} type="file" accept="image/*,application/pdf"
+        style={{display:"none"}} onChange={e => handleFile(e.target.files?.[0])} />
+
+      <style>{`
+        @keyframes bounce {
+          0%,100%{transform:translateY(0)} 50%{transform:translateY(-6px)}
+        }
+      `}</style>
+    </div>
+  );
+}
+
 // ─── TRIPS ────────────────────────────────────────────────────────────────────
 function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, log}) {
   const isIn = tripType === "inbound";
   const ac   = isIn ? C.teal : C.accent;
 
-  const [addSheet,  setAddSheet]  = useState(false);
-  const [editSheet, setEditSheet] = useState(null); // trip being edited
-  const [filter,    setFilter]    = useState("All");
-  const [search,    setSearch]    = useState("");
+  const [addSheet,    setAddSheet]    = useState(false);
+  const [editSheet,   setEditSheet]   = useState(null);
+  const [filter,      setFilter]      = useState("All");
+  const [search,      setSearch]      = useState("");
+  const [diConflict,  setDiConflict]  = useState(null); // existing trip with same LR
 
   const blankForm = () => ({
     type:tripType, lrNo:"", diNo:"", truckNo:"", grNo:"",
@@ -601,6 +795,35 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
   const onTruckChange = v => {
     const veh = vehicles.find(x => x.truckNo===v.toUpperCase().trim());
     setF(p => ({...p, truckNo:v, tafal: veh?.tafalExempt ? "0" : String(settings?.tafalPerTrip||300)}));
+  };
+
+  // Called when AI extracts fields from DI/GR copy
+  const onDIExtracted = (extracted, existingTrip) => {
+    if (existingTrip) {
+      // Same LR found — ask user if they want to add DI to existing trip
+      setDiConflict({ extracted, existingTrip });
+    } else {
+      // New LR — pre-fill form with extracted fields
+      setF(p => ({ ...p, ...extracted }));
+    }
+  };
+
+  // Add new DI to existing trip (same LR, multiple DIs)
+  const addDIToExisting = () => {
+    const { extracted, existingTrip } = diConflict;
+    const newDiNo = [existingTrip.diNo, extracted.diNo].filter(Boolean).join(" + ");
+    const newGrNo = [existingTrip.grNo, extracted.grNo].filter(Boolean).join(" + ");
+    const updatedTrip = {
+      ...existingTrip,
+      diNo: newDiNo,
+      grNo: newGrNo,
+      qty:  (existingTrip.qty||0) + (+extracted.qty||0),
+      bags: (existingTrip.bags||0) + (+extracted.bags||0),
+      editedBy: user.username, editedAt: nowTs(),
+    };
+    setTrips(p => p.map(t => t.id === existingTrip.id ? updatedTrip : t));
+    log("ADD DI TO TRIP", `LR:${existingTrip.lrNo} + DI:${extracted.diNo} total ${updatedTrip.qty}MT`);
+    setDiConflict(null); setAddSheet(false);
   };
 
   const saveNew = () => {
@@ -702,9 +925,41 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
 
       {/* ── ADD SHEET ── */}
       {addSheet && (
-        <Sheet title={isIn?"New Raw Material Trip":"New Cement Trip"} onClose={()=>{setAddSheet(false);setF(blankForm());}}>
-          <TripForm f={f} ff={ff} isIn={isIn} ac={ac} vehicles={vehicles} settings={settings}
-            onTruckChange={onTruckChange} onSubmit={saveNew} submitLabel="Save Trip" user={user} />
+        <Sheet title={isIn?"New Raw Material Trip":"New Cement Trip"} onClose={()=>{setAddSheet(false);setF(blankForm());setDiConflict(null);}}>
+
+          {/* DI Conflict — same LR already exists */}
+          {diConflict ? (
+            <div style={{display:"flex",flexDirection:"column",gap:14}}>
+              <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:12,padding:"14px"}}>
+                <div style={{color:C.orange,fontWeight:800,fontSize:14,marginBottom:8}}>⚠ Same LR Already Exists</div>
+                <div style={{color:C.text,fontSize:13,marginBottom:4}}>
+                  LR <b>{diConflict.existingTrip.lrNo}</b> already has a trip:
+                </div>
+                <div style={{color:C.muted,fontSize:12}}>
+                  {diConflict.existingTrip.truckNo} → {diConflict.existingTrip.to} · {diConflict.existingTrip.qty}MT · DI: {diConflict.existingTrip.diNo}
+                </div>
+              </div>
+              <div style={{color:C.text,fontSize:13}}>
+                New DI <b>{diConflict.extracted.diNo}</b> has <b>{diConflict.extracted.qty} MT</b>.
+                What would you like to do?
+              </div>
+              <Btn onClick={addDIToExisting} full color={C.orange}>
+                ➕ Add this DI to existing trip (total {(+diConflict.existingTrip.qty||0)+(+diConflict.extracted.qty||0)} MT)
+              </Btn>
+              <Btn onClick={()=>{setF(p=>({...p,...diConflict.extracted}));setDiConflict(null);}} full outline color={C.blue}>
+                Create as separate new trip
+              </Btn>
+              <Btn onClick={()=>setDiConflict(null)} full outline color={C.muted}>
+                Cancel
+              </Btn>
+            </div>
+          ) : (
+            <>
+              <DIUploader onExtracted={onDIExtracted} trips={trips} settings={settings} isIn={isIn} />
+              <TripForm f={f} ff={ff} isIn={isIn} ac={ac} vehicles={vehicles} settings={settings}
+                onTruckChange={onTruckChange} onSubmit={saveNew} submitLabel="Save Trip" user={user} />
+            </>
+          )}
         </Sheet>
       )}
 
