@@ -2269,3 +2269,13 @@ function UserAdmin({users, setUsers, user, log}) {
     </div>
   );
 }
+
+// ─── CONNECTION TEST (add to window for debugging) ───────────────────────────
+if (typeof window !== 'undefined') {
+  window.testSupabase = async () => {
+    const { supabase } = await import('./supabase.js')
+    const { data, error } = await supabase.from('mye_users').select('username,role')
+    console.log('Users:', data, 'Error:', error)
+    return { data, error }
+  }
+}
