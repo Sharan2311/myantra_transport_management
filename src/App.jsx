@@ -628,23 +628,16 @@ Rules:
 
       setState("scanning");
 
-      // Call Claude API
-      const contentBlock = isImage
-        ? { type: "image", source: { type: "base64", media_type: file.type, data: base64 } }
-        : { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } };
-
-      const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      // Call via Netlify serverless function (avoids browser CORS restriction)
+      const resp = await fetch("/.netlify/functions/scan-di", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 1000,
-          messages: [{ role: "user", content: [contentBlock, { type: "text", text: PROMPT }] }],
-        }),
+        body: JSON.stringify({ base64, mediaType: file.type, prompt: PROMPT }),
       });
 
       const data = await resp.json();
-      const text = (data.content||[]).find(b => b.type === "text")?.text || "";
+      if (!resp.ok || data.error) throw new Error(data.error || "Server error");
+      const text = data.text || "";
 
       // Parse JSON — strip any accidental markdown
       const clean = text.replace(/```json|```/g, "").trim();
