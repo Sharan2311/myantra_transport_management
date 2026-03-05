@@ -219,12 +219,43 @@ function MoreMenu({user, setTab}) {
 }
 
 // ─── LOGIN ────────────────────────────────────────────────────────────────────
-function Login({users, onLogin, dbError}) {
-  const [un, setUn] = useState(""); const [pin, setPin] = useState(""); const [err, setErr] = useState("");
-  const go = () => {
-    const u = (users||[]).find(x => x.username===un.trim().toLowerCase() && x.pin===pin && x.active);
-    u ? (setErr(""), onLogin(u)) : setErr("Wrong username or PIN. Try again.");
+function Login({onLogin}) {
+  const [un, setUn] = useState("");
+  const [pin, setPin] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const go = async () => {
+    const username = un.trim().toLowerCase();
+    if (!username || !pin) { setErr("Enter username and PIN."); return; }
+    setBusy(true); setErr("");
+    try {
+      // Query Supabase directly — bypasses any caching issue
+      const { data, error } = await import('./supabase.js').then(m =>
+        m.supabase.from('mye_users')
+          .select('*')
+          .eq('username', username)
+          .eq('pin', pin)
+          .eq('active', true)
+          .single()
+      );
+      if (error || !data) {
+        setErr("Wrong username or PIN. Try again.");
+      } else {
+        const u = {
+          id: data.id, name: data.name, username: data.username,
+          pin: data.pin, role: data.role, active: data.active,
+          createdAt: data.created_at,
+        };
+        onLogin(u);
+      }
+    } catch(e) {
+      setErr("Cannot reach database. Check internet connection. (" + e.message + ")");
+    } finally {
+      setBusy(false);
+    }
   };
+
   return (
     <div style={{minHeight:"100vh",background:C.bg,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,fontFamily:"system-ui,-apple-system,sans-serif"}}>
       <div style={{width:"100%",maxWidth:380}}>
@@ -233,14 +264,14 @@ function Login({users, onLogin, dbError}) {
           <div style={{color:C.accent,fontWeight:900,fontSize:22,letterSpacing:1}}>M. YANTRA ENTERPRISES</div>
           <div style={{color:C.muted,fontSize:12,letterSpacing:3,marginTop:4}}>TRANSPORT MANAGEMENT</div>
         </div>
-        {dbError && <div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:10,padding:"10px 14px",color:C.red,fontSize:12,marginBottom:12}}>
-          ⚠ Cannot reach database. Check your internet connection.<br/><span style={{color:C.muted}}>{dbError}</span>
-        </div>}
         <div style={{background:C.card,borderRadius:20,padding:24,display:"flex",flexDirection:"column",gap:14}}>
           <Field label="Username" value={un} onChange={setUn} placeholder="owner / raju / suresh" />
           <Field label="PIN" value={pin} onChange={setPin} type="password" placeholder="4-digit PIN" />
           {err && <div style={{color:C.red,fontSize:13,background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:10,padding:"10px 14px"}}>{err}</div>}
-          <Btn onClick={go} full>Login →</Btn>
+          <Btn onClick={go} full loading={busy}>{busy ? "Checking…" : "Login →"}</Btn>
+        </div>
+        <div style={{textAlign:"center",color:C.muted,fontSize:12,marginTop:16}}>
+          Users: owner · raju · suresh · accounts
         </div>
       </div>
     </div>
@@ -416,7 +447,7 @@ export default function App() {
         <div style={{color:C.muted,fontSize:13}}>Connecting to database…</div>
       </div>
     );
-    return <Login users={users} onLogin={u=>{setUser(u);log("LOGIN",`${u.name} signed in`);}} dbError={dbError} />;
+    return <Login onLogin={u=>{setUser(u);log("LOGIN",`${u.name} signed in`);}} />;
   }
 
   return (
