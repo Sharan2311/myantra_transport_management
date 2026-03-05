@@ -1,0 +1,95 @@
+# M. YANTRA — DEPLOYMENT GUIDE
+# Total time: ~20 minutes. No coding needed.
+
+═══════════════════════════════════════════════════════
+STEP 1 — CREATE SUPABASE DATABASE (Free)
+═══════════════════════════════════════════════════════
+
+1. Go to: https://supabase.com
+2. Click "Start your project" → Sign up with Google or email
+3. Click "New Project"
+   - Name: myantra
+   - Database Password: choose a strong password (save it)
+   - Region: Southeast Asia (Singapore) — closest to India
+   - Click "Create new project" — wait 2 minutes
+
+4. Once ready, go to: SQL Editor (left sidebar)
+5. Click "New Query"
+6. Open the file: supabase/schema.sql from this folder
+7. Copy ALL of it → Paste into the editor → Click "Run"
+   - You should see "Success. No rows returned"
+
+8. Get your API keys:
+   - Left sidebar → Settings → API
+   - Copy "Project URL" → looks like https://xxxx.supabase.co
+   - Copy "anon public" key → long string starting with eyJ...
+
+═══════════════════════════════════════════════════════
+STEP 2 — DEPLOY TO NETLIFY (Free)
+═══════════════════════════════════════════════════════
+
+1. Go to: https://netlify.com
+2. Sign up with Google or email
+3. Click "Add new site" → "Deploy manually"
+4. You'll need to build the app first (see Step 3), then drag the dist/ folder
+
+OR easier — connect via GitHub:
+1. Upload this entire myantra folder to a GitHub repo
+2. Netlify → "Import from Git" → connect your repo
+3. Build command: npm run build
+4. Publish directory: dist
+5. Click Deploy
+
+═══════════════════════════════════════════════════════
+STEP 3 — ADD YOUR SUPABASE KEYS TO NETLIFY
+═══════════════════════════════════════════════════════
+
+In Netlify, go to: Site → Site configuration → Environment variables
+Add these two variables:
+
+  Key: VITE_SUPABASE_URL
+  Value: (paste your Project URL from Supabase)
+
+  Key: VITE_SUPABASE_ANON_KEY
+  Value: (paste your anon public key from Supabase)
+
+Click Save → Trigger a redeploy
+
+═══════════════════════════════════════════════════════
+STEP 4 — SEND LINK TO AGENTS
+═══════════════════════════════════════════════════════
+
+Your app URL will be: https://[your-site-name].netlify.app
+
+Send to agents on WhatsApp:
+"Open this link and add to home screen: https://myantra.netlify.app"
+
+Android: Chrome → 3 dots menu → "Add to Home screen"
+iPhone:  Safari → Share button → "Add to Home Screen"
+
+Done. Looks and works like an app. No installation needed.
+
+═══════════════════════════════════════════════════════
+STEP 5 — CUSTOM DOMAIN (Optional, ₹800/year)
+═══════════════════════════════════════════════════════
+
+Instead of myantra.netlify.app you can have myantra.in or similar.
+Buy from GoDaddy/Namecheap → Add in Netlify → Site → Domain management.
+
+═══════════════════════════════════════════════════════
+COSTS SUMMARY
+═══════════════════════════════════════════════════════
+
+Supabase Free tier: 500MB storage, 2GB bandwidth/month → ₹0
+Netlify Free tier: 100GB bandwidth, unlimited deploys  → ₹0
+Custom domain (optional)                               → ~₹800/year
+
+For your usage (5-10 users, ~100 trips/month) you will
+NEVER hit the free tier limits.
+
+═══════════════════════════════════════════════════════
+IF YOU NEED HELP
+═══════════════════════════════════════════════════════
+
+Share the error message with your developer (or Claude)
+and they can fix it in minutes. The code is all here.
