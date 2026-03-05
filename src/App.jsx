@@ -232,14 +232,14 @@ function Login({onLogin}) {
     setBusy(true); setErr("");
     try {
       // Query Supabase directly — bypasses any caching issue
-      const { data, error } = await supabase
+      // Fetch by username only, check pin + active in JS
+      const { data: rows, error } = await supabase
         .from('mye_users')
         .select('*')
-        .eq('username', username)
-        .eq('pin', pin)
-        .eq('active', true)
-        .single();
-      if (error || !data) {
+        .eq('username', username);
+      const data = (rows||[]).find(u => u.pin === pin && u.active !== false);
+      if (error) throw new Error(error.message);
+      if (!data) {
         setErr("Wrong username or PIN. Try again.");
       } else {
         const u = {
