@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { DB } from "./db.js";
+import { supabase } from "./supabase.js";
 
 // ─── THEME ────────────────────────────────────────────────────────────────────
 const C = {
@@ -231,14 +232,13 @@ function Login({onLogin}) {
     setBusy(true); setErr("");
     try {
       // Query Supabase directly — bypasses any caching issue
-      const { data, error } = await import('./supabase.js').then(m =>
-        m.supabase.from('mye_users')
-          .select('*')
-          .eq('username', username)
-          .eq('pin', pin)
-          .eq('active', true)
-          .single()
-      );
+      const { data, error } = await supabase
+        .from('mye_users')
+        .select('*')
+        .eq('username', username)
+        .eq('pin', pin)
+        .eq('active', true)
+        .single();
       if (error || !data) {
         setErr("Wrong username or PIN. Try again.");
       } else {
@@ -2301,12 +2301,3 @@ function UserAdmin({users, setUsers, user, log}) {
   );
 }
 
-// ─── CONNECTION TEST (add to window for debugging) ───────────────────────────
-if (typeof window !== 'undefined') {
-  window.testSupabase = async () => {
-    const { supabase } = await import('./supabase.js')
-    const { data, error } = await supabase.from('mye_users').select('username,role')
-    console.log('Users:', data, 'Error:', error)
-    return { data, error }
-  }
-}
