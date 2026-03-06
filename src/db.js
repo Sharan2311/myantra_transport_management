@@ -14,6 +14,7 @@ const tripFromDB = r => ({
   billedAt: r.billed_at, editedBy: r.edited_by, editedAt: r.edited_at,
   createdBy: r.created_by, createdAt: r.created_at,
   diLines: r.di_lines || [],
+  dieselIndentNo: r.diesel_indent_no || "",
 })
 const tripToDB = t => ({
   id: t.id, type: t.type, lr_no: t.lrNo, di_no: t.diNo, truck_no: t.truckNo,
@@ -26,6 +27,7 @@ const tripToDB = t => ({
   billed_at: t.billedAt, edited_by: t.editedBy, edited_at: t.editedAt,
   created_by: t.createdBy, created_at: t.createdAt,
   di_lines: t.diLines || [],
+  diesel_indent_no: t.dieselIndentNo || "",
 })
 
 const vehicleFromDB = r => ({
@@ -99,6 +101,12 @@ const indentFromDB = r => ({
   ratePerLitre: +r.rate_per_litre, amount: +r.amount,
   confirmed: r.confirmed, paid: r.paid, paidDate: r.paid_date,
   paidRef: r.paid_ref, createdBy: r.created_by, createdAt: r.created_at,
+  unmatched: r.unmatched || false,
+  truckMismatch: r.truck_mismatch || false,
+  alertDismissed: r.alert_dismissed || false,
+  dismissReason: r.dismiss_reason || "",
+  dismissedBy: r.dismissed_by || "",
+  dismissedAt: r.dismissed_at || "",
 })
 const indentToDB = i => ({
   id: i.id, pump_id: i.pumpId, truck_no: i.truckNo, trip_id: i.tripId||'',
@@ -106,6 +114,12 @@ const indentToDB = i => ({
   rate_per_litre: i.ratePerLitre, amount: i.amount,
   confirmed: i.confirmed, paid: i.paid, paid_date: i.paidDate||'',
   paid_ref: i.paidRef||'', created_by: i.createdBy, created_at: i.createdAt,
+  unmatched: i.unmatched || false,
+  truck_mismatch: i.truckMismatch || false,
+  alert_dismissed: i.alertDismissed || false,
+  dismiss_reason: i.dismissReason || "",
+  dismissed_by: i.dismissedBy || "",
+  dismissed_at: i.dismissedAt || "",
 })
 
 const driverPayFromDB = r => ({

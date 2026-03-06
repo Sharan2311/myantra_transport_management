@@ -86,6 +86,7 @@ const mkTrip = (o) => ({
   frRate:0, givenRate:0, date:today(), advance:0, shortage:0, tafal:0,
   status:"Pending Bill", invoiceNo:"", paymentStatus:"Unpaid",
   driverSettled:false, dieselEstimate:0,
+  dieselIndentNo:"", // indent number from pump slip — given before loading
   diLines:[], // [{diNo, grNo, qty, bags, givenRate}] — for multi-DI trips
   createdBy:"system", createdAt:nowTs(), ...o
 });
@@ -979,7 +980,7 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
   const [confirmDel,  setConfirmDel]  = useState(null);  // trip pending delete confirmation
 
   const blankForm = () => ({
-    type:tripType, lrNo:"", diNo:"", truckNo:"", grNo:"",
+    type:tripType, lrNo:"", diNo:"", truckNo:"", grNo:"", dieselIndentNo:"",
     consignee: isIn ? "Shree Cement Ltd" : "",
     from: isIn ? "" : "Kodla", to: isIn ? "Kodla" : "",
     grade: isIn ? "Limestone" : "Cement Packed",
@@ -1056,12 +1057,18 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
     setDiConflict(null); setAddSheet(false);
   };
 
-  const saveNew = () => {
+  const saveNew = async () => {
+    // Validate: diesel indent no must be unique
+    if (f.dieselIndentNo && trips.some(t => t.dieselIndentNo && t.dieselIndentNo === f.dieselIndentNo.trim())) {
+      alert(`Diesel Indent No "${f.dieselIndentNo}" already exists on another trip. Each indent number must be unique.`);
+      return;
+    }
     const t = mkTrip({
       ...f, type:tripType,
       qty:+f.qty, bags:+f.bags, frRate:+f.frRate, givenRate:+f.givenRate,
       advance:+f.advance, shortage:+f.shortage, tafal:+f.tafal,
       dieselEstimate:+f.dieselEstimate,
+      dieselIndentNo: (f.dieselIndentNo||"").trim(),
       createdBy:user.username, createdAt:nowTs(),
     });
     setTrips(p => [t, ...(p||[])]);
@@ -1321,6 +1328,10 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
           : <><Field label="DI / Order No" value={f.diNo||""} onChange={ff("diNo")} placeholder="9003158248" half />
               <Field label="GR No" value={f.grNo||""} onChange={ff("grNo")} placeholder="1070/MYE/2670" half /></>}
       </div>
+      <Field label="Diesel Indent No (from pump slip)"
+        value={f.dieselIndentNo||""} onChange={ff("dieselIndentNo")}
+        placeholder="e.g. 25748 — given by pump before loading"
+        note="Enter the indent number from the pump slip before loading" />
       <div style={{display:"flex",gap:10}}>
         {locked
           ? <><LockedField label="From" value={f.from} half /><LockedField label="To" value={f.to} half /></>
@@ -1731,6 +1742,8 @@ function TafalMod({trips, vehicles, setVehicles, employees, settings, setSetting
         </div>
       </div>
 
+
+
       <Field label="Select Month" value={month} onChange={setMonth} type="month" />
 
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
@@ -1831,13 +1844,316 @@ function PumpRow({p, paid, onPayAll}) {
   );
 }
 
+
+
+
+// ─── DIESEL ALERT BANNER ──────────────────────────────────────────────────────
+function DieselAlertBanner({ alerts, trips, user, onLink, onDismiss }) {
+  const [expandedId, setExpandedId] = useState(null);
+  const [linkTripId,  setLinkTripId]  = useState("");
+  const [dismissReason, setDismissReason] = useState("");
+
+  const sendWhatsApp = (alert) => {
+    const type = alert.truckMismatch ? "TRUCK MISMATCH" : "NO TRIP FOUND";
+    const msg  = `🚨 DIESEL ALERT [${type}]\nIndent: ${alert.indentNo||"—"} · Truck: ${alert.truckNo}\nAmount: ₹${(alert.amount||0).toLocaleString("en-IN")} · Date: ${alert.date}\nPlease check with employees immediately.`;
+    window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, "_blank");
+  };
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+      <div style={{background:C.red+"11",border:`2px solid ${C.red}55`,borderRadius:12,padding:"12px 14px"}}>
+        <div style={{color:C.red,fontWeight:800,fontSize:14,marginBottom:2}}>
+          🚨 {alerts.length} Diesel Alert{alerts.length>1?"s":""} Require Action
+        </div>
+        <div style={{color:C.muted,fontSize:12}}>
+          Tap each alert to link to a trip or dismiss with reason
+        </div>
+      </div>
+
+      {alerts.map(alert => (
+        <div key={alert.id} style={{background:C.card,borderRadius:12,overflow:"hidden",
+          border:`2px solid ${C.red}44`}}>
+          {/* Alert header */}
+          <div style={{padding:"12px 14px",display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}
+            onClick={() => setExpandedId(expandedId===alert.id ? null : alert.id)}>
+            <div style={{flex:1}}>
+              <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:4}}>
+                <span style={{background:C.red,color:"#fff",fontSize:10,fontWeight:800,
+                  padding:"2px 8px",borderRadius:20}}>
+                  {alert.truckMismatch ? "TRUCK MISMATCH" : "NO TRIP"}
+                </span>
+                <span style={{color:C.muted,fontSize:11}}>{alert.date}</span>
+              </div>
+              <div style={{fontWeight:800,fontSize:14}}>{alert.truckNo}</div>
+              <div style={{color:C.muted,fontSize:12}}>Indent: {alert.indentNo||"—"}</div>
+              {alert.truckMismatch && alert.tripId && (
+                <div style={{color:C.orange,fontSize:12}}>
+                  ⚠ Matched trip has different truck
+                </div>
+              )}
+            </div>
+            <div style={{textAlign:"right",flexShrink:0,marginLeft:10}}>
+              <div style={{color:C.red,fontWeight:800,fontSize:16}}>
+                ₹{(alert.amount||0).toLocaleString("en-IN")}
+              </div>
+              <div style={{color:C.muted,fontSize:12}}>{expandedId===alert.id?"▲":"▼"}</div>
+            </div>
+          </div>
+
+          {/* Expanded actions */}
+          {expandedId===alert.id && (
+            <div style={{padding:"0 14px 14px",borderTop:`1px solid ${C.border}22`,
+              display:"flex",flexDirection:"column",gap:10,paddingTop:12}}>
+
+              {/* Send WhatsApp alert */}
+              <Btn onClick={()=>sendWhatsApp(alert)} full outline color={C.red} sm>
+                📱 Send WhatsApp Alert to Owner
+              </Btn>
+
+              {/* Link to trip */}
+              <div style={{background:C.bg,borderRadius:8,padding:"10px 12px"}}>
+                <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:6}}>
+                  LINK TO A TRIP (clears alert)
+                </div>
+                <select value={linkTripId}
+                  onChange={e=>setLinkTripId(e.target.value)}
+                  style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,
+                    color:C.text,padding:"8px 10px",fontSize:13,width:"100%",marginBottom:8}}>
+                  <option value="">— Select trip —</option>
+                  {trips.filter(t=>t.status!=="Paid").map(t=>(
+                    <option key={t.id} value={t.id}>
+                      {t.truckNo} · LR {t.lrNo||"—"} → {t.to} · {t.date}
+                    </option>
+                  ))}
+                </select>
+                <Btn onClick={()=>{if(linkTripId){onLink(alert.id,linkTripId);setExpandedId(null);setLinkTripId("");}}}
+                  full color={C.green} sm disabled={!linkTripId}>
+                  ✓ Link to Selected Trip
+                </Btn>
+              </div>
+
+              {/* Owner dismiss with reason */}
+              {user.role==="owner" && (
+                <div style={{background:C.bg,borderRadius:8,padding:"10px 12px"}}>
+                  <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:6}}>
+                    DISMISS WITH REASON (owner only)
+                  </div>
+                  <input value={dismissReason} onChange={e=>setDismissReason(e.target.value)}
+                    placeholder="e.g. Loading delayed, trip entered next day"
+                    style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,
+                      color:C.text,padding:"8px 10px",fontSize:13,width:"100%",
+                      boxSizing:"border-box",marginBottom:8,outline:"none"}} />
+                  <Btn onClick={()=>{if(dismissReason.trim()){onDismiss(alert.id,dismissReason);setExpandedId(null);setDismissReason("");}}}
+                    full outline color={C.muted} sm disabled={!dismissReason.trim()}>
+                    Dismiss Alert
+                  </Btn>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── CONFIRM DIESEL SHEET ─────────────────────────────────────────────────────
+// Manager enters actual amount, sends WhatsApp to pump group, then confirms
+function ConfirmDieselSheet({ indent, trips, onConfirm, onCancel }) {
+  const trip = trips.find(t => t.id === indent.tripId);
+  const [amount, setAmount] = useState(String(indent.amount || ""));
+  const estAmount = indent.amount || 0;
+  const actualAmount = +amount || 0;
+  const diff = actualAmount - estAmount;
+
+  const sendWhatsApp = () => {
+    const date = indent.date || today();
+    const msg = `Please confirm: Truck ${indent.truckNo} diesel ₹${actualAmount} on ${date}`;
+    const encoded = encodeURIComponent(msg);
+    window.open(`https://wa.me/?text=${encoded}`, "_blank");
+  };
+
+  return (
+    <Sheet title="Confirm Diesel Amount" onClose={onCancel}>
+      <div style={{display:"flex",flexDirection:"column",gap:14}}>
+
+        {/* Indent summary */}
+        <div style={{background:C.bg,borderRadius:10,padding:"12px 14px"}}>
+          <div style={{fontWeight:800,fontSize:15,marginBottom:4}}>{indent.truckNo}</div>
+          <div style={{color:C.muted,fontSize:13}}>
+            Date: {indent.date} · Indent: {indent.indentNo||"—"}
+          </div>
+          {trip && <div style={{color:C.blue,fontSize:12,marginTop:2}}>
+            Trip: LR {trip.lrNo||"—"} → {trip.to}
+          </div>}
+        </div>
+
+        {/* Amount entry */}
+        <div style={{background:C.bg,borderRadius:10,padding:"12px 14px",border:`1.5px solid ${C.orange}44`}}>
+          <div style={{color:C.orange,fontWeight:700,fontSize:12,marginBottom:8}}>
+            ACTUAL DIESEL AMOUNT ₹
+          </div>
+          <Field value={amount} onChange={setAmount} type="number"
+            placeholder="Enter confirmed amount from pump" />
+          {amount && (
+            <div style={{marginTop:8,fontSize:13}}>
+              <span style={{color:C.muted}}>Est: ₹{estAmount} → Actual: </span>
+              <b style={{color:actualAmount>0?C.orange:C.muted}}>₹{actualAmount}</b>
+              {diff !== 0 && amount && (
+                <span style={{color:diff>0?C.red:C.green,marginLeft:8,fontWeight:700}}>
+                  {diff>0?`+₹${diff} over estimate`:`₹${Math.abs(diff)} under estimate`}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Step 1 — Send WhatsApp */}
+        <div style={{background:C.bg,borderRadius:10,padding:"12px 14px"}}>
+          <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",
+            letterSpacing:1,marginBottom:8}}>Step 1 — Send to Pump WhatsApp Group</div>
+          <div style={{background:C.card2,borderRadius:8,padding:"10px 12px",
+            fontSize:13,color:C.text,marginBottom:10,fontStyle:"italic"}}>
+            "Please confirm: Truck {indent.truckNo} diesel ₹{actualAmount||"___"} on {indent.date}"
+          </div>
+          <Btn onClick={sendWhatsApp} full outline color={C.green}
+            disabled={!amount}>
+            📱 Open WhatsApp with this message
+          </Btn>
+        </div>
+
+        {/* Step 2 — Mark confirmed after pump replies */}
+        <div style={{background:C.bg,borderRadius:10,padding:"12px 14px"}}>
+          <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",
+            letterSpacing:1,marginBottom:8}}>Step 2 — After Pump Confirms in Group</div>
+          <Btn onClick={()=>onConfirm(amount)} full color={C.green}
+            disabled={!amount}>
+            ✓ Pump Confirmed — Save ₹{actualAmount||"___"}
+          </Btn>
+        </div>
+
+        <Btn onClick={onCancel} full outline color={C.muted}>Cancel</Btn>
+      </div>
+    </Sheet>
+  );
+}
+
+// ─── PUMP SLIP SCANNER ────────────────────────────────────────────────────────
+// Scans a pump slip image — extracts multiple truck entries in one shot
+const PUMP_PROMPT = `This is a diesel pump slip or Excel screenshot sent by a fuel pump.
+Extract ALL vehicle/truck rows. Return a JSON array like:
+[{"truckNo":"KA32D2753","indentNo":"25748","date":"2026-03-05","hsd":31596,"advance":3000},...]
+Rules:
+- truckNo: uppercase, remove spaces (KA 34 B 4788 → KA34B4788)
+- indentNo: the indent/serial number, or "" if not visible
+- date: YYYY-MM-DD format, or "" if not visible
+- hsd: the HSD column value — diesel amount, number only, no ₹ or commas
+- advance: the Advance column value — number only, 0 if blank or zero
+- Skip total/summary rows
+- Include ALL truck rows even if advance is 0
+Return ONLY the JSON array, no other text.`;
+
+function PumpSlipScanner({ pumps, trips, user, onResults }) {
+  const inputRef = useRef(null);
+  const [state, setState] = useState("idle"); // idle|reading|scanning|done|error
+  const [error, setError] = useState("");
+
+  const handleFile = async (file) => {
+    setError(""); setState("reading");
+    if (!file.type.startsWith("image/")) {
+      setError("Please upload an image (JPG/PNG) from WhatsApp."); setState("error"); return;
+    }
+    const base64 = await new Promise((res,rej) => {
+      const r = new FileReader();
+      r.onload = () => res(r.result.split(",")[1]);
+      r.onerror = () => rej(new Error("Read failed"));
+      r.readAsDataURL(file);
+    });
+    setState("scanning");
+    try {
+      const resp = await fetch("/.netlify/functions/scan-di", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ base64, mediaType: file.type, prompt: PUMP_PROMPT }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || data.error) throw new Error(data.error || "Server error");
+      const clean = data.text.replace(/```json|```/g,"").trim();
+      const entries = JSON.parse(clean);
+
+      // Match by indent number first (exact), fallback to truck number
+      const results = entries.map(e => {
+        const truck  = (e.truckNo||"").toUpperCase().trim();
+        const indent = String(e.indentNo||"").trim();
+
+        // Priority 1: match by dieselIndentNo on trip
+        let trip = indent ? trips.find(t =>
+          String(t.dieselIndentNo||"").trim() === indent && t.status !== "Paid"
+        ) : null;
+
+        // Priority 2: fallback to truck number
+        if (!trip) trip = trips.find(t => t.truckNo === truck && t.status !== "Paid");
+
+        // Detect truck mismatch (indent matched but truck is different)
+        const truckMismatch = trip && truck && trip.truckNo !== truck;
+
+        return {
+          truckNo: truck,
+          indentNo: indent,
+          date: e.date||today(),
+          amount: +(e.hsd||e.amount)||0,
+          advance: +(e.advance)||0,
+          trip: trip||null,
+          truckMismatch,
+          matchedBy: trip ? (indent && String(trip.dieselIndentNo||"").trim()===indent ? "indent" : "truck") : null,
+          pumpId: pumps[0]?.id||"",
+          include: !!trip && !truckMismatch,
+        };
+      });
+
+      onResults(results);
+      setState("done");
+    } catch(e) {
+      setError("Could not read slip: " + e.message); setState("error");
+    }
+  };
+
+  return (
+    <div>
+      <div
+        onClick={() => inputRef.current?.click()}
+        onDrop={e=>{e.preventDefault();handleFile(e.dataTransfer?.files?.[0]);}}
+        onDragOver={e=>e.preventDefault()}
+        style={{border:`2px dashed ${state==="error"?C.red:C.blue}`,borderRadius:14,
+          padding:"20px 16px",textAlign:"center",cursor:"pointer",background:C.bg,
+          display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
+        <div style={{fontSize:32}}>📷</div>
+        <div style={{color:C.blue,fontWeight:800,fontSize:14}}>
+          {state==="scanning" ? "🤖 Reading pump slip…" :
+           state==="done"    ? "✓ Slip scanned — review below" :
+           state==="reading" ? "📖 Loading image…" :
+           "Upload Pump WhatsApp Slip"}
+        </div>
+        <div style={{color:C.muted,fontSize:12}}>
+          {state==="idle"||state==="error" ? "Save image from WhatsApp → upload here" : "AI extracting truck numbers and amounts…"}
+        </div>
+        {error && <div style={{color:C.red,fontSize:12}}>{error}</div>}
+      </div>
+      <input ref={inputRef} type="file" accept="image/*" style={{display:"none"}}
+        onChange={e=>{ if(e.target.files[0]) handleFile(e.target.files[0]); e.target.value=""; }} />
+    </div>
+  );
+}
+
 // ─── DIESEL MODULE ────────────────────────────────────────────────────────────
 function DieselMod({trips, indents, setIndents, pumps, setPumps, user, log}) {
-  const [view,     setView]     = useState("unpaid");
-  const [addSheet, setAddSheet] = useState(false);
-  const [pumpSheet,setPumpSheet]= useState(false);
-  const [paySheet, setPaySheet] = useState(null);  // indent to pay
-  const [payRef,   setPayRef]   = useState("");
+  const [view,      setView]      = useState("unpaid");
+  const [addSheet,  setAddSheet]  = useState(false);
+  const [pumpSheet, setPumpSheet] = useState(false);
+  const [paySheet,  setPaySheet]  = useState(null);
+  const [payRef,    setPayRef]    = useState("");
+  const [scanSheet, setScanSheet] = useState(false);
+  const [scanResults, setScanResults] = useState(null);
+  const [confirmFlow, setConfirmFlow] = useState(null); // indent being confirmed
 
   const blankI = {pumpId:pumps[0]?.id||"", truckNo:"", tripId:"", indentNo:"", date:today(), litres:"", ratePerLitre:"", amount:"", confirmed:false};
   const [f, setF] = useState(blankI);
@@ -1853,6 +2169,30 @@ function DieselMod({trips, indents, setIndents, pumps, setPumps, user, log}) {
   const unpaid   = indents.filter(i => !i.paid);
   const paid     = indents.filter(i => i.paid);
   const unpaidAmt= unpaid.reduce((s,i)=>s+(i.amount||0),0);
+  // Indents with no matching trip — flagged for owner
+  const unmatchedIndents = indents.filter(i => i.unmatched);
+  // Red alerts = unmatched + truck mismatch, not yet dismissed
+  const redAlerts = indents.filter(i => (i.unmatched || i.truckMismatch) && !i.alertDismissed);
+
+  const linkAlertToTrip = async (alertId, tripId) => {
+    const trip = trips.find(t => t.id === tripId);
+    if (!trip) return;
+    const updated = indents.map(i => i.id===alertId
+      ? {...i, tripId, truckNo: trip.truckNo, unmatched:false, truckMismatch:false, alertDismissed:false}
+      : i);
+    setIndents(updated);
+    await DB.saveIndent(updated.find(i=>i.id===alertId));
+    log("ALERT LINKED", `Indent ${alertId} linked to LR ${trip.lrNo}`);
+  };
+
+  const dismissAlert = async (alertId, reason) => {
+    const updated = indents.map(i => i.id===alertId
+      ? {...i, alertDismissed:true, dismissReason:reason, dismissedBy:user.username, dismissedAt:nowTs()}
+      : i);
+    setIndents(updated);
+    await DB.saveIndent(updated.find(i=>i.id===alertId));
+    log("ALERT DISMISSED", `Indent ${alertId} dismissed: ${reason}`);
+  };
 
   // Group unpaid by pump for 15-day view
   const pumpTotals = pumps.map(p => ({
@@ -1860,6 +2200,57 @@ function DieselMod({trips, indents, setIndents, pumps, setPumps, user, log}) {
     unpaid: indents.filter(i=>i.pumpId===p.id&&!i.paid),
     unpaidAmt: indents.filter(i=>i.pumpId===p.id&&!i.paid).reduce((s,i)=>s+(i.amount||0),0),
   }));
+
+  const confirmScanned = async () => {
+    const toSave = scanResults.filter(r => r.include && r.trip);
+
+    // Save confirmed diesel indents (matched)
+    const newIndents = toSave.map(r => ({
+      id: uid(), pumpId: r.pumpId||pumps[0]?.id||"",
+      truckNo: r.truckNo, tripId: r.trip.id,
+      indentNo: r.indentNo||"", date: r.date||today(),
+      litres: 0, ratePerLitre: 0, amount: +r.amount||0,
+      confirmed: true, paid: false, unmatched: false,
+      createdBy: user.username, createdAt: nowTs(),
+    }));
+
+    // Save unmatched + truck mismatch indents as red alerts
+    const problematic = scanResults.filter(r => !r.trip || r.truckMismatch);
+    const unmatchedIndents = problematic.map(r => ({
+      id: uid(), pumpId: r.pumpId||pumps[0]?.id||"",
+      truckNo: r.truckNo, tripId: r.trip?.id||"",
+      indentNo: r.indentNo||"", date: r.date||today(),
+      litres: 0, ratePerLitre: 0, amount: +r.amount||0,
+      confirmed: false, paid: false,
+      unmatched: !r.trip,
+      truckMismatch: !!r.truckMismatch,
+      alertDismissed: false,
+      createdBy: user.username, createdAt: nowTs(),
+    }));
+
+    const allNew = [...newIndents, ...unmatchedIndents];
+    setIndents(p => [...allNew, ...(p||[])]);
+    for (const ind of allNew) await DB.saveIndent(ind);
+
+    // Add pump advance to trip advance for entries that have advance > 0
+    const tripsToUpdate = toSave.filter(r => r.advance > 0);
+    if (tripsToUpdate.length > 0) {
+      const updatedTrips = trips.map(t => {
+        const match = tripsToUpdate.find(r => r.trip.id === t.id);
+        if (!match) return t;
+        const updated = {...t, advance: (t.advance||0) + match.advance, editedBy: user.username, editedAt: nowTs()};
+        DB.saveTrip(updated);
+        log("PUMP ADVANCE", `${match.truckNo} +₹${match.advance} added to trip advance`);
+        return updated;
+      });
+      setTrips(updatedTrips);
+    }
+
+    for (const r of toSave) {
+      log("DIESEL SCAN CONFIRM", `${r.truckNo} · HSD ₹${r.amount}${r.advance>0?` + Adv ₹${r.advance}`:""}`);
+    }
+    setScanResults(null); setScanSheet(false);
+  };
 
   const saveIndent = () => {
     const ind = {...f, id:uid(), amount:+f.amount, litres:+f.litres, ratePerLitre:+f.ratePerLitre, paid:false, createdBy:user.username, createdAt:nowTs()};
@@ -1869,9 +2260,14 @@ function DieselMod({trips, indents, setIndents, pumps, setPumps, user, log}) {
     setF(blankI); setAddSheet(false);
   };
 
-  const confirmIndent = id => {
-    setIndents(p => p.map(i => i.id===id ? {...i, confirmed:true} : i));
-    log("DIESEL CONFIRM", `Indent ${indents.find(i=>i.id===id)?.indentNo} confirmed`);
+  const confirmIndent = async (id, newAmount) => {
+    const updated = indents.map(i => i.id===id
+      ? {...i, confirmed:true, amount: newAmount!=null ? +newAmount : i.amount}
+      : i);
+    setIndents(updated);
+    const ind = updated.find(i=>i.id===id);
+    await DB.saveIndent(ind);
+    log("DIESEL CONFIRM", `Truck ${ind?.truckNo} ₹${ind?.amount} confirmed`);
   };
 
   const markPaid = () => {
@@ -1890,8 +2286,20 @@ function DieselMod({trips, indents, setIndents, pumps, setPumps, user, log}) {
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div style={{color:C.orange,fontWeight:800,fontSize:16}}>⛽ Diesel & Pump</div>
-        <Btn onClick={()=>{setF(blankI);setAddSheet(true);}} sm color={C.orange}>+ Add Indent</Btn>
+        <div style={{display:"flex",gap:8}}>
+          <Btn onClick={()=>setScanSheet(true)} sm outline color={C.blue}>📷 Scan Slip</Btn>
+          <Btn onClick={()=>{setF(blankI);setAddSheet(true);}} sm color={C.orange}>+ Add Indent</Btn>
+        </div>
       </div>
+
+      {/* Red alerts — unmatched + truck mismatch — visible to all */}
+      {redAlerts.length > 0 && (
+        <DieselAlertBanner
+          alerts={redAlerts} trips={trips} user={user}
+          onLink={(alertId, tripId) => linkAlertToTrip(alertId, tripId)}
+          onDismiss={(alertId, reason) => dismissAlert(alertId, reason)}
+        />
+      )}
 
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
         <KPI icon="⚠" label="Unpaid to Pumps" value={fmt(unpaidAmt)} color={C.red} sub={`${unpaid.length} indents`} />
@@ -1924,8 +2332,10 @@ function DieselMod({trips, indents, setIndents, pumps, setPumps, user, log}) {
                     {i.confirmed ? <Badge label="Confirmed" color={C.green} /> : <Badge label="Estimate" color={C.orange} />}
                   </div>
                 </div>
-                <div style={{display:"flex",gap:8}}>
-                  {!i.confirmed && <Btn onClick={()=>confirmIndent(i.id)} sm outline color={C.green}>✓ Confirm</Btn>}
+                <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                  {!i.confirmed && (
+                    <Btn onClick={()=>setConfirmFlow(i)} sm outline color={C.green}>✓ Confirm Amount</Btn>
+                  )}
                   <Btn onClick={()=>{setPaySheet(i);setPayRef("");}} sm color={C.green}>Mark Paid</Btn>
                 </div>
               </div>
@@ -1966,6 +2376,83 @@ function DieselMod({trips, indents, setIndents, pumps, setPumps, user, log}) {
           })}
           {paid.length===0 && <div style={{textAlign:"center",color:C.muted,padding:40}}>No paid indents yet</div>}
         </div>
+      )}
+
+      {/* ── CONFIRM AMOUNT SHEET ── */}
+      {confirmFlow && (
+        <ConfirmDieselSheet
+          indent={confirmFlow}
+          trips={trips}
+          onConfirm={(amount) => { confirmIndent(confirmFlow.id, amount); setConfirmFlow(null); }}
+          onCancel={() => setConfirmFlow(null)}
+        />
+      )}
+
+      {/* ── SCAN PUMP SLIP SHEET ── */}
+      {scanSheet && (
+        <Sheet title="📷 Scan Pump Slip" onClose={()=>{setScanSheet(false);setScanResults(null);}}>
+          <PumpSlipScanner
+            pumps={pumps} trips={trips} user={user}
+            onResults={results => setScanResults(results)}
+          />
+          {scanResults && (
+            <div style={{marginTop:16,display:"flex",flexDirection:"column",gap:10}}>
+              <div style={{color:C.text,fontWeight:800,fontSize:14,marginBottom:4}}>
+                Review Extracted Entries
+              </div>
+              {scanResults.map((r,i) => (
+                <div key={i} style={{background:C.bg,borderRadius:10,padding:"12px 14px",
+                  border:`1.5px solid ${r.trip ? C.green+"44" : C.red+"44"}`}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontWeight:700,fontSize:14}}>{r.truckNo||"?"}</div>
+                      {r.indentNo && <div style={{color:C.muted,fontSize:12}}>Indent: {r.indentNo} · {r.date}</div>}
+                      {r.trip && !r.truckMismatch &&
+                        <div style={{color:C.green,fontSize:12}}>
+                          ✓ {r.matchedBy==="indent"?"Indent match":"Truck match"}: LR {r.trip.lrNo||"—"} → {r.trip.to}
+                        </div>}
+                      {r.truckMismatch &&
+                        <div style={{color:C.orange,fontSize:12}}>
+                          ⚠ Indent {r.indentNo} matched LR {r.trip.lrNo} but truck is {r.trip.truckNo} not {r.truckNo}
+                        </div>}
+                      {!r.trip &&
+                        <div style={{color:C.red,fontSize:12}}>🚨 No trip found — unmatched indent</div>}
+                    </div>
+                    <div style={{textAlign:"right",flexShrink:0,marginLeft:10}}>
+                      <div style={{color:C.orange,fontWeight:800,fontSize:15}}>⛽ ₹{r.amount||"?"}</div>
+                      {r.advance > 0 && <div style={{color:C.red,fontWeight:700,fontSize:13}}>+Adv ₹{r.advance}</div>}
+                      <label style={{display:"flex",alignItems:"center",gap:6,marginTop:4,cursor:"pointer",justifyContent:"flex-end"}}>
+                        <input type="checkbox" checked={r.include && !!r.trip}
+                          disabled={!r.trip}
+                          onChange={e => setScanResults(p => p.map((x,j)=>j===i?{...x,include:e.target.checked}:x))}
+                          style={{width:16,height:16}} />
+                        <span style={{color:C.muted,fontSize:12}}>{r.trip?"Include":"No trip"}</span>
+                      </label>
+                    </div>
+                  </div>
+                  {/* Pump selector */}
+                  {pumps.length > 1 && (
+                    <select value={r.pumpId||""} onChange={e=>setScanResults(p=>p.map((x,j)=>j===i?{...x,pumpId:e.target.value}:x))}
+                      style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,color:C.text,
+                        padding:"6px 10px",fontSize:12,width:"100%",marginTop:4}}>
+                      {pumps.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+                    </select>
+                  )}
+                </div>
+              ))}
+              <div style={{color:C.muted,fontSize:12,textAlign:"center"}}>
+                {scanResults.filter(r=>r.include&&r.trip).length} of {scanResults.length} will be saved ·
+                Total HSD: ₹{scanResults.filter(r=>r.include&&r.trip).reduce((s,r)=>s+r.amount,0).toLocaleString('en-IN')}
+                {scanResults.filter(r=>r.include&&r.trip&&r.advance>0).length > 0 &&
+                  ` · Advances: ₹${scanResults.filter(r=>r.include&&r.trip).reduce((s,r)=>s+r.advance,0).toLocaleString('en-IN')}`}
+              </div>
+              <Btn onClick={confirmScanned} full color={C.orange}
+                disabled={!scanResults.some(r=>r.include&&r.trip)}>
+                ✓ Confirm & Save All
+              </Btn>
+            </div>
+          )}
+        </Sheet>
       )}
 
       {/* ── ADD INDENT SHEET ── */}
