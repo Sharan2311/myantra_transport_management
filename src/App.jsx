@@ -2085,6 +2085,8 @@ function PumpSlipScanner({ pumps, trips, user, onResults }) {
       const entries = JSON.parse(clean);
 
       // Match by indent number first (exact), fallback to truck number
+      // Dedup — if pump slip has same indent no or same truck no twice, keep first only
+      const seen = new Set();
       const results = entries.map(e => {
         const truck  = (e.truckNo||"").toUpperCase().trim();
         const indent = String(e.indentNo||"").trim();
@@ -2121,6 +2123,12 @@ function PumpSlipScanner({ pumps, trips, user, onResults }) {
           pumpId: pumps[0]?.id||"",
           include: !!trip && !truckMismatch,
         };
+      }).filter(r => {
+        // Dedup: skip if same indent no or same truck already seen
+        const key = r.indentNo || r.truckNo;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
       });
 
       onResults(results);
