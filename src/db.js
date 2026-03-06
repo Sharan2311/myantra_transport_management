@@ -112,7 +112,7 @@ const indentFromDB = r => ({
   dismissedAt: r.dismissed_at || "",
 })
 const indentToDB = i => ({
-  id: i.id, pump_id: i.pumpId, truck_no: i.truckNo, trip_id: i.tripId||'',
+  id: i.id, pump_id: i.pumpId, truck_no: i.truckNo, trip_id: i.tripId||null,
   indent_no: i.indentNo, date: i.date, litres: i.litres,
   rate_per_litre: i.ratePerLitre, amount: i.amount,
   confirmed: i.confirmed, paid: i.paid, paid_date: i.paidDate||'',
@@ -232,6 +232,7 @@ export const DB = {
   // Indents
   getIndents:     () => fetchAll('mye_indents', indentFromDB),
   saveIndent:     i  => upsertOne('mye_indents', indentToDB, i),
+  deleteIndent:   id => deleteOne('mye_indents', id),
   saveManyIndents:async (indents) => {
     const { error } = await supabase.from('mye_indents').upsert(indents.map(indentToDB))
     if (error) throw error

@@ -1864,7 +1864,7 @@ function PumpRow({p, paid, onPayAll}) {
 
 
 // ─── DIESEL ALERT BANNER ──────────────────────────────────────────────────────
-function DieselAlertBanner({ alerts, trips, user, onLink, onDismiss }) {
+function DieselAlertBanner({ alerts, trips, user, onLink, onDismiss, onDelete }) {
   const [expandedId, setExpandedId] = useState(null);
   const [linkTripId,  setLinkTripId]  = useState("");
   const [dismissReason, setDismissReason] = useState("");
@@ -1951,20 +1951,23 @@ function DieselAlertBanner({ alerts, trips, user, onLink, onDismiss }) {
                 </Btn>
               </div>
 
-              {/* Owner dismiss with reason */}
+              {/* Owner dismiss + delete */}
               {user.role==="owner" && (
-                <div style={{background:C.bg,borderRadius:8,padding:"10px 12px"}}>
-                  <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:6}}>
-                    DISMISS WITH REASON (owner only)
+                <div style={{background:C.bg,borderRadius:8,padding:"10px 12px",display:"flex",flexDirection:"column",gap:8}}>
+                  <div style={{color:C.muted,fontSize:11,fontWeight:700}}>OWNER ACTIONS</div>
+                  <div style={{display:"flex",gap:8}}>
+                    <input value={dismissReason} onChange={e=>setDismissReason(e.target.value)}
+                      placeholder="Dismiss reason…"
+                      style={{flex:1,background:C.card,border:`1px solid ${C.border}`,borderRadius:8,
+                        color:C.text,padding:"8px 10px",fontSize:12,outline:"none"}} />
+                    <Btn onClick={()=>{if(dismissReason.trim()){onDismiss(alert.id,dismissReason);setExpandedId(null);setDismissReason("");}}}
+                      outline color={C.muted} sm disabled={!dismissReason.trim()}>
+                      Dismiss
+                    </Btn>
                   </div>
-                  <input value={dismissReason} onChange={e=>setDismissReason(e.target.value)}
-                    placeholder="e.g. Loading delayed, trip entered next day"
-                    style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,
-                      color:C.text,padding:"8px 10px",fontSize:13,width:"100%",
-                      boxSizing:"border-box",marginBottom:8,outline:"none"}} />
-                  <Btn onClick={()=>{if(dismissReason.trim()){onDismiss(alert.id,dismissReason);setExpandedId(null);setDismissReason("");}}}
-                    full outline color={C.muted} sm disabled={!dismissReason.trim()}>
-                    Dismiss Alert
+                  <Btn onClick={()=>{if(window.confirm(`Delete alert for ${alert.truckNo} indent ${alert.indentNo||"—"}?\nThis cannot be undone.`)){onDelete(alert.id);setExpandedId(null);}}}
+                    full outline color={C.red} sm>
+                    🗑 Delete This Alert
                   </Btn>
                 </div>
               )}
@@ -2209,7 +2212,15 @@ function DieselMod({trips, indents, setIndents, pumps, setPumps, user, log}) {
   // Indents with no matching trip — flagged for owner
   const unmatchedIndents = indents.filter(i => i.unmatched);
   // Red alerts = unmatched + truck mismatch, not yet dismissed
-  const redAlerts = indents.filter(i => (i.unmatched || i.truckMismatch || i.amountMismatch) && !i.alertDismissed);
+  // Dedup alerts — keep latest by indentNo+truckNo key
+  const _rawAlerts = indents.filter(i => (i.unmatched || i.truckMismatch || i.amountMismatch) && !i.alertDismissed);
+  const _seenAlerts = new Map();
+  _rawAlerts.forEach(i => {
+    const key = (i.indentNo||"") + "_" + (i.truckNo||"");
+    if (!_seenAlerts.has(key) || i.createdAt > _seenAlerts.get(key).createdAt)
+      _seenAlerts.set(key, i);
+  });
+  const redAlerts = Array.from(_seenAlerts.values());
 
   const linkAlertToTrip = async (alertId, tripId) => {
     const trip = trips.find(t => t.id === tripId);
@@ -2231,6 +2242,17 @@ function DieselMod({trips, indents, setIndents, pumps, setPumps, user, log}) {
     log("ALERT DISMISSED", `Indent ${alertId} dismissed: ${reason}`);
   };
 
+  const deleteAlert = async (alertId) => {
+    setIndents(p => p.filter(i => i.id !== alertId));
+    try {
+      await DB.deleteIndent(alertId);
+      log("ALERT DELETED", `Indent ${alertId} deleted by owner`);
+    } catch(e) {
+      setIndents(p => [...p]); // restore on fail
+      alert("Failed to delete: " + e.message);
+    }
+  };
+
   // Group unpaid by pump for 15-day view
   const pumpTotals = pumps.map(p => ({
     ...p,
@@ -2239,7 +2261,24 @@ function DieselMod({trips, indents, setIndents, pumps, setPumps, user, log}) {
   }));
 
   const confirmScanned = async () => {
-    const toSave = scanResults.filter(r => r.include && r.trip);
+    // Block if any indent number already exists in DB
+    const existingIndentNos = new Set(indents.map(i => String(i.indentNo||"").trim()).filter(Boolean));
+    const allResults = scanResults.filter(r => r.indentNo);
+    const alreadySaved = allResults.filter(r => existingIndentNos.has(String(r.indentNo).trim()));
+    if (alreadySaved.length > 0) {
+      alert(`These indent numbers were already saved previously and will be skipped:
+${alreadySaved.map(r=>r.indentNo).join(", ")}
+
+This image may have been scanned before.`);
+    }
+    // Filter out already-saved indent numbers
+    const freshResults = scanResults.filter(r => !r.indentNo || !existingIndentNos.has(String(r.indentNo).trim()));
+    if (freshResults.length === 0) {
+      alert("All indents in this slip have already been saved. Nothing to save.");
+      setScanResults(null); setScanSheet(false); return;
+    }
+
+    const toSave = freshResults.filter(r => r.include && r.trip);
 
     // Save confirmed diesel indents (matched)
     const newIndents = toSave.map(r => ({
@@ -2252,10 +2291,10 @@ function DieselMod({trips, indents, setIndents, pumps, setPumps, user, log}) {
     }));
 
     // Save unmatched + truck mismatch indents as red alerts
-    const problematic = scanResults.filter(r => !r.trip || r.truckMismatch || r.amountMismatch);
+    const problematic = freshResults.filter(r => !r.trip || r.truckMismatch || r.amountMismatch);
     const unmatchedIndents = problematic.map(r => ({
       id: uid(), pumpId: r.pumpId||pumps[0]?.id||"",
-      truckNo: r.truckNo, tripId: r.trip?.id||"",
+      truckNo: r.truckNo, tripId: r.trip?.id||null,
       indentNo: r.indentNo||"", date: r.date||today(),
       litres: 0, ratePerLitre: 0, amount: +r.amount||0,
       confirmed: false, paid: false,
@@ -2340,6 +2379,7 @@ function DieselMod({trips, indents, setIndents, pumps, setPumps, user, log}) {
           alerts={redAlerts} trips={trips} user={user}
           onLink={(alertId, tripId) => linkAlertToTrip(alertId, tripId)}
           onDismiss={(alertId, reason) => dismissAlert(alertId, reason)}
+          onDelete={deleteAlert}
         />
       )}
 
