@@ -976,6 +976,7 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
   const [search,      setSearch]      = useState("");
   const [diConflict,  setDiConflict]  = useState(null); // existing trip with same LR
   const [wasScanned,  setWasScanned]  = useState(false); // true if form was filled by AI scan
+  const [confirmDel,  setConfirmDel]  = useState(null);  // trip pending delete confirmation
 
   const blankForm = () => ({
     type:tripType, lrNo:"", diNo:"", truckNo:"", grNo:"",
@@ -1081,6 +1082,12 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
     setEditSheet(null);
   };
 
+  const deleteTrip = (t) => {
+    setTrips(p => p.filter(x => x.id !== t.id));
+    log("DELETE TRIP", `LR:${t.lrNo} ${t.truckNo} ${t.qty}MT`);
+    setConfirmDel(null);
+  };
+
   return (
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -1117,6 +1124,11 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
                   <Badge label={t.status} color={SC(t.status)} />
                   {/* ✏ EDIT ICON */}
                   <button onClick={()=>setEditSheet({...t})} style={{background:C.dim,border:"none",borderRadius:8,color:C.muted,padding:"5px 8px",cursor:"pointer",fontSize:14}}>✏</button>
+                  {/* 🗑 DELETE (owner only) */}
+                  {user.role==="owner" && (
+                    <button onClick={()=>setConfirmDel(t)}
+                      style={{background:C.red+"22",border:"none",borderRadius:8,color:C.red,padding:"5px 8px",cursor:"pointer",fontSize:14}}>🗑</button>
+                  )}
                 </div>
               </div>
             </div>
@@ -1182,6 +1194,33 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
                 user={user} wasScanned={wasScanned} />
             </>
           )}
+        </Sheet>
+      )}
+
+      {/* ── DELETE CONFIRM ── */}
+      {confirmDel && (
+        <Sheet title="Delete Trip" onClose={()=>setConfirmDel(null)}>
+          <div style={{display:"flex",flexDirection:"column",gap:16}}>
+            <div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:12,padding:"16px"}}>
+              <div style={{color:C.red,fontWeight:800,fontSize:15,marginBottom:8}}>⚠ Delete this trip?</div>
+              <div style={{color:C.text,fontSize:14,fontWeight:700}}>{confirmDel.truckNo}</div>
+              <div style={{color:C.muted,fontSize:13,marginTop:4}}>
+                LR: {confirmDel.lrNo||"—"} · DI: {confirmDel.diNo||"—"}
+              </div>
+              <div style={{color:C.muted,fontSize:13}}>
+                {confirmDel.qty}MT → {confirmDel.to} · {confirmDel.date}
+              </div>
+              <div style={{color:C.red,fontSize:12,marginTop:10,fontWeight:700}}>
+                This cannot be undone. All data for this trip will be permanently deleted.
+              </div>
+            </div>
+            <Btn onClick={()=>deleteTrip(confirmDel)} full color={C.red}>
+              🗑 Yes, Delete Trip
+            </Btn>
+            <Btn onClick={()=>setConfirmDel(null)} full outline color={C.muted}>
+              Cancel — Keep Trip
+            </Btn>
+          </div>
         </Sheet>
       )}
 
