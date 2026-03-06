@@ -1246,6 +1246,7 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
             onTruckChange={v=>{const veh=vehicles.find(x=>x.truckNo===v.toUpperCase().trim()); setEditSheet(p=>({...p,truckNo:v,tafal:veh?.tafalExempt?0:(settings?.tafalPerTrip||300)}));}}
             onSubmit={saveEdit} submitLabel="Save Changes" user={user}
             showStatus={true}
+            wasScanned={user.role !== "owner"}
           />
         </Sheet>
       )}
@@ -1333,12 +1334,39 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
           : <><Field label="Qty (MT)" value={f.qty||""} onChange={ff("qty")} type="number" half />
               <Field label="Bags"     value={f.bags||""} onChange={ff("bags")} type="number" half /></>}
       </div>
-      <div style={{display:"flex",gap:10}}>
-        {locked
-          ? <LockedField label="Shree Rate ₹/MT" value={f.frRate} half />
-          : <Field label="Shree Rate ₹/MT"  value={f.frRate||""}    onChange={ff("frRate")}    type="number" half />}
-        <Field label="Driver Rate ₹/MT" value={f.givenRate||""} onChange={ff("givenRate")} type="number" half />
-      </div>
+      {/* Multi-DI: show per-DI rates breakdown */}
+      {f.diLines && f.diLines.length > 1 ? (
+        <div style={{background:C.bg,borderRadius:10,padding:"12px 14px",border:`1px solid ${C.border}`}}>
+          <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Rates per DI</div>
+          {f.diLines.map((d,i) => (
+            <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",
+              borderBottom:`1px solid ${C.border}22`,fontSize:13}}>
+              <span style={{color:C.muted}}>DI {d.diNo||i+1} · {d.qty}MT</span>
+              <span>
+                <span style={{color:C.blue}}>₹{d.frRate||f.frRate||"—"}</span>
+                <span style={{color:C.muted}}> / </span>
+                <span style={{color:C.orange}}>₹{d.givenRate||"—"}</span>
+                <span style={{color:C.muted,fontSize:11}}> (Shree/Driver)</span>
+              </span>
+            </div>
+          ))}
+          <div style={{display:"flex",justifyContent:"space-between",marginTop:8,fontSize:13,fontWeight:700}}>
+            <span style={{color:C.muted}}>Combined Shree Rates</span>
+            <span style={{color:C.blue}}>{f.diLines.map(d=>d.frRate||f.frRate||"—").join(" + ")}</span>
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:13,fontWeight:700}}>
+            <span style={{color:C.muted}}>Combined Driver Rates</span>
+            <span style={{color:C.orange}}>{f.diLines.map(d=>d.givenRate||"—").join(" + ")}</span>
+          </div>
+        </div>
+      ) : (
+        <div style={{display:"flex",gap:10}}>
+          {locked
+            ? <LockedField label="Shree Rate ₹/MT" value={f.frRate} half />
+            : <Field label="Shree Rate ₹/MT"  value={f.frRate||""}    onChange={ff("frRate")}    type="number" half />}
+          <Field label="Driver Rate ₹/MT" value={f.givenRate||""} onChange={ff("givenRate")} type="number" half />
+        </div>
+      )}
       <div style={{display:"flex",gap:10}}>
         <Field label="Advance ₹"   value={f.advance||""}  onChange={ff("advance")}  type="number" half />
         <Field label="Shortage MT" value={f.shortage||""} onChange={ff("shortage")} type="number" half />
