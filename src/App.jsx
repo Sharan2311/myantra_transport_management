@@ -1212,9 +1212,24 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
           ) : (
             <>
               <DIUploader onExtracted={onDIExtracted} trips={trips} settings={settings} isIn={isIn} />
-              <TripForm f={f} ff={ff} isIn={isIn} ac={ac} vehicles={vehicles} settings={settings}
-                onTruckChange={onTruckChange} onSubmit={saveNew} submitLabel="Save Trip"
-                user={user} wasScanned={wasScanned} />
+
+              {/* Non-owner: block form until scan done */}
+              {user.role !== "owner" && !wasScanned ? (
+                <div style={{background:C.bg,border:`2px dashed ${C.border}`,borderRadius:14,
+                  padding:"28px 20px",textAlign:"center",marginTop:8}}>
+                  <div style={{fontSize:32,marginBottom:8}}>📄</div>
+                  <div style={{color:C.muted,fontWeight:700,fontSize:14,marginBottom:4}}>
+                    Upload GR / DI copy to fill trip details
+                  </div>
+                  <div style={{color:C.muted,fontSize:12}}>
+                    Scan the document above — fields will be filled automatically
+                  </div>
+                </div>
+              ) : (
+                <TripForm f={f} ff={ff} isIn={isIn} ac={ac} vehicles={vehicles} settings={settings}
+                  onTruckChange={onTruckChange} onSubmit={saveNew} submitLabel="Save Trip"
+                  user={user} wasScanned={wasScanned} />
+              )}
             </>
           )}
         </Sheet>
@@ -2316,10 +2331,7 @@ function DieselMod({trips, indents, setIndents, pumps, setPumps, user, log}) {
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div style={{color:C.orange,fontWeight:800,fontSize:16}}>⛽ Diesel & Pump</div>
-        <div style={{display:"flex",gap:8}}>
-          <Btn onClick={()=>setScanSheet(true)} sm outline color={C.blue}>📷 Scan Slip</Btn>
-          <Btn onClick={()=>{setF(blankI);setAddSheet(true);}} sm color={C.orange}>+ Add Indent</Btn>
-        </div>
+        <Btn onClick={()=>setScanSheet(true)} sm outline color={C.blue}>📷 Scan Slip</Btn>
       </div>
 
       {/* Red alerts — unmatched + truck mismatch — visible to all */}
