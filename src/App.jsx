@@ -1082,10 +1082,19 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
     setEditSheet(null);
   };
 
-  const deleteTrip = (t) => {
+  const deleteTrip = async (t) => {
+    // Optimistic update immediately
     setTrips(p => p.filter(x => x.id !== t.id));
-    log("DELETE TRIP", `LR:${t.lrNo} ${t.truckNo} ${t.qty}MT`);
     setConfirmDel(null);
+    log("DELETE TRIP", `LR:${t.lrNo} ${t.truckNo} ${t.qty}MT`);
+    // Persist to Supabase
+    try {
+      await DB.deleteTrip(t.id);
+    } catch(e) {
+      // If DB delete fails, restore the trip
+      setTrips(p => [t, ...p]);
+      alert("Failed to delete from database: " + e.message);
+    }
   };
 
   return (

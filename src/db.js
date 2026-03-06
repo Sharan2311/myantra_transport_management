@@ -181,6 +181,7 @@ export const DB = {
   // Trips
   getTrips:       () => fetchAll('mye_trips', tripFromDB),
   saveTrip:       t  => upsertOne('mye_trips', tripToDB, t),
+  deleteTrip:     id => deleteOne('mye_trips', id),
   saveManyTrips:  async (trips) => {
     const { error } = await supabase.from('mye_trips').upsert(trips.map(tripToDB))
     if (error) throw error
