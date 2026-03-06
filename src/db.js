@@ -13,6 +13,7 @@ const tripFromDB = r => ({
   settledBy: r.settled_by, netPaid: +r.net_paid, billedBy: r.billed_by,
   billedAt: r.billed_at, editedBy: r.edited_by, editedAt: r.edited_at,
   createdBy: r.created_by, createdAt: r.created_at,
+  diLines: r.di_lines || [],
 })
 const tripToDB = t => ({
   id: t.id, type: t.type, lr_no: t.lrNo, di_no: t.diNo, truck_no: t.truckNo,
@@ -24,6 +25,7 @@ const tripToDB = t => ({
   settled_by: t.settledBy, net_paid: t.netPaid, billed_by: t.billedBy,
   billed_at: t.billedAt, edited_by: t.editedBy, edited_at: t.editedAt,
   created_by: t.createdBy, created_at: t.createdAt,
+  di_lines: t.diLines || [],
 })
 
 const vehicleFromDB = r => ({
