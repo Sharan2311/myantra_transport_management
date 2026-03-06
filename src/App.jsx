@@ -1070,10 +1070,17 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
   };
 
   const saveEdit = () => {
+    // For multi-DI trips, recalculate gross givenRate from diLines
+    const diLines = editSheet.diLines || [];
+    const totalQty = diLines.length > 1 ? diLines.reduce((s,d)=>s+(d.qty||0),0) : +editSheet.qty;
+    const totalGross = diLines.length > 1 ? diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0) : 0;
+    const blendedRate = diLines.length > 1 && totalQty > 0 ? totalGross/totalQty : +editSheet.givenRate;
+
     setTrips(p => p.map(t => t.id===editSheet.id ? {
       ...editSheet,
       qty:+editSheet.qty, bags:+editSheet.bags, frRate:+editSheet.frRate,
-      givenRate:+editSheet.givenRate, advance:+editSheet.advance,
+      givenRate: blendedRate,
+      advance:+editSheet.advance,
       shortage:+editSheet.shortage, tafal:+editSheet.tafal,
       dieselEstimate:+editSheet.dieselEstimate,
       editedBy:user.username, editedAt:nowTs(),
@@ -1334,29 +1341,42 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
           : <><Field label="Qty (MT)" value={f.qty||""} onChange={ff("qty")} type="number" half />
               <Field label="Bags"     value={f.bags||""} onChange={ff("bags")} type="number" half /></>}
       </div>
-      {/* Multi-DI: show per-DI rates breakdown */}
+      {/* Rates — multi-DI: one editable row per DI */}
       {f.diLines && f.diLines.length > 1 ? (
         <div style={{background:C.bg,borderRadius:10,padding:"12px 14px",border:`1px solid ${C.border}`}}>
-          <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Rates per DI</div>
+          <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>
+            Rates per DI
+          </div>
           {f.diLines.map((d,i) => (
-            <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",
-              borderBottom:`1px solid ${C.border}22`,fontSize:13}}>
-              <span style={{color:C.muted}}>DI {d.diNo||i+1} · {d.qty}MT</span>
-              <span>
-                <span style={{color:C.blue}}>₹{d.frRate||f.frRate||"—"}</span>
-                <span style={{color:C.muted}}> / </span>
-                <span style={{color:C.orange}}>₹{d.givenRate||"—"}</span>
-                <span style={{color:C.muted,fontSize:11}}> (Shree/Driver)</span>
-              </span>
+            <div key={i} style={{marginBottom:10,paddingBottom:10,borderBottom:`1px solid ${C.border}22`}}>
+              <div style={{color:C.blue,fontSize:12,fontWeight:700,marginBottom:6}}>
+                DI {d.diNo||`#${i+1}`} · {d.qty} MT · {d.bags} Bags
+              </div>
+              <div style={{display:"flex",gap:8}}>
+                {/* Shree rate — locked for non-owners */}
+                {locked
+                  ? <LockedField label="Shree Rate ₹/MT" value={d.frRate||f.frRate||"—"} half />
+                  : <Field label="Shree Rate ₹/MT" half type="number"
+                      value={String(d.frRate||f.frRate||"")}
+                      onChange={v => {
+                        const lines = f.diLines.map((x,j)=> j===i ? {...x,frRate:+v} : x);
+                        ff("diLines")(lines);
+                      }} />
+                }
+                {/* Driver rate — always editable */}
+                <Field label="Driver Rate ₹/MT" half type="number"
+                  value={String(d.givenRate||"")}
+                  onChange={v => {
+                    const lines = f.diLines.map((x,j)=> j===i ? {...x,givenRate:+v} : x);
+                    ff("diLines")(lines);
+                  }} />
+              </div>
             </div>
           ))}
-          <div style={{display:"flex",justifyContent:"space-between",marginTop:8,fontSize:13,fontWeight:700}}>
-            <span style={{color:C.muted}}>Combined Shree Rates</span>
-            <span style={{color:C.blue}}>{f.diLines.map(d=>d.frRate||f.frRate||"—").join(" + ")}</span>
-          </div>
-          <div style={{display:"flex",justifyContent:"space-between",fontSize:13,fontWeight:700}}>
-            <span style={{color:C.muted}}>Combined Driver Rates</span>
-            <span style={{color:C.orange}}>{f.diLines.map(d=>d.givenRate||"—").join(" + ")}</span>
+          {/* Totals row */}
+          <div style={{fontSize:12,color:C.muted,display:"flex",justifyContent:"space-between",marginTop:4}}>
+            <span>Shree Rates: <b style={{color:C.blue}}>{f.diLines.map(d=>d.frRate||f.frRate||"—").join(" + ")}</b></span>
+            <span>Driver Rates: <b style={{color:C.orange}}>{f.diLines.map(d=>d.givenRate||"—").join(" + ")}</b></span>
           </div>
         </div>
       ) : (
