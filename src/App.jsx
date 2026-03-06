@@ -2166,6 +2166,7 @@ function DieselMod({trips, indents, setIndents, pumps, setPumps, user, log}) {
   const [payRef,    setPayRef]    = useState("");
   const [scanSheet, setScanSheet] = useState(false);
   const [scanResults, setScanResults] = useState(null);
+  const [scanSummary, setScanSummary] = useState(null); // {saved, flagged, date}
   const [confirmFlow, setConfirmFlow] = useState(null); // indent being confirmed
 
   const blankI = {pumpId:pumps[0]?.id||"", truckNo:"", tripId:"", indentNo:"", date:today(), litres:"", ratePerLitre:"", amount:"", confirmed:false};
@@ -2265,7 +2266,12 @@ function DieselMod({trips, indents, setIndents, pumps, setPumps, user, log}) {
     for (const r of toSave) {
       log("DIESEL SCAN CONFIRM", `${r.truckNo} · HSD ₹${r.amount}${r.advance>0?` + Adv ₹${r.advance}`:""}`);
     }
-    setScanResults(null); setScanSheet(false);
+    // Show save summary
+    const saved = toSave.length;
+    const flagged = problematic.length;
+    setScanResults(null);
+    setScanSummary({ saved, flagged, date: today() });
+    if (flagged === 0) setScanSheet(false);
   };
 
   const saveIndent = () => {
@@ -2406,12 +2412,42 @@ function DieselMod({trips, indents, setIndents, pumps, setPumps, user, log}) {
 
       {/* ── SCAN PUMP SLIP SHEET ── */}
       {scanSheet && (
-        <Sheet title="📷 Scan Pump Slip" onClose={()=>{setScanSheet(false);setScanResults(null);}}>
-          <PumpSlipScanner
+        <Sheet title="📷 Scan Pump Slip" onClose={()=>{setScanSheet(false);setScanResults(null);setScanSummary(null);}}>
+
+          {/* Post-save summary */}
+          {scanSummary && (
+            <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:16}}>
+              <div style={{background:C.green+"11",border:`1.5px solid ${C.green}44`,
+                borderRadius:12,padding:"14px 16px"}}>
+                <div style={{color:C.green,fontWeight:800,fontSize:15,marginBottom:4}}>
+                  ✓ {scanSummary.saved} indent{scanSummary.saved!==1?"s":""} saved & confirmed
+                </div>
+                <div style={{color:C.muted,fontSize:13}}>
+                  Diesel amounts deducted from driver net pay automatically
+                </div>
+              </div>
+              {scanSummary.flagged > 0 && (
+                <div style={{background:C.red+"11",border:`1.5px solid ${C.red}44`,
+                  borderRadius:12,padding:"14px 16px"}}>
+                  <div style={{color:C.red,fontWeight:800,fontSize:15,marginBottom:4}}>
+                    🚨 {scanSummary.flagged} alert{scanSummary.flagged!==1?"s":""} flagged — action needed
+                  </div>
+                  <div style={{color:C.muted,fontSize:13}}>
+                    Visible in the red alert banner below — tap each to resolve
+                  </div>
+                </div>
+              )}
+              <Btn onClick={()=>{setScanSheet(false);setScanSummary(null);}} full color={C.blue}>
+                Done — View Diesel Page
+              </Btn>
+            </div>
+          )}
+
+          {!scanSummary && <PumpSlipScanner
             pumps={pumps} trips={trips} user={user}
             onResults={results => setScanResults(results)}
-          />
-          {scanResults && (
+          />}
+          {!scanSummary && scanResults && (
             <div style={{marginTop:16,display:"flex",flexDirection:"column",gap:10}}>
               <div style={{color:C.text,fontWeight:800,fontSize:14,marginBottom:4}}>
                 Review Extracted Entries
