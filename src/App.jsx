@@ -1855,8 +1855,11 @@ function DieselAlertBanner({ alerts, trips, user, onLink, onDismiss }) {
   const [dismissReason, setDismissReason] = useState("");
 
   const sendWhatsApp = (alert) => {
-    const type = alert.truckMismatch ? "TRUCK MISMATCH" : "NO TRIP FOUND";
-    const msg  = `🚨 DIESEL ALERT [${type}]\nIndent: ${alert.indentNo||"—"} · Truck: ${alert.truckNo}\nAmount: ₹${(alert.amount||0).toLocaleString("en-IN")} · Date: ${alert.date}\nPlease check with employees immediately.`;
+    const type = alert.truckMismatch ? "TRUCK MISMATCH" : alert.amountMismatch ? "AMOUNT MISMATCH" : "NO TRIP FOUND";
+    const amtDetail = alert.amountMismatch
+      ? `\nHSD ₹${alert.amount} + Adv ₹${(alert.pumpTotal||0)-(alert.amount||0)} = ₹${alert.pumpTotal} | Est: ₹${alert.estDiesel} | Diff: ₹${Math.abs((alert.pumpTotal||0)-(alert.estDiesel||0))}`
+      : "";
+    const msg  = `🚨 DIESEL ALERT [${type}]\nIndent: ${alert.indentNo||"—"} · Truck: ${alert.truckNo}\nDate: ${alert.date}${amtDetail}\nPlease check with employees immediately.`;
     window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, "_blank");
   };
 
@@ -1881,7 +1884,7 @@ function DieselAlertBanner({ alerts, trips, user, onLink, onDismiss }) {
               <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:4}}>
                 <span style={{background:C.red,color:"#fff",fontSize:10,fontWeight:800,
                   padding:"2px 8px",borderRadius:20}}>
-                  {alert.truckMismatch ? "TRUCK MISMATCH" : "NO TRIP"}
+                  {alert.truckMismatch ? "TRUCK MISMATCH" : alert.amountMismatch ? "AMOUNT MISMATCH" : "NO TRIP"}
                 </span>
                 <span style={{color:C.muted,fontSize:11}}>{alert.date}</span>
               </div>
@@ -2097,12 +2100,21 @@ function PumpSlipScanner({ pumps, trips, user, onResults }) {
         // Detect truck mismatch (indent matched but truck is different)
         const truckMismatch = trip && truck && trip.truckNo !== truck;
 
+        const hsd      = +(e.hsd||e.amount)||0;
+        const advance  = +(e.advance)||0;
+        const pumpTotal = hsd + advance;
+        const estDiesel = trip ? +(trip.dieselEstimate||0) : 0;
+        const amountMismatch = trip && !truckMismatch && pumpTotal !== estDiesel;
+
         return {
           truckNo: truck,
           indentNo: indent,
           date: e.date||today(),
-          amount: +(e.hsd||e.amount)||0,
-          advance: +(e.advance)||0,
+          amount: hsd,
+          advance: advance,
+          pumpTotal,
+          estDiesel,
+          amountMismatch,
           trip: trip||null,
           truckMismatch,
           matchedBy: trip ? (indent && String(trip.dieselIndentNo||"").trim()===indent ? "indent" : "truck") : null,
@@ -2173,7 +2185,7 @@ function DieselMod({trips, indents, setIndents, pumps, setPumps, user, log}) {
   // Indents with no matching trip — flagged for owner
   const unmatchedIndents = indents.filter(i => i.unmatched);
   // Red alerts = unmatched + truck mismatch, not yet dismissed
-  const redAlerts = indents.filter(i => (i.unmatched || i.truckMismatch) && !i.alertDismissed);
+  const redAlerts = indents.filter(i => (i.unmatched || i.truckMismatch || i.amountMismatch) && !i.alertDismissed);
 
   const linkAlertToTrip = async (alertId, tripId) => {
     const trip = trips.find(t => t.id === tripId);
@@ -2216,7 +2228,7 @@ function DieselMod({trips, indents, setIndents, pumps, setPumps, user, log}) {
     }));
 
     // Save unmatched + truck mismatch indents as red alerts
-    const problematic = scanResults.filter(r => !r.trip || r.truckMismatch);
+    const problematic = scanResults.filter(r => !r.trip || r.truckMismatch || r.amountMismatch);
     const unmatchedIndents = problematic.map(r => ({
       id: uid(), pumpId: r.pumpId||pumps[0]?.id||"",
       truckNo: r.truckNo, tripId: r.trip?.id||"",
@@ -2225,6 +2237,9 @@ function DieselMod({trips, indents, setIndents, pumps, setPumps, user, log}) {
       confirmed: false, paid: false,
       unmatched: !r.trip,
       truckMismatch: !!r.truckMismatch,
+      amountMismatch: !!r.amountMismatch,
+      pumpTotal: r.pumpTotal||0,
+      estDiesel: r.estDiesel||0,
       alertDismissed: false,
       createdBy: user.username, createdAt: nowTs(),
     }));
@@ -2403,18 +2418,22 @@ function DieselMod({trips, indents, setIndents, pumps, setPumps, user, log}) {
               </div>
               {scanResults.map((r,i) => (
                 <div key={i} style={{background:C.bg,borderRadius:10,padding:"12px 14px",
-                  border:`1.5px solid ${r.trip ? C.green+"44" : C.red+"44"}`}}>
+                  border:`1.5px solid ${!r.trip||r.truckMismatch ? C.red+"44" : r.amountMismatch ? C.red+"44" : C.green+"44"}`}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
                     <div style={{flex:1,minWidth:0}}>
                       <div style={{fontWeight:700,fontSize:14}}>{r.truckNo||"?"}</div>
                       {r.indentNo && <div style={{color:C.muted,fontSize:12}}>Indent: {r.indentNo} · {r.date}</div>}
-                      {r.trip && !r.truckMismatch &&
+                      {r.trip && !r.truckMismatch && !r.amountMismatch &&
                         <div style={{color:C.green,fontSize:12}}>
-                          ✓ {r.matchedBy==="indent"?"Indent match":"Truck match"}: LR {r.trip.lrNo||"—"} → {r.trip.to}
+                          ✓ {r.matchedBy==="indent"?"Indent":"Truck"}: LR {r.trip.lrNo||"—"} · Est ₹{r.estDiesel} = HSD+Adv ₹{r.pumpTotal} ✓
+                        </div>}
+                      {r.trip && !r.truckMismatch && r.amountMismatch &&
+                        <div style={{color:C.red,fontSize:12}}>
+                          🚨 LR {r.trip.lrNo||"—"}: HSD ₹{r.amount} + Adv ₹{r.advance} = ₹{r.pumpTotal} ≠ Est ₹{r.estDiesel} (diff ₹{Math.abs(r.pumpTotal-r.estDiesel)})
                         </div>}
                       {r.truckMismatch &&
-                        <div style={{color:C.orange,fontSize:12}}>
-                          ⚠ Indent {r.indentNo} matched LR {r.trip.lrNo} but truck is {r.trip.truckNo} not {r.truckNo}
+                        <div style={{color:C.red,fontSize:12}}>
+                          🚨 Indent {r.indentNo} matched LR {r.trip.lrNo} but truck is {r.trip.truckNo} not {r.truckNo}
                         </div>}
                       {!r.trip &&
                         <div style={{color:C.red,fontSize:12}}>🚨 No trip found — unmatched indent</div>}
