@@ -32,12 +32,14 @@ const tripToDB = t => ({
 
 const vehicleFromDB = r => ({
   id: r.id, truckNo: r.truck_no, ownerName: r.owner_name, phone: r.phone,
+  accountNo: r.account_no||"", ifsc: r.ifsc||"",
   loan: +r.loan, loanRecovered: +r.loan_recovered, deductPerTrip: +r.deduct_per_trip,
   tafalExempt: r.tafal_exempt, shortageOwed: +(r.shortage_owed||0),
   shortageRecovered: +(r.shortage_recovered||0), createdBy: r.created_by,
 })
 const vehicleToDB = v => ({
   id: v.id, truck_no: v.truckNo, owner_name: v.ownerName, phone: v.phone,
+  account_no: v.accountNo||"", ifsc: v.ifsc||"",
   loan: v.loan, loan_recovered: v.loanRecovered, deduct_per_trip: v.deductPerTrip,
   tafal_exempt: v.tafalExempt, shortage_owed: v.shortageOwed||0,
   shortage_recovered: v.shortageRecovered||0, created_by: v.createdBy,

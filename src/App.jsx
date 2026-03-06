@@ -303,6 +303,7 @@ export default function App() {
   const [pumps,       setPumps,       rPu,reloadPumps]       = useDB(DB.getPumps,       []);
   const [indents,        setIndents,        rI,  reloadIndents]       = useDB(DB.getIndents,       []);
   const [pumpPayments,   setPumpPayments,   rPP, reloadPumpPayments] = useDB(DB.getPumpPayments, []);
+  const dbSetPumpPayments = async (val) => { setPumpPayments(val); await DB.savePumpPayment(val); };
   const [settings,    setSettings,    rSt,reloadSettings]    = useDB(DB.getSettings,    {tafalPerTrip:300});
   const [driverPays,  setDriverPays,  rDP,reloadDriverPays]  = useDB(DB.getDriverPays,  []);
   const [expenses,    setExpenses,    rEx,reloadExpenses]    = useDB(DB.getExpenses,    []);
@@ -441,6 +442,7 @@ export default function App() {
     activity, setActivity,
     pumps, setPumps:dbSetPumps,
     indents, setIndents:dbSetIndents,
+    pumpPayments, setPumpPayments:dbSetPumpPayments,
     settings:settings||{tafalPerTrip:300}, setSettings:dbSetSettings,
     driverPays, setDriverPays:dbSetDriverPays,
     expenses, setExpenses:dbSetExpenses,
@@ -1334,10 +1336,19 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
           ? <LockedField label="Date" value={f.date} half />
           : <Field label="Date" value={f.date||today()} onChange={ff("date")} type="date" half />}
       </div>
-      {veh && <div style={{fontSize:12,color:C.muted,background:C.bg,borderRadius:8,padding:"8px 10px"}}>
-        Owner: <b style={{color:C.text}}>{veh.ownerName}</b>
-        {veh.tafalExempt && <span style={{color:C.red,marginLeft:8}}>⚠ TAFAL Exempt</span>}
-      </div>}
+      {veh && (
+        <div style={{fontSize:12,color:C.muted,background:C.bg,borderRadius:8,padding:"10px 12px",
+          border:`1px solid ${C.border}33`}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+            <div>
+              <div><span style={{color:C.muted}}>Owner: </span><b style={{color:C.text}}>{veh.ownerName}</b></div>
+              {veh.phone && <div style={{marginTop:2}}><span style={{color:C.muted}}>Phone: </span><b style={{color:C.text}}>{veh.phone}</b></div>}
+              {veh.accountNo && <div style={{marginTop:2}}><span style={{color:C.muted}}>A/C: </span><b style={{color:C.blue}}>{veh.accountNo}</b>{veh.ifsc && <span style={{color:C.muted}}> · IFSC: {veh.ifsc}</span>}</div>}
+            </div>
+            {veh.tafalExempt && <Badge label="TAFAL Exempt" color={C.red} />}
+          </div>
+        </div>
+      )}
       <div style={{display:"flex",gap:10}}>
         {locked
           ? <><LockedField label="DI / Order No" value={f.diNo} half /><LockedField label="GR No" value={f.grNo} half /></>
@@ -1865,7 +1876,7 @@ function PumpRow({p, paid, onPayAll}) {
 
 
 // ─── DIESEL ALERT BANNER ──────────────────────────────────────────────────────
-function DieselAlertBanner({ alerts, trips, user, onLink, onDismiss, onDelete }) {
+function DieselAlertBanner({ alerts, trips, indents, user, onLink, onDismiss, onDelete }) {
   const [expandedId, setExpandedId] = useState(null);
   const [linkTripId,  setLinkTripId]  = useState("");
   const [dismissReason, setDismissReason] = useState("");
@@ -1940,7 +1951,16 @@ function DieselAlertBanner({ alerts, trips, user, onLink, onDismiss, onDelete })
                   style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,
                     color:C.text,padding:"8px 10px",fontSize:13,width:"100%",marginBottom:8}}>
                   <option value="">— Select trip —</option>
-                  {trips.filter(t=>t.status!=="Paid").map(t=>(
+                  {trips.filter(t => {
+                    if (t.status==="Paid") return false;
+                    // Hide trips that already have a confirmed indent (not an alert)
+                    const alreadyLinked = indents.some(i =>
+                      i.tripId === t.id && i.confirmed &&
+                      !i.unmatched && !i.truckMismatch && !i.amountMismatch &&
+                      i.id !== alert.id
+                    );
+                    return !alreadyLinked;
+                  }).map(t=>(
                     <option key={t.id} value={t.id}>
                       {t.truckNo} · LR {t.lrNo||"—"} → {t.to} · {t.date}
                     </option>
@@ -2185,7 +2205,7 @@ function PumpSlipScanner({ pumps, trips, user, onResults }) {
 }
 
 // ─── DIESEL MODULE ────────────────────────────────────────────────────────────
-function DieselMod({trips, setTrips, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, user, log}) {
+function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, driverPays, setDriverPays, user, log}) {
   const [view,        setView]        = useState("pumps");
   const [pumpSheet,   setPumpSheet]   = useState(false);
   const [scanSheet,   setScanSheet]   = useState(false);
@@ -2220,14 +2240,64 @@ function DieselMod({trips, setTrips, indents, setIndents, pumpPayments, setPumpP
   const redAlerts = Array.from(_seenAlerts.values());
 
   const linkAlertToTrip = async (alertId, tripId) => {
-    const trip = trips.find(t => t.id === tripId);
-    if (!trip) return;
-    const updated = indents.map(i => i.id===alertId
-      ? {...i, tripId, truckNo: trip.truckNo, unmatched:false, truckMismatch:false, alertDismissed:false}
-      : i);
-    setIndents(updated);
-    await DB.saveIndent(updated.find(i=>i.id===alertId));
-    log("ALERT LINKED", `Indent ${alertId} linked to LR ${trip.lrNo}`);
+    const trip    = trips.find(t => t.id === tripId);
+    const alert   = indents.find(i => i.id === alertId);
+    if (!trip || !alert) return;
+
+    // Block if LR already has a confirmed indent
+    const existing = indents.find(i =>
+      i.tripId === tripId && i.id !== alertId && i.confirmed &&
+      !i.unmatched && !i.truckMismatch && !i.amountMismatch
+    );
+    if (existing) {
+      window.alert(`LR ${trip.lrNo||"—"} already has an indent linked (${existing.truckNo} · #${existing.indentNo} · ₹${existing.amount}).\n\nEach LR can only have one indent. Please choose a different trip.`);
+      return;
+    }
+
+    // 1. Update the indent — link, clear flags, confirm
+    const updatedIndent = {...alert, tripId, truckNo: trip.truckNo,
+      unmatched:false, truckMismatch:false, amountMismatch:false,
+      alertDismissed:false, confirmed:true};
+    const updatedIndents = indents.map(i => i.id===alertId ? updatedIndent : i);
+    setIndents(updatedIndents);
+    await DB.saveIndent(updatedIndent);
+
+    // 2. Update trip dieselEstimate to scanned amount, recalculate
+    const oldEst   = trip.dieselEstimate || 0;
+    const newDiesel = alert.amount || 0;
+    const vehicle   = vehicles?.find(v => v.truckNo === trip.truckNo);
+    const oldCalc   = calcNet(trip, vehicle, oldEst);
+    const newCalc   = calcNet({...trip, dieselEstimate: newDiesel}, vehicle, newDiesel);
+    const updatedTrip = {...trip, dieselEstimate: newDiesel,
+      editedBy: user.username, editedAt: nowTs()};
+    setTrips(prev => prev.map(t => t.id===tripId ? updatedTrip : t));
+    await DB.saveTrip(updatedTrip);
+
+    // 3. If trip already settled and new net < old net — create deduction entry
+    if (trip.driverSettled && newCalc.net < oldCalc.net) {
+      const deductAmt = oldCalc.net - newCalc.net; // extra diesel not deducted before
+      const deduction = {
+        id: uid(), tripId, truckNo: trip.truckNo, lrNo: trip.lrNo||"",
+        amount: -deductAmt, // negative = deduction
+        utr: `DIESEL-ADJ-${alert.indentNo||alertId.slice(0,6)}`,
+        date: today(),
+        notes: `Diesel adjustment: Est ₹${oldEst} → Actual ₹${newDiesel}. Deduction ₹${deductAmt} from next payment.`,
+        createdBy: user.username, createdAt: nowTs(),
+      };
+      setDriverPays(prev => [deduction, ...(prev||[])]);
+      await DB.saveDriverPay(deduction);
+      log("DIESEL ADJ DEDUCTION", `LR ${trip.lrNo} ₹${deductAmt} deducted — diesel est was ₹${oldEst}, actual ₹${newDiesel}`);
+      window.alert(`⚠ Trip LR ${trip.lrNo||"—"} was already settled.\nDiesel updated: ₹${oldEst} → ₹${newDiesel}.\nDeduction of ₹${deductAmt} created in driver payments for next settlement.`);
+    }
+
+    // 4. WhatsApp alert if amount mismatch
+    if (alert.amountMismatch) {
+      const diff = Math.abs((alert.pumpTotal||0) - oldEst);
+      const msg  = `🚨 DIESEL AMOUNT UPDATED\nLR: ${trip.lrNo||"—"} · Truck: ${trip.truckNo}\nIndent: ${alert.indentNo||"—"}\nEst: ₹${oldEst} → Actual: ₹${newDiesel} (diff ₹${diff})\nEst Diesel updated in trip. Check balances.`;
+      window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, "_blank");
+    }
+
+    log("ALERT LINKED", `Indent ${alertId} → LR ${trip.lrNo}, diesel updated ₹${oldEst}→₹${newDiesel}`);
   };
 
   const dismissAlert = async (alertId, reason) => {
@@ -2390,7 +2460,7 @@ This image may have been scanned before.`);
       {/* Red alerts */}
       {redAlerts.length > 0 && (
         <DieselAlertBanner
-          alerts={redAlerts} trips={trips} user={user}
+          alerts={redAlerts} trips={trips} indents={indents} user={user}
           onLink={(alertId, tripId) => linkAlertToTrip(alertId, tripId)}
           onDismiss={(alertId, reason) => dismissAlert(alertId, reason)}
           onDelete={deleteAlert}
@@ -2408,6 +2478,7 @@ This image may have been scanned before.`);
       <PillBar items={[
         {id:"pumps",   label:"By Pump",   color:C.orange},
         {id:"indents", label:`Indents (${confirmedIndents.length})`, color:C.blue},
+        {id:"lrmap",   label:"LR ↔ Indent", color:C.teal||C.purple},
       ]} active={view} onSelect={setView} />
 
       {/* ── BY PUMP VIEW ── */}
@@ -2585,6 +2656,60 @@ This image may have been scanned before.`);
         </div>
       )}
 
+      {/* ── LR ↔ INDENT MAPPING ── */}
+      {view==="lrmap" && (
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          <div style={{color:C.muted,fontSize:12,marginBottom:4}}>
+            All trips with linked diesel indents
+          </div>
+          {trips.filter(t => {
+            const ind = confirmedIndents.find(i => i.tripId === t.id);
+            return !!ind;
+          }).sort((a,b) => b.date.localeCompare(a.date)).map(t => {
+            const ind  = confirmedIndents.find(i => i.tripId === t.id);
+            const pump = pumps.find(p => p.id === ind?.pumpId);
+            const veh  = vehicles?.find(v => v.truckNo === t.truckNo);
+            const calc = calcNet(t, veh, ind?.amount||t.dieselEstimate||0);
+            const estDiff = ind ? (ind.amount - (t.dieselEstimate||0)) : 0;
+            return (
+              <div key={t.id} style={{background:C.card,borderRadius:14,padding:"12px 14px",
+                borderLeft:`3px solid ${ind?.amountMismatch||estDiff!==0 ? C.orange : C.green}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
+                  <div>
+                    <div style={{fontWeight:800,fontSize:13}}>{t.truckNo}
+                      <span style={{color:C.muted,fontWeight:400,fontSize:11,marginLeft:6}}>LR {t.lrNo||"—"}</span>
+                    </div>
+                    <div style={{color:C.muted,fontSize:11}}>{t.date} · {t.to}</div>
+                  </div>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{color:C.green,fontWeight:800,fontSize:14}}>{fmt(calc.net)}</div>
+                    <div style={{color:C.muted,fontSize:10}}>Net Balance</div>
+                  </div>
+                </div>
+                <div style={{display:"flex",gap:16,fontSize:11,flexWrap:"wrap"}}>
+                  <span style={{color:C.muted}}>
+                    Indent: <b style={{color:C.text}}>#{ind?.indentNo||"—"}</b>
+                  </span>
+                  <span style={{color:C.muted}}>
+                    Pump: <b style={{color:C.text}}>{pump?.name||"—"}</b>
+                  </span>
+                  <span style={{color:C.muted}}>
+                    Diesel: <b style={{color:estDiff!==0?C.orange:C.green}}>₹{ind?.amount||0}</b>
+                    {estDiff!==0 && <span style={{color:C.orange}}> ({estDiff>0?"+":""}{estDiff} vs est)</span>}
+                  </span>
+                  {t.driverSettled && <Badge label="Settled" color={C.green} />}
+                </div>
+              </div>
+            );
+          })}
+          {trips.filter(t => confirmedIndents.find(i => i.tripId === t.id)).length === 0 && (
+            <div style={{textAlign:"center",color:C.muted,padding:40}}>
+              No trips linked to indents yet
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ── CONFIRM AMOUNT SHEET ── */}
       {confirmFlow && (
         <ConfirmDieselSheet
@@ -2718,9 +2843,10 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, user, log}) {
   const [sheet,   setSheet]   = useState(false);
   const [lSheet,  setLSheet]  = useState(null);
   const [sSheet,  setSSheet]  = useState(null);
+  const [hSheet,  setHSheet]  = useState(null); // truck history
   const [lAmt, setLAmt] = useState(""); const [rAmt, setRAmt] = useState("");
   const [shAmt, setShAmt] = useState(""); const [shTrip, setShTrip] = useState("");
-  const blank = {truckNo:"",ownerName:"",phone:"",loan:"0",loanRecovered:"0",deductPerTrip:"0",tafalExempt:false};
+  const blank = {truckNo:"",ownerName:"",phone:"",accountNo:"",ifsc:"",loan:"0",loanRecovered:"0",deductPerTrip:"0",tafalExempt:false};
   const [f,setF]=useState(blank); const ff=k=>v=>setF(p=>({...p,[k]:v}));
   return (
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
@@ -2731,7 +2857,9 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, user, log}) {
       <KPI icon="🔴" label="Total Loans Due" value={fmt(vehicles.reduce((s,v)=>s+Math.max(0,v.loan-v.loanRecovered),0))} color={C.red} />
       {sheet&&<Sheet title="Register Vehicle" onClose={()=>{setSheet(false);setF(blank);}}>
         <div style={{display:"flex",flexDirection:"column",gap:13}}>
-          <div style={{display:"flex",gap:10}}><Field label="Truck No" value={f.truckNo} onChange={ff("truckNo")} half /><Field label="Owner" value={f.ownerName} onChange={ff("ownerName")} half /></div>
+          <div style={{display:"flex",gap:10}}><Field label="Truck No" value={f.truckNo} onChange={ff("truckNo")} half /><Field label="Owner Name" value={f.ownerName} onChange={ff("ownerName")} half /></div>
+          <div style={{display:"flex",gap:10}}><Field label="Phone" value={f.phone||""} onChange={ff("phone")} half /><Field label="Bank A/C No" value={f.accountNo||""} onChange={ff("accountNo")} half /></div>
+          <Field label="IFSC Code" value={f.ifsc||""} onChange={ff("ifsc")} />
           <Field label="Phone" value={f.phone} onChange={ff("phone")} type="tel" />
           <div style={{display:"flex",gap:10}}><Field label="Loan ₹" value={f.loan} onChange={ff("loan")} type="number" half /><Field label="Recovered ₹" value={f.loanRecovered} onChange={ff("loanRecovered")} type="number" half /></div>
           <Field label="Deduct Per Trip ₹" value={f.deductPerTrip} onChange={ff("deductPerTrip")} type="number" />
@@ -2774,7 +2902,11 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, user, log}) {
         return (
           <div key={v.id} style={{background:C.card,borderRadius:14,padding:"14px 16px",borderLeft:`4px solid ${bal>0?C.red:C.green}`,marginBottom:8}}>
             <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
-              <div><div style={{fontWeight:800,fontSize:15}}>{v.truckNo}</div><div style={{color:C.muted,fontSize:12}}>{v.ownerName} · {v.phone}</div></div>
+              <div>
+                <div style={{fontWeight:800,fontSize:15}}>{v.truckNo}</div>
+                <div style={{color:C.muted,fontSize:12}}>{v.ownerName} · {v.phone}</div>
+                {v.accountNo && <div style={{color:C.blue,fontSize:11}}>A/C: {v.accountNo}{v.ifsc?` · IFSC: ${v.ifsc}`:""}</div>}
+              </div>
               <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:4}}>
                 <Badge label={bal>0?"Loan Due":"Clear"} color={bal>0?C.red:C.green} />
                 {v.tafalExempt && <Badge label="TAFAL Exempt" color={C.muted} />}
@@ -2793,12 +2925,73 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, user, log}) {
             <div style={{display:"flex",gap:8}}>
               <Btn onClick={()=>setLSheet(v.id)} sm outline color={C.blue}>Loan</Btn>
               <Btn onClick={()=>setSSheet(v.id)} sm outline color={C.red}>Shortage</Btn>
+              <Btn onClick={()=>setHSheet(v.id)} sm outline color={C.purple}>📋 History</Btn>
               <Btn onClick={()=>window.open(`https://wa.me/91${v.phone.replace(/\D/g,"")}?text=${encodeURIComponent(`Dear ${v.ownerName}, loan balance ${fmt(bal)}. - M.Yantra 9606477257`)}`,"_blank")} sm outline color={C.teal}>📲</Btn>
             </div>
           </div>
         );
       })}
     </div>
+
+      {/* ── TRUCK HISTORY SHEET ── */}
+      {hSheet && (()=>{
+        const v  = vehicles.find(x => x.id === hSheet);
+        if (!v) return null;
+        const vt = trips.filter(t => t.truckNo === v.truckNo)
+                        .sort((a,b) => b.date.localeCompare(a.date));
+        return (
+          <Sheet title={`📋 ${v.truckNo} — All Trips`} onClose={()=>setHSheet(null)}>
+            <div style={{display:"flex",flexDirection:"column",gap:12}}>
+              {/* Owner card */}
+              <div style={{background:C.bg,borderRadius:10,padding:"12px 14px",fontSize:13}}>
+                <div style={{fontWeight:800,fontSize:15,marginBottom:4}}>{v.ownerName}</div>
+                <div style={{color:C.muted}}>{v.phone}</div>
+                {v.accountNo && <div style={{color:C.blue,marginTop:2}}>A/C: {v.accountNo}{v.ifsc?` · IFSC: ${v.ifsc}`:""}</div>}
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginTop:10}}>
+                  <div style={{background:C.card,borderRadius:8,padding:"8px",textAlign:"center"}}>
+                    <div style={{fontWeight:700,color:C.blue}}>{vt.length}</div>
+                    <div style={{color:C.muted,fontSize:10}}>TOTAL TRIPS</div>
+                  </div>
+                  <div style={{background:C.card,borderRadius:8,padding:"8px",textAlign:"center"}}>
+                    <div style={{fontWeight:700,color:C.green}}>{vt.filter(t=>t.driverSettled).length}</div>
+                    <div style={{color:C.muted,fontSize:10}}>SETTLED</div>
+                  </div>
+                  <div style={{background:C.card,borderRadius:8,padding:"8px",textAlign:"center"}}>
+                    <div style={{fontWeight:700,color:C.orange}}>{vt.filter(t=>!t.driverSettled).length}</div>
+                    <div style={{color:C.muted,fontSize:10}}>PENDING</div>
+                  </div>
+                </div>
+              </div>
+              {/* Trip list */}
+              {vt.length === 0 && <div style={{textAlign:"center",color:C.muted,padding:24}}>No trips recorded</div>}
+              {vt.map(t => {
+                const calc = calcNet(t, v, t.dieselEstimate||0);
+                return (
+                  <div key={t.id} style={{background:C.card,borderRadius:12,padding:"11px 14px",
+                    borderLeft:`3px solid ${t.driverSettled?C.green:C.orange}`}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                      <div>
+                        <div style={{fontWeight:700,fontSize:13}}>LR {t.lrNo||"—"}
+                          <span style={{color:C.muted,fontWeight:400,fontSize:11,marginLeft:6}}>{t.date}</span>
+                        </div>
+                        <div style={{color:C.muted,fontSize:11,marginTop:2}}>{t.from||"—"} → {t.to} · {t.qty}MT</div>
+                        <div style={{color:C.muted,fontSize:11}}>DI: {t.diNo||"—"} · {t.grade}</div>
+                      </div>
+                      <div style={{textAlign:"right"}}>
+                        <div style={{color:C.green,fontWeight:800,fontSize:14}}>{fmt(calc.net)}</div>
+                        <div style={{fontSize:10,color:C.muted}}>Net</div>
+                        {t.driverSettled
+                          ? <Badge label="Settled" color={C.green} />
+                          : <Badge label="Pending" color={C.orange} />}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </Sheet>
+        );
+      })()}
   );
 }
 
