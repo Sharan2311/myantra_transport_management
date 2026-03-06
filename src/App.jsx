@@ -2222,10 +2222,17 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
   const [pf, setPf] = useState(blankP);
 
   // Confirmed indents = confirmed:true OR alert resolved (alertDismissed:true with tripId)
-  const confirmedIndents = indents.filter(i =>
-    i.confirmed ||
-    (i.alertDismissed && i.tripId)
-  );
+  // Confirmed = confirmed flag OR alert dismissed with a linked trip
+  // Dedup by indentNo — keep the one with confirmed:true preferably, else latest
+  const _allConfirmed = indents.filter(i => i.confirmed || (i.alertDismissed && i.tripId));
+  const _confirmedMap = new Map();
+  _allConfirmed.forEach(i => {
+    const key = i.indentNo ? String(i.indentNo).trim() : i.id;
+    const existing = _confirmedMap.get(key);
+    if (!existing || (i.confirmed && !existing.confirmed) || i.createdAt > existing.createdAt)
+      _confirmedMap.set(key, i);
+  });
+  const confirmedIndents = Array.from(_confirmedMap.values());
   // Indents with no matching trip — flagged for owner
   const unmatchedIndents = indents.filter(i => i.unmatched);
   // Red alerts = unmatched + truck mismatch, not yet dismissed
@@ -2268,7 +2275,9 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
     const vehicle   = vehicles?.find(v => v.truckNo === trip.truckNo);
     const oldCalc   = calcNet(trip, vehicle, oldEst);
     const newCalc   = calcNet({...trip, dieselEstimate: newDiesel}, vehicle, newDiesel);
-    const updatedTrip = {...trip, dieselEstimate: newDiesel,
+    const updatedTrip = {...trip,
+      dieselEstimate: newDiesel,
+      dieselIndentNo: alert.indentNo || trip.dieselIndentNo || "",
       editedBy: user.username, editedAt: nowTs()};
     setTrips(prev => prev.map(t => t.id===tripId ? updatedTrip : t));
     await DB.saveTrip(updatedTrip);
@@ -2670,10 +2679,11 @@ This image may have been scanned before.`);
             const pump = pumps.find(p => p.id === ind?.pumpId);
             const veh  = vehicles?.find(v => v.truckNo === t.truckNo);
             const calc = calcNet(t, veh, ind?.amount||t.dieselEstimate||0);
-            const estDiff = ind ? (ind.amount - (t.dieselEstimate||0)) : 0;
+            const estDiff = ind ? Math.round((ind.amount - (t.dieselEstimate||0)) * 100) / 100 : 0;
+            const hasDiscrepancy = estDiff !== 0;
             return (
               <div key={t.id} style={{background:C.card,borderRadius:14,padding:"12px 14px",
-                borderLeft:`3px solid ${ind?.amountMismatch||estDiff!==0 ? C.orange : C.green}`}}>
+                borderLeft:`3px solid ${hasDiscrepancy ? C.orange : C.green}`}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
                   <div>
                     <div style={{fontWeight:800,fontSize:13}}>{t.truckNo}
@@ -2694,8 +2704,8 @@ This image may have been scanned before.`);
                     Pump: <b style={{color:C.text}}>{pump?.name||"—"}</b>
                   </span>
                   <span style={{color:C.muted}}>
-                    Diesel: <b style={{color:estDiff!==0?C.orange:C.green}}>₹{ind?.amount||0}</b>
-                    {estDiff!==0 && <span style={{color:C.orange}}> ({estDiff>0?"+":""}{estDiff} vs est)</span>}
+                    Diesel: <b style={{color:hasDiscrepancy?C.orange:C.green}}>₹{ind?.amount||0}</b>
+                    {hasDiscrepancy && <span style={{color:C.orange}}> ({estDiff>0?"+":""}{estDiff} vs est)</span>}
                   </span>
                   {t.driverSettled && <Badge label="Settled" color={C.green} />}
                 </div>
@@ -2796,14 +2806,16 @@ This image may have been scanned before.`);
                       </label>
                     </div>
                   </div>
-                  {/* Pump selector */}
-                  {pumps.length > 1 && (
+                  {/* Pump selector — always visible */}
+                  <div style={{marginTop:8}}>
+                    <div style={{color:C.muted,fontSize:10,fontWeight:700,marginBottom:4,letterSpacing:1}}>⛽ LINK TO PUMP</div>
                     <select value={r.pumpId||""} onChange={e=>setScanResults(p=>p.map((x,j)=>j===i?{...x,pumpId:e.target.value}:x))}
-                      style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,color:C.text,
-                        padding:"6px 10px",fontSize:12,width:"100%",marginTop:4}}>
+                      style={{background:C.bg,border:`1.5px solid ${C.orange}55`,borderRadius:8,color:C.text,
+                        padding:"8px 10px",fontSize:13,width:"100%"}}>
+                      <option value="">— Select pump —</option>
                       {pumps.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
                     </select>
-                  )}
+                  </div>
                 </div>
               ))}
               <div style={{color:C.muted,fontSize:12,textAlign:"center"}}>
