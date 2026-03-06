@@ -178,6 +178,17 @@ const userToDB = u => ({
 })
 
 // ── Generic helpers ──────────────────────────────────────────────────────────
+
+const pumpPaymentFromDB = r => ({
+  id: r.id, pumpId: r.pump_id, amount: +(r.amount||0),
+  utr: r.utr||"", date: r.date||"", note: r.note||"",
+  createdBy: r.created_by, createdAt: r.created_at,
+})
+const pumpPaymentToDB = p => ({
+  id: p.id, pump_id: p.pumpId, amount: p.amount,
+  utr: p.utr||"", date: p.date||"", note: p.note||"",
+  created_by: p.createdBy, created_at: p.createdAt,
+})
 const fetchAll = async (table, fromDB) => {
   const { data, error } = await supabase.from(table).select('*').order('id')
   if (error) throw error
@@ -226,8 +237,13 @@ export const DB = {
   saveSettlement: s  => upsertOne('mye_settlements', settlementToDB, s),
 
   // Pumps
-  getPumps:       () => fetchAll('mye_pumps', pumpFromDB),
-  savePump:       p  => upsertOne('mye_pumps', pumpToDB, p),
+  getPumps:          () => fetchAll('mye_pumps', pumpFromDB),
+  savePump:          p  => upsertOne('mye_pumps', pumpToDB, p),
+
+  // Pump Payments
+  getPumpPayments:   () => fetchAll('mye_pump_payments', pumpPaymentFromDB),
+  savePumpPayment:   p  => upsertOne('mye_pump_payments', pumpPaymentToDB, p),
+  deletePumpPayment: id => deleteOne('mye_pump_payments', id),
 
   // Indents
   getIndents:     () => fetchAll('mye_indents', indentFromDB),

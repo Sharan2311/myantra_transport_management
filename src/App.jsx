@@ -301,7 +301,8 @@ export default function App() {
   const [settlements, setSettlements, rS, reloadSettlements] = useDB(DB.getSettlements, []);
   const [activity,    setActivity,    rA, reloadActivity]    = useDB(DB.getActivity,    []);
   const [pumps,       setPumps,       rPu,reloadPumps]       = useDB(DB.getPumps,       []);
-  const [indents,     setIndents,     rI, reloadIndents]     = useDB(DB.getIndents,     []);
+  const [indents,        setIndents,        rI,  reloadIndents]       = useDB(DB.getIndents,       []);
+  const [pumpPayments,   setPumpPayments,   rPP, reloadPumpPayments] = useDB(DB.getPumpPayments, []);
   const [settings,    setSettings,    rSt,reloadSettings]    = useDB(DB.getSettings,    {tafalPerTrip:300});
   const [driverPays,  setDriverPays,  rDP,reloadDriverPays]  = useDB(DB.getDriverPays,  []);
   const [expenses,    setExpenses,    rEx,reloadExpenses]    = useDB(DB.getExpenses,    []);
@@ -2184,31 +2185,27 @@ function PumpSlipScanner({ pumps, trips, user, onResults }) {
 }
 
 // ─── DIESEL MODULE ────────────────────────────────────────────────────────────
-function DieselMod({trips, indents, setIndents, pumps, setPumps, user, log}) {
-  const [view,      setView]      = useState("unpaid");
-  const [addSheet,  setAddSheet]  = useState(false);
-  const [pumpSheet, setPumpSheet] = useState(false);
-  const [paySheet,  setPaySheet]  = useState(null);
-  const [payRef,    setPayRef]    = useState("");
-  const [scanSheet, setScanSheet] = useState(false);
+function DieselMod({trips, setTrips, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, user, log}) {
+  const [view,        setView]        = useState("pumps");
+  const [pumpSheet,   setPumpSheet]   = useState(false);
+  const [scanSheet,   setScanSheet]   = useState(false);
   const [scanResults, setScanResults] = useState(null);
-  const [scanSummary, setScanSummary] = useState(null); // {saved, flagged, date}
-  const [confirmFlow, setConfirmFlow] = useState(null); // indent being confirmed
-
-  const blankI = {pumpId:pumps[0]?.id||"", truckNo:"", tripId:"", indentNo:"", date:today(), litres:"", ratePerLitre:"", amount:"", confirmed:false};
-  const [f, setF] = useState(blankI);
-  const ff = k => v => {
-    const next = {...f, [k]:v};
-    if (k==="litres"||k==="ratePerLitre") next.amount = String((+(next.litres)||0) * (+(next.ratePerLitre)||0));
-    setF(next);
-  };
+  const [scanSummary, setScanSummary] = useState(null);
+  const [confirmFlow, setConfirmFlow] = useState(null);
+  const [payPumpId,   setPayPumpId]   = useState(null); // pump being paid
+  const [payAmt,      setPayAmt]      = useState("");
+  const [payUtr,      setPayUtr]      = useState("");
+  const [payNote,     setPayNote]     = useState("");
+  const [expandPump,  setExpandPump]  = useState(null); // expanded pump id
 
   const blankP = {name:"", contact:"", address:"", accountNo:"", ifsc:""};
   const [pf, setPf] = useState(blankP);
 
-  const unpaid   = indents.filter(i => !i.paid);
-  const paid     = indents.filter(i => i.paid);
-  const unpaidAmt= unpaid.reduce((s,i)=>s+(i.amount||0),0);
+  // Confirmed indents = confirmed:true OR alert resolved (alertDismissed:true with tripId)
+  const confirmedIndents = indents.filter(i =>
+    i.confirmed ||
+    (i.alertDismissed && i.tripId)
+  );
   // Indents with no matching trip — flagged for owner
   const unmatchedIndents = indents.filter(i => i.unmatched);
   // Red alerts = unmatched + truck mismatch, not yet dismissed
@@ -2253,12 +2250,15 @@ function DieselMod({trips, indents, setIndents, pumps, setPumps, user, log}) {
     }
   };
 
-  // Group unpaid by pump for 15-day view
-  const pumpTotals = pumps.map(p => ({
-    ...p,
-    unpaid: indents.filter(i=>i.pumpId===p.id&&!i.paid),
-    unpaidAmt: indents.filter(i=>i.pumpId===p.id&&!i.paid).reduce((s,i)=>s+(i.amount||0),0),
-  }));
+  // Per-pump balance: total confirmed - total paid
+  const pumpBalances = pumps.map(p => {
+    const pIndents = confirmedIndents.filter(i => i.pumpId === p.id);
+    const totalOwed = pIndents.reduce((s,i) => s+(i.amount||0), 0);
+    const totalPaid = (pumpPayments||[]).filter(pp => pp.pumpId === p.id)
+                        .reduce((s,pp) => s+(pp.amount||0), 0);
+    const pending   = totalOwed - totalPaid;
+    return { ...p, pIndents, totalOwed, totalPaid, pending };
+  });
 
   const confirmScanned = async () => {
     // Block if any indent number already exists in DB
@@ -2354,26 +2354,40 @@ This image may have been scanned before.`);
     log("DIESEL CONFIRM", `Truck ${ind?.truckNo} ₹${ind?.amount} confirmed`);
   };
 
-  const markPaid = () => {
-    setIndents(p => p.map(i => i.id===paySheet.id ? {...i, paid:true, paidDate:today(), paidRef:payRef} : i));
-    log("DIESEL PAID", `Indent ${paySheet.indentNo} · ${fmt(paySheet.amount)} · Ref: ${payRef}`);
-    setPaySheet(null); setPayRef("");
+  const recordPumpPayment = async () => {
+    if (!payAmt || +payAmt <= 0 || !payUtr.trim()) return;
+    const pump = pumps.find(p => p.id === payPumpId);
+    const payment = { id:uid(), pumpId:payPumpId, amount:+payAmt, utr:payUtr.trim(),
+      date:today(), note:payNote.trim(), createdBy:user.username, createdAt:nowTs() };
+    setPumpPayments(prev => [payment, ...(prev||[])]);
+    await DB.savePumpPayment(payment);
+    log("PUMP PAYMENT", `${pump?.name} ₹${fmt(+payAmt)} UTR: ${payUtr}`);
+    setPayPumpId(null); setPayAmt(""); setPayUtr(""); setPayNote("");
   };
 
-  // pay all unpaid for a pump at once
-  const markPumpPaid = (pumpId, ref) => {
-    setIndents(p => p.map(i => i.pumpId===pumpId&&!i.paid ? {...i, paid:true, paidDate:today(), paidRef:ref} : i));
-    log("DIESEL PUMP PAID", `Pump ${pumps.find(p=>p.id===pumpId)?.name} — all cleared, Ref: ${ref}`);
+  const deletePumpPayment = async (id) => {
+    setPumpPayments(prev => prev.filter(p => p.id !== id));
+    await DB.deletePumpPayment(id);
+    log("PUMP PAYMENT DELETED", id);
   };
+
+  // Overall totals
+  const totalPending = pumpBalances.reduce((s,p) => s + Math.max(0,p.pending), 0);
+  const totalPaid    = (pumpPayments||[]).reduce((s,p) => s + p.amount, 0);
 
   return (
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
+
+      {/* Header */}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div style={{color:C.orange,fontWeight:800,fontSize:16}}>⛽ Diesel & Pump</div>
-        <Btn onClick={()=>setScanSheet(true)} sm outline color={C.blue}>📷 Scan Slip</Btn>
+        <div style={{display:"flex",gap:8}}>
+          <Btn onClick={()=>setScanSheet(true)} sm outline color={C.blue}>📷 Scan Slip</Btn>
+          <Btn onClick={()=>setPumpSheet(true)} sm outline color={C.muted}>+ Pump</Btn>
+        </div>
       </div>
 
-      {/* Red alerts — unmatched + truck mismatch — visible to all */}
+      {/* Red alerts */}
       {redAlerts.length > 0 && (
         <DieselAlertBanner
           alerts={redAlerts} trips={trips} user={user}
@@ -2383,80 +2397,191 @@ This image may have been scanned before.`);
         />
       )}
 
+      {/* Summary KPIs */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-        <KPI icon="⚠" label="Unpaid to Pumps" value={fmt(unpaidAmt)} color={C.red} sub={`${unpaid.length} indents`} />
-        <KPI icon="✅" label="Paid to Pumps"   value={fmt(paid.reduce((s,i)=>s+(i.amount||0),0))} color={C.green} />
+        <KPI icon="⏳" label="Pending to Credit" value={fmt(totalPending)} color={C.red}
+          sub={`across ${pumps.length} pump${pumps.length!==1?"s":""}`} />
+        <KPI icon="✅" label="Total Paid" value={fmt(totalPaid)} color={C.green}
+          sub={`${(pumpPayments||[]).length} payment${(pumpPayments||[]).length!==1?"s":""}`} />
       </div>
 
       <PillBar items={[
-        {id:"unpaid",  label:`Unpaid (${unpaid.length})`,   color:C.red},
-        {id:"pump",    label:"By Pump",                     color:C.blue},
-        {id:"paid",    label:`Paid (${paid.length})`,       color:C.green},
+        {id:"pumps",   label:"By Pump",   color:C.orange},
+        {id:"indents", label:`Indents (${confirmedIndents.length})`, color:C.blue},
       ]} active={view} onSelect={setView} />
 
-      {/* ── UNPAID INDENTS ── */}
-      {view==="unpaid" && (
+      {/* ── BY PUMP VIEW ── */}
+      {view==="pumps" && (
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          {pumpBalances.map(p => {
+            const isExpanded = expandPump === p.id;
+            const pPayments = (pumpPayments||[]).filter(pp => pp.pumpId === p.id).sort((a,b)=>b.date.localeCompare(a.date));
+            return (
+              <div key={p.id} style={{background:C.card,borderRadius:14,overflow:"hidden",
+                border:`1.5px solid ${p.pending>0?C.red+"44":C.green+"44"}`}}>
+
+                {/* Pump header — tap to expand */}
+                <div style={{padding:"14px 16px",cursor:"pointer"}}
+                  onClick={()=>setExpandPump(isExpanded?null:p.id)}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                    <div>
+                      <div style={{fontWeight:800,fontSize:15}}>{p.name}</div>
+                      <div style={{color:C.muted,fontSize:12,marginTop:2}}>{p.pIndents.length} confirmed indents</div>
+                    </div>
+                    <div style={{textAlign:"right"}}>
+                      <div style={{fontSize:11,color:C.muted}}>Pending to Credit</div>
+                      <div style={{color:p.pending>0?C.red:C.green,fontWeight:800,fontSize:20}}>
+                        {fmt(Math.max(0,p.pending))}
+                      </div>
+                    </div>
+                  </div>
+                  {/* Mini balance bar */}
+                  <div style={{marginTop:10,display:"flex",gap:10,fontSize:12}}>
+                    <span style={{color:C.muted}}>Total Owed: <b style={{color:C.text}}>{fmt(p.totalOwed)}</b></span>
+                    <span style={{color:C.muted}}>Paid: <b style={{color:C.green}}>{fmt(p.totalPaid)}</b></span>
+                    <span style={{color:C.muted,marginLeft:"auto"}}>{isExpanded?"▲":"▼"}</span>
+                  </div>
+                </div>
+
+                {/* Expanded: payment history + record payment */}
+                {isExpanded && (
+                  <div style={{borderTop:`1px solid ${C.border}22`,padding:"12px 16px",
+                    display:"flex",flexDirection:"column",gap:12}}>
+
+                    {/* Record payment — owner only */}
+                    {user.role==="owner" && (
+                      payPumpId===p.id ? (
+                        <div style={{background:C.bg,borderRadius:10,padding:"12px 14px",
+                          display:"flex",flexDirection:"column",gap:10}}>
+                          <div style={{color:C.text,fontWeight:700,fontSize:13}}>Record NEFT Payment</div>
+                          <div style={{display:"flex",gap:8}}>
+                            <Field label="Amount ₹" value={payAmt} onChange={setPayAmt} type="number" half
+                              note={`Pending: ${fmt(p.pending)}`} />
+                            <Field label="UTR / Ref No" value={payUtr} onChange={setPayUtr} half />
+                          </div>
+                          <Field label="Note (optional)" value={payNote} onChange={setPayNote}
+                            placeholder="e.g. 1st–15th Mar payment" />
+                          <div style={{display:"flex",gap:8}}>
+                            <Btn onClick={recordPumpPayment} full color={C.green}
+                              disabled={!payAmt||+payAmt<=0||!payUtr.trim()}>
+                              ✓ Record Payment
+                            </Btn>
+                            <Btn onClick={()=>setPayPumpId(null)} outline color={C.muted}>Cancel</Btn>
+                          </div>
+                        </div>
+                      ) : (
+                        <Btn onClick={()=>{setPayPumpId(p.id);setPayAmt(String(Math.max(0,p.pending)));setPayUtr("");setPayNote("");}}
+                          full color={C.green} sm>
+                          + Record Payment to {p.name}
+                        </Btn>
+                      )
+                    )}
+
+                    {/* Payment history */}
+                    {pPayments.length > 0 && (
+                      <div>
+                        <div style={{color:C.muted,fontSize:11,fontWeight:700,
+                          textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>
+                          Payment History
+                        </div>
+                        {pPayments.map(pp => (
+                          <div key={pp.id} style={{display:"flex",justifyContent:"space-between",
+                            alignItems:"center",padding:"8px 0",
+                            borderBottom:`1px solid ${C.border}22`}}>
+                            <div>
+                              <div style={{fontSize:13,fontWeight:600}}>{fmt(pp.amount)}</div>
+                              <div style={{color:C.muted,fontSize:11}}>
+                                {pp.date} · UTR: {pp.utr}
+                                {pp.note && ` · ${pp.note}`}
+                              </div>
+                            </div>
+                            <div style={{display:"flex",alignItems:"center",gap:8}}>
+                              <Badge label="Paid" color={C.green} />
+                              {user.role==="owner" && (
+                                <span style={{color:C.red,fontSize:18,cursor:"pointer",padding:"0 4px"}}
+                                  onClick={()=>{if(window.confirm("Delete this payment record?")) deletePumpPayment(pp.id);}}>
+                                  ×
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {pPayments.length===0 && (
+                      <div style={{color:C.muted,fontSize:12,textAlign:"center",padding:8}}>
+                        No payments recorded yet
+                      </div>
+                    )}
+
+                    {/* Recent indents for this pump */}
+                    <div>
+                      <div style={{color:C.muted,fontSize:11,fontWeight:700,
+                        textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>
+                        Confirmed Indents
+                      </div>
+                      {p.pIndents.slice(0,10).map(i => {
+                        const trip = trips.find(t=>t.id===i.tripId);
+                        return (
+                          <div key={i.id} style={{display:"flex",justifyContent:"space-between",
+                            padding:"6px 0",borderBottom:`1px solid ${C.border}11`,fontSize:12}}>
+                            <span style={{color:C.muted}}>{i.truckNo} · #{i.indentNo} · {i.date}</span>
+                            <span style={{color:C.text,fontWeight:600}}>{fmt(i.amount)}</span>
+                          </div>
+                        );
+                      })}
+                      {p.pIndents.length > 10 && (
+                        <div style={{color:C.muted,fontSize:11,textAlign:"center",marginTop:4}}>
+                          +{p.pIndents.length-10} more indents
+                        </div>
+                      )}
+                      {p.pIndents.length===0 && (
+                        <div style={{color:C.muted,fontSize:12,textAlign:"center",padding:8}}>
+                          No confirmed indents yet
+                        </div>
+                      )}
+                    </div>
+
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {pumps.length===0 && (
+            <div style={{textAlign:"center",color:C.muted,padding:32}}>
+              No pumps added — tap "+ Pump" to add one
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── ALL CONFIRMED INDENTS ── */}
+      {view==="indents" && (
         <div style={{display:"flex",flexDirection:"column",gap:8}}>
-          {unpaid.map(i => {
+          {confirmedIndents.length===0 && (
+            <div style={{textAlign:"center",color:C.muted,padding:40}}>No confirmed indents yet</div>
+          )}
+          {confirmedIndents.map(i => {
             const pump = pumps.find(p=>p.id===i.pumpId);
             const trip = trips.find(t=>t.id===i.tripId);
             return (
-              <div key={i.id} style={{background:C.card,borderRadius:14,padding:"13px 14px",borderLeft:`4px solid ${i.confirmed?C.orange:C.red}`}}>
-                <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
+              <div key={i.id} style={{background:C.card,borderRadius:12,padding:"11px 14px",
+                borderLeft:`3px solid ${C.green}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
                   <div>
-                    <div style={{fontWeight:700}}>{i.truckNo} <span style={{color:C.muted,fontWeight:400,fontSize:12}}>Indent: {i.indentNo}</span></div>
-                    <div style={{color:C.muted,fontSize:12}}>{i.date} · {i.litres}L @ ₹{i.ratePerLitre}/L</div>
-                    {pump && <div style={{color:C.blue,fontSize:12}}>{pump.name}</div>}
-                    {trip && <div style={{color:C.muted,fontSize:11}}>Trip: LR {trip.lrNo||"—"} → {trip.to}</div>}
+                    <div style={{fontWeight:700,fontSize:13}}>{i.truckNo}
+                      <span style={{color:C.muted,fontWeight:400,fontSize:11,marginLeft:6}}>#{i.indentNo}</span>
+                    </div>
+                    <div style={{color:C.muted,fontSize:11,marginTop:2}}>
+                      {i.date} · {pump?.name||"—"}
+                    </div>
+                    {trip && <div style={{color:C.blue,fontSize:11}}>LR {trip.lrNo||"—"} → {trip.to}</div>}
                   </div>
-                  <div style={{textAlign:"right"}}>
-                    <div style={{color:C.red,fontWeight:800,fontSize:16}}>{fmt(i.amount)}</div>
-                    {i.confirmed ? <Badge label="Confirmed" color={C.green} /> : <Badge label="Estimate" color={C.orange} />}
-                  </div>
-                </div>
-                <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-                  {!i.confirmed && (
-                    <Btn onClick={()=>setConfirmFlow(i)} sm outline color={C.green}>✓ Confirm Amount</Btn>
-                  )}
-                  <Btn onClick={()=>{setPaySheet(i);setPayRef("");}} sm color={C.green}>Mark Paid</Btn>
+                  <div style={{color:C.text,fontWeight:800,fontSize:14}}>{fmt(i.amount)}</div>
                 </div>
               </div>
             );
           })}
-          {unpaid.length===0 && <div style={{textAlign:"center",color:C.muted,padding:40}}>No unpaid indents ✓</div>}
-        </div>
-      )}
-
-      {/* ── BY PUMP (15-DAY VIEW) ── */}
-      {view==="pump" && (
-        <div style={{display:"flex",flexDirection:"column",gap:10}}>
-          <div style={{display:"flex",justifyContent:"flex-end"}}>
-            <Btn onClick={()=>setPumpSheet(true)} sm outline color={C.blue}>+ Add Pump</Btn>
-          </div>
-          {pumpTotals.map(p => (
-            <PumpRow key={p.id} p={p} paid={paid} onPayAll={markPumpPaid} />
-          ))}
-          {pumps.length===0 && <div style={{textAlign:"center",color:C.muted,padding:32}}>No pumps added yet</div>}
-        </div>
-      )}
-
-      {/* ── PAID ── */}
-      {view==="paid" && (
-        <div style={{display:"flex",flexDirection:"column",gap:8}}>
-          {paid.map(i => {
-            const pump = pumps.find(p=>p.id===i.pumpId);
-            return (
-              <div key={i.id} style={{background:C.card,borderRadius:12,padding:"11px 14px",borderLeft:`4px solid ${C.green}`,display:"flex",justifyContent:"space-between"}}>
-                <div>
-                  <div style={{fontWeight:700}}>{i.truckNo} · {i.indentNo}</div>
-                  <div style={{color:C.muted,fontSize:12}}>{i.date} · {i.litres}L · {pump?.name||"—"}</div>
-                  <div style={{color:C.green,fontSize:11}}>Paid {i.paidDate} · Ref: {i.paidRef||"—"}</div>
-                </div>
-                <div style={{color:C.green,fontWeight:800}}>{fmt(i.amount)}</div>
-              </div>
-            );
-          })}
-          {paid.length===0 && <div style={{textAlign:"center",color:C.muted,padding:40}}>No paid indents yet</div>}
         </div>
       )}
 
@@ -2568,51 +2693,6 @@ This image may have been scanned before.`);
               </Btn>
             </div>
           )}
-        </Sheet>
-      )}
-
-      {/* ── ADD INDENT SHEET ── */}
-      {addSheet && (
-        <Sheet title="Record Diesel Indent" onClose={()=>{setAddSheet(false);setF(blankI);}}>
-          <div style={{display:"flex",flexDirection:"column",gap:13}}>
-            <Field label="Pump" value={f.pumpId} onChange={ff("pumpId")}
-              opts={pumps.length>0 ? pumps.map(p=>({v:p.id,l:p.name})) : [{v:"",l:"No pumps — add one first"}]} />
-            <div style={{display:"flex",gap:10}}>
-              <Field label="Truck No" value={f.truckNo} onChange={ff("truckNo")} placeholder="KA34C4617" half />
-              <Field label="Date"     value={f.date}    onChange={ff("date")} type="date" half />
-            </div>
-            <Field label="Indent No" value={f.indentNo} onChange={ff("indentNo")} placeholder="IND-2026-001" />
-            <Field label="Link to Trip (LR)" value={f.tripId} onChange={ff("tripId")}
-              opts={[{v:"",l:"— Not linked to a specific trip —"},
-                ...trips.filter(t => !f.truckNo||t.truckNo===f.truckNo).slice(0,30)
-                  .map(t=>({v:t.id,l:`LR:${t.lrNo||"—"} · ${t.truckNo} → ${t.to} · ${t.date}`}))]} />
-            <div style={{display:"flex",gap:10}}>
-              <Field label="Litres" value={f.litres} onChange={ff("litres")} type="number" half />
-              <Field label="₹/Litre" value={f.ratePerLitre} onChange={ff("ratePerLitre")} type="number" half />
-            </div>
-            <Field label="Total Amount ₹ (auto)" value={f.amount} onChange={ff("amount")} type="number" />
-            <div style={{display:"flex",alignItems:"center",gap:10,padding:"4px 0"}}>
-              <input type="checkbox" checked={f.confirmed} onChange={e=>setF(p=>({...p,confirmed:e.target.checked}))} style={{width:20,height:20,cursor:"pointer"}} />
-              <span style={{color:C.text,fontSize:15}}>Pump has confirmed this amount</span>
-            </div>
-            <div style={{color:C.muted,fontSize:12}}>Recording as: <b style={{color:ROLES[user.role]?.color}}>{user.name}</b></div>
-            <Btn onClick={saveIndent} full color={C.orange}>Save Indent</Btn>
-          </div>
-        </Sheet>
-      )}
-
-      {/* ── PAY SINGLE INDENT SHEET ── */}
-      {paySheet && (
-        <Sheet title="Mark Indent as Paid" onClose={()=>{setPaySheet(null);setPayRef("");}}>
-          <div style={{display:"flex",flexDirection:"column",gap:14}}>
-            <div style={{background:C.bg,borderRadius:10,padding:"12px 14px",fontSize:13}}>
-              <div><b>{paySheet.truckNo}</b> · Indent {paySheet.indentNo}</div>
-              <div style={{color:C.muted}}>{paySheet.date} · {paySheet.litres}L · {pumps.find(p=>p.id===paySheet.pumpId)?.name||"—"}</div>
-              <div style={{color:C.red,fontWeight:800,fontSize:18,marginTop:6}}>{fmt(paySheet.amount)}</div>
-            </div>
-            <Field label="Payment Reference / UTR" value={payRef} onChange={setPayRef} placeholder="UTR or cheque number" />
-            <Btn onClick={markPaid} full color={C.green}>✓ Confirm Payment</Btn>
-          </div>
         </Sheet>
       )}
 
