@@ -1328,10 +1328,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
           : <><Field label="DI / Order No" value={f.diNo||""} onChange={ff("diNo")} placeholder="9003158248" half />
               <Field label="GR No" value={f.grNo||""} onChange={ff("grNo")} placeholder="1070/MYE/2670" half /></>}
       </div>
-      <Field label="Diesel Indent No (from pump slip)"
-        value={f.dieselIndentNo||""} onChange={ff("dieselIndentNo")}
-        placeholder="e.g. 25748 — given by pump before loading"
-        note="Enter the indent number from the pump slip before loading" />
+
       <div style={{display:"flex",gap:10}}>
         {locked
           ? <><LockedField label="From" value={f.from} half /><LockedField label="To" value={f.to} half /></>
@@ -1408,6 +1405,10 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
         <Field label="Diesel Estimate ₹" value={f.dieselEstimate||"0"} onChange={ff("dieselEstimate")} type="number" half
           note="Driver's estimate (update later via Indent)" />
       </div>
+      <Field label="⛽ Diesel Indent No"
+        value={f.dieselIndentNo||""} onChange={ff("dieselIndentNo")}
+        placeholder="e.g. 25748 — from pump slip before loading"
+        note="Pump gives this before loading — used to match diesel slip" />
       {showStatus && (
         <Field label="Status" value={f.status||"Pending Bill"} onChange={ff("status")}
           opts={["Pending Bill","Billed","Paid"].map(x=>({v:x,l:x}))} />
