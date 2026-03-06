@@ -243,7 +243,10 @@ export const DB = {
   savePump:          p  => upsertOne('mye_pumps', pumpToDB, p),
 
   // Pump Payments
-  getPumpPayments:   () => fetchAll('mye_pump_payments', pumpPaymentFromDB),
+  getPumpPayments:   async () => {
+    try { return await fetchAll('mye_pump_payments', pumpPaymentFromDB); }
+    catch(e) { console.warn('mye_pump_payments not ready:', e.message); return []; }
+  },
   savePumpPayment:   p  => upsertOne('mye_pump_payments', pumpPaymentToDB, p),
   deletePumpPayment: id => deleteOne('mye_pump_payments', id),
 

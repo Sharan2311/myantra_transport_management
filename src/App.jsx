@@ -303,7 +303,7 @@ export default function App() {
   const [pumps,       setPumps,       rPu,reloadPumps]       = useDB(DB.getPumps,       []);
   const [indents,        setIndents,        rI,  reloadIndents]       = useDB(DB.getIndents,       []);
   const [pumpPayments,   setPumpPayments,   rPP, reloadPumpPayments] = useDB(DB.getPumpPayments, []);
-  const dbSetPumpPayments = async (val) => { setPumpPayments(val); await DB.savePumpPayment(val); };
+  const dbSetPumpPayments = async (val) => { setPumpPayments(val); }; // pump payments saved individually via recordPumpPayment
   const [settings,    setSettings,    rSt,reloadSettings]    = useDB(DB.getSettings,    {tafalPerTrip:300});
   const [driverPays,  setDriverPays,  rDP,reloadDriverPays]  = useDB(DB.getDriverPays,  []);
   const [expenses,    setExpenses,    rEx,reloadExpenses]    = useDB(DB.getExpenses,    []);
