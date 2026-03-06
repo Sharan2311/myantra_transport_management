@@ -578,6 +578,113 @@ function Dashboard({trips, vehicles, employees, indents, activity, settings, set
 
 
 
+
+// ─── ASK LR SHEET ─────────────────────────────────────────────────────────────
+// Shown after scanning — asks user to enter LR number, then checks for duplicates
+function AskLRSheet({ extracted, trips, onConfirm, onCancel }) {
+  const [lrNo, setLrNo] = useState("");
+
+  // Check for duplicate DI across ALL trips
+  const scannedDiNo = (extracted.diNo || "").trim();
+  const duplicateDI = scannedDiNo ? trips.find(t => {
+    // Check diLines array
+    if (t.diLines && t.diLines.length > 0) {
+      return t.diLines.some(d => d.diNo === scannedDiNo);
+    }
+    // Check flat diNo field (may be "DI1 + DI2")
+    return (t.diNo || "").split("+").map(s=>s.trim()).includes(scannedDiNo);
+  }) : null;
+
+  const existing = lrNo.trim() ? trips.find(t => t.lrNo === lrNo.trim()) : null;
+
+  // Check if this DI already exists in the found LR trip
+  const diAlreadyInLR = existing && scannedDiNo && (() => {
+    if (existing.diLines && existing.diLines.length > 0)
+      return existing.diLines.some(d => d.diNo === scannedDiNo);
+    return (existing.diNo || "").split("+").map(s=>s.trim()).includes(scannedDiNo);
+  })();
+
+  const blocked = !!duplicateDI || !!diAlreadyInLR;
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+      {/* Scanned summary */}
+      <div style={{background:C.green+"11",border:`1px solid ${C.green}33`,borderRadius:12,padding:"14px"}}>
+        <div style={{color:C.green,fontWeight:800,fontSize:13,marginBottom:8}}>✓ Document Scanned</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,fontSize:12}}>
+          {[
+            ["Truck",    extracted.truckNo],
+            ["DI No",    extracted.diNo],
+            ["GR No",    extracted.grNo],
+            ["Qty",      `${extracted.qty} MT`],
+            ["Bags",     String(extracted.bags)],
+            ["Fr.Rate",  `₹${extracted.frRate}/MT`],
+          ].map(([l,v]) => v && v !== "0" ? (
+            <div key={l}><span style={{color:C.muted}}>{l}: </span><b style={{color:C.text}}>{v}</b></div>
+          ) : null)}
+        </div>
+      </div>
+
+      {/* Duplicate DI warning — block immediately */}
+      {duplicateDI && (
+        <div style={{background:C.red+"11",border:`1px solid ${C.red}44`,borderRadius:10,padding:"12px 14px"}}>
+          <div style={{color:C.red,fontWeight:800,fontSize:13,marginBottom:4}}>🚫 Duplicate DI — Already Exists!</div>
+          <div style={{color:C.muted,fontSize:12}}>
+            DI <b style={{color:C.text}}>{scannedDiNo}</b> is already recorded in:
+          </div>
+          <div style={{color:C.muted,fontSize:12,marginTop:4}}>
+            LR: <b style={{color:C.text}}>{duplicateDI.lrNo||"—"}</b> · {duplicateDI.truckNo} · {duplicateDI.qty}MT
+          </div>
+          <div style={{color:C.red,fontSize:11,marginTop:6,fontWeight:700}}>
+            You cannot add the same DI number twice. Please check the document.
+          </div>
+        </div>
+      )}
+
+      {/* LR entry — only show if not a duplicate */}
+      {!duplicateDI && (
+        <div style={{background:C.bg,borderRadius:12,padding:"14px",border:`2px solid ${C.blue}44`}}>
+          <div style={{color:C.blue,fontWeight:800,fontSize:13,marginBottom:10}}>
+            📋 Enter LR Number for this DI
+          </div>
+          <Field value={lrNo} onChange={setLrNo} placeholder="e.g. MYE/2526/001" />
+
+          {diAlreadyInLR && (
+            <div style={{marginTop:8,background:C.red+"11",border:`1px solid ${C.red}33`,
+              borderRadius:8,padding:"10px 12px",fontSize:12}}>
+              <div style={{color:C.red,fontWeight:800}}>🚫 This DI is already in LR {lrNo}</div>
+              <div style={{color:C.muted,marginTop:2}}>Cannot add the same DI to the same trip twice.</div>
+            </div>
+          )}
+
+          {existing && !diAlreadyInLR && (
+            <div style={{marginTop:10,background:C.orange+"11",border:`1px solid ${C.orange}33`,
+              borderRadius:8,padding:"10px 12px",fontSize:12}}>
+              <div style={{color:C.orange,fontWeight:800,marginBottom:4}}>⚠ LR already has a trip!</div>
+              <div style={{color:C.muted}}>{existing.truckNo} · {existing.qty}MT · DI: {existing.diNo||"—"}</div>
+              <div style={{color:C.muted,marginTop:2}}>Tap Continue → you can merge this DI into that trip</div>
+            </div>
+          )}
+
+          {lrNo.trim() && !existing && (
+            <div style={{marginTop:8,color:C.green,fontSize:12,fontWeight:700}}>✓ New LR — will create a new trip</div>
+          )}
+        </div>
+      )}
+
+      {!duplicateDI && (
+        <Btn onClick={()=>onConfirm(lrNo)} full color={C.blue}
+          disabled={!lrNo.trim() || !!diAlreadyInLR}>
+          {existing && !diAlreadyInLR ? "Continue → Merge options" : "Continue → Fill trip details"}
+        </Btn>
+      )}
+      <Btn onClick={onCancel} full outline color={C.muted}>
+        {duplicateDI ? "Close" : "Cancel"}
+      </Btn>
+    </div>
+  );
+}
+
 // ─── MERGE DI SHEET ───────────────────────────────────────────────────────────
 // Shown when scanning a second DI with same LR — confirms merge with driver rate
 function MergeDISheet({ conflict, onMerge, onSeparate, onCancel }) {
@@ -868,6 +975,7 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
   const [filter,      setFilter]      = useState("All");
   const [search,      setSearch]      = useState("");
   const [diConflict,  setDiConflict]  = useState(null); // existing trip with same LR
+  const [wasScanned,  setWasScanned]  = useState(false); // true if form was filled by AI scan
 
   const blankForm = () => ({
     type:tripType, lrNo:"", diNo:"", truckNo:"", grNo:"",
@@ -894,13 +1002,22 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
   };
 
   // Called when AI extracts fields from DI/GR copy
-  const onDIExtracted = (extracted, existingTrip) => {
+  // LR is always manual — so we show LR-ask screen first, then check for duplicates
+  const onDIExtracted = (extracted, _ignored) => {
+    // Always ask for LR number — it's never on the GR copy
+    setDiConflict({ extracted, existingTrip: null, askLR: true, lrInput: "" });
+  };
+
+  // Called when user confirms LR number after scanning
+  const onLRConfirmed = (lrNo) => {
+    const { extracted } = diConflict;
+    const existingTrip = lrNo.trim() ? trips.find(t => t.lrNo === lrNo.trim()) : null;
     if (existingTrip) {
-      // Same LR found — ask user if they want to add DI to existing trip
-      setDiConflict({ extracted, existingTrip });
+      setDiConflict({ extracted: { ...extracted, lrNo }, existingTrip, askLR: false });
     } else {
-      // New LR — pre-fill form with extracted fields
-      setF(p => ({ ...p, ...extracted }));
+      setF(p => ({ ...p, ...extracted, lrNo }));
+      setWasScanned(true);
+      setDiConflict(null);
     }
   };
 
@@ -948,7 +1065,7 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
     });
     setTrips(p => [t, ...(p||[])]);
     log("ADD TRIP", `LR:${t.lrNo} ${t.truckNo}→${t.to} ${t.qty}MT`);
-    setF(blankForm()); setAddSheet(false);
+    setF(blankForm()); setAddSheet(false); setWasScanned(false);
   };
 
   const saveEdit = () => {
@@ -1038,21 +1155,31 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
 
       {/* ── ADD SHEET ── */}
       {addSheet && (
-        <Sheet title={isIn?"New Raw Material Trip":"New Cement Trip"} onClose={()=>{setAddSheet(false);setF(blankForm());setDiConflict(null);}}>
+        <Sheet title={isIn?"New Raw Material Trip":"New Cement Trip"} onClose={()=>{setAddSheet(false);setF(blankForm());setDiConflict(null);setWasScanned(false);}}>
 
           {/* DI Conflict — same LR already exists */}
           {diConflict ? (
-            <MergeDISheet
-              conflict={diConflict}
-              onMerge={addDIToExisting}
-              onSeparate={()=>{setF(p=>({...p,...diConflict.extracted}));setDiConflict(null);}}
-              onCancel={()=>setDiConflict(null)}
-            />
+            diConflict.askLR ? (
+              <AskLRSheet
+                extracted={diConflict.extracted}
+                trips={trips}
+                onConfirm={onLRConfirmed}
+                onCancel={()=>setDiConflict(null)}
+              />
+            ) : (
+              <MergeDISheet
+                conflict={diConflict}
+                onMerge={addDIToExisting}
+                onSeparate={()=>{setF(p=>({...p,...diConflict.extracted}));setDiConflict(null);}}
+                onCancel={()=>setDiConflict(null)}
+              />
+            )
           ) : (
             <>
               <DIUploader onExtracted={onDIExtracted} trips={trips} settings={settings} isIn={isIn} />
               <TripForm f={f} ff={ff} isIn={isIn} ac={ac} vehicles={vehicles} settings={settings}
-                onTruckChange={onTruckChange} onSubmit={saveNew} submitLabel="Save Trip" user={user} />
+                onTruckChange={onTruckChange} onSubmit={saveNew} submitLabel="Save Trip"
+                user={user} wasScanned={wasScanned} />
             </>
           )}
         </Sheet>
@@ -1079,46 +1206,89 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
 }
 
 // Shared form for add + edit
-function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit, submitLabel, user, showStatus=false}) {
+function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit, submitLabel, user, showStatus=false, wasScanned=false}) {
   const gross    = (+f.qty||0)*(+f.givenRate||0);
   const tafalAmt = +f.tafal||0;
   const net      = gross - (+f.advance||0) - tafalAmt - (+f.dieselEstimate||0);
   const veh      = vehicles.find(x => x.truckNo===(f.truckNo||"").toUpperCase().trim());
+  const isOwner  = user?.role === "owner";
+  // Fields locked after scan for non-owners
+  const locked   = wasScanned && !isOwner;
+
+  // Locked display component
+  const LockedField = ({label, value, half=false}) => (
+    <div style={{display:"flex",flexDirection:"column",gap:5,flex:half?"1 1 45%":"1 1 100%",minWidth:0}}>
+      {label && <label style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>{label}</label>}
+      <div style={{background:C.dim,border:`1.5px solid ${C.border}`,borderRadius:10,
+        color:C.muted,padding:"13px 12px",fontSize:15,display:"flex",
+        justifyContent:"space-between",alignItems:"center"}}>
+        <span style={{color:C.text}}>{value||"—"}</span>
+        <span style={{fontSize:11,color:C.muted}}>🔒</span>
+      </div>
+    </div>
+  );
 
   return (
     <div style={{display:"flex",flexDirection:"column",gap:13}}>
+
+      {/* Scan lock notice for non-owners */}
+      {locked && (
+        <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,borderRadius:10,
+          padding:"9px 14px",color:C.orange,fontSize:12,fontWeight:700}}>
+          🔒 Scanned fields are locked — only Owner can edit them
+        </div>
+      )}
+
       {/* LR Number - highlighted */}
       <div style={{background:C.bg,borderRadius:10,padding:"12px 14px",border:`1.5px solid ${C.blue}44`}}>
         <div style={{color:C.blue,fontWeight:700,fontSize:12,marginBottom:6}}>📄 LR NUMBER (Lorry Receipt)</div>
-        <Field value={f.lrNo||""} onChange={ff("lrNo")} placeholder="e.g. LR/MYE/001 — identifies this trip" />
+        {locked
+          ? <LockedField value={f.lrNo} />
+          : <Field value={f.lrNo||""} onChange={ff("lrNo")} placeholder="e.g. LR/MYE/001 — identifies this trip" />}
       </div>
 
       <div style={{display:"flex",gap:10}}>
-        <Field label="Truck No" value={f.truckNo||""} onChange={onTruckChange} placeholder="KA34C4617" half />
-        <Field label="Date" value={f.date||today()} onChange={ff("date")} type="date" half />
+        {locked
+          ? <LockedField label="Truck No" value={f.truckNo} half />
+          : <Field label="Truck No" value={f.truckNo||""} onChange={onTruckChange} placeholder="KA34C4617" half />}
+        {locked
+          ? <LockedField label="Date" value={f.date} half />
+          : <Field label="Date" value={f.date||today()} onChange={ff("date")} type="date" half />}
       </div>
       {veh && <div style={{fontSize:12,color:C.muted,background:C.bg,borderRadius:8,padding:"8px 10px"}}>
         Owner: <b style={{color:C.text}}>{veh.ownerName}</b>
         {veh.tafalExempt && <span style={{color:C.red,marginLeft:8}}>⚠ TAFAL Exempt</span>}
       </div>}
       <div style={{display:"flex",gap:10}}>
-        <Field label="DI / Order No" value={f.diNo||""} onChange={ff("diNo")} placeholder="9003158248" half />
-        <Field label="GR No" value={f.grNo||""} onChange={ff("grNo")} placeholder="1070/MYE/2670" half />
+        {locked
+          ? <><LockedField label="DI / Order No" value={f.diNo} half /><LockedField label="GR No" value={f.grNo} half /></>
+          : <><Field label="DI / Order No" value={f.diNo||""} onChange={ff("diNo")} placeholder="9003158248" half />
+              <Field label="GR No" value={f.grNo||""} onChange={ff("grNo")} placeholder="1070/MYE/2670" half /></>}
       </div>
       <div style={{display:"flex",gap:10}}>
-        <Field label="From" value={f.from||""} onChange={ff("from")} half />
-        <Field label="To"   value={f.to||""}   onChange={ff("to")}   half />
+        {locked
+          ? <><LockedField label="From" value={f.from} half /><LockedField label="To" value={f.to} half /></>
+          : <><Field label="From" value={f.from||""} onChange={ff("from")} half />
+              <Field label="To"   value={f.to||""}   onChange={ff("to")}   half /></>}
       </div>
-      <Field label="Consignee" value={f.consignee||""} onChange={ff("consignee")} />
-      <Field label="Grade" value={f.grade||""} onChange={ff("grade")}
-        opts={isIn ? ["Limestone","Coal","Gypsum","Fly Ash","Slag","Other"].map(x=>({v:x,l:x}))
-                   : ["Cement Packed","Cement Bulk"].map(x=>({v:x,l:x}))} />
+      {locked
+        ? <LockedField label="Consignee" value={f.consignee} />
+        : <Field label="Consignee" value={f.consignee||""} onChange={ff("consignee")} />}
+      {locked
+        ? <LockedField label="Grade" value={f.grade} />
+        : <Field label="Grade" value={f.grade||""} onChange={ff("grade")}
+            opts={isIn ? ["Limestone","Coal","Gypsum","Fly Ash","Slag","Other"].map(x=>({v:x,l:x}))
+                       : ["Cement Packed","Cement Bulk"].map(x=>({v:x,l:x}))} />}
       <div style={{display:"flex",gap:10}}>
-        <Field label="Qty (MT)" value={f.qty||""} onChange={ff("qty")} type="number" half />
-        <Field label="Bags"     value={f.bags||""} onChange={ff("bags")} type="number" half />
+        {locked
+          ? <><LockedField label="Qty (MT)" value={f.qty} half /><LockedField label="Bags" value={f.bags} half /></>
+          : <><Field label="Qty (MT)" value={f.qty||""} onChange={ff("qty")} type="number" half />
+              <Field label="Bags"     value={f.bags||""} onChange={ff("bags")} type="number" half /></>}
       </div>
       <div style={{display:"flex",gap:10}}>
-        <Field label="Shree Rate ₹/MT"  value={f.frRate||""}    onChange={ff("frRate")}    type="number" half />
+        {locked
+          ? <LockedField label="Shree Rate ₹/MT" value={f.frRate} half />
+          : <Field label="Shree Rate ₹/MT"  value={f.frRate||""}    onChange={ff("frRate")}    type="number" half />}
         <Field label="Driver Rate ₹/MT" value={f.givenRate||""} onChange={ff("givenRate")} type="number" half />
       </div>
       <div style={{display:"flex",gap:10}}>
