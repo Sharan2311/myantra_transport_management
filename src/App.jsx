@@ -2931,7 +2931,6 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, user, log}) {
           </div>
         );
       })}
-    </div>
 
       {/* ── TRUCK HISTORY SHEET ── */}
       {hSheet && (()=>{
@@ -2992,6 +2991,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, user, log}) {
           </Sheet>
         );
       })()}
+    </div>
   );
 }
 
