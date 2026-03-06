@@ -63,15 +63,21 @@ function useDB(fetcher, initial = []) {
 }
 
 // ─── CALC NET ────────────────────────────────────────────────────────────────
+// Supports single-rate trips AND multi-DI trips (diLines array)
 function calcNet(t, vehicle, confirmedDiesel) {
-  const gross      = (t.qty||0) * (t.givenRate||0);
+  // Multi-DI: gross = sum of each DI's qty × its own givenRate
+  const gross = t.diLines && t.diLines.length > 0
+    ? t.diLines.reduce((s, d) => s + (d.qty||0) * (d.givenRate||0), 0)
+    : (t.qty||0) * (t.givenRate||0);
+  // Bill to Shree = sum of qty × frRate (same frRate for all DIs under one LR)
+  const billed = (t.qty||0) * (t.frRate||0);
   const tafal      = t.tafal || 0;
   const loanDeduct = vehicle ? (vehicle.deductPerTrip||0) : 0;
   const diesel     = confirmedDiesel != null ? confirmedDiesel : (t.dieselEstimate||0);
   const advance    = t.advance || 0;
   const shortage   = (t.shortage||0) * (t.givenRate||0);
   const net        = gross - advance - tafal - loanDeduct - diesel - shortage;
-  return {gross, tafal, loanDeduct, diesel, advance, shortage, net};
+  return {gross, billed, tafal, loanDeduct, diesel, advance, shortage, net};
 }
 
 const mkTrip = (o) => ({
@@ -80,6 +86,7 @@ const mkTrip = (o) => ({
   frRate:0, givenRate:0, date:today(), advance:0, shortage:0, tafal:0,
   status:"Pending Bill", invoiceNo:"", paymentStatus:"Unpaid",
   driverSettled:false, dieselEstimate:0,
+  diLines:[], // [{diNo, grNo, qty, bags, givenRate}] — for multi-DI trips
   createdBy:"system", createdAt:nowTs(), ...o
 });
 
@@ -570,6 +577,102 @@ function Dashboard({trips, vehicles, employees, indents, activity, settings, set
 }
 
 
+
+// ─── MERGE DI SHEET ───────────────────────────────────────────────────────────
+// Shown when scanning a second DI with same LR — confirms merge with driver rate
+function MergeDISheet({ conflict, onMerge, onSeparate, onCancel }) {
+  const { extracted, existingTrip } = conflict;
+  const [driverRate, setDriverRate] = useState("");
+
+  const existingLines = existingTrip.diLines && existingTrip.diLines.length > 0
+    ? existingTrip.diLines
+    : [{ diNo: existingTrip.diNo, qty: existingTrip.qty, bags: existingTrip.bags, givenRate: existingTrip.givenRate }];
+
+  const newQty   = +extracted.qty  || 0;
+  const newRate  = +driverRate     || 0;
+  const totalQty = existingLines.reduce((s,d)=>s+(d.qty||0),0) + newQty;
+  const totalBags= existingLines.reduce((s,d)=>s+(d.bags||0),0) + (+extracted.bags||0);
+
+  // Gross = existing DI gross + new DI gross
+  const existingGross = existingLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0);
+  const newGross      = newQty * newRate;
+  const totalGross    = existingGross + newGross;
+
+  // Bill to Shree = total qty × frRate
+  const frRate    = existingTrip.frRate || 0;
+  const totalBill = totalQty * frRate;
+
+  const tafal    = existingTrip.tafal   || 0;
+  const advance  = existingTrip.advance || 0;
+  const diesel   = existingTrip.dieselEstimate || 0;
+  const net      = totalGross - advance - tafal - diesel;
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+      {/* Header */}
+      <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:12,padding:"14px"}}>
+        <div style={{color:C.orange,fontWeight:800,fontSize:15,marginBottom:6}}>📋 Same LR — Add Another DI?</div>
+        <div style={{color:C.muted,fontSize:12}}>LR: <b style={{color:C.text}}>{existingTrip.lrNo}</b> · Truck: <b style={{color:C.text}}>{existingTrip.truckNo}</b></div>
+      </div>
+
+      {/* Existing DIs */}
+      <div style={{background:C.bg,borderRadius:10,padding:"12px 14px"}}>
+        <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Existing DIs</div>
+        {existingLines.map((d,i) => (
+          <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:`1px solid ${C.border}22`,fontSize:13}}>
+            <span style={{color:C.muted}}>DI {d.diNo||"—"}</span>
+            <span>{d.qty} MT × {fmt(d.givenRate)} = <b style={{color:C.orange}}>{fmt((d.qty||0)*(d.givenRate||0))}</b></span>
+          </div>
+        ))}
+      </div>
+
+      {/* New DI being added */}
+      <div style={{background:C.green+"11",border:`1px solid ${C.green}33`,borderRadius:10,padding:"12px 14px"}}>
+        <div style={{color:C.green,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>New DI to Add</div>
+        <div style={{fontSize:13,color:C.text,marginBottom:10}}>
+          DI <b>{extracted.diNo}</b> · {newQty} MT · {extracted.bags} Bags
+        </div>
+        <Field label="Driver Rate ₹/MT for this DI"
+          value={driverRate} onChange={setDriverRate} type="number"
+          placeholder="Enter rate for this DI" />
+      </div>
+
+      {/* Merged totals preview */}
+      {driverRate && (
+        <div style={{background:C.bg,borderRadius:10,padding:"12px 14px"}}>
+          <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>After Merge — Combined Totals</div>
+          {[
+            {l:"Total MT",          v:`${totalQty} MT`,   c:C.text},
+            {l:"Total Bags",        v:totalBags,           c:C.text},
+            {l:"Bill to Shree",     v:fmt(totalBill),      c:C.blue},
+            {l:"Gross to Driver",   v:fmt(totalGross),     c:C.orange},
+            {l:"(−) Advance",       v:fmt(advance),        c:C.red},
+            {l:"(−) TAFAL",         v:fmt(tafal),          c:C.purple},
+            {l:"(−) Diesel Est.",   v:fmt(diesel),         c:C.orange},
+            {l:"Est. Net to Driver",v:fmt(net),            c:net>=0?C.green:C.red},
+          ].map(x=>(
+            <div key={x.l} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:`1px solid ${C.border}22`,fontSize:13}}>
+              <span style={{color:C.muted}}>{x.l}</span>
+              <span style={{color:x.c,fontWeight:700}}>{x.v}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <Btn onClick={()=>onMerge(driverRate)} full color={C.orange}
+        disabled={!driverRate}>
+        ➕ Merge into existing trip
+      </Btn>
+      <Btn onClick={onSeparate} full outline color={C.blue}>
+        Create as separate new trip
+      </Btn>
+      <Btn onClick={onCancel} full outline color={C.muted}>
+        Cancel
+      </Btn>
+    </div>
+  );
+}
+
 // ─── DI / GR COPY UPLOADER ───────────────────────────────────────────────────
 // Sends photo or PDF to Claude AI → extracts all trip fields automatically
 function DIUploader({ onExtracted, trips, settings, isIn }) {
@@ -801,21 +904,37 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
     }
   };
 
-  // Add new DI to existing trip (same LR, multiple DIs)
-  const addDIToExisting = () => {
+  // Merge second DI into existing trip — driver rate entered per DI
+  const addDIToExisting = (newDriverRate) => {
     const { extracted, existingTrip } = diConflict;
-    const newDiNo = [existingTrip.diNo, extracted.diNo].filter(Boolean).join(" + ");
-    const newGrNo = [existingTrip.grNo, extracted.grNo].filter(Boolean).join(" + ");
+    const newQty  = +extracted.qty  || 0;
+    const newBags = +extracted.bags || 0;
+    const newRate = +newDriverRate  || 0;
+
+    // Build diLines — migrate existing trip if needed
+    const existingLines = existingTrip.diLines && existingTrip.diLines.length > 0
+      ? existingTrip.diLines
+      : [{ diNo: existingTrip.diNo, grNo: existingTrip.grNo,
+           qty: existingTrip.qty, bags: existingTrip.bags, givenRate: existingTrip.givenRate }];
+
+    const newLine = { diNo: extracted.diNo, grNo: extracted.grNo,
+                      qty: newQty, bags: newBags, givenRate: newRate };
+    const allLines = [...existingLines, newLine];
+
+    const totalQty  = allLines.reduce((s,d) => s+(d.qty||0), 0);
+    const totalBags = allLines.reduce((s,d) => s+(d.bags||0), 0);
+    const allDiNos  = allLines.map(d=>d.diNo).filter(Boolean).join(" + ");
+    const allGrNos  = [...new Set(allLines.map(d=>d.grNo).filter(Boolean))].join(" + ");
+
     const updatedTrip = {
       ...existingTrip,
-      diNo: newDiNo,
-      grNo: newGrNo,
-      qty:  (existingTrip.qty||0) + (+extracted.qty||0),
-      bags: (existingTrip.bags||0) + (+extracted.bags||0),
+      diNo: allDiNos, grNo: allGrNos,
+      qty: totalQty, bags: totalBags,
+      diLines: allLines,
       editedBy: user.username, editedAt: nowTs(),
     };
     setTrips(p => p.map(t => t.id === existingTrip.id ? updatedTrip : t));
-    log("ADD DI TO TRIP", `LR:${existingTrip.lrNo} + DI:${extracted.diNo} total ${updatedTrip.qty}MT`);
+    log("ADD DI TO TRIP", `LR:${existingTrip.lrNo} + DI:${extracted.diNo} total ${totalQty}MT`);
     setDiConflict(null); setAddSheet(false);
   };
 
@@ -889,7 +1008,7 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
             <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",borderTop:`1px solid ${C.border}`,background:C.card2}}>
               {[
                 {l:"MT",     v:t.qty,                          c:C.text},
-                {l:"Billed", v:fmt(t.qty*t.frRate),            c:C.blue},
+                {l:"Billed", v:fmt(calc.billed||t.qty*t.frRate),c:C.blue},
                 {l:"Owed",   v:fmt(calc.gross),                c:C.orange},
                 {l:"Net Pay",v:fmt(calc.net),                  c:calc.net>=0?C.green:C.red},
               ].map(x => (
@@ -909,6 +1028,7 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
                 {t.advance>0   && <Badge label={`Adv ${fmt(t.advance)}`} color={C.orange} />}
                 {confirmedDiesel>0 && <Badge label={`⛽ ${fmt(confirmedDiesel)}`} color={C.orange} />}
                 {t.driverSettled   && <Badge label="✓ Settled" color={C.green} />}
+                {t.diLines && t.diLines.length > 1 && <Badge label={`${t.diLines.length} DIs`} color={C.teal} />}
               </div>
             </div>
           </div>
@@ -922,30 +1042,12 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
 
           {/* DI Conflict — same LR already exists */}
           {diConflict ? (
-            <div style={{display:"flex",flexDirection:"column",gap:14}}>
-              <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:12,padding:"14px"}}>
-                <div style={{color:C.orange,fontWeight:800,fontSize:14,marginBottom:8}}>⚠ Same LR Already Exists</div>
-                <div style={{color:C.text,fontSize:13,marginBottom:4}}>
-                  LR <b>{diConflict.existingTrip.lrNo}</b> already has a trip:
-                </div>
-                <div style={{color:C.muted,fontSize:12}}>
-                  {diConflict.existingTrip.truckNo} → {diConflict.existingTrip.to} · {diConflict.existingTrip.qty}MT · DI: {diConflict.existingTrip.diNo}
-                </div>
-              </div>
-              <div style={{color:C.text,fontSize:13}}>
-                New DI <b>{diConflict.extracted.diNo}</b> has <b>{diConflict.extracted.qty} MT</b>.
-                What would you like to do?
-              </div>
-              <Btn onClick={addDIToExisting} full color={C.orange}>
-                ➕ Add this DI to existing trip (total {(+diConflict.existingTrip.qty||0)+(+diConflict.extracted.qty||0)} MT)
-              </Btn>
-              <Btn onClick={()=>{setF(p=>({...p,...diConflict.extracted}));setDiConflict(null);}} full outline color={C.blue}>
-                Create as separate new trip
-              </Btn>
-              <Btn onClick={()=>setDiConflict(null)} full outline color={C.muted}>
-                Cancel
-              </Btn>
-            </div>
+            <MergeDISheet
+              conflict={diConflict}
+              onMerge={addDIToExisting}
+              onSeparate={()=>{setF(p=>({...p,...diConflict.extracted}));setDiConflict(null);}}
+              onCancel={()=>setDiConflict(null)}
+            />
           ) : (
             <>
               <DIUploader onExtracted={onDIExtracted} trips={trips} settings={settings} isIn={isIn} />

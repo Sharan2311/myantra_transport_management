@@ -1,63 +1,47 @@
 // netlify/functions/scan-di.js
-// Uses Google Gemini API — free up to 1500 requests/day
-
 exports.handler = async (event) => {
   if (event.httpMethod !== "POST") {
     return { statusCode: 405, body: "Method Not Allowed" };
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    return {
-      statusCode: 500,
-      body: JSON.stringify({ error: "GEMINI_API_KEY not set in Netlify environment variables" }),
-    };
+    return { statusCode: 500, body: JSON.stringify({ error: "ANTHROPIC_API_KEY not set in Netlify env vars" }) };
   }
 
   try {
     const { base64, mediaType, prompt } = JSON.parse(event.body);
+    const isImage = mediaType && mediaType.startsWith("image/");
 
-    // Gemini accepts both images and PDFs as inline_data
-    const requestBody = {
-      contents: [{
-        parts: [
-          {
-            inline_data: {
-              mime_type: mediaType,
-              data: base64,
-            }
-          },
-          {
-            text: prompt
-          }
-        ]
-      }],
-      generationConfig: {
-        temperature: 0,
-        maxOutputTokens: 1000,
-      }
-    };
+    const contentBlock = isImage
+      ? { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } }
+      : { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } };
 
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestBody),
-      }
-    );
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "pdfs-2024-09-25",
+      },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 1000,
+        messages: [{ role: "user", content: [contentBlock, { type: "text", text: prompt }] }],
+      }),
+    });
 
     const data = await response.json();
 
     if (!response.ok) {
       return {
         statusCode: response.status,
-        body: JSON.stringify({ error: `Gemini ${response.status}: ${data.error?.message || JSON.stringify(data)}` }),
+        body: JSON.stringify({ error: `Anthropic ${response.status}: ${data.error?.message || JSON.stringify(data.error)}` }),
       };
     }
 
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-
+    const text = (data.content || []).find(b => b.type === "text")?.text || "";
     return {
       statusCode: 200,
       headers: { "Content-Type": "application/json" },

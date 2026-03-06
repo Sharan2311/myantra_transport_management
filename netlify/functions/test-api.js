@@ -1,24 +1,14 @@
 exports.handler = async (event) => {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) return { statusCode: 200, body: JSON.stringify({ result: "ERROR: No GEMINI_API_KEY in env vars" }) };
-
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return { statusCode: 200, body: JSON.stringify({ result: "ERROR: No ANTHROPIC_API_KEY in env vars" }) };
   try {
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: "Reply with just: OK" }] }]
-        }),
-      }
-    );
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({ model: "claude-haiku-4-5-20251001", max_tokens: 50, messages: [{ role: "user", content: "Reply with just: OK" }] }),
+    });
     const data = await response.json();
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || null;
-    return {
-      statusCode: 200,
-      body: JSON.stringify({ status: response.status, result: text, error: data.error || null }),
-    };
+    return { statusCode: 200, body: JSON.stringify({ status: response.status, result: data.content?.[0]?.text || null, error: data.error || null }) };
   } catch(e) {
     return { statusCode: 200, body: JSON.stringify({ result: "EXCEPTION: " + e.message }) };
   }
