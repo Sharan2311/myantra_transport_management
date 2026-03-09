@@ -1100,6 +1100,14 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
   };
 
   const deleteTrip = async (t) => {
+    // Cascade: remove any indents/alerts linked to this trip
+    const linkedIndents = indents.filter(i => i.tripId === t.id);
+    if (linkedIndents.length > 0) {
+      setIndents(prev => prev.filter(i => i.tripId !== t.id));
+      for (const ind of linkedIndents) {
+        try { await DB.deleteIndent(ind.id); } catch(e) { console.warn("indent cascade delete:", e); }
+      }
+    }
     // Optimistic update immediately
     setTrips(p => p.filter(x => x.id !== t.id));
     setConfirmDel(null);
@@ -1893,11 +1901,24 @@ function DieselAlertBanner({ alerts, trips, indents, user, onLink, onDismiss, on
   return (
     <div style={{display:"flex",flexDirection:"column",gap:8}}>
       <div style={{background:C.red+"11",border:`2px solid ${C.red}55`,borderRadius:12,padding:"12px 14px"}}>
-        <div style={{color:C.red,fontWeight:800,fontSize:14,marginBottom:2}}>
-          🚨 {alerts.length} Diesel Alert{alerts.length>1?"s":""} Require Action
-        </div>
-        <div style={{color:C.muted,fontSize:12}}>
-          Tap each alert to link to a trip or dismiss with reason
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+          <div>
+            <div style={{color:C.red,fontWeight:800,fontSize:14,marginBottom:2}}>
+              🚨 {alerts.length} Diesel Alert{alerts.length>1?"s":""} Require Action
+            </div>
+            <div style={{color:C.muted,fontSize:12}}>
+              Tap each alert to link to a trip or dismiss with reason
+            </div>
+          </div>
+          <Btn onClick={()=>{
+            const lines = alerts.map(a => {
+              const type = a.truckMismatch ? "Truck Mismatch" : a.amountMismatch ? "Amount Mismatch" : "No Trip";
+              const amtInfo = a.amountMismatch ? ` (Pump ₹${a.pumpTotal} ≠ Est ₹${a.estDiesel})` : "";
+              return `• ${a.truckNo} | Indent: ${a.indentNo||"—"} | ₹${a.amount}${amtInfo} | ${type}`;
+            }).join("\n");
+            const msg = `🚨 DIESEL ALERTS — ${new Date().toLocaleDateString("en-IN")}\n\n${lines}\n\nPlease resolve with employees.`;
+            window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, "_blank");
+          }} sm outline color={C.red}>📱 All</Btn>
         </div>
       </div>
 
@@ -2130,45 +2151,68 @@ function PumpSlipScanner({ pumps, trips, user, onResults }) {
         const truck  = (e.truckNo||"").toUpperCase().trim();
         const indent = String(e.indentNo||"").trim();
 
-        // Priority 1: match by dieselIndentNo on trip (exact indent number)
-        let trip = indent ? trips.find(t =>
-          String(t.dieselIndentNo||"").trim() === indent && t.status !== "Paid"
-        ) : null;
+        const hsd       = +(e.hsd||e.amount)||0;
+        const advance   = +(e.advance)||0;
+        const pumpTotal = hsd + advance;
 
-        // Priority 2: fallback to truck number ONLY if trip has diesel pre-registered
-        // (i.e. trip has a dieselIndentNo OR a non-zero dieselEstimate)
-        // This prevents matching trips that have no diesel info at all
-        if (!trip) {
-          trip = trips.find(t =>
-            t.truckNo === truck &&
-            t.status !== "Paid" &&
-            (String(t.dieselIndentNo||"").trim() !== "" || (t.dieselEstimate||0) > 0)
-          ) || null;
+        // ── STRICT MATCHING HIERARCHY ─────────────────────────────────
+        // Rule 1: Pump slip MUST have indent number → else UNMATCHED
+        // Rule 2: LR MUST have dieselIndentNo filled → else UNMATCHED
+        // Rule 3: Both indent numbers must match exactly → else UNMATCHED
+        // Rule 4: Truck on slip must match truck on LR → TRUCK MISMATCH
+        // Rule 5: HSD + Advance must equal LR dieselEstimate → AMOUNT MISMATCH
+        // No fallback to truck-only matching under any condition.
+
+        let trip          = null;
+        let truckMismatch = false;
+        let amountMismatch = false;
+        let noIndentOnLR  = false; // matched by truck but LR has no indent
+        let matchedBy     = null;
+
+        if (!indent) {
+          // Rule 1: no indent on pump slip → always UNMATCHED
+          trip = null;
+        } else {
+          // Rule 2+3: find trip where dieselIndentNo matches exactly
+          const indentTrip = trips.find(t =>
+            String(t.dieselIndentNo||"").trim() === indent && t.status !== "Paid"
+          );
+
+          if (indentTrip) {
+            trip      = indentTrip;
+            matchedBy = "indent";
+            // Rule 4: truck check
+            truckMismatch = trip.truckNo !== truck;
+            // Rule 5: amount check (only if truck matched)
+            if (!truckMismatch) {
+              const est = +(trip.dieselEstimate||0);
+              amountMismatch = Math.round(pumpTotal * 100) !== Math.round(est * 100);
+            }
+          } else {
+            // Indent on slip but no LR has that indent number → UNMATCHED
+            // (includes case where LR has no indent set — both sides mandatory)
+            trip = null;
+          }
         }
 
-        // Detect truck mismatch (indent matched but truck is different)
-        const truckMismatch = trip && truck && trip.truckNo !== truck;
-
-        const hsd      = +(e.hsd||e.amount)||0;
-        const advance  = +(e.advance)||0;
-        const pumpTotal = hsd + advance;
         const estDiesel = trip ? +(trip.dieselEstimate||0) : 0;
-        const amountMismatch = trip && !truckMismatch && pumpTotal !== estDiesel;
 
         return {
           truckNo: truck,
           indentNo: indent,
           date: e.date||today(),
           amount: hsd,
-          advance: advance,
+          advance,
           pumpTotal,
           estDiesel,
           amountMismatch,
+          indentMismatch: false,
           trip: trip||null,
           truckMismatch,
-          matchedBy: trip ? (indent && String(trip.dieselIndentNo||"").trim()===indent ? "indent" : "truck") : null,
+          matchedBy,
           pumpId: pumps[0]?.id||"",
-          include: !!trip && !truckMismatch,
+          include: !!trip && !truckMismatch && !amountMismatch,
+          noIndentOnLR,
         };
       }).filter(r => {
         // Dedup: skip if same indent no or same truck already seen
@@ -2245,7 +2289,7 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
   const unmatchedIndents = indents.filter(i => i.unmatched);
   // Red alerts = unmatched + truck mismatch, not yet dismissed
   // Dedup alerts — keep latest by indentNo+truckNo key
-  const _rawAlerts = indents.filter(i => (i.unmatched || i.truckMismatch || i.amountMismatch) && !i.alertDismissed);
+  const _rawAlerts = indents.filter(i => (i.unmatched || i.truckMismatch || i.amountMismatch || i.indentMismatch) && !i.alertDismissed);
   const _seenAlerts = new Map();
   _rawAlerts.forEach(i => {
     const key = (i.indentNo||"") + "_" + (i.truckNo||"");
@@ -2338,12 +2382,16 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
   };
 
   // Per-pump balance: total confirmed - total paid
-  const pumpBalances = pumps.map(p => {
-    const pIndents = confirmedIndents.filter(i => i.pumpId === p.id);
-    const totalOwed = pIndents.reduce((s,i) => s+(i.amount||0), 0);
+  const pumpBalances = pumps.map((p, idx) => {
+    // Count confirmed indents for this pump
+    // Fallback: indents with no pumpId go to first pump
+    const pIndents = confirmedIndents.filter(i =>
+      i.pumpId === p.id || (idx === 0 && !i.pumpId)
+    );
+    const totalOwed = pIndents.reduce((s,i) => s+(+(i.amount)||0), 0);
     const totalPaid = (pumpPayments||[]).filter(pp => pp.pumpId === p.id)
-                        .reduce((s,pp) => s+(pp.amount||0), 0);
-    const pending   = totalOwed - totalPaid;
+                        .reduce((s,pp) => s+(+(pp.amount)||0), 0);
+    const pending   = Math.max(0, totalOwed - totalPaid);
     return { ...p, pIndents, totalOwed, totalPaid, pending };
   });
 
@@ -2378,7 +2426,7 @@ This image may have been scanned before.`);
     }));
 
     // Save unmatched + truck mismatch indents as red alerts
-    const problematic = freshResults.filter(r => !r.trip || r.truckMismatch || r.amountMismatch);
+    const problematic = freshResults.filter(r => !r.trip || r.truckMismatch || r.amountMismatch || r.indentMismatch);
     const unmatchedIndents = problematic.map(r => ({
       id: uid(), pumpId: r.pumpId||pumps[0]?.id||"",
       truckNo: r.truckNo, tripId: r.trip?.id||null,
@@ -2388,6 +2436,7 @@ This image may have been scanned before.`);
       unmatched: !r.trip,
       truckMismatch: !!r.truckMismatch,
       amountMismatch: !!r.amountMismatch,
+      indentMismatch: !!r.indentMismatch,
       pumpTotal: r.pumpTotal||0,
       estDiesel: r.estDiesel||0,
       alertDismissed: false,
@@ -2797,10 +2846,16 @@ This image may have been scanned before.`);
                         </div>}
                       {r.truckMismatch &&
                         <div style={{color:C.red,fontSize:12}}>
-                          🚨 Indent {r.indentNo} matched LR {r.trip.lrNo} but truck is {r.trip.truckNo} not {r.truckNo}
+                          🚨 Truck mismatch: indent {r.indentNo} matched LR {r.trip?.lrNo} but truck is {r.trip?.truckNo}, not {r.truckNo}
                         </div>}
-                      {!r.trip &&
-                        <div style={{color:C.red,fontSize:12}}>🚨 No trip found — unmatched indent</div>}
+                      {r.indentMismatch &&
+                        <div style={{color:C.red,fontSize:12}}>
+                          🚨 Indent mismatch: LR {r.trip?.lrNo} has indent #{r.trip?.dieselIndentNo}, not #{r.indentNo}
+                        </div>}
+                      {!r.trip && r.indentNo &&
+                        <div style={{color:C.red,fontSize:12}}>🚨 No LR found with indent #{r.indentNo} — unmatched</div>}
+                      {!r.trip && !r.indentNo &&
+                        <div style={{color:C.red,fontSize:12}}>🚨 No indent number on slip — cannot match</div>}
                     </div>
                     <div style={{textAlign:"right",flexShrink:0,marginLeft:10}}>
                       <div style={{color:C.orange,fontWeight:800,fontSize:15}}>⛽ ₹{r.amount||"?"}</div>
@@ -2826,12 +2881,49 @@ This image may have been scanned before.`);
                   </div>
                 </div>
               ))}
+              {/* Bulk WhatsApp for unmatched */}
+              {scanResults.filter(r => !r.trip || r.truckMismatch || r.amountMismatch).length > 0 && (
+                <Btn onClick={() => {
+                  const unmatched = scanResults.filter(r => !r.trip || r.truckMismatch || r.amountMismatch);
+                  const lines = unmatched.map(r => {
+                    const reason = !r.trip ? "No trip found" : r.truckMismatch ? `Truck mismatch (${r.truckNo})` : `Amount mismatch (Pump ₹${r.pumpTotal} ≠ Est ₹${r.estDiesel})`;
+                    return `• ${r.truckNo} | Indent: ${r.indentNo||"—"} | ₹${r.amount}${r.advance>0?`+Adv ₹${r.advance}`:""} | ${reason}`;
+                  }).join("
+");
+                  const msg = `🚨 UNMATCHED DIESEL INDENTS — ${today()}
+
+${lines}
+
+Please check and confirm with employees.`;
+                  window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, "_blank");
+                }} full outline color={C.orange} sm>
+                  📱 Send {scanResults.filter(r => !r.trip || r.truckMismatch || r.amountMismatch).length} Unmatched to WhatsApp
+                </Btn>
+              )}
               <div style={{color:C.muted,fontSize:12,textAlign:"center"}}>
                 {scanResults.filter(r=>r.include&&r.trip).length} of {scanResults.length} will be saved ·
                 Total HSD: ₹{scanResults.filter(r=>r.include&&r.trip).reduce((s,r)=>s+r.amount,0).toLocaleString('en-IN')}
                 {scanResults.filter(r=>r.include&&r.trip&&r.advance>0).length > 0 &&
                   ` · Advances: ₹${scanResults.filter(r=>r.include&&r.trip).reduce((s,r)=>s+r.advance,0).toLocaleString('en-IN')}`}
               </div>
+              {/* Bulk WhatsApp for unmatched */}
+              {scanResults.some(r => !r.trip || r.truckMismatch || r.indentMismatch) && (
+                <Btn onClick={()=>{
+                  const unmatched = scanResults.filter(r => !r.trip || r.truckMismatch || r.indentMismatch);
+                  const lines = unmatched.map(r => {
+                    const issue = !r.trip ? "No trip found" : r.truckMismatch ? "Truck mismatch" : "Indent mismatch";
+                    return `• ${r.truckNo} | Indent: ${r.indentNo||"—"} | HSD: ₹${r.amount}${r.advance>0?` + Adv ₹${r.advance}`:""} | ${issue}`;
+                  }).join("
+");
+                  const msg = `🚨 UNMATCHED DIESEL INDENTS — ${today()}
+${lines}
+
+Please check and update trips accordingly.`;
+                  window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, "_blank");
+                }} full outline color={C.orange} sm>
+                  📱 Send {scanResults.filter(r => !r.trip || r.truckMismatch || r.indentMismatch).length} Unmatched to WhatsApp
+                </Btn>
+              )}
               <Btn onClick={confirmScanned} full color={C.orange}
                 disabled={!scanResults.some(r=>r.include&&r.trip)}>
                 ✓ Confirm & Save All
