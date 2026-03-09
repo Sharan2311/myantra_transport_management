@@ -2130,13 +2130,21 @@ function PumpSlipScanner({ pumps, trips, user, onResults }) {
         const truck  = (e.truckNo||"").toUpperCase().trim();
         const indent = String(e.indentNo||"").trim();
 
-        // Priority 1: match by dieselIndentNo on trip
+        // Priority 1: match by dieselIndentNo on trip (exact indent number)
         let trip = indent ? trips.find(t =>
           String(t.dieselIndentNo||"").trim() === indent && t.status !== "Paid"
         ) : null;
 
-        // Priority 2: fallback to truck number
-        if (!trip) trip = trips.find(t => t.truckNo === truck && t.status !== "Paid");
+        // Priority 2: fallback to truck number ONLY if trip has diesel pre-registered
+        // (i.e. trip has a dieselIndentNo OR a non-zero dieselEstimate)
+        // This prevents matching trips that have no diesel info at all
+        if (!trip) {
+          trip = trips.find(t =>
+            t.truckNo === truck &&
+            t.status !== "Paid" &&
+            (String(t.dieselIndentNo||"").trim() !== "" || (t.dieselEstimate||0) > 0)
+          ) || null;
+        }
 
         // Detect truck mismatch (indent matched but truck is different)
         const truckMismatch = trip && truck && trip.truckNo !== truck;
