@@ -2211,7 +2211,7 @@ function PumpSlipScanner({ pumps, trips, user, onResults }) {
           truckMismatch,
           matchedBy,
           pumpId: pumps[0]?.id||"",
-          include: !!trip && !truckMismatch && !amountMismatch,
+          include: !!trip && !truckMismatch,
           noIndentOnLR,
         };
       }).filter(r => {
@@ -2413,26 +2413,16 @@ This image may have been scanned before.`);
       setScanResults(null); setScanSheet(false); return;
     }
 
-    const toSave = freshResults.filter(r => r.include && r.trip);
+    const toSave = freshResults; // save ALL entries regardless of match status
 
-    // Save confirmed diesel indents (matched)
+    // Save ALL scanned indents as confirmed — mismatch flags still trigger alerts
     const newIndents = toSave.map(r => ({
-      id: uid(), pumpId: r.pumpId||pumps[0]?.id||"",
-      truckNo: r.truckNo, tripId: r.trip.id,
-      indentNo: r.indentNo||"", date: r.date||today(),
-      litres: 0, ratePerLitre: 0, amount: +r.amount||0,
-      confirmed: true, paid: false, unmatched: false,
-      createdBy: user.username, createdAt: nowTs(),
-    }));
-
-    // Save unmatched + truck mismatch indents as red alerts
-    const problematic = freshResults.filter(r => !r.trip || r.truckMismatch || r.amountMismatch || r.indentMismatch);
-    const unmatchedIndents = problematic.map(r => ({
       id: uid(), pumpId: r.pumpId||pumps[0]?.id||"",
       truckNo: r.truckNo, tripId: r.trip?.id||null,
       indentNo: r.indentNo||"", date: r.date||today(),
       litres: 0, ratePerLitre: 0, amount: +r.amount||0,
-      confirmed: false, paid: false,
+      confirmed: true, paid: false,
+      // mismatch flags — drive alert display
       unmatched: !r.trip,
       truckMismatch: !!r.truckMismatch,
       amountMismatch: !!r.amountMismatch,
@@ -2443,12 +2433,15 @@ This image may have been scanned before.`);
       createdBy: user.username, createdAt: nowTs(),
     }));
 
-    const allNew = [...newIndents, ...unmatchedIndents];
+    // No separate problematic list — all saved above with flags
+    const problematic = freshResults.filter(r => !r.trip || r.truckMismatch || r.amountMismatch);
+
+    const allNew = newIndents;
     setIndents(p => [...allNew, ...(p||[])]);
     for (const ind of allNew) await DB.saveIndent(ind);
 
-    // Add pump advance to trip advance for entries that have advance > 0
-    const tripsToUpdate = toSave.filter(r => r.advance > 0);
+    // Add pump advance to trip advance for matched entries with advance > 0
+    const tripsToUpdate = toSave.filter(r => r.trip && r.advance > 0);
     if (tripsToUpdate.length > 0) {
       const updatedTrips = trips.map(t => {
         const match = tripsToUpdate.find(r => r.trip.id === t.id);
