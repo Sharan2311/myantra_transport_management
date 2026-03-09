@@ -2269,6 +2269,9 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
   const [payUtr,      setPayUtr]      = useState("");
   const [payNote,     setPayNote]     = useState("");
   const [expandPump,  setExpandPump]  = useState(null); // expanded pump id
+  const [filterFrom,  setFilterFrom]  = useState("");
+  const [filterTo,    setFilterTo]    = useState("");
+  const [showFilter,  setShowFilter]  = useState(false);
 
   const blankP = {name:"", contact:"", address:"", accountNo:"", ifsc:""};
   const [pf, setPf] = useState(blankP);
@@ -2396,73 +2399,66 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
   });
 
   const confirmScanned = async () => {
-    // Block if any indent number already exists in DB
-    const existingIndentNos = new Set(indents.map(i => String(i.indentNo||"").trim()).filter(Boolean));
-    const allResults = scanResults.filter(r => r.indentNo);
-    const alreadySaved = allResults.filter(r => existingIndentNos.has(String(r.indentNo).trim()));
-    if (alreadySaved.length > 0) {
-      alert(`These indent numbers were already saved previously and will be skipped:
-${alreadySaved.map(r=>r.indentNo).join(", ")}
+    // Deduplicate against already-saved indent numbers
+    const existingNos = new Set(indents.map(i=>String(i.indentNo||"").trim()).filter(Boolean));
+    const dupes = scanResults.filter(r=>r.indentNo && existingNos.has(String(r.indentNo).trim()));
+    if (dupes.length>0) alert("Already saved (will skip): " + dupes.map(r=>r.indentNo).join(", "));
+    const fresh = scanResults.filter(r=>!r.indentNo||!existingNos.has(String(r.indentNo).trim()));
+    if (fresh.length===0){ setScanResults(null); setScanSheet(false); return; }
 
-This image may have been scanned before.`);
-    }
-    // Filter out already-saved indent numbers
-    const freshResults = scanResults.filter(r => !r.indentNo || !existingIndentNos.has(String(r.indentNo).trim()));
-    if (freshResults.length === 0) {
-      alert("All indents in this slip have already been saved. Nothing to save.");
-      setScanResults(null); setScanSheet(false); return;
-    }
+    // Only GREEN entries (trip matched, no mismatch flags) get saved
+    const green  = fresh.filter(r=> r.trip && !r.truckMismatch && !r.amountMismatch && !r.indentMismatch);
+    const alerts = fresh.filter(r=>!r.trip ||  r.truckMismatch ||  r.amountMismatch ||  r.indentMismatch);
 
-    const toSave = freshResults; // save ALL entries regardless of match status
-
-    // Save ALL scanned indents as confirmed — mismatch flags still trigger alerts
-    const newIndents = toSave.map(r => ({
-      id: uid(), pumpId: r.pumpId||pumps[0]?.id||"",
-      truckNo: r.truckNo, tripId: r.trip?.id||null,
-      indentNo: r.indentNo||"", date: r.date||today(),
-      litres: 0, ratePerLitre: 0, amount: +r.amount||0,
-      confirmed: true, paid: false,
-      // mismatch flags — drive alert display
-      unmatched: !r.trip,
-      truckMismatch: !!r.truckMismatch,
-      amountMismatch: !!r.amountMismatch,
-      indentMismatch: !!r.indentMismatch,
-      pumpTotal: r.pumpTotal||0,
-      estDiesel: r.estDiesel||0,
-      alertDismissed: false,
-      createdBy: user.username, createdAt: nowTs(),
+    // Save confirmed indents (green only)
+    const newIndents = green.map(r=>({
+      id:uid(), pumpId:r.pumpId||pumps[0]?.id||"",
+      truckNo:r.truckNo, tripId:r.trip.id,
+      indentNo:r.indentNo||"", date:r.date||today(),
+      litres:0, ratePerLitre:0, amount:+r.amount||0,
+      confirmed:true, paid:false,
+      unmatched:false, truckMismatch:false, amountMismatch:false, indentMismatch:false,
+      pumpTotal:r.pumpTotal||0, estDiesel:r.estDiesel||0,
+      alertDismissed:false,
+      createdBy:user.username, createdAt:nowTs(),
     }));
 
-    // No separate problematic list — all saved above with flags
-    const problematic = freshResults.filter(r => !r.trip || r.truckMismatch || r.amountMismatch);
+    // Save unresolved alerts as unconfirmed (visible in alert banner, NOT in indents tab)
+    const alertIndents = alerts.map(r=>({
+      id:uid(), pumpId:r.pumpId||pumps[0]?.id||"",
+      truckNo:r.truckNo, tripId:r.trip?.id||null,
+      indentNo:r.indentNo||"", date:r.date||today(),
+      litres:0, ratePerLitre:0, amount:+r.amount||0,
+      confirmed:false, paid:false,
+      unmatched:!r.trip, truckMismatch:!!r.truckMismatch,
+      amountMismatch:!!r.amountMismatch, indentMismatch:!!r.indentMismatch,
+      pumpTotal:r.pumpTotal||0, estDiesel:r.estDiesel||0,
+      alertDismissed:false,
+      createdBy:user.username, createdAt:nowTs(),
+    }));
 
-    const allNew = newIndents;
-    setIndents(p => [...allNew, ...(p||[])]);
+    const allNew = [...newIndents, ...alertIndents];
+    setIndents(p=>[...allNew,...(p||[])]);
     for (const ind of allNew) await DB.saveIndent(ind);
 
-    // Add pump advance to trip advance for matched entries with advance > 0
-    const tripsToUpdate = toSave.filter(r => r.trip && r.advance > 0);
-    if (tripsToUpdate.length > 0) {
-      const updatedTrips = trips.map(t => {
-        const match = tripsToUpdate.find(r => r.trip.id === t.id);
+    // Add pump advance to trip advance for green matched entries
+    const tripsToUpdate = green.filter(r=>r.advance>0);
+    if (tripsToUpdate.length>0){
+      const updatedTrips = trips.map(t=>{
+        const match = tripsToUpdate.find(r=>r.trip.id===t.id);
         if (!match) return t;
-        const updated = {...t, advance: (t.advance||0) + match.advance, editedBy: user.username, editedAt: nowTs()};
+        const updated={...t, advance:(t.advance||0)+match.advance, editedBy:user.username, editedAt:nowTs()};
         DB.saveTrip(updated);
-        log("PUMP ADVANCE", `${match.truckNo} +₹${match.advance} added to trip advance`);
         return updated;
       });
       setTrips(updatedTrips);
     }
 
-    for (const r of toSave) {
-      log("DIESEL SCAN CONFIRM", `${r.truckNo} · HSD ₹${r.amount}${r.advance>0?` + Adv ₹${r.advance}`:""}`);
-    }
-    // Show save summary
-    const saved = toSave.length;
-    const flagged = problematic.length;
+    for (const r of green) log("DIESEL CONFIRM", r.truckNo+" IndentNo:"+r.indentNo+" Rs."+r.amount);
+
     setScanResults(null);
-    setScanSummary({ saved, flagged, date: today() });
-    if (flagged === 0) setScanSheet(false);
+    setScanSummary({ saved:green.length, flagged:alerts.length, date:today() });
+    if (alerts.length===0) setScanSheet(false);
   };
 
   const saveIndent = () => {
@@ -2511,10 +2507,67 @@ This image may have been scanned before.`);
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div style={{color:C.orange,fontWeight:800,fontSize:16}}>⛽ Diesel & Pump</div>
         <div style={{display:"flex",gap:8}}>
+          <Btn onClick={()=>setShowFilter(v=>!v)} sm outline color={showFilter?C.orange:C.muted}>📅 Filter</Btn>
           <Btn onClick={()=>setScanSheet(true)} sm outline color={C.blue}>📷 Scan Slip</Btn>
           <Btn onClick={()=>setPumpSheet(true)} sm outline color={C.muted}>+ Pump</Btn>
         </div>
       </div>
+
+      {/* Date filter bar */}
+      {showFilter && (
+        <div style={{background:C.card,borderRadius:12,padding:"12px 14px",display:"flex",flexDirection:"column",gap:10}}>
+          <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
+            <div style={{flex:1}}>
+              <div style={{color:C.muted,fontSize:11,marginBottom:4}}>FROM</div>
+              <input type="date" value={filterFrom} onChange={e=>setFilterFrom(e.target.value)}
+                style={{background:C.bg,border:"1px solid "+C.border,borderRadius:8,color:C.text,
+                  padding:"8px 10px",fontSize:13,width:"100%"}} />
+            </div>
+            <div style={{flex:1}}>
+              <div style={{color:C.muted,fontSize:11,marginBottom:4}}>TO</div>
+              <input type="date" value={filterTo} onChange={e=>setFilterTo(e.target.value)}
+                style={{background:C.bg,border:"1px solid "+C.border,borderRadius:8,color:C.text,
+                  padding:"8px 10px",fontSize:13,width:"100%"}} />
+            </div>
+            <Btn onClick={()=>{setFilterFrom("");setFilterTo("");}} sm outline color={C.muted}>Clear</Btn>
+          </div>
+          {(filterFrom||filterTo) && (()=>{
+            const from=filterFrom||"2000-01-01", to=filterTo||"2099-12-31";
+            const filtI=confirmedIndents.filter(i=>i.date>=from&&i.date<=to);
+            const filtP=(pumpPayments||[]).filter(p=>p.date>=from&&p.date<=to);
+            const totalI=filtI.reduce((s,i)=>s+(+i.amount||0),0);
+            const totalPmt=filtP.reduce((s,p)=>s+(+p.amount||0),0);
+            return (
+              <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                <div style={{display:"flex",gap:8,fontSize:12}}>
+                  <span style={{color:C.muted}}>Indents: <b style={{color:C.text}}>{filtI.length}</b></span>
+                  <span style={{color:C.muted}}>Total HSD: <b style={{color:C.orange}}>{fmt(totalI)}</b></span>
+                  <span style={{color:C.muted}}>Payments: <b style={{color:C.green}}>{fmt(totalPmt)}</b></span>
+                </div>
+                <Btn onClick={()=>{
+                  const pumpMap=Object.fromEntries(pumps.map(p=>[p.id,p.name]));
+                  const tripMap=Object.fromEntries(trips.map(t=>[t.id,t.lrNo||"—"]));
+                  const indRows=filtI.map(i=>"<tr><td>"+i.date+"</td><td>"+i.truckNo+"</td><td>"+i.indentNo+"</td><td>"+(pumpMap[i.pumpId]||"—")+"</td><td>"+(tripMap[i.tripId]||"—")+"</td><td style='text-align:right'>"+fmt(i.amount)+"</td></tr>").join("");
+                  const pmtRows=filtP.map(p=>"<tr><td>"+p.date+"</td><td colspan='3'>"+(pumpMap[p.pumpId]||"—")+" — "+p.utr+"</td><td>"+(p.note||"")+"</td><td style='text-align:right'>"+fmt(p.amount)+"</td></tr>").join("");
+                  const html="<html><head><style>body{font-family:Arial,sans-serif;font-size:13px;padding:20px}h2{color:#f97316}table{width:100%;border-collapse:collapse;margin-bottom:20px}th{background:#f97316;color:#fff;padding:7px 10px;text-align:left}td{padding:6px 10px;border-bottom:1px solid #eee}.summary{display:flex;gap:30px;margin-bottom:16px;font-size:14px}.sum-lbl{color:#888}.sum-val{font-weight:bold}</style></head><body>"
+                    +"<h2>M. Yantra Enterprises — Diesel Statement</h2>"
+                    +"<div style='color:#888;margin-bottom:12px'>Period: "+(filterFrom||"all")+" to "+(filterTo||"all")+"</div>"
+                    +"<div class='summary'><div><span class='sum-lbl'>Total HSD </span><span class='sum-val'>"+fmt(totalI)+"</span></div><div><span class='sum-lbl'>Payments Made </span><span class='sum-val'>"+fmt(totalPmt)+"</span></div><div><span class='sum-lbl'>Balance </span><span class='sum-val'>"+fmt(totalI-totalPmt)+"</span></div></div>"
+                    +"<h3>Indents ("+filtI.length+")</h3><table><thead><tr><th>Date</th><th>Truck</th><th>Indent No</th><th>Pump</th><th>LR</th><th>Amount</th></tr></thead><tbody>"+indRows+"</tbody></table>"
+                    +"<h3>Payments ("+filtP.length+")</h3><table><thead><tr><th>Date</th><th>Pump / UTR</th><th></th><th></th><th>Note</th><th>Amount</th></tr></thead><tbody>"+pmtRows+"</tbody></table>"
+                    +"</body></html>";
+                  const w=window.open("","_blank");
+                  w.document.write(html);
+                  w.document.close();
+                  setTimeout(()=>w.print(),400);
+                }} full color={C.orange} sm>
+                  🖨 Export as PDF ({filterFrom||"all"} → {filterTo||"all"})
+                </Btn>
+              </div>
+            );
+          })()}
+        </div>
+      )}
 
       {/* Red alerts */}
       {redAlerts.length > 0 && (
@@ -2817,103 +2870,123 @@ This image may have been scanned before.`);
             pumps={pumps} trips={trips} user={user}
             onResults={results => setScanResults(results)}
           />}
-          {!scanSummary && scanResults && (
+          {!scanSummary && scanResults && (()=>{
+            const greenList   = scanResults.filter(r=>r.trip&&!r.truckMismatch&&!r.amountMismatch&&!r.indentMismatch);
+            const mismatchList= scanResults.filter(r=>!r.trip||r.truckMismatch||r.amountMismatch||r.indentMismatch);
+            const selMismatch = scanResults.filter(r=>r._waSelected);
+            return (
             <div style={{marginTop:16,display:"flex",flexDirection:"column",gap:10}}>
-              <div style={{color:C.text,fontWeight:800,fontSize:14,marginBottom:4}}>
-                Review Extracted Entries
-              </div>
-              {scanResults.map((r,i) => (
-                <div key={i} style={{background:C.bg,borderRadius:10,padding:"12px 14px",
-                  border:`1.5px solid ${!r.trip||r.truckMismatch ? C.red+"44" : r.amountMismatch ? C.red+"44" : C.green+"44"}`}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
+              <div style={{color:C.text,fontWeight:800,fontSize:14}}>Review Extracted Entries</div>
+
+              {/* ── GREEN entries ── */}
+              {greenList.length>0 && (
+                <div style={{color:C.green,fontWeight:700,fontSize:12,marginTop:4}}>
+                  ✅ {greenList.length} MATCHED — will be saved
+                </div>
+              )}
+              {greenList.map((r,i)=>{
+                const idx=scanResults.indexOf(r);
+                return (
+                <div key={idx} style={{background:C.bg,borderRadius:10,padding:"12px 14px",
+                  border:"1.5px solid "+C.green+"66"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
                     <div style={{flex:1,minWidth:0}}>
-                      <div style={{fontWeight:700,fontSize:14}}>{r.truckNo||"?"}</div>
-                      {r.indentNo && <div style={{color:C.muted,fontSize:12}}>Indent: {r.indentNo} · {r.date}</div>}
-                      {r.trip && !r.truckMismatch && !r.amountMismatch &&
-                        <div style={{color:C.green,fontSize:12}}>
-                          ✓ {r.matchedBy==="indent"?"Indent":"Truck"}: LR {r.trip.lrNo||"—"} · Est ₹{r.estDiesel} = HSD+Adv ₹{r.pumpTotal} ✓
-                        </div>}
-                      {r.trip && !r.truckMismatch && r.amountMismatch &&
-                        <div style={{color:C.red,fontSize:12}}>
-                          🚨 LR {r.trip.lrNo||"—"}: HSD ₹{r.amount} + Adv ₹{r.advance} = ₹{r.pumpTotal} ≠ Est ₹{r.estDiesel} (diff ₹{Math.abs(r.pumpTotal-r.estDiesel)})
-                        </div>}
-                      {r.truckMismatch &&
-                        <div style={{color:C.red,fontSize:12}}>
-                          🚨 Truck mismatch: indent {r.indentNo} matched LR {r.trip?.lrNo} but truck is {r.trip?.truckNo}, not {r.truckNo}
-                        </div>}
-                      {r.indentMismatch &&
-                        <div style={{color:C.red,fontSize:12}}>
-                          🚨 Indent mismatch: LR {r.trip?.lrNo} has indent #{r.trip?.dieselIndentNo}, not #{r.indentNo}
-                        </div>}
-                      {!r.trip && r.indentNo &&
-                        <div style={{color:C.red,fontSize:12}}>🚨 No LR found with indent #{r.indentNo} — unmatched</div>}
-                      {!r.trip && !r.indentNo &&
-                        <div style={{color:C.red,fontSize:12}}>🚨 No indent number on slip — cannot match</div>}
+                      <div style={{fontWeight:700,fontSize:14}}>{r.truckNo}</div>
+                      <div style={{color:C.muted,fontSize:12}}>Indent: {r.indentNo} · {r.date}</div>
+                      <div style={{color:C.green,fontSize:12}}>
+                        ✓ LR {r.trip.lrNo||"—"} · Est Rs.{r.estDiesel} = HSD+Adv Rs.{r.pumpTotal} ✓
+                      </div>
                     </div>
                     <div style={{textAlign:"right",flexShrink:0,marginLeft:10}}>
-                      <div style={{color:C.orange,fontWeight:800,fontSize:15}}>⛽ ₹{r.amount||"?"}</div>
-                      {r.advance > 0 && <div style={{color:C.red,fontWeight:700,fontSize:13}}>+Adv ₹{r.advance}</div>}
-                      <label style={{display:"flex",alignItems:"center",gap:6,marginTop:4,cursor:"pointer",justifyContent:"flex-end"}}>
-                        <input type="checkbox" checked={r.include && !!r.trip}
-                          disabled={!r.trip}
-                          onChange={e => setScanResults(p => p.map((x,j)=>j===i?{...x,include:e.target.checked}:x))}
-                          style={{width:16,height:16}} />
-                        <span style={{color:C.muted,fontSize:12}}>{r.trip?"Include":"No trip"}</span>
-                      </label>
+                      <div style={{color:C.green,fontWeight:800,fontSize:15}}>Rs.{r.amount}</div>
+                      {r.advance>0&&<div style={{color:C.muted,fontSize:12}}>+Adv Rs.{r.advance}</div>}
                     </div>
                   </div>
-                  {/* Pump selector — always visible */}
                   <div style={{marginTop:8}}>
-                    <div style={{color:C.muted,fontSize:10,fontWeight:700,marginBottom:4,letterSpacing:1}}>⛽ LINK TO PUMP</div>
-                    <select value={r.pumpId||""} onChange={e=>setScanResults(p=>p.map((x,j)=>j===i?{...x,pumpId:e.target.value}:x))}
-                      style={{background:C.bg,border:`1.5px solid ${C.orange}55`,borderRadius:8,color:C.text,
-                        padding:"8px 10px",fontSize:13,width:"100%"}}>
+                    <div style={{color:C.muted,fontSize:10,fontWeight:700,marginBottom:4,letterSpacing:1}}>LINK TO PUMP</div>
+                    <select value={r.pumpId||""} onChange={e=>setScanResults(p=>p.map((x,j)=>j===idx?{...x,pumpId:e.target.value}:x))}
+                      style={{background:C.bg,border:"1.5px solid "+C.green+"55",borderRadius:8,color:C.text,padding:"8px 10px",fontSize:13,width:"100%"}}>
                       <option value="">— Select pump —</option>
                       {pumps.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
                     </select>
                   </div>
                 </div>
-              ))}
-              {/* Bulk WhatsApp for unmatched */}
-              {scanResults.filter(r => !r.trip || r.truckMismatch || r.amountMismatch).length > 0 && (
-                <Btn onClick={() => {
-                  const unmatched = scanResults.filter(r => !r.trip || r.truckMismatch || r.amountMismatch);
-                  const lines = unmatched.map(r => {
-                    const reason = !r.trip ? "No trip found" : r.truckMismatch ? "Truck mismatch" : "Amount mismatch (Pump Rs." + r.pumpTotal + " != Est Rs." + r.estDiesel + ")";
-                    return "- " + r.truckNo + " | Indent: " + (r.indentNo||"--") + " | Rs." + r.amount + (r.advance>0 ? " +Adv Rs."+r.advance : "") + " | " + reason;
-                  }).join("\n");
-                  const msg = "🚨 UNMATCHED DIESEL INDENTS — " + today() + "\n\n" + lines + "\n\nPlease check and confirm with employees.";
-                  window.open("https://wa.me/?text=" + encodeURIComponent(msg), "_blank");
-                }} full outline color={C.orange} sm>
-                  📱 Send {scanResults.filter(r => !r.trip || r.truckMismatch || r.amountMismatch).length} Unmatched to WhatsApp
-                </Btn>
+              );})}
+
+              {/* ── MISMATCH entries ── */}
+              {mismatchList.length>0 && (
+                <div style={{color:C.red,fontWeight:700,fontSize:12,marginTop:4}}>
+                  🚨 {mismatchList.length} MISMATCH — select to send WhatsApp
+                </div>
               )}
-              <div style={{color:C.muted,fontSize:12,textAlign:"center"}}>
-                {scanResults.filter(r=>r.include&&r.trip).length} of {scanResults.length} will be saved ·
-                Total HSD: ₹{scanResults.filter(r=>r.include&&r.trip).reduce((s,r)=>s+r.amount,0).toLocaleString('en-IN')}
-                {scanResults.filter(r=>r.include&&r.trip&&r.advance>0).length > 0 &&
-                  ` · Advances: ₹${scanResults.filter(r=>r.include&&r.trip).reduce((s,r)=>s+r.advance,0).toLocaleString('en-IN')}`}
+              {mismatchList.map((r,i)=>{
+                const idx=scanResults.indexOf(r);
+                const reason=!r.trip?(r.indentNo?"No LR for indent #"+r.indentNo:"No indent on slip"):r.truckMismatch?"Truck mismatch: LR has "+r.trip.truckNo:r.amountMismatch?"Amount: Rs."+r.pumpTotal+" != Est Rs."+r.estDiesel:"Indent mismatch";
+                return (
+                <div key={idx} style={{background:C.bg,borderRadius:10,padding:"12px 14px",
+                  border:"1.5px solid "+(r._waSelected?C.orange:C.red+"44")}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontWeight:700,fontSize:14}}>{r.truckNo}</div>
+                      {r.indentNo&&<div style={{color:C.muted,fontSize:12}}>Indent: {r.indentNo} · {r.date}</div>}
+                      <div style={{color:C.red,fontSize:12}}>🚨 {reason}</div>
+                    </div>
+                    <div style={{textAlign:"right",flexShrink:0,marginLeft:10}}>
+                      <div style={{color:C.orange,fontWeight:800,fontSize:15}}>Rs.{r.amount}</div>
+                      {r.advance>0&&<div style={{color:C.red,fontSize:12}}>+Adv Rs.{r.advance}</div>}
+                      <label style={{display:"flex",alignItems:"center",gap:6,marginTop:6,cursor:"pointer",justifyContent:"flex-end"}}>
+                        <input type="checkbox" checked={!!r._waSelected}
+                          onChange={e=>setScanResults(p=>p.map((x,j)=>j===idx?{...x,_waSelected:e.target.checked}:x))}
+                          style={{width:16,height:16,accentColor:C.orange}} />
+                        <span style={{color:C.orange,fontSize:12,fontWeight:700}}>WA</span>
+                      </label>
+                    </div>
+                  </div>
+                </div>
+              );})}
+
+              {/* ── Actions ── */}
+              <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:4}}>
+                {mismatchList.length>0 && (
+                  <div style={{display:"flex",gap:8}}>
+                    <button onClick={()=>setScanResults(p=>p.map(r=>({...r,_waSelected:!r.trip||r.truckMismatch||r.amountMismatch||r.indentMismatch})))}
+                      style={{flex:1,background:C.orange+"22",border:"1px solid "+C.orange+"55",borderRadius:8,
+                        color:C.orange,fontSize:12,fontWeight:700,padding:"8px",cursor:"pointer"}}>
+                      Select All Mismatches
+                    </button>
+                    <button onClick={()=>setScanResults(p=>p.map(r=>({...r,_waSelected:false})))}
+                      style={{flex:1,background:C.card,border:"1px solid "+C.border,borderRadius:8,
+                        color:C.muted,fontSize:12,fontWeight:700,padding:"8px",cursor:"pointer"}}>
+                      Deselect All
+                    </button>
+                  </div>
+                )}
+                {selMismatch.length>0 && (
+                  <Btn onClick={()=>{
+                    const lines=selMismatch.map(r=>{
+                      const issue=!r.trip?(r.indentNo?"No LR for indent #"+r.indentNo:"No indent on slip"):r.truckMismatch?"Truck mismatch":r.amountMismatch?"Amount mismatch":"Indent mismatch";
+                      return r.truckNo+" | Indent:"+(r.indentNo||"--")+" | Rs."+r.amount+(r.advance>0?" +Adv Rs."+r.advance:"")+" | "+issue;
+                    }).join("\n");
+                    const msg="DIESEL MISMATCH - "+today()+"\n\n"+lines+"\n\nPlease verify and update trips.";
+                    window.open("https://wa.me/?text="+encodeURIComponent(msg),"_blank");
+                  }} full color={C.orange} sm>
+                    📱 Send {selMismatch.length} Selected to WhatsApp
+                  </Btn>
+                )}
+                {greenList.length>0 && (
+                  <Btn onClick={confirmScanned} full color={C.green}>
+                    ✓ Save {greenList.length} Matched Indent{greenList.length!==1?"s":""}
+                  </Btn>
+                )}
+                {greenList.length===0 && (
+                  <div style={{textAlign:"center",color:C.muted,fontSize:12,padding:"8px 0"}}>
+                    No matched indents to save — resolve mismatches first
+                  </div>
+                )}
               </div>
-              {/* Bulk WhatsApp for unmatched */}
-              {scanResults.some(r => !r.trip || r.truckMismatch || r.indentMismatch) && (
-                <Btn onClick={()=>{
-                  const unmatched = scanResults.filter(r => !r.trip || r.truckMismatch || r.indentMismatch);
-                  const lines = unmatched.map(r => {
-                    const issue = !r.trip ? "No trip found" : r.truckMismatch ? "Truck mismatch" : "Indent mismatch";
-                    return "- " + r.truckNo + " | Indent: " + (r.indentNo||"--") + " | HSD: Rs." + r.amount + (r.advance>0?" + Adv Rs."+r.advance:"") + " | " + issue;
-                  }).join("\n");
-                  const msg = "UNMATCHED DIESEL INDENTS - " + today() + "\n\n" + lines + "\n\nPlease check and update trips accordingly.";
-                  window.open("https://wa.me/?text=" + encodeURIComponent(msg), "_blank");
-                }} full outline color={C.orange} sm>
-                  📱 Send {scanResults.filter(r => !r.trip || r.truckMismatch || r.indentMismatch).length} Unmatched to WhatsApp
-                </Btn>
-              )}
-              <Btn onClick={confirmScanned} full color={C.orange}
-                disabled={!scanResults.some(r=>r.include&&r.trip)}>
-                ✓ Confirm & Save All
-              </Btn>
             </div>
-          )}
+            );
+          })()}
         </Sheet>
       )}
 
