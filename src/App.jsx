@@ -2402,7 +2402,26 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
     // Deduplicate against already-saved indent numbers
     const existingNos = new Set(indents.map(i=>String(i.indentNo||"").trim()).filter(Boolean));
     const dupes = scanResults.filter(r=>r.indentNo && existingNos.has(String(r.indentNo).trim()));
-    if (dupes.length>0) alert("Already saved (will skip): " + dupes.map(r=>r.indentNo).join(", "));
+    if (dupes.length>0) {
+      // Upgrade any previously-saved unconfirmed indents to confirmed
+      const upgraded = [];
+      const updatedIndents = indents.map(i => {
+        const matchesDupe = dupes.some(r => String(r.indentNo).trim() === String(i.indentNo||"").trim());
+        if (matchesDupe && !i.confirmed) {
+          const upd = {...i, confirmed:true, unmatched:false, alertDismissed:false};
+          upgraded.push(upd);
+          return upd;
+        }
+        return i;
+      });
+      if (upgraded.length > 0) {
+        setIndents(updatedIndents);
+        for (const ind of upgraded) await DB.saveIndent(ind);
+        alert("Upgraded " + upgraded.length + " previously-saved indent(s) to confirmed: " + upgraded.map(i=>i.indentNo).join(", "));
+      } else {
+        alert("Already confirmed (skipping): " + dupes.map(r=>r.indentNo).join(", "));
+      }
+    }
     const fresh = scanResults.filter(r=>!r.indentNo||!existingNos.has(String(r.indentNo).trim()));
     if (fresh.length===0){ setScanResults(null); setScanSheet(false); return; }
 
