@@ -2886,16 +2886,11 @@ This image may have been scanned before.`);
                 <Btn onClick={() => {
                   const unmatched = scanResults.filter(r => !r.trip || r.truckMismatch || r.amountMismatch);
                   const lines = unmatched.map(r => {
-                    const reason = !r.trip ? "No trip found" : r.truckMismatch ? `Truck mismatch (${r.truckNo})` : `Amount mismatch (Pump ₹${r.pumpTotal} ≠ Est ₹${r.estDiesel})`;
-                    return `• ${r.truckNo} | Indent: ${r.indentNo||"—"} | ₹${r.amount}${r.advance>0?`+Adv ₹${r.advance}`:""} | ${reason}`;
-                  }).join("
-");
-                  const msg = `🚨 UNMATCHED DIESEL INDENTS — ${today()}
-
-${lines}
-
-Please check and confirm with employees.`;
-                  window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, "_blank");
+                    const reason = !r.trip ? "No trip found" : r.truckMismatch ? "Truck mismatch" : "Amount mismatch (Pump Rs." + r.pumpTotal + " != Est Rs." + r.estDiesel + ")";
+                    return "- " + r.truckNo + " | Indent: " + (r.indentNo||"--") + " | Rs." + r.amount + (r.advance>0 ? " +Adv Rs."+r.advance : "") + " | " + reason;
+                  }).join("\n");
+                  const msg = "🚨 UNMATCHED DIESEL INDENTS — " + today() + "\n\n" + lines + "\n\nPlease check and confirm with employees.";
+                  window.open("https://wa.me/?text=" + encodeURIComponent(msg), "_blank");
                 }} full outline color={C.orange} sm>
                   📱 Send {scanResults.filter(r => !r.trip || r.truckMismatch || r.amountMismatch).length} Unmatched to WhatsApp
                 </Btn>
