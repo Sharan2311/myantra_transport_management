@@ -514,11 +514,15 @@ export default function App() {
   );
 }
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
-function Dashboard({trips, vehicles, employees, indents, activity, settings, setTab, user}) {
+function Dashboard({trips, vehicles, employees, indents, pumps, pumpPayments, activity, settings, setTab, user}) {
   const pending     = trips.filter(t => t.status==="Pending Bill");
   const margin      = trips.reduce((s,t) => s + t.qty*(t.frRate-t.givenRate), 0);
   const vLoan       = vehicles.reduce((s,v) => s + Math.max(0, v.loan-v.loanRecovered), 0);
-  const unpaidDiesel= indents.filter(i=>!i.paid).reduce((s,i) => s+(i.amount||0), 0);
+  // Diesel pending = total confirmed indents - total pump payments made
+  const confirmedIndents = indents.filter(i => i.confirmed);
+  const totalDieselOwed = confirmedIndents.reduce((s,i) => s+(+(i.amount)||0), 0);
+  const totalDieselPaid = (pumpPayments||[]).reduce((s,p) => s+(+(p.amount)||0), 0);
+  const unpaidDiesel = Math.max(0, totalDieselOwed - totalDieselPaid);
   const tafalPool   = trips.reduce((s,t) => s+(t.tafal||0), 0);
 
   return (
@@ -528,7 +532,7 @@ function Dashboard({trips, vehicles, employees, indents, activity, settings, set
         <KPI icon="⚠"  label="Pending Bills"   value={pending.length}   color={C.accent} sub={fmt(pending.reduce((s,t)=>s+t.qty*t.frRate,0))} />
         <KPI icon="📈" label="My Margin"        value={fmt(margin)}      color={C.green} />
         <KPI icon="🚚" label="Total Trips"      value={trips.length}     color={C.blue}  sub={`${trips.filter(t=>t.type==="outbound").length} out · ${trips.filter(t=>t.type==="inbound").length} in`} />
-        <KPI icon="⛽" label="Diesel Pending"   value={fmt(unpaidDiesel)}color={C.orange}sub={`${indents.filter(i=>!i.paid).length} indents`} />
+        <KPI icon="⛽" label="Diesel Pending"   value={fmt(unpaidDiesel)}color={C.orange}sub={`${confirmedIndents.length} indents`} />
         <KPI icon="🔴" label="Vehicle Loans"    value={fmt(vLoan)}       color={C.red} />
         <KPI icon="🤝" label="TAFAL Pool"       value={fmt(tafalPool)}   color={C.purple}sub={`₹${settings?.tafalPerTrip||300}/trip`} />
       </div>
@@ -2883,16 +2887,32 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
 
         return (
           <div style={{display:"flex",flexDirection:"column",gap:10}}>
-            {/* Date filter notice */}
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            {/* Inline date filter */}
+            <div style={{background:C.card,borderRadius:10,padding:"10px 12px",display:"flex",flexDirection:"column",gap:8}}>
+              <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
+                <div style={{flex:1}}>
+                  <div style={{color:C.muted,fontSize:11,marginBottom:3}}>FROM</div>
+                  <input type="date" value={filterFrom} onChange={e=>setFilterFrom(e.target.value)}
+                    onClick={e=>e.target.showPicker?.()}
+                    style={{background:C.bg,border:"1.5px solid "+C.border,borderRadius:8,color:filterFrom?C.text:C.muted,
+                      padding:"8px 10px",fontSize:13,width:"100%",colorScheme:"dark",WebkitAppearance:"none",boxSizing:"border-box"}} />
+                </div>
+                <div style={{flex:1}}>
+                  <div style={{color:C.muted,fontSize:11,marginBottom:3}}>TO</div>
+                  <input type="date" value={filterTo} onChange={e=>setFilterTo(e.target.value)}
+                    onClick={e=>e.target.showPicker?.()}
+                    style={{background:C.bg,border:"1.5px solid "+C.border,borderRadius:8,color:filterTo?C.text:C.muted,
+                      padding:"8px 10px",fontSize:13,width:"100%",colorScheme:"dark",WebkitAppearance:"none",boxSizing:"border-box"}} />
+                </div>
+                {(filterFrom||filterTo) && (
+                  <Btn onClick={()=>{setFilterFrom("");setFilterTo("");}} sm outline color={C.muted}>Clear</Btn>
+                )}
+              </div>
               <div style={{color:C.muted,fontSize:12}}>
                 {filterFrom||filterTo
-                  ? `Showing ${filtered.length} alerts · ${filterFrom||"all"} → ${filterTo||"all"}`
-                  : `All ${allAlerts.length} alerts ever`}
+                  ? `${filtered.length} of ${allAlerts.length} alerts · ${filterFrom||"all"} → ${filterTo||"all"}`
+                  : `All ${allAlerts.length} alerts`}
               </div>
-              <Btn onClick={()=>setShowFilter(v=>!v)} sm outline color={showFilter?C.orange:C.muted}>
-                📅 {filterFrom||filterTo?"Change Filter":"Filter by Date"}
-              </Btn>
             </div>
 
             {/* Summary row */}
