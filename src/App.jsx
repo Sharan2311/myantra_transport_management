@@ -2907,14 +2907,10 @@ This image may have been scanned before.`);
                   const unmatched = scanResults.filter(r => !r.trip || r.truckMismatch || r.indentMismatch);
                   const lines = unmatched.map(r => {
                     const issue = !r.trip ? "No trip found" : r.truckMismatch ? "Truck mismatch" : "Indent mismatch";
-                    return `• ${r.truckNo} | Indent: ${r.indentNo||"—"} | HSD: ₹${r.amount}${r.advance>0?` + Adv ₹${r.advance}`:""} | ${issue}`;
-                  }).join("
-");
-                  const msg = `🚨 UNMATCHED DIESEL INDENTS — ${today()}
-${lines}
-
-Please check and update trips accordingly.`;
-                  window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, "_blank");
+                    return "- " + r.truckNo + " | Indent: " + (r.indentNo||"--") + " | HSD: Rs." + r.amount + (r.advance>0?" + Adv Rs."+r.advance:"") + " | " + issue;
+                  }).join("\n");
+                  const msg = "UNMATCHED DIESEL INDENTS - " + today() + "\n\n" + lines + "\n\nPlease check and update trips accordingly.";
+                  window.open("https://wa.me/?text=" + encodeURIComponent(msg), "_blank");
                 }} full outline color={C.orange} sm>
                   📱 Send {scanResults.filter(r => !r.trip || r.truckMismatch || r.indentMismatch).length} Unmatched to WhatsApp
                 </Btn>
