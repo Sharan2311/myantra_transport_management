@@ -2897,7 +2897,7 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
 
             {/* Summary row */}
             {filtered.length > 0 && (
-              <div style={{display:"flex",gap:8"}}>
+              <div style={{display:"flex",gap:8}}>
                 <div style={{flex:1,background:C.red+"11",border:"1px solid "+C.red+"33",borderRadius:10,padding:"10px 12px",textAlign:"center"}}>
                   <div style={{color:C.red,fontWeight:800,fontSize:18}}>{unresolved.length}</div>
                   <div style={{color:C.muted,fontSize:11}}>Open</div>
