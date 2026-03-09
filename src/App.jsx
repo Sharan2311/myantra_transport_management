@@ -107,7 +107,9 @@ const Field = ({label, value, onChange, type="text", placeholder="", opts=null, 
         </select>
       : <input type={type} value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
           inputMode={type==="number"?"decimal":undefined}
-          style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,color:C.text,padding:"13px 12px",fontSize:15,outline:"none",width:"100%",boxSizing:"border-box"}} />
+          onClick={type==="date"?e=>e.target.showPicker?.():undefined}
+          style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,color:C.text,padding:"13px 12px",fontSize:15,outline:"none",width:"100%",boxSizing:"border-box",
+            ...(type==="date"?{colorScheme:"dark",WebkitAppearance:"none"}:{})}} />
     }
     {note && <div style={{color:C.muted,fontSize:11}}>{note}</div>}
   </div>
@@ -2536,14 +2538,18 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
             <div style={{flex:1}}>
               <div style={{color:C.muted,fontSize:11,marginBottom:4}}>FROM</div>
               <input type="date" value={filterFrom} onChange={e=>setFilterFrom(e.target.value)}
-                style={{background:C.bg,border:"1px solid "+C.border,borderRadius:8,color:C.text,
-                  padding:"8px 10px",fontSize:13,width:"100%"}} />
+                onClick={e=>e.target.showPicker?.()}
+                style={{background:C.bg,border:"1.5px solid "+C.border,borderRadius:8,
+                  color:filterFrom?C.text:C.muted, padding:"9px 10px",fontSize:14,width:"100%",
+                  WebkitAppearance:"none", colorScheme:"dark", boxSizing:"border-box"}} />
             </div>
             <div style={{flex:1}}>
               <div style={{color:C.muted,fontSize:11,marginBottom:4}}>TO</div>
               <input type="date" value={filterTo} onChange={e=>setFilterTo(e.target.value)}
-                style={{background:C.bg,border:"1px solid "+C.border,borderRadius:8,color:C.text,
-                  padding:"8px 10px",fontSize:13,width:"100%"}} />
+                onClick={e=>e.target.showPicker?.()}
+                style={{background:C.bg,border:"1.5px solid "+C.border,borderRadius:8,
+                  color:filterTo?C.text:C.muted, padding:"9px 10px",fontSize:14,width:"100%",
+                  WebkitAppearance:"none", colorScheme:"dark", boxSizing:"border-box"}} />
             </div>
             <Btn onClick={()=>{setFilterFrom("");setFilterTo("");}} sm outline color={C.muted}>Clear</Btn>
           </div>
