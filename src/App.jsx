@@ -2210,7 +2210,7 @@ function PumpSlipScanner({ pumps, trips, user, onResults }) {
           trip: trip||null,
           truckMismatch,
           matchedBy,
-          pumpId: pumps[0]?.id||"",
+          pumpId: pumps.length===1 ? pumps[0].id : "",  // auto-select only if exactly 1 pump
           include: !!trip && !truckMismatch,
           noIndentOnLR,
         };
@@ -2385,12 +2385,9 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
   };
 
   // Per-pump balance: total confirmed - total paid
-  const pumpBalances = pumps.map((p, idx) => {
-    // Count confirmed indents for this pump
-    // Fallback: indents with no pumpId go to first pump
-    const pIndents = confirmedIndents.filter(i =>
-      i.pumpId === p.id || (idx === 0 && !i.pumpId)
-    );
+  const pumpBalances = pumps.map((p) => {
+    // Only count indents explicitly assigned to this pump — no auto-fallback
+    const pIndents = confirmedIndents.filter(i => i.pumpId === p.id);
     const totalOwed = pIndents.reduce((s,i) => s+(+(i.amount)||0), 0);
     const totalPaid = (pumpPayments||[]).filter(pp => pp.pumpId === p.id)
                         .reduce((s,pp) => s+(+(pp.amount)||0), 0);
@@ -2431,7 +2428,7 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
 
     // Save confirmed indents (green only)
     const newIndents = green.map(r=>({
-      id:uid(), pumpId:r.pumpId||pumps[0]?.id||"",
+      id:uid(), pumpId:r.pumpId||"",
       truckNo:r.truckNo, tripId:r.trip.id,
       indentNo:r.indentNo||"", date:r.date||today(),
       litres:0, ratePerLitre:0, amount:+r.amount||0,
@@ -2444,7 +2441,7 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
 
     // Save unresolved alerts as unconfirmed (visible in alert banner, NOT in indents tab)
     const alertIndents = alerts.map(r=>({
-      id:uid(), pumpId:r.pumpId||pumps[0]?.id||"",
+      id:uid(), pumpId:r.pumpId||"",
       truckNo:r.truckNo, tripId:r.trip?.id||null,
       indentNo:r.indentNo||"", date:r.date||today(),
       litres:0, ratePerLitre:0, amount:+r.amount||0,
@@ -2768,9 +2765,9 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
             const trip = trips.find(t=>t.id===i.tripId);
             return (
               <div key={i.id} style={{background:C.card,borderRadius:12,padding:"11px 14px",
-                borderLeft:`3px solid ${C.green}`}}>
+                borderLeft:`3px solid ${i.unmatched||i.truckMismatch||i.amountMismatch ? C.orange : C.green}`}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
-                  <div>
+                  <div style={{flex:1,minWidth:0}}>
                     <div style={{fontWeight:700,fontSize:13}}>{i.truckNo}
                       <span style={{color:C.muted,fontWeight:400,fontSize:11,marginLeft:6}}>#{i.indentNo}</span>
                     </div>
@@ -2778,8 +2775,22 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
                       {i.date} · {pump?.name||"—"}
                     </div>
                     {trip && <div style={{color:C.blue,fontSize:11}}>LR {trip.lrNo||"—"} → {trip.to}</div>}
+                    {!trip && i.unmatched && <div style={{color:C.orange,fontSize:11}}>⚠ No LR linked</div>}
                   </div>
-                  <div style={{color:C.text,fontWeight:800,fontSize:14}}>{fmt(i.amount)}</div>
+                  <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:6}}>
+                    <div style={{color:C.text,fontWeight:800,fontSize:14}}>{fmt(i.amount)}</div>
+                    {user.role==="owner" && (
+                      <button onClick={async()=>{
+                        if(!window.confirm("Delete indent #"+i.indentNo+" for "+i.truckNo+"? This cannot be undone.")) return;
+                        setIndents(p=>p.filter(x=>x.id!==i.id));
+                        try { await DB.deleteIndent(i.id); }
+                        catch(e){ alert("Delete failed: "+e.message); }
+                      }} style={{background:"none",border:"1px solid "+C.red+"55",borderRadius:6,
+                        color:C.red,fontSize:11,padding:"3px 8px",cursor:"pointer"}}>
+                        🗑 Delete
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
             );
@@ -2855,6 +2866,31 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
       {/* ── SCAN PUMP SLIP SHEET ── */}
       {scanSheet && (
         <Sheet title="📷 Scan Pump Slip" onClose={()=>{setScanSheet(false);setScanResults(null);setScanSummary(null);}}>
+
+          {/* Pump selector at top — set default for all scan entries */}
+          {pumps.length > 1 && !scanSummary && (
+            <div style={{background:C.card,borderRadius:10,padding:"10px 14px",marginBottom:12}}>
+              <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:6,letterSpacing:1}}>
+                ⛽ SELECT PUMP FOR THIS SLIP
+              </div>
+              <select
+                value={scanResults?.[0]?.pumpId||""}
+                onChange={e=>{
+                  const pid=e.target.value;
+                  setScanResults(p=>p?p.map(r=>({...r,pumpId:pid})):p);
+                }}
+                style={{background:C.bg,border:"1.5px solid "+C.orange,borderRadius:8,
+                  color:C.text,padding:"9px 12px",fontSize:14,width:"100%",fontWeight:700}}>
+                <option value="">— Select pump —</option>
+                {pumps.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+              {(!scanResults?.[0]?.pumpId) && (
+                <div style={{color:C.orange,fontSize:11,marginTop:4}}>
+                  ⚠ Select pump before scanning or saving
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Post-save summary */}
           {scanSummary && (
