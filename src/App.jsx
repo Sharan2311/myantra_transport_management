@@ -2613,6 +2613,7 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
         {id:"pumps",   label:"By Pump",   color:C.orange},
         {id:"indents", label:`Indents (${confirmedIndents.length})`, color:C.blue},
         {id:"lrmap",   label:"LR ↔ Indent", color:C.teal||C.purple},
+        {id:"history", label:"Alert History", color:C.muted},
       ]} active={view} onSelect={setView} />
 
       {/* ── BY PUMP VIEW ── */}
@@ -2858,6 +2859,111 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
           )}
         </div>
       )}
+
+      {/* ── ALERT HISTORY VIEW ── */}
+      {view==="history" && (()=>{
+        // All indents that were ever alerts — dismissed or resolved
+        const allAlerts = indents.filter(i =>
+          i.unmatched || i.truckMismatch || i.amountMismatch || i.indentMismatch
+        ).sort((a,b) => (b.createdAt||"").localeCompare(a.createdAt||""));
+
+        // Apply date filter
+        const from = filterFrom||"2000-01-01", to = filterTo||"2099-12-31";
+        const filtered = (filterFrom||filterTo)
+          ? allAlerts.filter(a => (a.date||a.createdAt?.slice(0,10)||"") >= from && (a.date||a.createdAt?.slice(0,10)||"") <= to)
+          : allAlerts;
+
+        const resolved   = filtered.filter(a => a.alertDismissed || a.confirmed);
+        const unresolved = filtered.filter(a => !a.alertDismissed && !a.confirmed);
+
+        const typeLabel = a => a.truckMismatch ? "Truck Mismatch" : a.indentMismatch ? "Indent Mismatch" : a.amountMismatch ? "Amount Mismatch" : "No Trip";
+        const typeColor = a => a.truckMismatch ? C.red : a.indentMismatch ? C.purple : a.amountMismatch ? C.orange : C.red;
+        const statusLabel = a => a.confirmed ? "✅ Resolved" : a.alertDismissed ? "🔕 Dismissed" : "🔴 Open";
+        const statusColor = a => a.confirmed ? C.green : a.alertDismissed ? C.muted : C.red;
+
+        return (
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+            {/* Date filter notice */}
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div style={{color:C.muted,fontSize:12}}>
+                {filterFrom||filterTo
+                  ? `Showing ${filtered.length} alerts · ${filterFrom||"all"} → ${filterTo||"all"}`
+                  : `All ${allAlerts.length} alerts ever`}
+              </div>
+              <Btn onClick={()=>setShowFilter(v=>!v)} sm outline color={showFilter?C.orange:C.muted}>
+                📅 {filterFrom||filterTo?"Change Filter":"Filter by Date"}
+              </Btn>
+            </div>
+
+            {/* Summary row */}
+            {filtered.length > 0 && (
+              <div style={{display:"flex",gap:8"}}>
+                <div style={{flex:1,background:C.red+"11",border:"1px solid "+C.red+"33",borderRadius:10,padding:"10px 12px",textAlign:"center"}}>
+                  <div style={{color:C.red,fontWeight:800,fontSize:18}}>{unresolved.length}</div>
+                  <div style={{color:C.muted,fontSize:11}}>Open</div>
+                </div>
+                <div style={{flex:1,background:C.green+"11",border:"1px solid "+C.green+"33",borderRadius:10,padding:"10px 12px",textAlign:"center"}}>
+                  <div style={{color:C.green,fontWeight:800,fontSize:18}}>{resolved.filter(a=>a.confirmed).length}</div>
+                  <div style={{color:C.muted,fontSize:11}}>Resolved</div>
+                </div>
+                <div style={{flex:1,background:C.card,border:"1px solid "+C.border,borderRadius:10,padding:"10px 12px",textAlign:"center"}}>
+                  <div style={{color:C.muted,fontWeight:800,fontSize:18}}>{resolved.filter(a=>a.alertDismissed&&!a.confirmed).length}</div>
+                  <div style={{color:C.muted,fontSize:11}}>Dismissed</div>
+                </div>
+              </div>
+            )}
+
+            {filtered.length === 0 && (
+              <div style={{textAlign:"center",color:C.muted,padding:40}}>
+                No alerts in this period
+              </div>
+            )}
+
+            {/* Alert cards */}
+            {filtered.map(a => {
+              const pump = pumps.find(p=>p.id===a.pumpId);
+              const trip = trips.find(t=>t.id===a.tripId);
+              return (
+                <div key={a.id} style={{background:C.card,borderRadius:12,padding:"12px 14px",
+                  borderLeft:"3px solid "+(a.confirmed?C.green:a.alertDismissed?C.muted:typeColor(a))}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                        <span style={{fontWeight:700,fontSize:13}}>{a.truckNo}</span>
+                        {a.indentNo && <span style={{color:C.muted,fontSize:11}}>#{a.indentNo}</span>}
+                        <span style={{background:typeColor(a)+"22",color:typeColor(a),fontSize:10,
+                          fontWeight:700,padding:"2px 6px",borderRadius:6}}>{typeLabel(a)}</span>
+                        <span style={{background:statusColor(a)+"22",color:statusColor(a),fontSize:10,
+                          fontWeight:700,padding:"2px 6px",borderRadius:6}}>{statusLabel(a)}</span>
+                      </div>
+                      <div style={{color:C.muted,fontSize:11,marginTop:3}}>
+                        {a.date} · {pump?.name||"—"}
+                        {trip && <span style={{color:C.blue}}> · LR {trip.lrNo}</span>}
+                      </div>
+                      {a.alertDismissed && a.dismissReason && (
+                        <div style={{color:C.muted,fontSize:11,marginTop:2,fontStyle:"italic"}}>
+                          Dismissed by {a.dismissedBy||"—"}: "{a.dismissReason}"
+                        </div>
+                      )}
+                      {a.confirmed && trip && (
+                        <div style={{color:C.green,fontSize:11,marginTop:2}}>
+                          Linked to LR {trip.lrNo} → {trip.to}
+                        </div>
+                      )}
+                    </div>
+                    <div style={{textAlign:"right",flexShrink:0,marginLeft:10}}>
+                      <div style={{color:C.text,fontWeight:800,fontSize:14}}>{fmt(a.amount)}</div>
+                      {a.pumpTotal > 0 && a.pumpTotal !== a.amount && (
+                        <div style={{color:C.muted,fontSize:10}}>Pump: {fmt(a.pumpTotal)}</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })()}
 
       {/* ── CONFIRM AMOUNT SHEET ── */}
       {confirmFlow && (
