@@ -2390,6 +2390,201 @@ function ScanPaymentBtn({ onResult }) {
   );
 }
 
+// ─── SPLIT PAYMENT SHEET ──────────────────────────────────────────────────────
+// Shown when a scanned payment contains multiple LR numbers
+function SplitPaymentSheet({ scanData, trips, tripWithBalance, onSave, onCancel }) {
+  const totalAmount = +(scanData.amount||0);
+  const utr = scanData.referenceNo||"";
+  const date = scanData.date||today();
+  const paidTo = scanData.paidTo||"";
+
+  // Try to match scanned LR numbers to actual trips
+  const scannedLRs = (scanData.lrNumbers||[]).map(lr => String(lr).trim());
+
+  // Build initial rows — one per detected LR, pre-matched to a trip
+  const initRows = scannedLRs.map(lr => {
+    const matched = tripWithBalance.find(t =>
+      String(t.lrNo||"").toLowerCase().includes(lr.toLowerCase()) ||
+      lr.toLowerCase().includes(String(t.lrNo||"").toLowerCase())
+    );
+    return { lr, tripId: matched?.id||"", amount: "" };
+  });
+
+  // If no LRs detected, start with 2 blank rows
+  const [rows, setRows] = useState(initRows.length > 0 ? initRows : [
+    {lr:"", tripId:"", amount:""},
+    {lr:"", tripId:"", amount:""},
+  ]);
+  const [sharedUtr]  = useState(utr);
+  const [sharedDate, setSharedDate] = useState(date);
+  const [sharedNote, setSharedNote] = useState(paidTo);
+
+  const updateRow = (i, k, v) => setRows(r => r.map((row,idx) => idx===i ? {...row,[k]:v} : row));
+
+  const totalAllocated = rows.reduce((s,r) => s+(+r.amount||0), 0);
+  const remaining = totalAmount - totalAllocated;
+
+  const canSave = rows.every(r => r.tripId && +r.amount > 0) && rows.length > 0;
+
+  const handleSave = () => {
+    const payments = rows.map(r => {
+      const t = tripWithBalance.find(x=>x.id===r.tripId);
+      return {
+        id: uid(), tripId: r.tripId,
+        truckNo: t?.truckNo||"", lrNo: t?.lrNo||"",
+        amount: +r.amount, utr: sharedUtr,
+        date: sharedDate, notes: sharedNote,
+      };
+    });
+    onSave(payments);
+  };
+
+  return (
+    <Sheet title="Split Payment Across LRs" onClose={onCancel}>
+      <div style={{display:"flex",flexDirection:"column",gap:14}}>
+
+        {/* Summary from scan */}
+        <div style={{background:C.purple+"11",border:`1.5px solid ${C.purple}44`,borderRadius:12,padding:"12px 14px"}}>
+          <div style={{color:C.purple||"#7c3aed",fontWeight:800,fontSize:13,marginBottom:6}}>📷 Scanned Payment</div>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+            <span style={{color:C.muted,fontSize:12}}>Total Amount</span>
+            <span style={{color:C.text,fontWeight:800,fontSize:16}}>{fmt(totalAmount)}</span>
+          </div>
+          {utr && <div style={{color:C.muted,fontSize:11}}>UTR: <b style={{color:C.text}}>{utr}</b></div>}
+          {paidTo && <div style={{color:C.muted,fontSize:11}}>Paid to: {paidTo}</div>}
+          {scannedLRs.length > 0 && <div style={{color:C.muted,fontSize:11,marginTop:2}}>Detected LRs: <b style={{color:C.orange}}>{scannedLRs.join(", ")}</b></div>}
+        </div>
+
+        {/* Shared date + note */}
+        <div style={{display:"flex",gap:8}}>
+          <div style={{flex:1}}>
+            <div style={{color:C.muted,fontSize:11,marginBottom:3}}>DATE</div>
+            <input type="date" value={sharedDate} onChange={e=>setSharedDate(e.target.value)}
+              onClick={e=>e.target.showPicker?.()}
+              style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,color:C.text,
+                padding:"8px 10px",fontSize:13,width:"100%",colorScheme:"dark",
+                WebkitAppearance:"none",boxSizing:"border-box"}} />
+          </div>
+          <div style={{flex:1}}>
+            <div style={{color:C.muted,fontSize:11,marginBottom:3}}>NOTES</div>
+            <input value={sharedNote} onChange={e=>setSharedNote(e.target.value)}
+              placeholder="Driver name, remarks…"
+              style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,color:C.text,
+                padding:"8px 10px",fontSize:13,width:"100%",boxSizing:"border-box",outline:"none"}} />
+          </div>
+        </div>
+
+        {/* Allocation rows */}
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>
+              Allocate to Trips
+            </div>
+            <button onClick={()=>setRows(r=>[...r,{lr:"",tripId:"",amount:""}])}
+              style={{background:"none",border:`1px solid ${C.border}`,borderRadius:6,
+                color:C.text,fontSize:11,padding:"3px 8px",cursor:"pointer"}}>
+              + Add Row
+            </button>
+          </div>
+
+          {rows.map((row, i) => {
+            const trip = tripWithBalance.find(t=>t.id===row.tripId);
+            return (
+              <div key={i} style={{background:C.bg,borderRadius:10,padding:"10px 12px",
+                border:`1px solid ${row.tripId?C.green+"44":C.border}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                  <div style={{color:C.muted,fontSize:11,fontWeight:700}}>LR {i+1}</div>
+                  {rows.length > 1 && (
+                    <button onClick={()=>setRows(r=>r.filter((_,idx)=>idx!==i))}
+                      style={{background:"none",border:"none",color:C.red,fontSize:14,cursor:"pointer",padding:"0 4px"}}>×</button>
+                  )}
+                </div>
+
+                {/* Trip search */}
+                <div style={{marginBottom:6}}>
+                  <input
+                    value={row.lr} onChange={e=>{
+                      const q = e.target.value;
+                      updateRow(i,"lr",q);
+                      // auto-match
+                      const m = tripWithBalance.find(t=>
+                        (t.lrNo||"").toLowerCase().includes(q.toLowerCase()) && q.length>=2
+                      );
+                      updateRow(i,"tripId", m?.id||"");
+                    }}
+                    placeholder="Type LR number or truck…"
+                    style={{background:C.card,border:`1px solid ${row.tripId?C.green:C.border}`,borderRadius:7,
+                      color:C.text,padding:"7px 10px",fontSize:13,width:"100%",
+                      boxSizing:"border-box",outline:"none"}} />
+                  {/* Matching dropdown */}
+                  {row.lr && !row.tripId && (() => {
+                    const q = row.lr.toLowerCase();
+                    const matches = tripWithBalance.filter(t=>
+                      t.balance>0 && (t.lrNo||"").toLowerCase().includes(q) || (t.truckNo||"").toLowerCase().includes(q)
+                    ).slice(0,5);
+                    return matches.length > 0 ? (
+                      <div style={{background:C.card,borderRadius:7,marginTop:3,
+                        border:`1px solid ${C.border}`,overflow:"hidden"}}>
+                        {matches.map(t=>(
+                          <div key={t.id} onClick={()=>{updateRow(i,"tripId",t.id);updateRow(i,"lr",`LR ${t.lrNo} · ${t.truckNo}`);}}
+                            style={{padding:"7px 10px",cursor:"pointer",fontSize:12,
+                              borderBottom:`1px solid ${C.border}22`}}>
+                            <b>LR {t.lrNo}</b> · {t.truckNo} · Balance: <span style={{color:C.accent}}>{fmt(t.balance)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null;
+                  })()}
+                </div>
+
+                {/* Trip info if matched */}
+                {trip && (
+                  <div style={{color:C.muted,fontSize:11,marginBottom:6,padding:"4px 6px",
+                    background:C.green+"11",borderRadius:5}}>
+                    ✅ {trip.truckNo} · {trip.from}→{trip.to} · Balance: <b style={{color:C.green}}>{fmt(trip.balance)}</b>
+                  </div>
+                )}
+
+                {/* Amount */}
+                <input type="number" value={row.amount}
+                  onChange={e=>updateRow(i,"amount",e.target.value)}
+                  placeholder={trip ? `Max balance: ${trip.balance}` : "Amount ₹"}
+                  style={{background:C.card,border:`1.5px solid ${+row.amount>0?C.green:C.border}`,borderRadius:7,
+                    color:C.text,padding:"8px 10px",fontSize:14,width:"100%",
+                    boxSizing:"border-box",outline:"none"}} />
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Running total */}
+        <div style={{background:C.card,borderRadius:10,padding:"10px 14px"}}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+            <span style={{color:C.muted,fontSize:12}}>Allocated</span>
+            <span style={{color:C.text,fontWeight:700}}>{fmt(totalAllocated)}</span>
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+            <span style={{color:C.muted,fontSize:12}}>Total Scanned</span>
+            <span style={{color:C.text,fontWeight:700}}>{fmt(totalAmount)}</span>
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between",borderTop:`1px solid ${C.border}33`,paddingTop:6}}>
+            <span style={{fontWeight:800,fontSize:13}}>Remaining</span>
+            <span style={{fontWeight:900,fontSize:15,
+              color:remaining===0?C.green:remaining<0?C.red:C.orange}}>
+              {remaining===0?"✅ Fully allocated":fmt(Math.abs(remaining))+(remaining<0?" over":"")}
+            </span>
+          </div>
+        </div>
+
+        <Btn onClick={handleSave} full color={C.green} disabled={!canSave}>
+          ✓ Save {rows.length} Payment{rows.length>1?"s":""} — {fmt(totalAllocated)}
+        </Btn>
+        <Btn onClick={onCancel} full outline color={C.muted}>Cancel</Btn>
+      </div>
+    </Sheet>
+  );
+}
+
 // ─── DIESEL MODULE ────────────────────────────────────────────────────────────
 function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, driverPays, setDriverPays, user, log}) {
   const [view,        setView]        = useState("pumps");
@@ -4028,8 +4223,11 @@ function ShortageRecoverBtn({v, setVehicles, log}) {
 function DriverPayments({trips, driverPays, setDriverPays, vehicles, user, log}) {
   const [filter,    setFilter]    = useState("unpaid");
   const [paySheet,  setPaySheet]  = useState(null);
+  const [splitSheet, setSplitSheet] = useState(null); // scanned multi-LR data
+  const [scanningGlobal, setScanningGlobal] = useState(false);
   const [pf, setPf] = useState({amount:"", utr:"", date:today(), notes:""});
   const pff = k => v => setPf(p=>({...p,[k]:v}));
+  const scanInputRef = useRef();
 
   // History filters
   const [histFrom,  setHistFrom]  = useState("");
@@ -4058,6 +4256,39 @@ function DriverPayments({trips, driverPays, setDriverPays, vehicles, user, log})
     setDriverPays(prev=>[...(prev||[]),p]);
     log("DRIVER PAYMENT",`LR:${t.lrNo} ${t.truckNo} — ${fmt(+pf.amount)} UTR:${pf.utr}`);
     setPaySheet(null); setPf({amount:"",utr:"",date:today(),notes:""});
+  };
+
+  const saveMultiPayment = (payments) => {
+    const withMeta = payments.map(p => ({...p, createdBy:user.username, createdAt:nowTs()}));
+    setDriverPays(prev=>[...(prev||[]),...withMeta]);
+    withMeta.forEach(p => log("DRIVER PAYMENT",`LR:${p.lrNo} ${p.truckNo} — ${fmt(p.amount)} UTR:${p.utr}`));
+    setSplitSheet(null);
+  };
+
+  const scanGlobal = async (file) => {
+    if (!file) return;
+    setScanningGlobal(true);
+    try {
+      const b64 = await new Promise((res,rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result.split(",")[1]);
+        r.onerror = rej;
+        r.readAsDataURL(file);
+      });
+      const resp = await fetch("/.netlify/functions/scan-payment", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({base64:b64, mediaType:file.type||"image/jpeg"})
+      });
+      const data = await resp.json();
+      if (data.error) throw new Error(data.error);
+      // Always open split sheet — handles both single and multi-LR
+      setSplitSheet(data);
+    } catch(e) {
+      alert("Could not read payment image. Please fill manually.");
+    } finally {
+      setScanningGlobal(false);
+      if (scanInputRef.current) scanInputRef.current.value = "";
+    }
   };
 
   // Filtered payment history
@@ -4100,7 +4331,19 @@ function DriverPayments({trips, driverPays, setDriverPays, vehicles, user, log})
 
   return (
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
-      <div style={{color:C.blue,fontWeight:800,fontSize:16}}>🏧 Driver Payments</div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div style={{color:C.blue,fontWeight:800,fontSize:16}}>🏧 Driver Payments</div>
+        {/* Global scan button */}
+        <div>
+          <input ref={scanInputRef} type="file" accept="image/*" capture="environment"
+            style={{display:"none"}} onChange={e=>scanGlobal(e.target.files[0])} />
+          <button onClick={()=>scanInputRef.current.click()} disabled={scanningGlobal}
+            style={{background:scanningGlobal?"#333":C.purple||"#7c3aed",border:"none",borderRadius:8,
+              color:"#fff",fontSize:12,fontWeight:700,padding:"8px 14px",cursor:"pointer",opacity:scanningGlobal?0.7:1}}>
+            {scanningGlobal?"⏳ Reading…":"📷 Scan Payment"}
+          </button>
+        </div>
+      </div>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
         <KPI icon="⏳" label="Balance Due"  value={fmt(totalBalance)}    color={C.accent} sub={`${unpaidTrips.length} trips`} />
         <KPI icon="✅" label="Total Paid"   value={fmt((driverPays||[]).reduce((s,p)=>s+(p.amount||0),0))} color={C.green} />
@@ -4277,6 +4520,17 @@ function DriverPayments({trips, driverPays, setDriverPays, vehicles, user, log})
             <Btn onClick={()=>savePayment(paySheet)} full color={C.green}>✓ Confirm Payment — {fmt(+pf.amount)}</Btn>
           </div>
         </Sheet>
+      )}
+
+      {/* ── SPLIT PAYMENT SHEET (multi-LR scan) ── */}
+      {splitSheet && (
+        <SplitPaymentSheet
+          scanData={splitSheet}
+          trips={trips}
+          tripWithBalance={tripWithBalance}
+          onSave={saveMultiPayment}
+          onCancel={()=>setSplitSheet(null)}
+        />
       )}
     </div>
   );
