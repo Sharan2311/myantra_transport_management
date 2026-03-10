@@ -4027,9 +4027,14 @@ function ShortageRecoverBtn({v, setVehicles, log}) {
 // Record bank transfers against a trip. "Balance due" auto-updates.
 function DriverPayments({trips, driverPays, setDriverPays, vehicles, user, log}) {
   const [filter,    setFilter]    = useState("unpaid");
-  const [paySheet,  setPaySheet]  = useState(null); // trip being paid
+  const [paySheet,  setPaySheet]  = useState(null);
   const [pf, setPf] = useState({amount:"", utr:"", date:today(), notes:""});
   const pff = k => v => setPf(p=>({...p,[k]:v}));
+
+  // History filters
+  const [histFrom,  setHistFrom]  = useState("");
+  const [histTo,    setHistTo]    = useState("");
+  const [histLR,    setHistLR]    = useState("");
 
   // For each trip compute total paid and balance
   const tripWithBalance = trips.map(t => {
@@ -4055,6 +4060,44 @@ function DriverPayments({trips, driverPays, setDriverPays, vehicles, user, log})
     setPaySheet(null); setPf({amount:"",utr:"",date:today(),notes:""});
   };
 
+  // Filtered payment history
+  const allPays = [...(driverPays||[])].sort((a,b)=>b.date.localeCompare(a.date));
+  const filteredPays = allPays.filter(p => {
+    if (histFrom && p.date < histFrom) return false;
+    if (histTo   && p.date > histTo)   return false;
+    if (histLR   && !(p.lrNo||"").toLowerCase().includes(histLR.toLowerCase()) &&
+                    !(p.truckNo||"").toLowerCase().includes(histLR.toLowerCase())) return false;
+    return true;
+  });
+  const histTotal = filteredPays.reduce((s,p)=>s+(p.amount||0),0);
+
+  const exportHistoryPDF = () => {
+    const rows = filteredPays.map(p => {
+      const t = trips.find(x=>x.id===p.tripId);
+      return `<tr><td>${p.date}</td><td>${p.truckNo}</td><td>${p.lrNo||"—"}</td><td>${t?`${t.from||""}→${t.to||""}`:""}</td><td>${p.utr||"—"}</td><td>${p.notes||""}</td><td style="text-align:right;font-weight:bold">${fmt(p.amount)}</td></tr>`;
+    }).join("");
+    const html = `<html><head><style>
+      body{font-family:Arial,sans-serif;font-size:12px;padding:20px}
+      h2{color:#f97316;margin-bottom:4px}
+      .sub{color:#888;font-size:12px;margin-bottom:12px}
+      table{width:100%;border-collapse:collapse;margin-top:12px}
+      th{background:#f97316;color:#fff;padding:7px 8px;text-align:left;font-size:11px}
+      td{padding:6px 8px;border-bottom:1px solid #eee;font-size:11px}
+      .total{text-align:right;font-weight:bold;font-size:14px;margin-top:12px;color:#f97316}
+    </style></head><body>
+      <h2>M. Yantra — Driver Payment History</h2>
+      <div class="sub">Period: ${histFrom||"all"} → ${histTo||"all"}${histLR?` | Search: ${histLR}`:""}</div>
+      <div class="sub">${filteredPays.length} payments recorded</div>
+      <table><thead><tr><th>Date</th><th>Truck</th><th>LR</th><th>Route</th><th>UTR</th><th>Notes</th><th>Amount</th></tr></thead>
+      <tbody>${rows}</tbody></table>
+      <div class="total">Total Paid: ${fmt(histTotal)}</div>
+    </body></html>`;
+    const w = window.open("","_blank");
+    w.document.write(html);
+    w.document.close();
+    setTimeout(()=>w.print(),400);
+  };
+
   return (
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
       <div style={{color:C.blue,fontWeight:800,fontSize:16}}>🏧 Driver Payments</div>
@@ -4064,12 +4107,95 @@ function DriverPayments({trips, driverPays, setDriverPays, vehicles, user, log})
       </div>
 
       <PillBar items={[
-        {id:"unpaid",label:`Unpaid (${unpaidTrips.length})`,color:C.accent},
-        {id:"paid",  label:`Paid (${paidTrips.length})`,    color:C.green},
-        {id:"all",   label:"All",                           color:C.blue},
+        {id:"unpaid",  label:`Unpaid (${unpaidTrips.length})`, color:C.accent},
+        {id:"paid",    label:`Paid (${paidTrips.length})`,     color:C.green},
+        {id:"all",     label:"All",                            color:C.blue},
+        {id:"history", label:`History (${allPays.length})`,    color:C.muted},
       ]} active={filter} onSelect={setFilter} />
 
-      {(filter==="unpaid"?unpaidTrips:filter==="paid"?paidTrips:tripWithBalance).map(t=>(
+      {/* ── PAYMENT HISTORY TAB ── */}
+      {filter==="history" && (
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          {/* Filters */}
+          <div style={{background:C.card,borderRadius:12,padding:"12px 14px",display:"flex",flexDirection:"column",gap:10}}>
+            <input value={histLR} onChange={e=>setHistLR(e.target.value)}
+              placeholder="🔍 Search by LR or truck number…"
+              style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,color:C.text,
+                padding:"9px 12px",fontSize:13,outline:"none",width:"100%",boxSizing:"border-box"}} />
+            <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
+              <div style={{flex:1}}>
+                <div style={{color:C.muted,fontSize:11,marginBottom:3}}>FROM</div>
+                <input type="date" value={histFrom} onChange={e=>setHistFrom(e.target.value)}
+                  onClick={e=>e.target.showPicker?.()}
+                  style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,
+                    color:histFrom?C.text:C.muted,padding:"8px 10px",fontSize:13,width:"100%",
+                    colorScheme:"dark",WebkitAppearance:"none",boxSizing:"border-box"}} />
+              </div>
+              <div style={{flex:1}}>
+                <div style={{color:C.muted,fontSize:11,marginBottom:3}}>TO</div>
+                <input type="date" value={histTo} onChange={e=>setHistTo(e.target.value)}
+                  onClick={e=>e.target.showPicker?.()}
+                  style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,
+                    color:histTo?C.text:C.muted,padding:"8px 10px",fontSize:13,width:"100%",
+                    colorScheme:"dark",WebkitAppearance:"none",boxSizing:"border-box"}} />
+              </div>
+              {(histFrom||histTo||histLR) && (
+                <Btn onClick={()=>{setHistFrom("");setHistTo("");setHistLR("");}} sm outline color={C.muted}>Clear</Btn>
+              )}
+            </div>
+            {/* Summary + export */}
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div>
+                <span style={{color:C.muted,fontSize:12}}>{filteredPays.length} payments · </span>
+                <span style={{color:C.green,fontWeight:800,fontSize:14}}>{fmt(histTotal)}</span>
+              </div>
+              <button onClick={exportHistoryPDF}
+                style={{background:C.orange,border:"none",borderRadius:8,color:"#000",
+                  fontSize:12,fontWeight:700,padding:"7px 14px",cursor:"pointer"}}>
+                🖨 Export PDF
+              </button>
+            </div>
+          </div>
+
+          {filteredPays.length===0 && (
+            <div style={{textAlign:"center",color:C.muted,padding:40}}>No payments found</div>
+          )}
+
+          {filteredPays.map(p => {
+            const t = trips.find(x=>x.id===p.tripId);
+            return (
+              <div key={p.id} style={{background:C.card,borderRadius:12,padding:"12px 14px",
+                borderLeft:"3px solid "+C.green}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                      <span style={{fontWeight:800,fontSize:14}}>{fmt(p.amount)}</span>
+                      <span style={{color:C.blue,fontSize:12}}>LR {p.lrNo||"—"}</span>
+                      <span style={{color:C.muted,fontSize:12}}>{p.truckNo}</span>
+                    </div>
+                    <div style={{color:C.muted,fontSize:11,marginTop:3}}>
+                      {p.date}
+                      {p.utr && <span> · UTR: <b style={{color:C.text}}>{p.utr}</b></span>}
+                      {p.notes && <span> · {p.notes}</span>}
+                    </div>
+                    {t && (
+                      <div style={{color:C.muted,fontSize:11,marginTop:1}}>
+                        {t.from||""}→{t.to||""} · {t.qty}MT
+                      </div>
+                    )}
+                  </div>
+                  <div style={{color:C.muted,fontSize:11,flexShrink:0,marginLeft:8,textAlign:"right"}}>
+                    {p.createdBy||""}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── TRIP LIST (unpaid / paid / all) ── */}
+      {filter!=="history" && (filter==="unpaid"?unpaidTrips:filter==="paid"?paidTrips:tripWithBalance).map(t=>(
         <div key={t.id} style={{background:C.card,borderRadius:14,padding:"14px 16px",borderLeft:`4px solid ${t.balance>0?C.accent:C.green}`,marginBottom:8}}>
           <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
             <div>
