@@ -2800,16 +2800,17 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
     const fresh = scanResults.filter(r=>!r.indentNo||!existingNos.has(String(r.indentNo).trim()));
     if (fresh.length===0){ setScanResults(null); setScanSheet(false); return; }
 
-    // Only GREEN entries (trip matched, no mismatch flags) get saved
-    const green  = fresh.filter(r=> r.trip && !r.truckMismatch && !r.amountMismatch && !r.indentMismatch);
-    const alerts = fresh.filter(r=>!r.trip ||  r.truckMismatch ||  r.amountMismatch ||  r.indentMismatch);
-
     // Save confirmed indents (green only)
+    // amount = pumpTotal (HSD + Advance) — this is the full credit due back from pump
+    // hsd = HSD only (fuel portion)
     const newIndents = green.map(r=>({
       id:uid(), pumpId:r.pumpId||"",
       truckNo:r.truckNo, tripId:r.trip.id,
       indentNo:r.indentNo||"", date:r.date||today(),
-      litres:0, ratePerLitre:0, amount:+r.amount||0,
+      litres:0, ratePerLitre:0,
+      amount: r.pumpTotal||+r.amount||0,   // HSD + Advance = total credit due
+      hsd: +r.amount||0,                   // HSD only
+      advance: r.advance||0,
       confirmed:true, paid:false,
       unmatched:false, truckMismatch:false, amountMismatch:false, indentMismatch:false,
       pumpTotal:r.pumpTotal||0, estDiesel:r.estDiesel||0,
@@ -2817,12 +2818,15 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
       createdBy:user.username, createdAt:nowTs(),
     }));
 
-    // Save unresolved alerts as unconfirmed (visible in alert banner, NOT in indents tab)
+    // Save unresolved alerts as unconfirmed
     const alertIndents = alerts.map(r=>({
       id:uid(), pumpId:r.pumpId||"",
       truckNo:r.truckNo, tripId:r.trip?.id||null,
       indentNo:r.indentNo||"", date:r.date||today(),
-      litres:0, ratePerLitre:0, amount:+r.amount||0,
+      litres:0, ratePerLitre:0,
+      amount: r.pumpTotal||+r.amount||0,
+      hsd: +r.amount||0,
+      advance: r.advance||0,
       confirmed:false, paid:false,
       unmatched:!r.trip, truckMismatch:!!r.truckMismatch,
       amountMismatch:!!r.amountMismatch, indentMismatch:!!r.indentMismatch,
@@ -3183,7 +3187,15 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
                           <div key={i.id} style={{display:"flex",justifyContent:"space-between",
                             padding:"6px 0",borderBottom:`1px solid ${C.border}11`,fontSize:12}}>
                             <span style={{color:C.muted}}>{i.truckNo} · #{i.indentNo} · {i.date}</span>
-                            <span style={{color:C.text,fontWeight:600}}>{fmt(i.amount)}</span>
+                            <div style={{textAlign:"right"}}>
+                              <div style={{color:C.text,fontWeight:600}}>{fmt(i.amount)}</div>
+                              {(i.hsd>0||i.advance>0) && (
+                                <div style={{color:C.muted,fontSize:10}}>
+                                  {i.hsd>0&&<span>HSD {fmt(i.hsd)}</span>}
+                                  {i.advance>0&&<span style={{marginLeft:4}}>+Adv {fmt(i.advance)}</span>}
+                                </div>
+                              )}
+                            </div>
                           </div>
                         );
                       })}
@@ -3237,6 +3249,12 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
                   </div>
                   <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:6}}>
                     <div style={{color:C.text,fontWeight:800,fontSize:14}}>{fmt(i.amount)}</div>
+                    {(i.hsd>0||i.advance>0) && (
+                      <div style={{color:C.muted,fontSize:10,textAlign:"right"}}>
+                        {i.hsd>0 && <span>HSD {fmt(i.hsd)}</span>}
+                        {i.advance>0 && <span style={{marginLeft:4}}>+ Adv {fmt(i.advance)}</span>}
+                      </div>
+                    )}
                     {user.role==="owner" && (
                       <button onClick={async()=>{
                         if(!window.confirm("Delete indent #"+i.indentNo+" for "+i.truckNo+"? This cannot be undone.")) return;
