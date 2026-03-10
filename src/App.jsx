@@ -2285,10 +2285,13 @@ function PumpSlipScanner({ pumps, trips, user, onResults }) {
             matchedBy = "indent";
             // Rule 4: truck check
             truckMismatch = trip.truckNo !== truck;
-            // Rule 5: amount check (only if truck matched)
+            // Rule 5: amount check (only if truck matched AND estimate was set)
             if (!truckMismatch) {
               const est = +(trip.dieselEstimate||0);
-              amountMismatch = Math.round(pumpTotal * 100) !== Math.round(est * 100);
+              if (est > 0) {
+                amountMismatch = Math.round(pumpTotal * 100) !== Math.round(est * 100);
+              }
+              // If est=0 (not set on trip), no amount check — still green if matched
             }
           } else {
             // Indent on slip but no LR has that indent number → UNMATCHED
@@ -2656,12 +2659,20 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
     if (!existing || (i.confirmed && !existing.confirmed) || i.createdAt > existing.createdAt)
       _confirmedMap.set(key, i);
   });
-  const confirmedIndents = Array.from(_confirmedMap.values());
+  // Only truly confirmed = confirmed:true AND has a valid linked trip
+  const confirmedIndents = Array.from(_confirmedMap.values())
+    .filter(i => i.confirmed && i.tripId && trips.some(t => t.id === i.tripId));
   // Indents with no matching trip — flagged for owner
   const unmatchedIndents = indents.filter(i => i.unmatched);
-  // Red alerts = unmatched + truck mismatch, not yet dismissed
+  // Red alerts = unmatched + truck mismatch + amount mismatch + indent mismatch + confirmed but no trip
   // Dedup alerts — keep latest by indentNo+truckNo key
-  const _rawAlerts = indents.filter(i => (i.unmatched || i.truckMismatch || i.amountMismatch || i.indentMismatch) && !i.alertDismissed);
+  const _rawAlerts = indents.filter(i => {
+    if (i.alertDismissed) return false;
+    if (i.unmatched || i.truckMismatch || i.amountMismatch || i.indentMismatch) return true;
+    // Confirmed but no valid trip linked → show as NO TRIP alert
+    if (i.confirmed && (!i.tripId || !trips.some(t => t.id === i.tripId))) return true;
+    return false;
+  });
 
   // Stale alert: trip has dieselEstimate > 0 but NO confirmed indent linked, and trip date < today
   const staleIndentAlerts = trips.filter(t => {
