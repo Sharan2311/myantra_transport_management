@@ -2348,7 +2348,7 @@ function PumpSlipScanner({ pumps, trips, user, onResults }) {
 // ─── SCAN PAYMENT IMAGE ───────────────────────────────────────────────────────
 function ScanPaymentBtn({ onResult }) {
   const [scanning, setScanning] = useState(false);
-  const inputRef = React.useRef();
+  const inputRef = useRef();
 
   const scan = async (file) => {
     if (!file) return;
