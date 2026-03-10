@@ -2424,7 +2424,11 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance, onSave, onCancel 
   const totalAllocated = rows.reduce((s,r) => s+(+r.amount||0), 0);
   const remaining = totalAmount - totalAllocated;
 
-  const canSave = rows.every(r => r.tripId && +r.amount > 0) && rows.length > 0;
+  const canSave = rows.every(r => r.tripId && +r.amount > 0) &&
+    rows.every(r => {
+      const t = tripWithBalance.find(x=>x.id===r.tripId);
+      return !t || +r.amount <= t.balance;
+    }) && rows.length > 0;
 
   const handleSave = () => {
     const payments = rows.map(r => {
@@ -2549,9 +2553,18 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance, onSave, onCancel 
                 <input type="number" value={row.amount}
                   onChange={e=>updateRow(i,"amount",e.target.value)}
                   placeholder={trip ? `Max balance: ${trip.balance}` : "Amount ₹"}
-                  style={{background:C.card,border:`1.5px solid ${+row.amount>0?C.green:C.border}`,borderRadius:7,
+                  style={{background:C.card,border:`1.5px solid ${
+                    !row.amount ? C.border :
+                    trip && +row.amount > trip.balance ? C.red :
+                    +row.amount > 0 ? C.green : C.border
+                  }`,borderRadius:7,
                     color:C.text,padding:"8px 10px",fontSize:14,width:"100%",
                     boxSizing:"border-box",outline:"none"}} />
+                {trip && +row.amount > trip.balance && (
+                  <div style={{color:C.red,fontSize:11,marginTop:3,fontWeight:700}}>
+                    ⚠ Exceeds balance of {fmt(trip.balance)} — reduce amount
+                  </div>
+                )}
               </div>
             );
           })}
