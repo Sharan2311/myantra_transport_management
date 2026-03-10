@@ -2415,9 +2415,10 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance, onSave, onCancel 
     {lr:"", tripId:"", amount:""},
     {lr:"", tripId:"", amount:""},
   ]);
-  const [sharedUtr]  = useState(utr);
-  const [sharedDate, setSharedDate] = useState(date);
-  const [sharedNote, setSharedNote] = useState(paidTo);
+  const [sharedUtr]    = useState(utr);
+  const [sharedDate,   setSharedDate]   = useState(date);
+  const [sharedPaidTo, setSharedPaidTo] = useState(paidTo);
+  const [sharedNote,   setSharedNote]   = useState("");
 
   const updateRow = (i, k, v) => setRows(r => r.map((row,idx) => idx===i ? {...row,[k]:v} : row));
 
@@ -2437,7 +2438,7 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance, onSave, onCancel 
         id: uid(), tripId: r.tripId,
         truckNo: t?.truckNo||"", lrNo: t?.lrNo||"",
         amount: +r.amount, utr: sharedUtr,
-        date: sharedDate, notes: sharedNote,
+        date: sharedDate, paidTo: sharedPaidTo, notes: sharedNote,
       };
     });
     onSave(payments);
@@ -2459,7 +2460,7 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance, onSave, onCancel 
           {scannedLRs.length > 0 && <div style={{color:C.muted,fontSize:11,marginTop:2}}>Detected LRs: <b style={{color:C.orange}}>{scannedLRs.join(", ")}</b></div>}
         </div>
 
-        {/* Shared date + note */}
+        {/* Shared date + paid to + notes */}
         <div style={{display:"flex",gap:8}}>
           <div style={{flex:1}}>
             <div style={{color:C.muted,fontSize:11,marginBottom:3}}>DATE</div>
@@ -2470,12 +2471,19 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance, onSave, onCancel 
                 WebkitAppearance:"none",boxSizing:"border-box"}} />
           </div>
           <div style={{flex:1}}>
-            <div style={{color:C.muted,fontSize:11,marginBottom:3}}>NOTES</div>
-            <input value={sharedNote} onChange={e=>setSharedNote(e.target.value)}
-              placeholder="Driver name, remarks…"
+            <div style={{color:C.muted,fontSize:11,marginBottom:3}}>PAID TO</div>
+            <input value={sharedPaidTo} onChange={e=>setSharedPaidTo(e.target.value)}
+              placeholder="Recipient name…"
               style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,color:C.text,
                 padding:"8px 10px",fontSize:13,width:"100%",boxSizing:"border-box",outline:"none"}} />
           </div>
+        </div>
+        <div>
+          <div style={{color:C.muted,fontSize:11,marginBottom:3}}>NOTES</div>
+          <input value={sharedNote} onChange={e=>setSharedNote(e.target.value)}
+            placeholder="Bank name, remarks…"
+            style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,color:C.text,
+              padding:"8px 10px",fontSize:13,width:"100%",boxSizing:"border-box",outline:"none"}} />
         </div>
 
         {/* Allocation rows */}
@@ -2611,9 +2619,10 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
   const [scanResults, setScanResults] = useState(null);
   const [scanSummary, setScanSummary] = useState(null);
   const [confirmFlow, setConfirmFlow] = useState(null);
-  const [payPumpId,   setPayPumpId]   = useState(null); // pump being paid
+  const [payPumpId,   setPayPumpId]   = useState(null);
   const [payAmt,      setPayAmt]      = useState("");
   const [payUtr,      setPayUtr]      = useState("");
+  const [payPaidTo,   setPayPaidTo]   = useState("");
   const [payNote,     setPayNote]     = useState("");
   const [expandPump,  setExpandPump]  = useState(null); // expanded pump id
   const [filterFrom,  setFilterFrom]  = useState("");
@@ -2855,11 +2864,11 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
     if (!payAmt || +payAmt <= 0 || !payUtr.trim()) return;
     const pump = pumps.find(p => p.id === payPumpId);
     const payment = { id:uid(), pumpId:payPumpId, amount:+payAmt, utr:payUtr.trim(),
-      date:today(), note:payNote.trim(), createdBy:user.username, createdAt:nowTs() };
+      date:today(), paidTo:payPaidTo.trim(), note:payNote.trim(), createdBy:user.username, createdAt:nowTs() };
     setPumpPayments(prev => [payment, ...(prev||[])]);
     await DB.savePumpPayment(payment);
     log("PUMP PAYMENT", `${pump?.name} ₹${fmt(+payAmt)} UTR: ${payUtr}`);
-    setPayPumpId(null); setPayAmt(""); setPayUtr(""); setPayNote("");
+    setPayPumpId(null); setPayAmt(""); setPayUtr(""); setPayPaidTo(""); setPayNote("");
   };
 
   const deletePumpPayment = async (id) => {
@@ -3084,7 +3093,8 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
                             <ScanPaymentBtn onResult={r=>{
                               if(r.amount) setPayAmt(String(r.amount).replace(/[^0-9.]/g,""));
                               if(r.referenceNo) setPayUtr(r.referenceNo);
-                              if(r.paidTo) setPayNote(r.paidTo);
+                              if(r.paidTo) setPayPaidTo(r.paidTo);
+                              if(r.date) {}
                             }} />
                           </div>
                           <div style={{display:"flex",gap:8}}>
@@ -3092,6 +3102,7 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
                               note={`Pending: ${fmt(p.pending)}`} />
                             <Field label="UTR / Ref No" value={payUtr} onChange={setPayUtr} half />
                           </div>
+                          <Field label="Paid To" value={payPaidTo} onChange={setPayPaidTo} placeholder="Recipient name…" />
                           <Field label="Note (optional)" value={payNote} onChange={setPayNote}
                             placeholder="e.g. 1st–15th Mar payment" />
                           <div style={{display:"flex",gap:8}}>
@@ -3103,7 +3114,7 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
                           </div>
                         </div>
                       ) : (
-                        <Btn onClick={()=>{setPayPumpId(p.id);setPayAmt(String(Math.max(0,p.pending)));setPayUtr("");setPayNote("");}}
+                        <Btn onClick={()=>{setPayPumpId(p.id);setPayAmt(String(Math.max(0,p.pending)));setPayUtr("");setPayPaidTo("");setPayNote("");}}
                           full color={C.green} sm>
                           + Record Payment to {p.name}
                         </Btn>
@@ -4243,7 +4254,7 @@ function DriverPayments({trips, driverPays, setDriverPays, vehicles, user, log})
   const [paySheet,  setPaySheet]  = useState(null);
   const [splitSheet, setSplitSheet] = useState(null); // scanned multi-LR data
   const [scanningGlobal, setScanningGlobal] = useState(false);
-  const [pf, setPf] = useState({amount:"", utr:"", date:today(), notes:""});
+  const [pf, setPf] = useState({amount:"", utr:"", date:today(), paidTo:"", notes:""});
   const pff = k => v => setPf(p=>({...p,[k]:v}));
   const scanInputRef = useRef();
 
@@ -4269,11 +4280,11 @@ function DriverPayments({trips, driverPays, setDriverPays, vehicles, user, log})
 
   const savePayment = (t) => {
     const p = {id:uid(), tripId:t.id, truckNo:t.truckNo, lrNo:t.lrNo,
-      amount:+pf.amount, utr:pf.utr, date:pf.date, notes:pf.notes,
+      amount:+pf.amount, utr:pf.utr, date:pf.date, paidTo:pf.paidTo, notes:pf.notes,
       createdBy:user.username, createdAt:nowTs()};
     setDriverPays(prev=>[...(prev||[]),p]);
     log("DRIVER PAYMENT",`LR:${t.lrNo} ${t.truckNo} — ${fmt(+pf.amount)} UTR:${pf.utr}`);
-    setPaySheet(null); setPf({amount:"",utr:"",date:today(),notes:""});
+    setPaySheet(null); setPf({amount:"",utr:"",date:today(),paidTo:"",notes:""});
   };
 
   const saveMultiPayment = (payments) => {
@@ -4451,6 +4462,7 @@ function DriverPayments({trips, driverPays, setDriverPays, vehicles, user, log})
                     <div style={{color:C.muted,fontSize:11,marginTop:3}}>
                       {p.date}
                       {p.utr && <span> · UTR: <b style={{color:C.text}}>{p.utr}</b></span>}
+                      {p.paidTo && <span> · To: <b style={{color:C.text}}>{p.paidTo}</b></span>}
                       {p.notes && <span> · {p.notes}</span>}
                     </div>
                     {t && (
@@ -4532,7 +4544,7 @@ function DriverPayments({trips, driverPays, setDriverPays, vehicles, user, log})
               </div>
             </div>
           ))}
-          {t.balance>0&&<Btn onClick={()=>{setPaySheet(t);setPf({amount:String(t.balance),utr:"",date:today(),notes:""});}} full sm color={C.green}>+ Record Payment</Btn>}
+          {t.balance>0&&<Btn onClick={()=>{setPaySheet(t);setPf({amount:String(t.balance),utr:"",date:today(),paidTo:"",notes:""});}} full sm color={C.green}>+ Record Payment</Btn>}
         </div>
       ));
       })()}
@@ -4548,13 +4560,15 @@ function DriverPayments({trips, driverPays, setDriverPays, vehicles, user, log})
             <ScanPaymentBtn onResult={r=>{
               if(r.amount) setPf(p=>({...p,amount:String(r.amount).replace(/[^0-9.]/g,"")}));
               if(r.referenceNo) setPf(p=>({...p,utr:r.referenceNo}));
-              if(r.paidTo) setPf(p=>({...p,notes:r.paidTo}));
+              if(r.paidTo) setPf(p=>({...p,paidTo:r.paidTo}));
+              if(r.date) setPf(p=>({...p,date:r.date}));
             }} />
             <Field label="Amount ₹" value={pf.amount} onChange={pff("amount")} type="number" />
             <div style={{display:"flex",gap:10}}>
               <Field label="UTR / Reference" value={pf.utr} onChange={pff("utr")} half />
               <Field label="Date" value={pf.date} onChange={pff("date")} type="date" half />
             </div>
+            <Field label="Paid To" value={pf.paidTo} onChange={pff("paidTo")} placeholder="Recipient name…" />
             <Field label="Notes" value={pf.notes} onChange={pff("notes")} placeholder="Bank name, NEFT/RTGS…" />
             <div style={{color:C.muted,fontSize:12}}>Recording as: <b style={{color:ROLES[user.role]?.color}}>{user.name}</b></div>
             <Btn onClick={()=>savePayment(paySheet)} full color={C.green}>✓ Confirm Payment — {fmt(+pf.amount)}</Btn>
