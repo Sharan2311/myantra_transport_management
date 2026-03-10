@@ -984,9 +984,12 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
   const [editSheet,   setEditSheet]   = useState(null);
   const [filter,      setFilter]      = useState("All");
   const [search,      setSearch]      = useState("");
-  const [diConflict,  setDiConflict]  = useState(null); // existing trip with same LR
-  const [wasScanned,  setWasScanned]  = useState(false); // true if form was filled by AI scan
-  const [confirmDel,  setConfirmDel]  = useState(null);  // trip pending delete confirmation
+  const [diConflict,  setDiConflict]  = useState(null);
+  const [wasScanned,  setWasScanned]  = useState(false);
+  const [confirmDel,  setConfirmDel]  = useState(null);
+  const [showDateFilter, setShowDateFilter] = useState(false);
+  const [dateFrom,    setDateFrom]    = useState("");
+  const [dateTo,      setDateTo]      = useState("");
 
   const blankForm = () => ({
     type:tripType, lrNo:"", diNo:"", truckNo:"", grNo:"", dieselIndentNo:"",
@@ -1003,7 +1006,8 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
   const ff = k => v => setF(p => ({...p, [k]:v}));
 
   const list   = trips.filter(t => t.type===tripType);
-  const slist  = search ? list.filter(t => (t.truckNo+t.lrNo+t.grNo+t.diNo+t.to+t.consignee).toLowerCase().includes(search.toLowerCase())) : list;
+  const dlist  = (dateFrom||dateTo) ? list.filter(t => t.date>=(dateFrom||"2000-01-01") && t.date<=(dateTo||"2099-12-31")) : list;
+  const slist  = search ? dlist.filter(t => (t.truckNo+t.lrNo+t.grNo+t.diNo+t.to+t.consignee).toLowerCase().includes(search.toLowerCase())) : dlist;
   const shown  = filter==="All" ? slist : slist.filter(t => t.status===filter);
 
   // When truck number changes, check if tafalExempt
@@ -1067,6 +1071,11 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
   };
 
   const saveNew = async () => {
+    // Validate: if diesel estimate entered, indent number is mandatory
+    if ((+f.dieselEstimate||0) > 0 && !f.dieselIndentNo?.trim()) {
+      alert("Diesel Indent No is mandatory when Diesel Estimate is entered.\nPlease enter the indent number from the pump slip.");
+      return;
+    }
     // Validate: diesel indent no must be unique
     if (f.dieselIndentNo && trips.some(t => t.dieselIndentNo && t.dieselIndentNo === f.dieselIndentNo.trim())) {
       alert(`Diesel Indent No "${f.dieselIndentNo}" already exists on another trip. Each indent number must be unique.`);
@@ -1132,8 +1141,62 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div style={{color:ac,fontWeight:800,fontSize:16}}>{isIn?"🏭 Raw Material":"🚚 Cement Trips"}</div>
-        <Btn onClick={()=>{setF(blankForm());setAddSheet(true);}} color={ac} sm>+ Add Trip</Btn>
+        <div style={{display:"flex",gap:8}}>
+          <Btn onClick={()=>setShowDateFilter(v=>!v)} sm outline color={showDateFilter||(dateFrom||dateTo)?C.orange:C.muted}>📅</Btn>
+          <Btn onClick={()=>{setF(blankForm());setAddSheet(true);}} color={ac} sm>+ Add Trip</Btn>
+        </div>
       </div>
+
+      {/* Date filter bar */}
+      {showDateFilter && (
+        <div style={{background:C.card,borderRadius:12,padding:"12px 14px",display:"flex",flexDirection:"column",gap:10}}>
+          <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
+            <div style={{flex:1}}>
+              <div style={{color:C.muted,fontSize:11,marginBottom:3}}>FROM</div>
+              <input type="date" value={dateFrom} onChange={e=>setDateFrom(e.target.value)}
+                onClick={e=>e.target.showPicker?.()}
+                style={{background:C.bg,border:"1.5px solid "+C.border,borderRadius:8,color:dateFrom?C.text:C.muted,
+                  padding:"8px 10px",fontSize:13,width:"100%",colorScheme:"dark",WebkitAppearance:"none",boxSizing:"border-box"}} />
+            </div>
+            <div style={{flex:1}}>
+              <div style={{color:C.muted,fontSize:11,marginBottom:3}}>TO</div>
+              <input type="date" value={dateTo} onChange={e=>setDateTo(e.target.value)}
+                onClick={e=>e.target.showPicker?.()}
+                style={{background:C.bg,border:"1.5px solid "+C.border,borderRadius:8,color:dateTo?C.text:C.muted,
+                  padding:"8px 10px",fontSize:13,width:"100%",colorScheme:"dark",WebkitAppearance:"none",boxSizing:"border-box"}} />
+            </div>
+            <Btn onClick={()=>{setDateFrom("");setDateTo("");}} sm outline color={C.muted}>Clear</Btn>
+          </div>
+          {(dateFrom||dateTo) && (
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div style={{color:C.muted,fontSize:12}}>{dlist.length} trips · {dateFrom||"all"} → {dateTo||"all"}</div>
+              <button onClick={()=>{
+                const rows = shown.map(t => {
+                  const v = vehicles?.find(x=>x.truckNo===t.truckNo);
+                  const diesel = t.dieselEstimate||0;
+                  const net = (t.qty*(t.givenRate||0)) - (t.advance||0) - (t.tafal||0) - diesel;
+                  return "<tr><td>"+t.date+"</td><td>"+t.truckNo+"</td><td>"+(t.lrNo||"—")+"</td><td>"+(t.to||"—")+"</td><td>"+t.qty+"</td><td style='text-align:right'>"+fmt(t.qty*(t.frRate||0))+"</td><td style='text-align:right'>"+fmt(t.advance||0)+"</td><td style='text-align:right'>"+fmt(diesel)+"</td><td style='text-align:right'>"+fmt(net)+"</td><td>"+(t.status||"—")+"</td></tr>";
+                }).join("");
+                const totalFreight = shown.reduce((s,t)=>s+t.qty*(t.frRate||0),0);
+                const totalQty = shown.reduce((s,t)=>s+t.qty,0);
+                const html = "<html><head><style>body{font-family:Arial,sans-serif;font-size:12px;padding:16px}h2{color:#f97316;margin-bottom:4px}table{width:100%;border-collapse:collapse;margin-top:12px}th{background:#f97316;color:#fff;padding:6px 8px;text-align:left;font-size:11px}td{padding:5px 8px;border-bottom:1px solid #eee;font-size:11px}.summary{display:flex;gap:24px;margin:8px 0;font-size:13px;color:#555}.sv{font-weight:bold;color:#111}</style></head>"
+                  +"<body><h2>M. Yantra — Trip Report</h2>"
+                  +"<div style='color:#888;font-size:12px'>Period: "+(dateFrom||"all")+" to "+(dateTo||"all")+" &nbsp;|&nbsp; Filter: "+filter+"</div>"
+                  +"<div class='summary'><div>Trips: <span class='sv'>"+shown.length+"</span></div><div>Total Qty: <span class='sv'>"+totalQty+"MT</span></div><div>Total Freight: <span class='sv'>"+fmt(totalFreight)+"</span></div></div>"
+                  +"<table><thead><tr><th>Date</th><th>Truck</th><th>LR</th><th>To</th><th>Qty(MT)</th><th>Freight</th><th>Advance</th><th>Diesel</th><th>Net</th><th>Status</th></tr></thead>"
+                  +"<tbody>"+rows+"</tbody></table></body></html>";
+                const w = window.open("","_blank");
+                w.document.write(html);
+                w.document.close();
+                setTimeout(()=>w.print(),400);
+              }} style={{background:C.orange,border:"none",borderRadius:8,color:"#000",
+                fontSize:12,fontWeight:700,padding:"7px 14px",cursor:"pointer"}}>
+                🖨 Export PDF ({shown.length})
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search truck, LR, destination…"
         style={{background:C.card,border:`1.5px solid ${C.border}`,borderRadius:10,color:C.text,padding:"11px 14px",fontSize:14,outline:"none",width:"100%",boxSizing:"border-box"}} />
@@ -2299,6 +2362,15 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
   // Red alerts = unmatched + truck mismatch, not yet dismissed
   // Dedup alerts — keep latest by indentNo+truckNo key
   const _rawAlerts = indents.filter(i => (i.unmatched || i.truckMismatch || i.amountMismatch || i.indentMismatch) && !i.alertDismissed);
+
+  // Stale alert: trip has dieselEstimate > 0 but NO confirmed indent linked, and trip date < today
+  const staleIndentAlerts = trips.filter(t => {
+    if ((t.dieselEstimate||0) <= 0) return false;
+    if (t.status === "Paid") return false;
+    if (t.date >= today()) return false; // only flag if trip date is past
+    const hasConfirmed = indents.some(i => i.tripId === t.id && i.confirmed);
+    return !hasConfirmed;
+  });
   const _seenAlerts = new Map();
   _rawAlerts.forEach(i => {
     const key = (i.indentNo||"") + "_" + (i.truckNo||"");
@@ -2605,6 +2677,29 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
         />
       )}
 
+      {/* Stale indent alerts — trips with diesel estimate but no indent scanned */}
+      {staleIndentAlerts.length > 0 && (
+        <div style={{background:C.orange+"11",border:`1.5px solid ${C.orange}55`,borderRadius:12,padding:"12px 14px"}}>
+          <div style={{color:C.orange,fontWeight:800,fontSize:13,marginBottom:6}}>
+            ⏰ {staleIndentAlerts.length} Trip{staleIndentAlerts.length>1?"s":""} Missing Diesel Indent
+          </div>
+          <div style={{color:C.muted,fontSize:12,marginBottom:8}}>
+            These trips have a diesel estimate but no pump slip was scanned
+          </div>
+          {staleIndentAlerts.map(t => (
+            <div key={t.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+              padding:"6px 0",borderBottom:`1px solid ${C.orange}22`}}>
+              <div>
+                <span style={{fontWeight:700,fontSize:13}}>{t.truckNo}</span>
+                <span style={{color:C.muted,fontSize:11,marginLeft:6}}>LR {t.lrNo||"—"} · {t.date}</span>
+                {t.dieselIndentNo && <span style={{color:C.orange,fontSize:11,marginLeft:6}}>Indent#{t.dieselIndentNo}</span>}
+              </div>
+              <span style={{color:C.orange,fontWeight:700,fontSize:13}}>₹{(t.dieselEstimate||0).toLocaleString("en-IN")}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Summary KPIs */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
         <KPI icon="⏳" label="Pending to Credit" value={fmt(totalPending)} color={C.red}
@@ -2614,11 +2709,54 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
       </div>
 
       <PillBar items={[
-        {id:"pumps",   label:"By Pump",   color:C.orange},
-        {id:"indents", label:`Indents (${confirmedIndents.length})`, color:C.blue},
-        {id:"lrmap",   label:"LR ↔ Indent", color:C.teal||C.purple},
-        {id:"history", label:"Alert History", color:C.muted},
+        {id:"pumps",    label:"By Pump",   color:C.orange},
+        {id:"payments", label:`Payments (${(pumpPayments||[]).length})`, color:C.green},
+        {id:"indents",  label:`Indents (${confirmedIndents.length})`, color:C.blue},
+        {id:"lrmap",    label:"LR ↔ Indent", color:C.teal||C.purple},
+        {id:"history",  label:"Alerts", color:C.muted},
       ]} active={view} onSelect={setView} />
+
+      {/* ── PAYMENTS VIEW ── */}
+      {view==="payments" && (
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div style={{color:C.muted,fontSize:12}}>{(pumpPayments||[]).length} payments recorded</div>
+            <div style={{color:C.green,fontWeight:800}}>{fmt((pumpPayments||[]).reduce((s,p)=>s+(+p.amount||0),0))}</div>
+          </div>
+          {(pumpPayments||[]).length === 0 && (
+            <div style={{textAlign:"center",color:C.muted,padding:40}}>No payments recorded yet</div>
+          )}
+          {[...(pumpPayments||[])].sort((a,b)=>b.date.localeCompare(a.date)).map(pp => {
+            const pump = pumps.find(p=>p.id===pp.pumpId);
+            return (
+              <div key={pp.id} style={{background:C.card,borderRadius:12,padding:"12px 14px",
+                borderLeft:"3px solid "+C.green}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontWeight:700,fontSize:14}}>{fmt(pp.amount)}</div>
+                    <div style={{color:C.muted,fontSize:12,marginTop:2}}>
+                      {pump?.name||"—"} · {pp.date}
+                    </div>
+                    <div style={{color:C.muted,fontSize:11,marginTop:1}}>
+                      UTR: {pp.utr||"—"}
+                      {pp.note && <span> · {pp.note}</span>}
+                    </div>
+                  </div>
+                  {user.role==="owner" && (
+                    <button onClick={async()=>{
+                      if(!window.confirm("Delete payment of "+fmt(pp.amount)+" to "+pump?.name+"?\\nThis will affect pending balance.")) return;
+                      deletePumpPayment(pp.id);
+                    }} style={{background:"none",border:"1px solid "+C.red+"55",borderRadius:6,
+                      color:C.red,fontSize:11,padding:"4px 8px",cursor:"pointer",flexShrink:0,marginLeft:8}}>
+                      🗑 Delete
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* ── BY PUMP VIEW ── */}
       {view==="pumps" && (
