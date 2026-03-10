@@ -2785,30 +2785,79 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
   });
 
   const confirmScanned = async () => {
-    // Deduplicate against already-saved indent numbers
-    const existingNos = new Set(indents.map(i=>String(i.indentNo||"").trim()).filter(Boolean));
-    const dupes = scanResults.filter(r=>r.indentNo && existingNos.has(String(r.indentNo).trim()));
-    if (dupes.length>0) {
-      // Upgrade any previously-saved unconfirmed indents to confirmed
-      const upgraded = [];
-      const updatedIndents = indents.map(i => {
-        const matchesDupe = dupes.some(r => String(r.indentNo).trim() === String(i.indentNo||"").trim());
-        if (matchesDupe && !i.confirmed) {
-          const upd = {...i, confirmed:true, unmatched:false, alertDismissed:false};
-          upgraded.push(upd);
-          return upd;
-        }
-        return i;
-      });
-      if (upgraded.length > 0) {
-        setIndents(updatedIndents);
-        for (const ind of upgraded) await DB.saveIndent(ind);
-        alert("Upgraded " + upgraded.length + " previously-saved indent(s) to confirmed: " + upgraded.map(i=>i.indentNo).join(", "));
+    // ── DEDUP: check scanned indents against already-saved ones ──────────────
+    const existingByNo = new Map(
+      indents.filter(i=>i.indentNo).map(i=>[String(i.indentNo).trim(), i])
+    );
+
+    const exactDupes   = []; // same indent no + same pumpTotal → skip entirely
+    const amountChanged = []; // same indent no but pumpTotal changed → update with alert
+    const unconfirmedUpgrades = []; // same indent no, was unconfirmed → upgrade
+
+    for (const r of (scanResults||[])) {
+      if (!r.indentNo) continue;
+      const existing = existingByNo.get(String(r.indentNo).trim());
+      if (!existing) continue;
+
+      if (!existing.confirmed) {
+        unconfirmedUpgrades.push({ r, existing });
       } else {
-        alert("Already confirmed (skipping): " + dupes.map(r=>r.indentNo).join(", "));
+        const existingTotal = +(existing.pumpTotal||existing.amount||0);
+        const scannedTotal  = +(r.pumpTotal||0);
+        if (Math.round(existingTotal*100) === Math.round(scannedTotal*100)) {
+          exactDupes.push(r); // identical — skip silently
+        } else {
+          amountChanged.push({ r, existing }); // amount differs — ask to update
+        }
       }
     }
-    const fresh = scanResults.filter(r=>!r.indentNo||!existingNos.has(String(r.indentNo).trim()));
+
+    // Handle unconfirmed upgrades silently
+    if (unconfirmedUpgrades.length > 0) {
+      const updatedIndents = indents.map(i => {
+        const match = unconfirmedUpgrades.find(u => u.existing.id === i.id);
+        if (!match) return i;
+        const upd = {...i, confirmed:true, unmatched:false, alertDismissed:false,
+          amount: match.r.pumpTotal||+match.r.amount||0,
+          hsd: +match.r.amount||0, advance: match.r.advance||0,
+          pumpTotal: match.r.pumpTotal||0};
+        return upd;
+      });
+      setIndents(updatedIndents);
+      for (const u of unconfirmedUpgrades) {
+        const upd = updatedIndents.find(i=>i.id===u.existing.id);
+        if (upd) await DB.saveIndent(upd);
+      }
+    }
+
+    // Handle amount-changed duplicates — alert and update
+    for (const { r, existing } of amountChanged) {
+      const oldAmt = +(existing.pumpTotal||existing.amount||0);
+      const newAmt = +(r.pumpTotal||0);
+      const proceed = window.confirm(
+        `⚠️ Indent #${r.indentNo} was already saved on ${existing.date}.\n\n` +
+        `Previous amount: ₹${oldAmt.toLocaleString("en-IN")} (HSD ₹${existing.hsd||existing.amount||0} + Adv ₹${existing.advance||0})\n` +
+        `New amount: ₹${newAmt.toLocaleString("en-IN")} (HSD ₹${+r.amount||0} + Adv ₹${r.advance||0})\n\n` +
+        `Update to new amount?`
+      );
+      if (proceed) {
+        const upd = {...existing,
+          amount: r.pumpTotal||+r.amount||0,
+          hsd: +r.amount||0, advance: r.advance||0,
+          pumpTotal: r.pumpTotal||0,
+          editedBy: user.username, editedAt: nowTs()};
+        setIndents(p => p.map(i => i.id===existing.id ? upd : i));
+        await DB.saveIndent(upd);
+      }
+    }
+
+    // Only process truly fresh indent numbers
+    const allDupeNos = new Set([
+      ...exactDupes.map(r=>String(r.indentNo).trim()),
+      ...amountChanged.map(({r})=>String(r.indentNo).trim()),
+      ...unconfirmedUpgrades.map(({r})=>String(r.indentNo).trim()),
+    ]);
+    const fresh = (scanResults||[]).filter(r => !r.indentNo || !allDupeNos.has(String(r.indentNo).trim()));
     if (fresh.length===0){ setScanResults(null); setScanSheet(false); return; }
 
     // Split fresh into green (confirmed) and alerts (mismatches)
