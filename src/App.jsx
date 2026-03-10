@@ -1071,6 +1071,11 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
   };
 
   const saveNew = async () => {
+    // Validate: driver rate is mandatory
+    if (!f.givenRate || +f.givenRate <= 0) {
+      alert("Driver Rate ₹/MT is mandatory.\nPlease enter the rate before saving.");
+      return;
+    }
     // Validate: if diesel estimate entered, indent number is mandatory
     if ((+f.dieselEstimate||0) > 0 && !f.dieselIndentNo?.trim()) {
       alert("Diesel Indent No is mandatory when Diesel Estimate is entered.\nPlease enter the indent number from the pump slip.");
@@ -1496,7 +1501,15 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
           {locked
             ? <LockedField label="Shree Rate ₹/MT" value={f.frRate} half />
             : <Field label="Shree Rate ₹/MT"  value={f.frRate||""}    onChange={ff("frRate")}    type="number" half />}
-          <Field label="Driver Rate ₹/MT" value={f.givenRate||""} onChange={ff("givenRate")} type="number" half />
+          <div style={{flex:"1 1 45%",minWidth:0,display:"flex",flexDirection:"column",gap:5}}>
+            <label style={{color:(!f.givenRate||+f.givenRate<=0)?C.red:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>
+              Driver Rate ₹/MT {(!f.givenRate||+f.givenRate<=0) && <span style={{fontSize:10}}>*required</span>}
+            </label>
+            <input type="number" value={f.givenRate||""} onChange={e=>ff("givenRate")(e.target.value)}
+              style={{background:C.bg,border:`1.5px solid ${(!f.givenRate||+f.givenRate<=0)?C.red:C.border}`,
+                borderRadius:10,color:C.text,padding:"13px 12px",fontSize:15,outline:"none",
+                width:"100%",boxSizing:"border-box"}} />
+          </div>
         </div>
       )}
       <div style={{display:"flex",gap:10}}>
