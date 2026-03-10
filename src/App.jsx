@@ -2428,7 +2428,7 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance, onSave, onCancel 
     rows.every(r => {
       const t = tripWithBalance.find(x=>x.id===r.tripId);
       return !t || +r.amount <= t.balance;
-    }) && rows.length > 0;
+    }) && rows.length > 0 && remaining === 0;
 
   const handleSave = () => {
     const payments = rows.map(r => {
@@ -2592,6 +2592,11 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance, onSave, onCancel 
         <Btn onClick={handleSave} full color={C.green} disabled={!canSave}>
           ✓ Save {rows.length} Payment{rows.length>1?"s":""} — {fmt(totalAllocated)}
         </Btn>
+        {remaining > 0 && (
+          <div style={{color:C.orange,fontSize:12,textAlign:"center",fontWeight:700}}>
+            ⚠ ₹{remaining.toLocaleString("en-IN")} still unallocated — add more rows or adjust amounts
+          </div>
+        )}
         <Btn onClick={onCancel} full outline color={C.muted}>Cancel</Btn>
       </div>
     </Sheet>
@@ -4278,6 +4283,11 @@ function DriverPayments({trips, driverPays, setDriverPays, vehicles, user, log})
     setSplitSheet(null);
   };
 
+  const deleteDriverPay = async (id) => {
+    setDriverPays(prev=>(prev||[]).filter(p=>p.id!==id));
+    await DB.deleteDriverPay(id);
+  };
+
   const scanGlobal = async (file) => {
     if (!file) return;
     setScanningGlobal(true);
@@ -4449,8 +4459,15 @@ function DriverPayments({trips, driverPays, setDriverPays, vehicles, user, log})
                       </div>
                     )}
                   </div>
-                  <div style={{color:C.muted,fontSize:11,flexShrink:0,marginLeft:8,textAlign:"right"}}>
-                    {p.createdBy||""}
+                  <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:6,flexShrink:0,marginLeft:8}}>
+                    <div style={{color:C.muted,fontSize:11}}>{p.createdBy||""}</div>
+                    {user.role==="owner" && (
+                      <button onClick={()=>{if(window.confirm(`Delete payment of ${fmt(p.amount)} for LR ${p.lrNo}?\nThis will restore the balance.`)) deleteDriverPay(p.id);}}
+                        style={{background:"none",border:`1px solid ${C.red}55`,borderRadius:5,
+                          color:C.red,fontSize:10,padding:"2px 7px",cursor:"pointer"}}>
+                        🗑 Delete
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
@@ -4500,9 +4517,19 @@ function DriverPayments({trips, driverPays, setDriverPays, vehicles, user, log})
           </div>
           {/* Previous payments */}
           {(driverPays||[]).filter(p=>p.tripId===t.id).map(p=>(
-            <div key={p.id} style={{background:C.green+"11",borderRadius:6,padding:"6px 10px",marginBottom:4,display:"flex",justifyContent:"space-between",fontSize:12}}>
+            <div key={p.id} style={{background:C.green+"11",borderRadius:6,padding:"6px 10px",marginBottom:4,
+              display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:12}}>
               <span style={{color:C.muted}}>{p.date} · UTR: {p.utr}</span>
-              <span style={{color:C.green,fontWeight:700}}>{fmt(p.amount)}</span>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                <span style={{color:C.green,fontWeight:700}}>{fmt(p.amount)}</span>
+                {user.role==="owner" && (
+                  <button onClick={()=>{if(window.confirm(`Delete payment of ${fmt(p.amount)}?\nBalance will be restored.`)) deleteDriverPay(p.id);}}
+                    style={{background:"none",border:`1px solid ${C.red}44`,borderRadius:4,
+                      color:C.red,fontSize:10,padding:"1px 6px",cursor:"pointer"}}>
+                    🗑
+                  </button>
+                )}
+              </div>
             </div>
           ))}
           {t.balance>0&&<Btn onClick={()=>{setPaySheet(t);setPf({amount:String(t.balance),utr:"",date:today(),notes:""});}} full sm color={C.green}>+ Record Payment</Btn>}

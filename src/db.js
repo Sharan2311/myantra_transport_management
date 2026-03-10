@@ -264,6 +264,7 @@ export const DB = {
   // Driver Payments
   getDriverPays:  () => fetchAll('mye_driver_payments', driverPayFromDB),
   saveDriverPay:  p  => upsertOne('mye_driver_payments', driverPayToDB, p),
+  deleteDriverPay: id => deleteOne('mye_driver_payments', id),
 
   // Expenses
   getExpenses:    () => fetchAll('mye_expenses', expenseFromDB),
