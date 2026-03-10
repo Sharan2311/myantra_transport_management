@@ -2841,19 +2841,6 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
     setIndents(p=>[...allNew,...(p||[])]);
     for (const ind of allNew) await DB.saveIndent(ind);
 
-    // Add pump advance to trip advance for green matched entries
-    const tripsToUpdate = green.filter(r=>r.advance>0);
-    if (tripsToUpdate.length>0){
-      const updatedTrips = trips.map(t=>{
-        const match = tripsToUpdate.find(r=>r.trip.id===t.id);
-        if (!match) return t;
-        const updated={...t, advance:(t.advance||0)+match.advance, editedBy:user.username, editedAt:nowTs()};
-        DB.saveTrip(updated);
-        return updated;
-      });
-      setTrips(updatedTrips);
-    }
-
     for (const r of green) log("DIESEL CONFIRM", r.truckNo+" IndentNo:"+r.indentNo+" Rs."+r.amount);
 
     setScanResults(null);
@@ -4320,10 +4307,13 @@ function DriverPayments({trips, driverPays, setDriverPays, vehicles, user, log})
     setPaySheet(null); setPf({amount:"",utr:"",date:today(),paidTo:"",notes:""});
   };
 
-  const saveMultiPayment = (payments) => {
+  const saveMultiPayment = async (payments) => {
     const withMeta = payments.map(p => ({...p, createdBy:user.username, createdAt:nowTs()}));
     setDriverPays(prev=>[...(prev||[]),...withMeta]);
-    withMeta.forEach(p => log("DRIVER PAYMENT",`LR:${p.lrNo} ${p.truckNo} — ${fmt(p.amount)} UTR:${p.utr}`));
+    for (const p of withMeta) {
+      log("DRIVER PAYMENT",`LR:${p.lrNo} ${p.truckNo} — ${fmt(p.amount)} UTR:${p.utr}`);
+      await DB.saveDriverPay(p);
+    }
     setSplitSheet(null);
   };
 

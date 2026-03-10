@@ -26,22 +26,29 @@ exports.handler = async (event) => {
           role: "user",
           content: [
             { type: "image", source: { type: "base64", media_type: mediaType || "image/jpeg", data: base64 } },
-            { type: "text", text: `Extract payment details from this screenshot.
-Look carefully for LR numbers — they may appear as "CEM 2717 2720" or "LR 47 48" meaning MULTIPLE LRs in one payment.
+            { type: "text", text: `Extract payment details from this NEFT/bank transfer screenshot.
 
-IMPORTANT RULES:
-- For the reference number: use ONLY the "Reference Number" field (e.g. HDFCH00853198382). Do NOT use the Transaction ID.
-- For paidTo: use the recipient name only (e.g. "LATA", "BASAVANA GOUDA")
+LR NUMBER EXTRACTION — CRITICAL:
+The payment description may show LR numbers like "CEM 2724 2725" or "CEM 2707 2708 2714".
+"CEM" is a prefix meaning Cement — the actual LR numbers are the SPACE-SEPARATED NUMBERS after CEM.
+So "CEM 2724 2725" = TWO LR numbers: ["2724", "2725"]
+And "CEM 2707 2708 2714" = THREE LR numbers: ["2707", "2708", "2714"]
+Each number is a SEPARATE element in the array. Never combine them into one string.
+
+OTHER RULES:
+- referenceNo: use ONLY the "Reference Number" field value. Do NOT use the "Transaction ID" or "HDFC Transaction ID".
+- paidTo: recipient name only (e.g. "BASAVANA GOUDA", "LATA")
+- amount: numeric value only, no ₹ or commas
+- date: YYYY-MM-DD format
 
 Respond ONLY with JSON, no markdown:
 {
-  "paidTo": "recipient name only",
-  "referenceNo": "Reference Number value only (NOT Transaction ID)",
-  "amount": "total numeric amount only",
-  "date": "date in YYYY-MM-DD format if visible",
-  "lrNumbers": ["list", "of", "LR", "numbers", "found"]
-}
-If only one LR found, lrNumbers should be a single-element array. If no LR numbers visible, use empty array.` }
+  "paidTo": "recipient name",
+  "referenceNo": "Reference Number only",
+  "amount": 20900,
+  "date": "2026-03-10",
+  "lrNumbers": ["2724", "2725"]
+}` }
           ]
         }]
       })
@@ -51,6 +58,14 @@ If only one LR found, lrNumbers should be a single-element array. If no LR numbe
     const text = data.content?.[0]?.text || "";
     const clean = text.replace(/```json|```/g, "").trim();
     const parsed = JSON.parse(clean);
+
+    // Post-process: if any lrNumbers element contains spaces, split it further
+    // e.g. ["2724 2725"] → ["2724", "2725"]
+    if (Array.isArray(parsed.lrNumbers)) {
+      parsed.lrNumbers = parsed.lrNumbers
+        .flatMap(lr => String(lr).trim().split(/\s+/))
+        .filter(Boolean);
+    }
 
     return {
       statusCode: 200,
