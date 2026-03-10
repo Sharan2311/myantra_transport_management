@@ -1957,6 +1957,7 @@ function DieselAlertBanner({ alerts, trips, indents, user, onLink, onDismiss, on
   const [expandedId, setExpandedId] = useState(null);
   const [linkTripId,  setLinkTripId]  = useState("");
   const [dismissReason, setDismissReason] = useState("");
+  const [lrSearch, setLrSearch] = useState("");
 
   const sendWhatsApp = (alert) => {
     const type = alert.truckMismatch ? "TRUCK MISMATCH" : alert.amountMismatch ? "AMOUNT MISMATCH" : "NO TRIP FOUND";
@@ -2017,7 +2018,14 @@ function DieselAlertBanner({ alerts, trips, indents, user, onLink, onDismiss, on
               <div style={{color:C.red,fontWeight:800,fontSize:16}}>
                 ₹{(alert.amount||0).toLocaleString("en-IN")}
               </div>
-              <div style={{color:C.muted,fontSize:12}}>{expandedId===alert.id?"▲":"▼"}</div>
+              {user.role==="owner" && (
+                <button onClick={e=>{e.stopPropagation();if(window.confirm(`Delete alert for ${alert.truckNo}?\nThis cannot be undone.`)){onDelete(alert.id);}}}
+                  style={{background:"none",border:"1px solid "+C.red+"44",borderRadius:5,color:C.red,
+                    fontSize:10,padding:"2px 6px",cursor:"pointer",marginTop:3,display:"block",width:"100%"}}>
+                  🗑 Delete
+                </button>
+              )}
+              <div style={{color:C.muted,fontSize:12,marginTop:2}}>{expandedId===alert.id?"▲":"▼"}</div>
             </div>
           </div>
 
@@ -2031,32 +2039,44 @@ function DieselAlertBanner({ alerts, trips, indents, user, onLink, onDismiss, on
                 📱 Send WhatsApp Alert to Owner
               </Btn>
 
-              {/* Link to trip */}
+              {/* Link to trip — searchable by LR */}
               <div style={{background:C.bg,borderRadius:8,padding:"10px 12px"}}>
                 <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:6}}>
                   LINK TO A TRIP (clears alert)
                 </div>
-                <select value={linkTripId}
-                  onChange={e=>setLinkTripId(e.target.value)}
-                  style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,
-                    color:C.text,padding:"8px 10px",fontSize:13,width:"100%",marginBottom:8}}>
-                  <option value="">— Select trip —</option>
-                  {trips.filter(t => {
+                <input
+                  value={lrSearch} onChange={e=>{setLrSearch(e.target.value);setLinkTripId("");}}
+                  placeholder="Search by LR, truck, destination…"
+                  style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,
+                    color:C.text,padding:"8px 10px",fontSize:13,width:"100%",boxSizing:"border-box",
+                    outline:"none",marginBottom:6}} />
+                {(() => {
+                  const q = lrSearch.trim().toLowerCase();
+                  const eligible = trips.filter(t => {
                     if (t.status==="Paid") return false;
-                    // Hide trips that already have a confirmed indent (not an alert)
                     const alreadyLinked = indents.some(i =>
-                      i.tripId === t.id && i.confirmed &&
-                      !i.unmatched && !i.truckMismatch && !i.amountMismatch &&
-                      i.id !== alert.id
+                      i.tripId===t.id && i.confirmed && !i.unmatched && !i.truckMismatch && !i.amountMismatch && i.id!==alert.id
                     );
                     return !alreadyLinked;
-                  }).map(t=>(
-                    <option key={t.id} value={t.id}>
-                      {t.truckNo} · LR {t.lrNo||"—"} → {t.to} · {t.date}
-                    </option>
-                  ))}
-                </select>
-                <Btn onClick={()=>{if(linkTripId){onLink(alert.id,linkTripId);setExpandedId(null);setLinkTripId("");}}}
+                  });
+                  const filtered = q ? eligible.filter(t=>(t.lrNo+t.truckNo+t.to+t.date).toLowerCase().includes(q)) : eligible.slice(0,6);
+                  if (!filtered.length) return <div style={{color:C.muted,fontSize:12,textAlign:"center",padding:6}}>No trips found</div>;
+                  return (
+                    <div style={{maxHeight:160,overflowY:"auto",display:"flex",flexDirection:"column",gap:4,marginBottom:8}}>
+                      {filtered.map(t=>(
+                        <div key={t.id} onClick={()=>{setLinkTripId(t.id);setLrSearch(`${t.truckNo} · LR ${t.lrNo||"—"} → ${t.to}`);}}
+                          style={{padding:"7px 10px",borderRadius:7,cursor:"pointer",fontSize:12,
+                            background:linkTripId===t.id?C.green+"22":C.card,
+                            border:`1px solid ${linkTripId===t.id?C.green:C.border}`,
+                            color:linkTripId===t.id?C.green:C.text}}>
+                          <b>{t.truckNo}</b> · LR <b>{t.lrNo||"—"}</b> → {t.to}
+                          <span style={{color:C.muted,marginLeft:6,fontSize:11}}>{t.date}</span>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
+                <Btn onClick={()=>{if(linkTripId){onLink(alert.id,linkTripId);setExpandedId(null);setLinkTripId("");setLrSearch("");}}}
                   full color={C.green} sm disabled={!linkTripId}>
                   ✓ Link to Selected Trip
                 </Btn>
@@ -2322,6 +2342,63 @@ function PumpSlipScanner({ pumps, trips, user, onResults }) {
       <input ref={inputRef} type="file" accept="image/*" style={{display:"none"}}
         onChange={e=>{ if(e.target.files[0]) handleFile(e.target.files[0]); e.target.value=""; }} />
     </div>
+  );
+}
+
+// ─── SCAN PAYMENT IMAGE ───────────────────────────────────────────────────────
+function ScanPaymentBtn({ onResult }) {
+  const [scanning, setScanning] = useState(false);
+  const inputRef = React.useRef();
+
+  const scan = async (file) => {
+    if (!file) return;
+    setScanning(true);
+    try {
+      const b64 = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result.split(",")[1]);
+        r.onerror = rej;
+        r.readAsDataURL(file);
+      });
+      const resp = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 300,
+          messages: [{
+            role: "user",
+            content: [
+              { type:"image", source:{type:"base64", media_type:file.type||"image/jpeg", data:b64} },
+              { type:"text",  text:'Extract from this payment screenshot/receipt. Respond ONLY with JSON, no markdown:\n{"paidTo":"name of recipient","referenceNo":"UTR/transaction/reference ID","amount":"numeric amount only"}' }
+            ]
+          }]
+        })
+      });
+      const data = await resp.json();
+      const text = data.content?.[0]?.text || "";
+      const clean = text.replace(/```json|```/g,"").trim();
+      const parsed = JSON.parse(clean);
+      onResult(parsed);
+    } catch(e) {
+      alert("Could not read payment image. Please fill manually.");
+    } finally {
+      setScanning(false);
+      if (inputRef.current) inputRef.current.value = "";
+    }
+  };
+
+  return (
+    <>
+      <input ref={inputRef} type="file" accept="image/*" capture="environment"
+        style={{display:"none"}} onChange={e=>scan(e.target.files[0])} />
+      <button onClick={()=>inputRef.current.click()} disabled={scanning}
+        style={{background:scanning?"#333":C.purple||"#7c3aed",border:"none",borderRadius:8,
+          color:"#fff",fontSize:12,fontWeight:700,padding:"8px 14px",cursor:"pointer",
+          display:"flex",alignItems:"center",gap:6,opacity:scanning?0.7:1}}>
+        {scanning ? "⏳ Reading…" : "📷 Scan Payment"}
+      </button>
+    </>
   );
 }
 
@@ -2801,7 +2878,14 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
                       payPumpId===p.id ? (
                         <div style={{background:C.bg,borderRadius:10,padding:"12px 14px",
                           display:"flex",flexDirection:"column",gap:10}}>
-                          <div style={{color:C.text,fontWeight:700,fontSize:13}}>Record NEFT Payment</div>
+                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                            <div style={{color:C.text,fontWeight:700,fontSize:13}}>Record NEFT Payment</div>
+                            <ScanPaymentBtn onResult={r=>{
+                              if(r.amount) setPayAmt(String(r.amount).replace(/[^0-9.]/g,""));
+                              if(r.referenceNo) setPayUtr(r.referenceNo);
+                              if(r.paidTo) setPayNote(r.paidTo);
+                            }} />
+                          </div>
                           <div style={{display:"flex",gap:8}}>
                             <Field label="Amount ₹" value={payAmt} onChange={setPayAmt} type="number" half
                               note={`Pending: ${fmt(p.pending)}`} />
@@ -3823,8 +3907,14 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
       {sheet && (
         <Sheet title="Record Payment from Shree" onClose={()=>{setSheet(false);setF(blankP);}}>
           <div style={{display:"flex",flexDirection:"column",gap:13}}>
-            <div style={{background:C.blue+"11",border:`1px solid ${C.blue}33`,borderRadius:10,padding:"9px 12px",color:C.muted,fontSize:12}}>
-              Fill from the payment advice PDF from Shree Cement. Shortage deductions can be linked to specific trucks for recovery tracking.
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div style={{background:C.blue+"11",border:`1px solid ${C.blue}33`,borderRadius:10,padding:"9px 12px",color:C.muted,fontSize:12,flex:1,marginRight:8}}>
+                Fill from the payment advice PDF from Shree Cement.
+              </div>
+              <ScanPaymentBtn onResult={r=>{
+                if(r.amount) setF(p=>({...p,totalBill:String(r.amount).replace(/[^0-9.]/g,"")}));
+                if(r.referenceNo) setF(p=>({...p,invoiceNo:r.referenceNo}));
+              }} />
             </div>
             <div style={{display:"flex",gap:10}}>
               <Field label="Invoice No" value={f.invoiceNo} onChange={ff("invoiceNo")} placeholder="SMYE107026…" half />
@@ -4045,6 +4135,11 @@ function DriverPayments({trips, driverPays, setDriverPays, vehicles, user, log})
               <div style={{color:C.muted}}>{paySheet.from}→{paySheet.to} · {paySheet.qty}MT</div>
               <div style={{color:C.accent,fontWeight:800,fontSize:16,marginTop:4}}>Balance: {fmt(paySheet.balance)}</div>
             </div>
+            <ScanPaymentBtn onResult={r=>{
+              if(r.amount) setPf(p=>({...p,amount:String(r.amount).replace(/[^0-9.]/g,"")}));
+              if(r.referenceNo) setPf(p=>({...p,utr:r.referenceNo}));
+              if(r.paidTo) setPf(p=>({...p,notes:r.paidTo}));
+            }} />
             <Field label="Amount ₹" value={pf.amount} onChange={pff("amount")} type="number" />
             <div style={{display:"flex",gap:10}}>
               <Field label="UTR / Reference" value={pf.utr} onChange={pff("utr")} half />
