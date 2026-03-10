@@ -976,7 +976,7 @@ Rules:
 }
 
 // ─── TRIPS ────────────────────────────────────────────────────────────────────
-function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, log}) {
+function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, log, driverPays}) {
   const isIn = tripType === "inbound";
   const ac   = isIn ? C.teal : C.accent;
 
@@ -1216,6 +1216,8 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
         const tripIndents = indents.filter(i => i.tripId===t.id && i.confirmed);
         const confirmedDiesel = tripIndents.reduce((s,i) => s+(i.amount||0), 0);
         const calc = calcNet(t, v, confirmedDiesel > 0 ? confirmedDiesel : null);
+        const paidSoFar = (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
+        const remaining = Math.max(0, calc.net - paidSoFar);
         return (
           <div key={t.id} style={{background:C.card,borderRadius:14,overflow:"hidden",borderLeft:`4px solid ${SC(t.status)}`,marginBottom:6}}>
             <div style={{padding:"13px 14px 10px"}}>
@@ -1241,17 +1243,20 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
               </div>
             </div>
 
-            {/* Stats strip */}
             <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",borderTop:`1px solid ${C.border}`,background:C.card2}}>
               {[
-                {l:"MT",     v:t.qty,                          c:C.text},
+                {l:"MT",     v:t.qty,                           c:C.text},
                 {l:"Billed", v:fmt(calc.billed||t.qty*t.frRate),c:C.blue},
-                {l:"Owed",   v:fmt(calc.gross),                c:C.orange},
-                {l:"Net Pay",v:fmt(calc.net),                  c:calc.net>=0?C.green:C.red},
+                {l:"Owed",   v:fmt(calc.gross),                 c:C.orange},
+                {l: paidSoFar>0 ? "Remaining" : "Net Pay",
+                 v: fmt(paidSoFar>0 ? remaining : calc.net),
+                 c: paidSoFar>0 ? (remaining===0 ? C.green : C.accent) : (calc.net>=0?C.green:C.red),
+                 sub: paidSoFar>0 ? `paid ${fmt(paidSoFar)}` : null},
               ].map(x => (
                 <div key={x.l} style={{padding:"8px 0",textAlign:"center",borderRight:`1px solid ${C.border}`}}>
                   <div style={{color:x.c,fontWeight:700,fontSize:12}}>{x.v}</div>
                   <div style={{color:C.muted,fontSize:9}}>{x.l}</div>
+                  {x.sub && <div style={{color:C.muted,fontSize:9}}>{x.sub}</div>}
                 </div>
               ))}
             </div>
