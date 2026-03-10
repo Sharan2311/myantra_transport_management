@@ -2360,25 +2360,13 @@ function ScanPaymentBtn({ onResult }) {
         r.onerror = rej;
         r.readAsDataURL(file);
       });
-      const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      const resp = await fetch("/.netlify/functions/scan-payment", {
         method: "POST",
         headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 300,
-          messages: [{
-            role: "user",
-            content: [
-              { type:"image", source:{type:"base64", media_type:file.type||"image/jpeg", data:b64} },
-              { type:"text",  text:'Extract from this payment screenshot/receipt. Respond ONLY with JSON, no markdown:\n{"paidTo":"name of recipient","referenceNo":"UTR/transaction/reference ID","amount":"numeric amount only"}' }
-            ]
-          }]
-        })
+        body: JSON.stringify({ base64: b64, mediaType: file.type||"image/jpeg" })
       });
-      const data = await resp.json();
-      const text = data.content?.[0]?.text || "";
-      const clean = text.replace(/```json|```/g,"").trim();
-      const parsed = JSON.parse(clean);
+      const parsed = await resp.json();
+      if (parsed.error) throw new Error(parsed.error);
       onResult(parsed);
     } catch(e) {
       alert("Could not read payment image. Please fill manually.");
