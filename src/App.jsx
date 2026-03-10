@@ -2800,7 +2800,9 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
     const fresh = scanResults.filter(r=>!r.indentNo||!existingNos.has(String(r.indentNo).trim()));
     if (fresh.length===0){ setScanResults(null); setScanSheet(false); return; }
 
-    // Save confirmed indents (green only)
+    // Split fresh into green (confirmed) and alerts (mismatches)
+    const green  = fresh.filter(r=> r.trip && !r.truckMismatch && !r.amountMismatch && !r.indentMismatch);
+    const alerts = fresh.filter(r=>!r.trip ||  r.truckMismatch ||  r.amountMismatch ||  r.indentMismatch);
     // amount = pumpTotal (HSD + Advance) — this is the full credit due back from pump
     // hsd = HSD only (fuel portion)
     const newIndents = green.map(r=>({
