@@ -4113,6 +4113,15 @@ function DriverPayments({trips, driverPays, setDriverPays, vehicles, user, log})
         {id:"history", label:`History (${allPays.length})`,    color:C.muted},
       ]} active={filter} onSelect={setFilter} />
 
+      {/* Search bar for trip tabs */}
+      {filter!=="history" && (
+        <input value={histLR} onChange={e=>setHistLR(e.target.value)}
+          placeholder="🔍 Search LR or truck number…"
+          style={{background:C.card,border:`1.5px solid ${histLR?C.accent:C.border}`,borderRadius:10,
+            color:C.text,padding:"10px 14px",fontSize:13,outline:"none",
+            width:"100%",boxSizing:"border-box"}} />
+      )}
+
       {/* ── PAYMENT HISTORY TAB ── */}
       {filter==="history" && (
         <div style={{display:"flex",flexDirection:"column",gap:10}}>
@@ -4195,7 +4204,10 @@ function DriverPayments({trips, driverPays, setDriverPays, vehicles, user, log})
       )}
 
       {/* ── TRIP LIST (unpaid / paid / all) ── */}
-      {filter!=="history" && (filter==="unpaid"?unpaidTrips:filter==="paid"?paidTrips:tripWithBalance).map(t=>(
+      {filter!=="history" && (()=>{
+        const base = filter==="unpaid"?unpaidTrips:filter==="paid"?paidTrips:tripWithBalance;
+        const shown = histLR ? base.filter(t=>(t.lrNo+t.truckNo).toLowerCase().includes(histLR.toLowerCase())) : base;
+        return shown.map(t=>(
         <div key={t.id} style={{background:C.card,borderRadius:14,padding:"14px 16px",borderLeft:`4px solid ${t.balance>0?C.accent:C.green}`,marginBottom:8}}>
           <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
             <div>
@@ -4239,7 +4251,8 @@ function DriverPayments({trips, driverPays, setDriverPays, vehicles, user, log})
           ))}
           {t.balance>0&&<Btn onClick={()=>{setPaySheet(t);setPf({amount:String(t.balance),utr:"",date:today(),notes:""});}} full sm color={C.green}>+ Record Payment</Btn>}
         </div>
-      ))}
+      ));
+      })()}
 
       {paySheet && (
         <Sheet title={`Pay Driver — ${paySheet.truckNo}`} onClose={()=>setPaySheet(null)}>
