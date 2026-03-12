@@ -3930,384 +3930,782 @@ function Employees({employees, setEmployees, user, log}) {
   );
 }
 
-// ─── PAYMENTS FROM SHREE ──────────────────────────────────────────────────────
-// Shortage in payment advice = Shree deducts for weight lost in transit
-// We record which truck caused it → auto-adds to vehicle's shortage recovery due
+
+// ─── SHREE PAYMENTS & BILLING ──────────────────────────────────────────────────
+// PDF scan → AI extracts LR-wise data → matches trips → marks Billed / Paid
+// Shortage in payment advice = Shree deducts for cement lost in transit
 function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles, gstReleases, setGstReleases, expenses, setExpenses, user, log}) {
-  const [view,     setView]     = useState("list");
-  const [sheet,    setSheet]    = useState(false);
-  const [gstSheet, setGstSheet] = useState(false);
 
-  // Shortage entries linked to vehicles (for recovery tracking)
-  const blankP = {
-    invoiceNo:"", date:today(), totalBill:"", tds:"", gstHold:"",
-    // shortage: can have multiple trucks in one advice
-    shortageLines:[{truckNo:"", lrNo:"", shortMT:"", rate:"", amount:""}],
-    otherDeduct:"", otherDeductLabel:"", paid:"", utr:"",
+  // ── sub-tab state ──────────────────────────────────────────────────────────
+  const [activeTab,        setActiveTab]        = useState("overview");
+  const [scanResult,       setScanResult]       = useState(null);
+  const [scanning,         setScanning]         = useState(false);
+  const [scanError,        setScanError]        = useState(null);
+  const [showAlert,        setShowAlert]        = useState(true);
+  const [newExp,           setNewExp]           = useState({tripId:"", label:"", amount:""});
+
+  // ── helpers ────────────────────────────────────────────────────────────────
+  const fmtINR = n => Number(n||0).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2});
+  const parseDD = s => {
+    if(!s) return "";
+    const p = s.split(/[.\-\/]/);
+    if(p.length===3) return `${p[2]}-${p[1].padStart(2,"0")}-${p[0].padStart(2,"0")}`;
+    return s;
   };
-  const [f, setF] = useState(blankP);
-  const ff = k => v => setF(p=>({...p,[k]:v}));
 
-  // Shortage line helpers
-  const addShortLine  = () => setF(p=>({...p, shortageLines:[...p.shortageLines, {truckNo:"",lrNo:"",shortMT:"",rate:"",amount:""}]}));
-  const updShortLine  = (i,k,v) => setF(p=>{
-    const lines = p.shortageLines.map((l,idx)=>{
-      if(idx!==i) return l;
-      const updated = {...l,[k]:v};
-      if(k==="shortMT"||k==="rate") updated.amount = String((+updated.shortMT||0)*(+updated.rate||0));
-      return updated;
+  // ── shortages across all payment advices ──────────────────────────────────
+  const allShortages = (payments||[]).flatMap(p =>
+    (p.shortages||[]).map(s=>({...s, utr:p.utr, paymentDate:p.paymentDate||p.date}))
+  );
+
+  // ── shree-specific invoices (trips that have been billed to Shree) ─────────
+  const shreeInvoices = useMemo(() => {
+    const map = {};
+    (trips||[]).filter(t=>t.invoiceNo).forEach(t => {
+      if(!map[t.invoiceNo]) map[t.invoiceNo] = {
+        invoiceNo:t.invoiceNo, invoiceDate:t.invoiceDate, totalAmt:0, trips:[], status:t.paymentDate?"paid":"billed"
+      };
+      map[t.invoiceNo].trips.push(t);
+      map[t.invoiceNo].totalAmt += Number(t.billedToShree||0);
+      if(t.paymentDate) map[t.invoiceNo].status = "paid";
     });
-    return {...p, shortageLines:lines};
-  });
-  const delShortLine  = i => setF(p=>({...p, shortageLines:p.shortageLines.filter((_,idx)=>idx!==i)}));
+    return Object.values(map);
+  }, [trips]);
 
-  const totalShortage = f.shortageLines.reduce((s,l)=>s+(+l.amount||0),0);
-  const totalDeduct   = (+f.tds||0) + (+f.gstHold||0) + totalShortage + (+f.otherDeduct||0);
-  const netPaid       = Math.max(0, (+f.totalBill||0) - totalDeduct);
+  // ── trip expenses ──────────────────────────────────────────────────────────
+  const tripExps = tid => ((expenses||{})[tid]||[]).reduce((s,e)=>s+Number(e.amount||0),0);
+  const tripProfit = t => {
+    const income = Number(t.paidAmount||t.billedToShree||0);
+    const shortage = t.shortage ? Number(t.shortage.deduction||0) : 0;
+    return income - shortage - tripExps(t.id);
+  };
 
-  // GST tracking
-  const totalGstHeld     = payments.reduce((s,p)=>s+(p.gstHold||p.hold||0),0);
-  const totalGstReleased = (gstReleases||[]).reduce((s,r)=>s+(r.amount||0),0);
-  const gstOutstanding   = totalGstHeld - totalGstReleased;
-
-  const blankG = {date:today(), invoiceRef:"", amount:"", utr:"", notes:""};
-  const [gf, setGf] = useState(blankG);
-  const gff = k => v => setGf(p=>({...p,[k]:v}));
-
-  const savePayment = () => {
-    const finalPaid = +f.paid || netPaid;
-    const p = {
-      id:uid(), invoiceNo:f.invoiceNo, date:f.date,
-      totalBill:+f.totalBill, tds:+f.tds, gstHold:+f.gstHold, hold:+f.gstHold,
-      shortageLines:f.shortageLines.filter(l=>+l.amount>0),
-      shortageTotal:totalShortage,
-      otherDeduct:+f.otherDeduct, otherDeductLabel:f.otherDeductLabel,
-      paid:finalPaid, utr:f.utr,
-      createdBy:user.username, createdAt:nowTs(),
-    };
-    setPayments(prev=>[...(prev||[]),p]);
-
-    // Mark trips as Paid
-    setTrips(prev=>prev.map(t=>t.invoiceNo===f.invoiceNo?{...t,status:"Paid",paymentStatus:"Paid"}:t));
-
-    // Add shortage to each vehicle's shortage due (vehicle.shortageOwed)
-    if(totalShortage>0) {
-      f.shortageLines.filter(l=>+l.amount>0 && l.truckNo).forEach(l=>{
-        setVehicles(prev=>prev.map(v=>v.truckNo===l.truckNo
-          ? {...v, shortageOwed:(v.shortageOwed||0)+(+l.amount)}
-          : v));
+  // ── real PDF scan via Netlify function ─────────────────────────────────────
+  const handleScan = async (file, scanType) => {
+    if(!file) return;
+    setScanning(true);
+    setScanResult(null);
+    setScanError(null);
+    try {
+      const base64 = await new Promise((res,rej)=>{
+        const r = new FileReader();
+        r.onload = ()=>res(r.result.split(",")[1]);
+        r.onerror = ()=>rej(new Error("File read failed"));
+        r.readAsDataURL(file);
       });
-      // Also record as an expense
-      const e = {id:uid(), date:f.date, label:`Shortage — Invoice ${f.invoiceNo}`,
-        amount:totalShortage, category:"Shortage",
-        notes:f.shortageLines.filter(l=>+l.amount>0).map(l=>`${l.truckNo}:${l.shortMT}MT`).join(", "),
-        createdBy:user.username, createdAt:nowTs()};
-      setExpenses(prev=>[e,...(prev||[])]);
+      const mediaType = file.type || "application/pdf";
+      const resp = await fetch("/.netlify/functions/scan-shree", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({base64, mediaType, scanType}),
+      });
+      const data = await resp.json();
+      if(data.error) { setScanError(data.error); }
+      else { setScanResult({...data, type:scanType}); }
+    } catch(e) {
+      setScanError(e.message);
+    } finally {
+      setScanning(false);
     }
-    // Record other deduction as expense
-    if(+f.otherDeduct>0 && f.otherDeductLabel) {
-      const e = {id:uid(), date:f.date, label:f.otherDeductLabel,
-        amount:+f.otherDeduct, category:"Other",
-        notes:`Deducted in invoice ${f.invoiceNo}`,
-        createdBy:user.username, createdAt:nowTs()};
-      setExpenses(prev=>[e,...(prev||[])]);
-    }
-
-    log("PAYMENT",`Invoice ${f.invoiceNo} — Paid ${fmt(finalPaid)} | TDS ${fmt(+f.tds)} | GST ${fmt(+f.gstHold)} | Shortage ${fmt(totalShortage)} | UTR:${f.utr}`);
-    setF(blankP); setSheet(false);
   };
 
-  const saveGst = () => {
-    const r = {...gf, id:uid(), amount:+gf.amount, createdBy:user.username, createdAt:nowTs()};
-    setGstReleases(prev=>[...(prev||[]),r]);
-    log("GST RELEASE",`${fmt(+gf.amount)} · UTR:${gf.utr} · Ref:${gf.invoiceRef}`);
-    setGf(blankG); setGstSheet(false);
+  // ── apply invoice scan → mark trips Billed ────────────────────────────────
+  const applyInvoiceScan = () => {
+    if(!scanResult || scanResult.type!=="invoice") return;
+    const invNo    = scanResult.invoiceNo;
+    const invDate  = parseDD(scanResult.invoiceDate);
+    const scTrips  = scanResult.trips||[];
+    setTrips(prev => prev.map(t => {
+      const match = scTrips.find(st =>
+        st.lrNo === t.lr && Math.abs(Number(st.frtAmt||0) - Number(t.billedToShree||0)) < 2
+      );
+      if(match) return {...t, invoiceNo:invNo, invoiceDate:invDate, status:"billed"};
+      return t;
+    }));
+    log && log(`Invoice ${invNo} scanned — trips marked Billed`);
+    setScanResult(null);
   };
 
+  // ── apply payment scan → mark trips Paid + flag shortages ─────────────────
+  const applyPaymentScan = () => {
+    if(!scanResult || scanResult.type!=="payment") return;
+    const utr     = scanResult.utr;
+    const pDate   = parseDD(scanResult.paymentDate);
+    const invList = scanResult.invoices||[];
+    const shorts  = scanResult.shortages||[];
+
+    // mark trips paid
+    setTrips(prev => prev.map(t => {
+      if(invList.some(i=>i.invoiceNo===t.invoiceNo)) {
+        const short = shorts.find(s=>s.lrNo===t.lr);
+        return {
+          ...t,
+          paidAmount: Number(t.billedToShree||0),
+          paymentDate: pDate,
+          utr,
+          status:"paid",
+          shortage: short ? {tonnes:Number(short.tonnes||0), deduction:Number(short.deduction||0)} : t.shortage,
+        };
+      }
+      return t;
+    }));
+
+    // save payment advice record
+    const pa = {
+      id:"PA"+Date.now(),
+      utr, paymentDate:pDate,
+      totalPaid:  Number(scanResult.totalPaid||0),
+      totalBilled:Number(scanResult.totalBilled||0),
+      tdsDeducted:Number(scanResult.tdsDeducted||0),
+      holdAmount: Number(scanResult.holdAmount||0),
+      invoices: invList,
+      shortages: shorts,
+      penalties: scanResult.penalties||[],
+    };
+    setPayments(prev=>[...(prev||[]), pa]);
+
+    // update vehicle shortage owed
+    if(shorts.length>0 && setVehicles) {
+      setVehicles(prev=>(prev||[]).map(v => {
+        const truckShorts = shorts.filter(s=>{
+          const t = (trips||[]).find(t2=>t2.lr===s.lrNo);
+          return t && t.truck===v.regNo;
+        });
+        if(truckShorts.length===0) return v;
+        const add = truckShorts.reduce((s,sh)=>s+Number(sh.deduction||0),0);
+        return {...v, shortageOwed:(Number(v.shortageOwed||0)+add)};
+      }));
+    }
+
+    log && log(`Payment advice UTR ${utr} applied — ${invList.length} invoices paid, ${shorts.length} shortages flagged`);
+    setScanResult(null);
+  };
+
+  // ── shared style tokens ───────────────────────────────────────────────────
+  const TH = {padding:"9px 12px",textAlign:"left",fontSize:11,fontWeight:700,letterSpacing:1,
+              color:"#666",borderBottom:"1px solid #222",whiteSpace:"nowrap"};
+  const TD = {padding:"9px 12px",fontSize:13,color:"#ccc",borderBottom:"1px solid #1a1a1a",verticalAlign:"middle"};
+  const TDR= {...TD,textAlign:"right",fontFamily:"monospace"};
+
+  const StatusPill = ({status, shortage}) => {
+    const cfg = {
+      pending:{bg:"#2a2a2a",col:"#888",txt:"Pending"},
+      billed: {bg:"#1a2a1a",col:"#4caf50",txt:"Billed"},
+      paid:   {bg:"#1a1a2e",col:"#5b8dee",txt:"Paid"},
+    };
+    const c = cfg[status]||cfg.pending;
+    return (
+      <span style={{display:"inline-flex",alignItems:"center",gap:4}}>
+        <span style={{background:c.bg,color:c.col,border:`1px solid ${c.col}40`,
+          borderRadius:4,padding:"2px 8px",fontSize:11,fontWeight:700,letterSpacing:1}}>
+          {c.txt}
+        </span>
+        {shortage && (
+          <span style={{background:"#2a1515",color:"#ff6b6b",border:"1px solid #ff6b6b40",
+            borderRadius:4,padding:"2px 6px",fontSize:11,fontWeight:700}}>⚠ SHORT</span>
+        )}
+      </span>
+    );
+  };
+
+  // ── KPI summary ───────────────────────────────────────────────────────────
+  const totalBilled   = shreeInvoices.reduce((s,i)=>s+i.totalAmt,0);
+  const totalReceived = (payments||[]).reduce((s,p)=>s+Number(p.totalPaid||0),0);
+  const totalHold     = (payments||[]).reduce((s,p)=>s+Number(p.holdAmount||0),0);
+  const totalShortage = allShortages.reduce((s,sh)=>s+Number(sh.deduction||0),0);
+
+  const shreeTrips = (trips||[]).filter(t=>t.billedToShree);
+
+  // ── RENDER ─────────────────────────────────────────────────────────────────
   return (
-    <div style={{display:"flex",flexDirection:"column",gap:12}}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-        <div style={{color:C.green,fontWeight:800,fontSize:16}}>💰 Shree Payments</div>
-        <Btn onClick={()=>setSheet(true)} sm>+ Record</Btn>
-      </div>
+    <div style={{background:"#0d0d0d",minHeight:"100vh",color:"#e0e0e0",fontFamily:"'DM Sans','Segoe UI',sans-serif"}}>
 
-      {/* KPIs */}
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-        <KPI icon="✅" label="Total Received"  value={fmt(payments.reduce((s,p)=>s+(p.paid||0),0))} color={C.green} />
-        <KPI icon="📋" label="TDS Deducted"    value={fmt(payments.reduce((s,p)=>s+(p.tds||0),0))} color={C.red} />
-        <KPI icon="🔒" label="GST Held (total)"value={fmt(totalGstHeld)}      color={C.orange} sub={`Released: ${fmt(totalGstReleased)}`} />
-        <KPI icon="⏳" label="GST Outstanding" value={fmt(gstOutstanding)}    color={gstOutstanding>0?C.accent:C.green} sub="To be released" />
-      </div>
-
-      {/* GST banner */}
-      {gstOutstanding > 0 && (
-        <div style={{background:C.orange+"11",border:`1.5px solid ${C.orange}`,borderRadius:12,padding:"12px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <div>
-            <div style={{color:C.orange,fontWeight:800}}>GST to Release: {fmt(gstOutstanding)}</div>
-            <div style={{color:C.muted,fontSize:12}}>Paste GST release payment advice below</div>
+      {/* ── top header ── */}
+      <div style={{background:"#111",borderBottom:"1px solid #222",padding:"16px 24px",
+        display:"flex",alignItems:"center",justifyContent:"space-between",gap:16}}>
+        <div>
+          <div style={{fontSize:10,letterSpacing:3,color:"#555",marginBottom:3}}>M YANTRA ENTERPRISES</div>
+          <div style={{fontSize:19,fontWeight:800,color:"#fff",letterSpacing:-0.5}}>
+            💰 Shree Cement — Payments &amp; Billing
           </div>
-          <Btn onClick={()=>setGstSheet(true)} sm color={C.orange}>Record Release</Btn>
+        </div>
+        <div style={{display:"flex",gap:24,fontSize:12}}>
+          {[
+            {label:"Total Billed",    val:`₹${fmtINR(totalBilled)}`,    col:"#5b8dee"},
+            {label:"Total Received",  val:`₹${fmtINR(totalReceived)}`,  col:"#4caf50"},
+            {label:"On Hold",         val:`₹${fmtINR(totalHold)}`,      col:"#ff9800"},
+            {label:"Shortage Lost",   val:`₹${fmtINR(totalShortage)}`,  col:"#ff6b6b"},
+          ].map(m=>(
+            <div key={m.label} style={{textAlign:"right"}}>
+              <div style={{fontSize:9,color:"#555",letterSpacing:1}}>{m.label}</div>
+              <div style={{fontWeight:800,color:m.col,fontSize:14}}>{m.val}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* ── shortage alert banner ── */}
+      {showAlert && allShortages.length>0 && (
+        <div style={{background:"#1a0a0a",borderBottom:"1px solid #ff6b6b30",padding:"9px 24px",
+          display:"flex",alignItems:"center",gap:10}}>
+          <span style={{fontSize:15}}>🚨</span>
+          <span style={{color:"#ff6b6b",fontWeight:700,fontSize:12}}>
+            {allShortages.length} Shortage Deduction{allShortages.length>1?"s":""} detected
+          </span>
+          <span style={{color:"#777",fontSize:12}}>— Total: ₹{fmtINR(totalShortage)}</span>
+          <button onClick={()=>setActiveTab("shortages")}
+            style={{marginLeft:8,background:"#ff6b6b15",border:"1px solid #ff6b6b50",color:"#ff6b6b",
+              padding:"2px 10px",borderRadius:4,cursor:"pointer",fontSize:11}}>View</button>
+          <button onClick={()=>setShowAlert(false)}
+            style={{marginLeft:"auto",background:"none",border:"none",color:"#555",cursor:"pointer",fontSize:15}}>✕</button>
         </div>
       )}
 
-      <PillBar items={[
-        {id:"list",  label:"Payments",    color:C.green},
-        {id:"gst",   label:"GST Tracker", color:C.orange},
-        {id:"shortage",label:"Shortage Recovery",color:C.red},
-      ]} active={view} onSelect={setView} />
+      {/* ── sub-tabs ── */}
+      <div style={{background:"#111",borderBottom:"1px solid #1e1e1e",padding:"0 24px",display:"flex"}}>
+        {[
+          {id:"overview",  label:"Overview"},
+          {id:"invoices",  label:"Invoices"},
+          {id:"payments",  label:"Payment Advice"},
+          {id:"shortages", label:"Shortages"},
+          {id:"profit",    label:"Profit"},
+        ].map(t=>(
+          <button key={t.id} onClick={()=>setActiveTab(t.id)} style={{
+            background:"none",border:"none",padding:"12px 18px",cursor:"pointer",
+            fontSize:13,fontWeight:activeTab===t.id?700:400,
+            color:activeTab===t.id?"#fff":"#555",
+            borderBottom:activeTab===t.id?"2px solid #5b8dee":"2px solid transparent",
+            transition:"all 0.15s",
+          }}>{t.label}</button>
+        ))}
+      </div>
 
-      {/* LIST VIEW */}
-      {view==="list" && (
-        <div style={{display:"flex",flexDirection:"column",gap:10}}>
-          {payments.map(p => (
-            <div key={p.id} style={{background:C.card,borderRadius:14,padding:"14px 16px",borderLeft:`4px solid ${C.green}`}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
-                <div>
-                  <div style={{color:C.blue,fontWeight:800,fontSize:14}}>{p.invoiceNo}</div>
-                  <div style={{color:C.muted,fontSize:12}}>{p.date} · UTR: {p.utr}</div>
-                  {p.createdBy&&<div style={{color:ROLES[p.createdBy]?.color||C.muted,fontSize:11}}>by {p.createdBy}</div>}
+      <div style={{padding:24}}>
+
+        {/* ════════════════════════ OVERVIEW ════════════════════════ */}
+        {activeTab==="overview" && (
+          <div>
+            {/* KPI cards */}
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:14,marginBottom:24}}>
+              {[
+                {label:"Shree Trips",       val:shreeTrips.length,                                          col:"#5b8dee"},
+                {label:"Pending Billing",   val:shreeTrips.filter(t=>t.status==="pending").length,          col:"#ff9800"},
+                {label:"Billed / Paid",     val:`${shreeTrips.filter(t=>t.status==="billed").length} / ${shreeTrips.filter(t=>t.status==="paid").length}`, col:"#4caf50"},
+                {label:"Shortage Alerts",   val:allShortages.length,                                        col:"#ff6b6b"},
+              ].map(c=>(
+                <div key={c.label} style={{background:"#151515",border:"1px solid #222",borderRadius:8,padding:"16px 18px"}}>
+                  <div style={{fontSize:10,color:"#555",letterSpacing:1,marginBottom:6}}>{c.label}</div>
+                  <div style={{fontSize:26,fontWeight:800,color:c.col}}>{c.val}</div>
                 </div>
-                <div style={{textAlign:"right"}}>
-                  <div style={{color:C.green,fontWeight:900,fontSize:20}}>{fmt(p.paid)}</div>
-                  <div style={{color:C.muted,fontSize:11}}>received</div>
-                </div>
+              ))}
+            </div>
+
+            {/* ── Scan / Upload ── */}
+            <div style={{background:"#111",border:"1px solid #222",borderRadius:8,padding:18,marginBottom:20}}>
+              <div style={{fontSize:13,fontWeight:700,color:"#fff",marginBottom:12}}>📤 Scan Document with AI</div>
+              <div style={{display:"flex",gap:12}}>
+                {/* Invoice upload */}
+                <label style={{flex:1,border:"1.5px dashed #333",borderRadius:6,padding:"16px",
+                  cursor:"pointer",textAlign:"center",transition:"border-color 0.2s"}}
+                  onMouseEnter={e=>e.currentTarget.style.borderColor="#5b8dee"}
+                  onMouseLeave={e=>e.currentTarget.style.borderColor="#333"}>
+                  <input type="file" accept=".pdf,image/*" style={{display:"none"}}
+                    onChange={e=>{ if(e.target.files[0]) handleScan(e.target.files[0],"invoice"); e.target.value=""; }} />
+                  <div style={{fontSize:22,marginBottom:4}}>📄</div>
+                  <div style={{color:"#aaa",fontWeight:600,fontSize:13}}>Upload Invoice PDF</div>
+                  <div style={{fontSize:11,color:"#444",marginTop:3}}>Extracts LR-wise FRT amounts → marks trips Billed</div>
+                </label>
+                {/* Payment advice upload */}
+                <label style={{flex:1,border:"1.5px dashed #333",borderRadius:6,padding:"16px",
+                  cursor:"pointer",textAlign:"center",transition:"border-color 0.2s"}}
+                  onMouseEnter={e=>e.currentTarget.style.borderColor="#ff9800"}
+                  onMouseLeave={e=>e.currentTarget.style.borderColor="#333"}>
+                  <input type="file" accept=".pdf,image/*" style={{display:"none"}}
+                    onChange={e=>{ if(e.target.files[0]) handleScan(e.target.files[0],"payment"); e.target.value=""; }} />
+                  <div style={{fontSize:22,marginBottom:4}}>💳</div>
+                  <div style={{color:"#aaa",fontWeight:600,fontSize:13}}>Upload Payment Advice</div>
+                  <div style={{fontSize:11,color:"#444",marginTop:3}}>Marks trips Paid + flags shortage deductions</div>
+                </label>
               </div>
-              <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
-                {[
-                  {l:"Total Bill",          v:p.totalBill||0,                     c:C.blue},
-                  {l:"(−) TDS",             v:p.tds||0,                           c:C.red},
-                  {l:"(−) GST Held",        v:p.gstHold||p.hold||0,               c:C.orange},
-                  {l:"(−) Shortage",        v:p.shortageTotal||0,                 c:C.red},
-                  {l:"(−) Other Deduction", v:p.otherDeduct||0,                   c:C.red},
-                ].map(r=>(
-                  <div key={r.l} style={{display:"flex",justifyContent:"space-between",padding:"4px 0",borderBottom:`1px solid ${C.border}22`}}>
-                    <span style={{color:C.muted,fontSize:12}}>{r.l}</span>
-                    <span style={{color:r.v>0?r.c:C.dim,fontWeight:r.v>0?700:400,fontSize:12}}>{r.v>0?fmt(r.v):"—"}</span>
+
+              {/* scanning state */}
+              {scanning && (
+                <div style={{marginTop:16,textAlign:"center",color:"#5b8dee",fontSize:13}}>
+                  <span style={{display:"inline-block",animation:"spin 1s linear infinite",marginRight:8}}>⏳</span>
+                  Scanning document with AI…
+                </div>
+              )}
+
+              {/* scan error */}
+              {scanError && (
+                <div style={{marginTop:12,background:"#1a0808",border:"1px solid #ff6b6b40",
+                  borderRadius:6,padding:"10px 14px",color:"#ff6b6b",fontSize:13}}>
+                  ✕ Scan failed: {scanError}
+                  <button onClick={()=>setScanError(null)}
+                    style={{marginLeft:12,background:"none",border:"none",color:"#ff6b6b",cursor:"pointer"}}>Dismiss</button>
+                </div>
+              )}
+
+              {/* scan result preview */}
+              {scanResult && (
+                <div style={{marginTop:14,background:"#0d1a0d",border:"1px solid #2a4a2a",borderRadius:6,padding:16}}>
+                  <div style={{fontWeight:700,color:"#4caf50",marginBottom:10,fontSize:13}}>
+                    ✅ Scan Complete — {scanResult.type==="invoice"?"Invoice":"Payment Advice"}
                   </div>
-                ))}
-                <div style={{display:"flex",justifyContent:"space-between",padding:"7px 0 0"}}>
-                  <span style={{fontWeight:800}}>Net Received</span>
-                  <span style={{color:C.green,fontWeight:900}}>{fmt(p.paid)}</span>
-                </div>
-              </div>
-              {/* Shortage lines detail */}
-              {(p.shortageLines||[]).filter(l=>+l.amount>0).length>0 && (
-                <div style={{marginTop:8,background:C.red+"08",borderRadius:8,padding:"8px 10px"}}>
-                  <div style={{color:C.red,fontSize:11,fontWeight:700,marginBottom:4}}>Shortage deductions (to recover from vehicles):</div>
-                  {p.shortageLines.filter(l=>+l.amount>0).map((l,i)=>(
-                    <div key={i} style={{display:"flex",justifyContent:"space-between",fontSize:12,padding:"2px 0"}}>
-                      <span style={{color:C.muted}}>{l.truckNo} · LR:{l.lrNo||"—"} · {l.shortMT}MT × ₹{l.rate}</span>
-                      <span style={{color:C.red,fontWeight:700}}>{fmt(+l.amount)}</span>
-                    </div>
-                  ))}
+
+                  {scanResult.type==="invoice" && (
+                    <>
+                      <div style={{fontSize:12,color:"#888",marginBottom:10}}>
+                        Invoice: <b style={{color:"#fff"}}>{scanResult.invoiceNo||"—"}</b>
+                        &nbsp;|&nbsp;Date: {scanResult.invoiceDate||"—"}
+                        &nbsp;|&nbsp;Total: ₹{fmtINR(scanResult.totalAmount)}
+                      </div>
+                      <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                        <thead><tr>
+                          {["LR No","Truck","Qty MT","Rate ₹","FRT Amt ₹","Match"].map(h=>(
+                            <th key={h} style={{...TH,fontSize:10}}>{h}</th>
+                          ))}
+                        </tr></thead>
+                        <tbody>
+                          {(scanResult.trips||[]).map((st,i)=>{
+                            const match = (trips||[]).find(t=>
+                              t.lr===st.lrNo && Math.abs(Number(t.billedToShree||0)-Number(st.frtAmt||0))<2
+                            );
+                            return (
+                              <tr key={i}>
+                                <td style={TD}>{st.lrNo||"—"}</td>
+                                <td style={TD}>{st.truckNo||"—"}</td>
+                                <td style={TDR}>{st.qty}</td>
+                                <td style={TDR}>₹{fmtINR(st.frtRate)}</td>
+                                <td style={TDR}>₹{fmtINR(st.frtAmt)}</td>
+                                <td style={TD}>
+                                  {match
+                                    ? <span style={{color:"#4caf50"}}>✓ {match.id}</span>
+                                    : <span style={{color:"#ff6b6b"}}>✗ Not found</span>}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                      <div style={{marginTop:12,display:"flex",gap:10}}>
+                        <button onClick={applyInvoiceScan}
+                          style={{background:"#4caf50",color:"#000",border:"none",borderRadius:5,
+                            padding:"8px 20px",fontWeight:700,cursor:"pointer",fontSize:13}}>
+                          ✓ Apply — Mark Trips as Billed
+                        </button>
+                        <button onClick={()=>setScanResult(null)}
+                          style={{background:"#222",color:"#888",border:"1px solid #333",borderRadius:5,
+                            padding:"8px 16px",cursor:"pointer",fontSize:13}}>
+                          Discard
+                        </button>
+                      </div>
+                    </>
+                  )}
+
+                  {scanResult.type==="payment" && (
+                    <>
+                      <div style={{fontSize:12,color:"#888",marginBottom:10}}>
+                        UTR: <b style={{color:"#fff"}}>{scanResult.utr||"—"}</b>
+                        &nbsp;|&nbsp;Date: {scanResult.paymentDate||"—"}
+                        &nbsp;|&nbsp;Net Paid: ₹{fmtINR(scanResult.totalPaid)}
+                        &nbsp;|&nbsp;TDS: ₹{fmtINR(scanResult.tdsDeducted)}
+                        &nbsp;|&nbsp;Hold: ₹{fmtINR(scanResult.holdAmount)}
+                      </div>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:12}}>
+                        <div>
+                          <div style={{fontSize:11,color:"#666",marginBottom:6,fontWeight:700}}>INVOICES IN PAYMENT</div>
+                          {(scanResult.invoices||[]).map((inv,i)=>(
+                            <div key={i} style={{fontSize:12,color:"#aaa",padding:"3px 0",fontFamily:"monospace"}}>
+                              {inv.invoiceNo} → ₹{fmtINR(inv.paymentAmt||inv.totalAmt)}
+                            </div>
+                          ))}
+                        </div>
+                        {(scanResult.shortages||[]).length>0 && (
+                          <div>
+                            <div style={{fontSize:11,color:"#ff6b6b",marginBottom:6,fontWeight:700}}>⚠ SHORTAGES</div>
+                            {(scanResult.shortages||[]).map((s,i)=>(
+                              <div key={i} style={{fontSize:12,color:"#ff9999",padding:"3px 0"}}>
+                                {s.lrNo} — {s.tonnes} TO — ₹{fmtINR(s.deduction)}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      <div style={{display:"flex",gap:10}}>
+                        <button onClick={applyPaymentScan}
+                          style={{background:"#5b8dee",color:"#000",border:"none",borderRadius:5,
+                            padding:"8px 20px",fontWeight:700,cursor:"pointer",fontSize:13}}>
+                          ✓ Apply — Mark Trips Paid + Flag Shortages
+                        </button>
+                        <button onClick={()=>setScanResult(null)}
+                          style={{background:"#222",color:"#888",border:"1px solid #333",borderRadius:5,
+                            padding:"8px 16px",cursor:"pointer",fontSize:13}}>
+                          Discard
+                        </button>
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
             </div>
-          ))}
-          {payments.length===0&&<div style={{textAlign:"center",color:C.muted,padding:40}}>No payments recorded yet</div>}
-        </div>
-      )}
 
-      {/* GST TRACKER */}
-      {view==="gst" && (
-        <div style={{display:"flex",flexDirection:"column",gap:10}}>
-          <div style={{background:C.card,borderRadius:12,padding:"14px 16px"}}>
-            <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
-              <span style={{color:C.muted,fontSize:13}}>Total GST held by Shree</span>
-              <span style={{color:C.orange,fontWeight:800}}>{fmt(totalGstHeld)}</span>
-            </div>
-            <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
-              <span style={{color:C.muted,fontSize:13}}>Total GST released</span>
-              <span style={{color:C.green,fontWeight:800}}>− {fmt(totalGstReleased)}</span>
-            </div>
-            <div style={{borderTop:`1px solid ${C.border}`,marginTop:6,paddingTop:8,display:"flex",justifyContent:"space-between"}}>
-              <span style={{fontWeight:800}}>Outstanding GST to recover</span>
-              <span style={{color:gstOutstanding>0?C.accent:C.green,fontWeight:900,fontSize:16}}>{fmt(gstOutstanding)}</span>
+            {/* Recent Shree trips quick view */}
+            <div style={{background:"#111",border:"1px solid #222",borderRadius:8,overflow:"hidden"}}>
+              <div style={{padding:"12px 16px",borderBottom:"1px solid #1e1e1e",fontWeight:700,fontSize:13}}>
+                Recent Trips — Shree Cement
+              </div>
+              {shreeTrips.length===0
+                ? <div style={{padding:20,color:"#444",fontSize:13}}>No Shree trips yet. Trips with "Billed to Shree" amount will appear here.</div>
+                : (
+                  <table style={{width:"100%",borderCollapse:"collapse"}}>
+                    <thead><tr>
+                      {["LR No","Truck","Qty MT","Billed ₹","Invoice","Status"].map(h=><th key={h} style={TH}>{h}</th>)}
+                    </tr></thead>
+                    <tbody>
+                      {shreeTrips.slice(0,8).map(t=>(
+                        <tr key={t.id} style={{background:t.shortage?"#1a0808":"transparent"}}>
+                          <td style={{...TD,fontFamily:"monospace",fontSize:12}}>{t.lr}</td>
+                          <td style={TD}>{t.truck}</td>
+                          <td style={TDR}>{t.qty||t.loadedMT||"—"}</td>
+                          <td style={TDR}>₹{fmtINR(t.billedToShree)}</td>
+                          <td style={{...TD,fontFamily:"monospace",fontSize:11,color:"#666"}}>{t.invoiceNo||"—"}</td>
+                          <td style={TD}><StatusPill status={t.status||"pending"} shortage={t.shortage}/></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )
+              }
             </div>
           </div>
-          <div style={{color:C.muted,fontWeight:700,fontSize:12,textTransform:"uppercase",letterSpacing:1}}>GST Held per Invoice</div>
-          {payments.filter(p=>(p.gstHold||p.hold||0)>0).map(p=>(
-            <div key={p.id} style={{background:C.card,borderRadius:12,padding:"11px 14px",display:"flex",justifyContent:"space-between",borderLeft:`4px solid ${C.orange}`}}>
-              <div>
-                <div style={{fontWeight:700}}>{p.invoiceNo}</div>
-                <div style={{color:C.muted,fontSize:12}}>{p.date}</div>
-              </div>
-              <div style={{color:C.orange,fontWeight:800}}>{fmt(p.gstHold||p.hold||0)}</div>
-            </div>
-          ))}
-          {(gstReleases||[]).length>0&&(
-            <>
-              <div style={{color:C.muted,fontWeight:700,fontSize:12,textTransform:"uppercase",letterSpacing:1}}>GST Releases Recorded</div>
-              {(gstReleases||[]).map(r=>(
-                <div key={r.id} style={{background:C.card,borderRadius:12,padding:"11px 14px",display:"flex",justifyContent:"space-between",borderLeft:`4px solid ${C.green}`}}>
-                  <div>
-                    <div style={{fontWeight:700}}>Ref: {r.invoiceRef||"—"}</div>
-                    <div style={{color:C.muted,fontSize:12}}>{r.date} · UTR: {r.utr}</div>
-                    {r.notes&&<div style={{color:C.muted,fontSize:11}}>{r.notes}</div>}
-                  </div>
-                  <div style={{color:C.green,fontWeight:800}}>{fmt(r.amount)}</div>
-                </div>
-              ))}
-            </>
-          )}
-        </div>
-      )}
+        )}
 
-      {/* SHORTAGE RECOVERY */}
-      {view==="shortage" && (
-        <div style={{display:"flex",flexDirection:"column",gap:10}}>
-          <div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:10,padding:"10px 12px",color:C.muted,fontSize:13}}>
-            Shortage = Shree deducted from our payment because the vehicle delivered less MT than loaded. We recover this from the vehicle owner.
-          </div>
-          {vehicles.filter(v=>(v.shortageOwed||0)>0).map(v=>(
-            <div key={v.id} style={{background:C.card,borderRadius:14,padding:"14px 16px",borderLeft:`4px solid ${C.red}`}}>
-              <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
-                <div>
-                  <div style={{fontWeight:800,fontSize:15}}>{v.truckNo}</div>
-                  <div style={{color:C.muted,fontSize:12}}>{v.ownerName} · {v.phone}</div>
+        {/* ════════════════════════ INVOICES ════════════════════════ */}
+        {activeTab==="invoices" && (
+          <div>
+            <div style={{fontSize:15,fontWeight:700,marginBottom:16}}>Invoices Raised to Shree Cement</div>
+            {shreeInvoices.length===0
+              ? <div style={{background:"#111",border:"1px solid #222",borderRadius:8,padding:24,color:"#444",fontSize:13}}>
+                  No invoices yet. Upload an invoice PDF in the Overview tab to get started.
                 </div>
-                <div style={{textAlign:"right"}}>
-                  <div style={{color:C.red,fontWeight:800,fontSize:16}}>{fmt(v.shortageOwed||0)}</div>
-                  <div style={{color:C.muted,fontSize:11}}>to recover</div>
-                </div>
-              </div>
-              <div style={{display:"flex",gap:8}}>
-                <ShortageRecoverBtn v={v} setVehicles={setVehicles} log={log} />
-                <Btn onClick={()=>window.open(`https://wa.me/91${v.phone.replace(/\D/g,"")}?text=${encodeURIComponent(`Dear ${v.ownerName}, shortage amount of ${fmt(v.shortageOwed||0)} is to be recovered. - M.Yantra`)}`,"_blank")} sm outline color={C.teal}>📲 WA</Btn>
-              </div>
-            </div>
-          ))}
-          {vehicles.filter(v=>(v.shortageOwed||0)>0).length===0 && (
-            <div style={{textAlign:"center",color:C.muted,padding:40}}>No shortage recovery pending ✓</div>
-          )}
-          {/* History of all shortage deductions */}
-          {payments.some(p=>(p.shortageTotal||0)>0) && (
-            <div>
-              <div style={{color:C.muted,fontWeight:700,fontSize:12,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>All Shortage Deductions</div>
-              {payments.filter(p=>(p.shortageTotal||0)>0).map(p=>(
-                <div key={p.id} style={{background:C.card,borderRadius:12,padding:"11px 14px",marginBottom:7}}>
-                  <div style={{display:"flex",justifyContent:"space-between"}}>
-                    <div style={{color:C.blue,fontSize:13,fontWeight:700}}>{p.invoiceNo}</div>
-                    <div style={{color:C.red,fontWeight:800}}>{fmt(p.shortageTotal||0)}</div>
+              : (
+                <>
+                  <div style={{background:"#111",border:"1px solid #222",borderRadius:8,overflow:"hidden",marginBottom:20}}>
+                    <table style={{width:"100%",borderCollapse:"collapse"}}>
+                      <thead><tr>
+                        {["Invoice No","Date","Total ₹","Trips","Status"].map(h=><th key={h} style={TH}>{h}</th>)}
+                      </tr></thead>
+                      <tbody>
+                        {shreeInvoices.map(inv=>(
+                          <tr key={inv.invoiceNo}>
+                            <td style={{...TD,fontFamily:"monospace",fontWeight:700,color:"#fff"}}>{inv.invoiceNo}</td>
+                            <td style={TD}>{inv.invoiceDate||"—"}</td>
+                            <td style={TDR}>₹{fmtINR(inv.totalAmt)}</td>
+                            <td style={TD}>{inv.trips.length} trips</td>
+                            <td style={TD}><StatusPill status={inv.status}/></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
-                  {(p.shortageLines||[]).filter(l=>+l.amount>0).map((l,i)=>(
-                    <div key={i} style={{color:C.muted,fontSize:12,marginTop:3}}>{l.truckNo} · LR:{l.lrNo||"—"} · {l.shortMT}MT × ₹{l.rate} = {fmt(+l.amount)}</div>
+                  {shreeInvoices.map(inv=>(
+                    <div key={inv.invoiceNo} style={{background:"#111",border:"1px solid #222",borderRadius:8,overflow:"hidden",marginBottom:16}}>
+                      <div style={{padding:"10px 16px",borderBottom:"1px solid #1e1e1e",fontSize:12,fontWeight:700,color:"#aaa"}}>
+                        {inv.invoiceNo} — Trip Breakdown
+                      </div>
+                      <table style={{width:"100%",borderCollapse:"collapse"}}>
+                        <thead><tr>
+                          {["LR No","Truck","Consignee","Qty MT","Rate ₹","Billed ₹","Paid ₹","Shortage"].map(h=><th key={h} style={TH}>{h}</th>)}
+                        </tr></thead>
+                        <tbody>
+                          {inv.trips.map(t=>(
+                            <tr key={t.id} style={{background:t.shortage?"#1a0808":"transparent"}}>
+                              <td style={{...TD,fontFamily:"monospace",fontSize:12}}>{t.lr}</td>
+                              <td style={TD}>{t.truck}</td>
+                              <td style={TD}>{t.consignee||t.to||"—"}</td>
+                              <td style={TDR}>{t.qty||t.loadedMT||"—"}</td>
+                              <td style={TDR}>₹{fmtINR(t.frtRate||t.rate)}</td>
+                              <td style={TDR}>₹{fmtINR(t.billedToShree)}</td>
+                              <td style={TDR}>{t.paidAmount ? `₹${fmtINR(t.paidAmount)}` : "—"}</td>
+                              <td style={TD}>
+                                {t.shortage
+                                  ? <span style={{color:"#ff6b6b"}}>⚠ {t.shortage.tonnes} TO / ₹{fmtINR(t.shortage.deduction)}</span>
+                                  : <span style={{color:"#333"}}>—</span>}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
                   ))}
+                </>
+              )
+            }
+          </div>
+        )}
+
+        {/* ════════════════════════ PAYMENT ADVICE ════════════════════════ */}
+        {activeTab==="payments" && (
+          <div>
+            <div style={{fontSize:15,fontWeight:700,marginBottom:16}}>Payment Advices Received</div>
+            {(payments||[]).length===0
+              ? <div style={{background:"#111",border:"1px solid #222",borderRadius:8,padding:24,color:"#444",fontSize:13}}>
+                  No payment advices yet. Upload a Payment Advice PDF in the Overview tab.
+                </div>
+              : (payments||[]).map(p=>(
+                <div key={p.id||p.utr} style={{marginBottom:24}}>
+                  <div style={{background:"#111",border:"1px solid #222",borderRadius:8,overflow:"hidden",marginBottom:12}}>
+                    <div style={{padding:"13px 18px",borderBottom:"1px solid #1e1e1e",
+                      display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <div>
+                        <span style={{fontWeight:800,fontSize:14,color:"#fff"}}>Payment Advice</span>
+                        <span style={{marginLeft:12,fontFamily:"monospace",color:"#5b8dee",fontSize:13}}>UTR: {p.utr}</span>
+                      </div>
+                      <div style={{fontSize:12,color:"#666"}}>{p.paymentDate||p.date}</div>
+                    </div>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)"}}>
+                      {[
+                        {label:"Total Billed",   val:`₹${fmtINR(p.totalBilled)}`,   col:"#aaa"},
+                        {label:"TDS Deducted",   val:`₹${fmtINR(p.tdsDeducted)}`,   col:"#ff9800"},
+                        {label:"On Hold",        val:`₹${fmtINR(p.holdAmount)}`,    col:"#ff9800"},
+                        {label:"Net Paid",       val:`₹${fmtINR(p.totalPaid)}`,     col:"#4caf50"},
+                      ].map((m,i)=>(
+                        <div key={m.label} style={{padding:"13px 18px",borderRight:i<3?"1px solid #1a1a1a":"none"}}>
+                          <div style={{fontSize:9,color:"#555",letterSpacing:1,marginBottom:4}}>{m.label}</div>
+                          <div style={{fontWeight:800,color:m.col,fontSize:16}}>{m.val}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {(p.penalties||[]).map((pen,i)=>(
+                    <div key={i} style={{background:"#1a1000",border:"1px solid #ff980040",borderRadius:6,
+                      padding:"9px 16px",marginBottom:10,fontSize:13,color:"#ff9800"}}>
+                      ⚠ <b>Penalty:</b> ₹{fmtINR(pen.amount)} — {pen.description}
+                    </div>
+                  ))}
+
+                  {(p.invoices||[]).length>0 && (
+                    <div style={{background:"#111",border:"1px solid #222",borderRadius:8,overflow:"hidden",marginBottom:12}}>
+                      <div style={{padding:"8px 16px",borderBottom:"1px solid #1e1e1e",fontSize:11,fontWeight:700,color:"#666"}}>
+                        INVOICE-WISE BREAKDOWN
+                      </div>
+                      <table style={{width:"100%",borderCollapse:"collapse"}}>
+                        <thead><tr>
+                          {["Invoice No","Total ₹","Paid ₹","TDS ₹","Hold ₹"].map(h=><th key={h} style={TH}>{h}</th>)}
+                        </tr></thead>
+                        <tbody>
+                          {(p.invoices||[]).map((inv,i)=>(
+                            <tr key={i}>
+                              <td style={{...TD,fontFamily:"monospace"}}>{inv.invoiceNo}</td>
+                              <td style={TDR}>₹{fmtINR(inv.totalAmt||inv.total)}</td>
+                              <td style={{...TDR,color:"#4caf50"}}>₹{fmtINR(inv.paymentAmt)}</td>
+                              <td style={{...TDR,color:"#ff9800"}}>₹{fmtINR(inv.tds)}</td>
+                              <td style={{...TDR,color:"#ff9800"}}>₹{fmtINR(inv.hold)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  {(p.shortages||[]).length>0 && (
+                    <div style={{background:"#150a0a",border:"1px solid #ff6b6b25",borderRadius:8,overflow:"hidden"}}>
+                      <div style={{padding:"8px 16px",borderBottom:"1px solid #2a1212",fontSize:11,fontWeight:700,color:"#ff6b6b"}}>
+                        🚨 SHORTAGE DEBIT NOTES
+                      </div>
+                      <table style={{width:"100%",borderCollapse:"collapse"}}>
+                        <thead><tr>
+                          {["Debit Note Ref","LR No","Inv Ref","Tonnes Short","Deducted ₹"].map(h=>(
+                            <th key={h} style={{...TH,color:"#883333"}}>{h}</th>
+                          ))}
+                        </tr></thead>
+                        <tbody>
+                          {(p.shortages||[]).map((s,i)=>(
+                            <tr key={i}>
+                              <td style={{...TD,fontFamily:"monospace",fontSize:12}}>{s.ref||"—"}</td>
+                              <td style={{...TD,fontFamily:"monospace",fontSize:12,color:"#ffaaaa"}}>{s.lrNo||s.lr}</td>
+                              <td style={{...TD,fontFamily:"monospace",fontSize:11,color:"#666"}}>{s.invRef||"—"}</td>
+                              <td style={{...TDR,color:"#ff6b6b",fontWeight:700}}>{s.tonnes} TO</td>
+                              <td style={{...TDR,color:"#ff6b6b",fontWeight:700}}>₹{fmtINR(s.deduction)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              ))
+            }
+          </div>
+        )}
+
+        {/* ════════════════════════ SHORTAGES ════════════════════════ */}
+        {activeTab==="shortages" && (
+          <div>
+            <div style={{background:"#150a0a",border:"1px solid #ff6b6b25",borderRadius:8,
+              padding:"14px 18px",marginBottom:18,display:"flex",gap:28}}>
+              {[
+                {label:"TOTAL SHORTAGES",     val:allShortages.length,                                                             col:"#ff6b6b"},
+                {label:"TOTAL DEDUCTED",      val:`₹${fmtINR(totalShortage)}`,                                                    col:"#ff6b6b"},
+                {label:"TOTAL SHORT TONNES",  val:`${allShortages.reduce((s,sh)=>s+Number(sh.tonnes||0),0).toFixed(3)} TO`,       col:"#ff9999"},
+              ].map(m=>(
+                <div key={m.label}>
+                  <div style={{fontSize:9,color:"#883333",letterSpacing:1}}>{m.label}</div>
+                  <div style={{fontSize:22,fontWeight:800,color:m.col}}>{m.val}</div>
                 </div>
               ))}
             </div>
-          )}
-        </div>
-      )}
 
-      {/* ── ADD PAYMENT SHEET ── */}
-      {sheet && (
-        <Sheet title="Record Payment from Shree" onClose={()=>{setSheet(false);setF(blankP);}}>
-          <div style={{display:"flex",flexDirection:"column",gap:13}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <div style={{background:C.blue+"11",border:`1px solid ${C.blue}33`,borderRadius:10,padding:"9px 12px",color:C.muted,fontSize:12,flex:1,marginRight:8}}>
-                Fill from the payment advice PDF from Shree Cement.
-              </div>
-              <ScanPaymentBtn onResult={r=>{
-                if(r.amount) setF(p=>({...p,totalBill:String(r.amount).replace(/[^0-9.]/g,"")}));
-                if(r.referenceNo) setF(p=>({...p,invoiceNo:r.referenceNo}));
-              }} />
-            </div>
-            <div style={{display:"flex",gap:10}}>
-              <Field label="Invoice No" value={f.invoiceNo} onChange={ff("invoiceNo")} placeholder="SMYE107026…" half />
-              <Field label="Date" value={f.date} onChange={ff("date")} type="date" half />
-            </div>
-            <Field label="Total Bill Amount ₹" value={f.totalBill} onChange={ff("totalBill")} type="number" />
-            <div style={{display:"flex",gap:10}}>
-              <Field label="TDS ₹" value={f.tds} onChange={ff("tds")} type="number" half />
-              <Field label="GST Hold ₹" value={f.gstHold} onChange={ff("gstHold")} type="number" half note="Released after GSTR-1 filing" />
-            </div>
-
-            {/* Shortage lines */}
-            <div style={{background:C.bg,borderRadius:10,padding:"12px 12px"}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                <div style={{color:C.red,fontWeight:700,fontSize:12}}>Shortage Deductions (link to truck for recovery)</div>
-                <Btn onClick={addShortLine} sm outline color={C.red}>+ Add</Btn>
-              </div>
-              {f.shortageLines.map((l,i)=>(
-                <div key={i} style={{background:C.card,borderRadius:8,padding:"10px",marginBottom:8}}>
-                  <div style={{display:"flex",gap:8,marginBottom:6}}>
-                    <Field label="Truck No" value={l.truckNo} onChange={v=>updShortLine(i,"truckNo",v)} placeholder="KA34C4617" half />
-                    <Field label="LR No" value={l.lrNo} onChange={v=>updShortLine(i,"lrNo",v)} placeholder="LR/MYE/001" half />
-                  </div>
-                  <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
-                    <Field label="Short MT" value={l.shortMT} onChange={v=>updShortLine(i,"shortMT",v)} type="number" half />
-                    <Field label="Shree Rate ₹" value={l.rate} onChange={v=>updShortLine(i,"rate",v)} type="number" half />
-                    {f.shortageLines.length>1&&<button onClick={()=>delShortLine(i)} style={{background:"none",border:"none",color:C.red,fontSize:18,cursor:"pointer",paddingBottom:14}}>×</button>}
-                  </div>
-                  {+l.amount>0&&<div style={{color:C.red,fontWeight:700,fontSize:13,marginTop:4}}>Deduction: {fmt(+l.amount)}</div>}
+            {allShortages.length===0
+              ? <div style={{background:"#111",border:"1px solid #222",borderRadius:8,padding:24,color:"#444",fontSize:13}}>
+                  No shortages recorded yet.
                 </div>
-              ))}
-              {totalShortage>0&&<div style={{display:"flex",justifyContent:"space-between",color:C.red,fontWeight:800,fontSize:13,marginTop:4}}>
-                <span>Total shortage deducted</span><span>{fmt(totalShortage)}</span>
-              </div>}
-            </div>
+              : (
+                <div style={{background:"#111",border:"1px solid #222",borderRadius:8,overflow:"hidden",marginBottom:20}}>
+                  <table style={{width:"100%",borderCollapse:"collapse"}}>
+                    <thead><tr>
+                      {["Debit Ref","LR No","Trip","Tonnes","Deducted ₹","UTR","Date"].map(h=><th key={h} style={TH}>{h}</th>)}
+                    </tr></thead>
+                    <tbody>
+                      {allShortages.map((s,i)=>{
+                        const trip = (trips||[]).find(t=>t.lr===(s.lrNo||s.lr));
+                        return (
+                          <tr key={i} style={{background:"#140808"}}>
+                            <td style={{...TD,fontFamily:"monospace",fontSize:12}}>{s.ref||"—"}</td>
+                            <td style={{...TD,fontFamily:"monospace",fontSize:12,color:"#ffaaaa"}}>{s.lrNo||s.lr}</td>
+                            <td style={TD}>{trip?trip.id:"—"}</td>
+                            <td style={{...TDR,color:"#ff6b6b",fontWeight:700}}>{s.tonnes} TO</td>
+                            <td style={{...TDR,color:"#ff6b6b",fontWeight:700}}>₹{fmtINR(s.deduction)}</td>
+                            <td style={{...TD,fontFamily:"monospace",fontSize:12,color:"#5b8dee"}}>{s.utr}</td>
+                            <td style={{...TD,fontSize:12}}>{s.paymentDate}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )
+            }
 
-            <div style={{display:"flex",gap:10}}>
-              <Field label="Other Deduction ₹" value={f.otherDeduct} onChange={ff("otherDeduct")} type="number" half />
-              <Field label="Label (e.g. Electricity)" value={f.otherDeductLabel} onChange={ff("otherDeductLabel")} half />
-            </div>
-
-            {/* Auto calculated net */}
-            {+f.totalBill>0 && (
-              <div style={{background:C.bg,borderRadius:10,padding:"12px 14px"}}>
-                <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Payment Breakdown</div>
-                {[
-                  {l:"Total Bill",       v:+f.totalBill||0,  c:C.blue},
-                  {l:"(−) TDS",          v:+f.tds||0,        c:C.red},
-                  {l:"(−) GST Hold",     v:+f.gstHold||0,    c:C.orange},
-                  {l:"(−) Shortage",     v:totalShortage,    c:C.red},
-                  {l:"(−) Other",        v:+f.otherDeduct||0,c:C.red},
-                ].map(r=>(
-                  <div key={r.l} style={{display:"flex",justifyContent:"space-between",padding:"4px 0",borderBottom:`1px solid ${C.border}22`}}>
-                    <span style={{color:C.muted,fontSize:13}}>{r.l}</span>
-                    <span style={{color:r.v>0?r.c:C.dim,fontWeight:r.v>0?700:400,fontSize:13}}>{r.v>0?fmt(r.v):"—"}</span>
+            {/* trips with shortage flag */}
+            {shreeTrips.filter(t=>t.shortage).length>0 && (
+              <div style={{background:"#111",border:"1px solid #222",borderRadius:8,padding:16}}>
+                <div style={{fontSize:13,fontWeight:700,marginBottom:12}}>Flagged Trips</div>
+                {shreeTrips.filter(t=>t.shortage).map(t=>(
+                  <div key={t.id} style={{background:"#150a0a",border:"1px solid #ff6b6b20",borderRadius:6,
+                    padding:"11px 14px",marginBottom:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                    <div>
+                      <span style={{fontWeight:700,color:"#ff9999",fontFamily:"monospace"}}>{t.lr}</span>
+                      <span style={{marginLeft:12,fontSize:12,color:"#666"}}>{t.truck}</span>
+                    </div>
+                    <div style={{textAlign:"right"}}>
+                      <div style={{color:"#ff6b6b",fontWeight:700}}>⚠ {t.shortage.tonnes} Tonnes Short</div>
+                      <div style={{color:"#883333",fontSize:12}}>₹{fmtINR(t.shortage.deduction)} deducted</div>
+                    </div>
                   </div>
                 ))}
-                <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0 0"}}>
-                  <span style={{fontWeight:800,fontSize:15}}>Net to Receive</span>
-                  <span style={{color:C.green,fontWeight:900,fontSize:18}}>{fmt(netPaid)}</span>
-                </div>
               </div>
             )}
-
-            <div style={{display:"flex",gap:10}}>
-              <Field label="Amount Actually Received ₹" value={f.paid} onChange={ff("paid")} type="number" half note="Leave blank to use calculated net" />
-              <Field label="UTR / Reference" value={f.utr} onChange={ff("utr")} half />
-            </div>
-            <div style={{color:C.muted,fontSize:12}}>Recording as: <b style={{color:ROLES[user.role]?.color}}>{user.name}</b></div>
-            <Btn onClick={savePayment} full color={C.green}>Save Payment</Btn>
           </div>
-        </Sheet>
-      )}
+        )}
 
-      {/* ── GST RELEASE SHEET ── */}
-      {gstSheet && (
-        <Sheet title="Record GST Release" onClose={()=>{setGstSheet(false);setGf(blankG);}}>
-          <div style={{display:"flex",flexDirection:"column",gap:13}}>
-            <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,borderRadius:10,padding:"9px 12px",color:C.muted,fontSize:12}}>
-              Paste the GST release payment advice from Shree. This will reduce the outstanding GST balance.
+        {/* ════════════════════════ PROFIT ════════════════════════ */}
+        {activeTab==="profit" && (
+          <div>
+            {/* add expense */}
+            <div style={{background:"#111",border:"1px solid #222",borderRadius:8,padding:16,marginBottom:20}}>
+              <div style={{fontSize:13,fontWeight:700,marginBottom:10}}>Add Expense to Trip</div>
+              <div style={{display:"flex",gap:10,alignItems:"flex-end",flexWrap:"wrap"}}>
+                <div>
+                  <div style={{fontSize:10,color:"#555",marginBottom:3}}>TRIP</div>
+                  <select value={newExp.tripId} onChange={e=>setNewExp({...newExp,tripId:e.target.value})}
+                    style={{background:"#0d0d0d",border:"1px solid #333",borderRadius:4,padding:"7px 10px",
+                      color:"#ccc",fontSize:13,minWidth:160}}>
+                    <option value="">Select trip…</option>
+                    {shreeTrips.map(t=><option key={t.id} value={t.id}>{t.lr}</option>)}
+                  </select>
+                </div>
+                <div style={{flex:2,minWidth:160}}>
+                  <div style={{fontSize:10,color:"#555",marginBottom:3}}>EXPENSE LABEL</div>
+                  <input value={newExp.label} onChange={e=>setNewExp({...newExp,label:e.target.value})}
+                    placeholder="e.g. Driver salary, Fuel, Toll…"
+                    style={{width:"100%",background:"#0d0d0d",border:"1px solid #333",borderRadius:4,
+                      padding:"7px 10px",color:"#ccc",fontSize:13,boxSizing:"border-box"}}/>
+                </div>
+                <div>
+                  <div style={{fontSize:10,color:"#555",marginBottom:3}}>AMOUNT ₹</div>
+                  <input value={newExp.amount} onChange={e=>setNewExp({...newExp,amount:e.target.value})}
+                    type="number" placeholder="0"
+                    style={{width:100,background:"#0d0d0d",border:"1px solid #333",borderRadius:4,
+                      padding:"7px 10px",color:"#ccc",fontSize:13}}/>
+                </div>
+                <button onClick={()=>{
+                  if(!newExp.tripId||!newExp.label||!newExp.amount) return;
+                  setExpenses(prev=>({
+                    ...prev,
+                    [newExp.tripId]:[...(prev[newExp.tripId]||[]),{label:newExp.label,amount:Number(newExp.amount)}]
+                  }));
+                  setNewExp({tripId:"",label:"",amount:""});
+                }} style={{background:"#5b8dee",color:"#000",border:"none",borderRadius:5,
+                  padding:"7px 18px",fontWeight:700,cursor:"pointer",fontSize:13,whiteSpace:"nowrap"}}>
+                  + Add
+                </button>
+              </div>
             </div>
-            <div style={{display:"flex",gap:10}}>
-              <Field label="Date" value={gf.date} onChange={gff("date")} type="date" half />
-              <Field label="Amount ₹" value={gf.amount} onChange={gff("amount")} type="number" half />
+
+            {/* profit table */}
+            <div style={{background:"#111",border:"1px solid #222",borderRadius:8,overflow:"hidden"}}>
+              <table style={{width:"100%",borderCollapse:"collapse"}}>
+                <thead><tr>
+                  {["LR No","Billed ₹","Paid ₹","Shortage ₹","Expenses ₹","Net Profit ₹"].map(h=><th key={h} style={TH}>{h}</th>)}
+                </tr></thead>
+                <tbody>
+                  {shreeTrips.map(t=>{
+                    const profit = tripProfit(t);
+                    return (
+                      <tr key={t.id}>
+                        <td style={{...TD,fontFamily:"monospace",fontSize:12}}>{t.lr}</td>
+                        <td style={TDR}>₹{fmtINR(t.billedToShree)}</td>
+                        <td style={TDR}>{t.paidAmount?`₹${fmtINR(t.paidAmount)}`:<span style={{color:"#444"}}>—</span>}</td>
+                        <td style={{...TDR,color:t.shortage?"#ff6b6b":"#333"}}>
+                          {t.shortage?`₹${fmtINR(t.shortage.deduction)}`:"—"}
+                        </td>
+                        <td style={TDR}>
+                          <div>₹{fmtINR(tripExps(t.id))}</div>
+                          {((expenses||{})[t.id]||[]).length>0 && (
+                            <div style={{fontSize:10,color:"#555",marginTop:2}}>
+                              {((expenses||{})[t.id]||[]).map(e=>`${e.label}: ₹${fmtINR(e.amount)}`).join(" | ")}
+                            </div>
+                          )}
+                        </td>
+                        <td style={{...TDR,fontWeight:800,fontSize:14,color:profit>=0?"#4caf50":"#ff6b6b"}}>
+                          ₹{fmtINR(profit)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {shreeTrips.length>0 && (
+                    <tr style={{background:"#151515",borderTop:"2px solid #333"}}>
+                      <td style={{...TD,fontWeight:800,color:"#fff"}}>TOTAL</td>
+                      <td style={{...TDR,fontWeight:700}}>₹{fmtINR(shreeTrips.reduce((s,t)=>s+Number(t.billedToShree||0),0))}</td>
+                      <td style={{...TDR,fontWeight:700,color:"#4caf50"}}>₹{fmtINR(shreeTrips.filter(t=>t.paidAmount).reduce((s,t)=>s+Number(t.paidAmount),0))}</td>
+                      <td style={{...TDR,fontWeight:700,color:"#ff6b6b"}}>₹{fmtINR(totalShortage)}</td>
+                      <td style={{...TDR,fontWeight:700}}>₹{fmtINR(shreeTrips.reduce((s,t)=>s+tripExps(t.id),0))}</td>
+                      <td style={{...TDR,fontWeight:800,fontSize:15,color:"#4caf50"}}>
+                        ₹{fmtINR(shreeTrips.reduce((s,t)=>s+tripProfit(t),0))}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
             </div>
-            <Field label="Invoice / Reference" value={gf.invoiceRef} onChange={gff("invoiceRef")} placeholder="Invoice or advice reference" />
-            <Field label="UTR" value={gf.utr} onChange={gff("utr")} />
-            <Field label="Notes" value={gf.notes} onChange={gff("notes")} placeholder="Optional notes" />
-            <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0"}}>
-              <span style={{color:C.muted,fontSize:13}}>Outstanding before this release</span>
-              <span style={{color:C.orange,fontWeight:800}}>{fmt(gstOutstanding)}</span>
-            </div>
-            <Btn onClick={saveGst} full color={C.orange}>Record GST Release</Btn>
           </div>
-        </Sheet>
-      )}
+        )}
+
+      </div>
+      <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
     </div>
   );
 }
