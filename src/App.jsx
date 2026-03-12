@@ -3976,7 +3976,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
   const tripExps = tid => ((expenses||{})[tid]||[]).reduce((s,e)=>s+Number(e.amount||0),0);
   const tripProfit = t => {
     const income = Number(t.paidAmount||t.billedToShree||0);
-    const shortage = t.shortage ? Number(t.shortage.deduction||0) : 0;
+    const shortage = t.shreeShortage ? Number(t.shreeShortage.deduction||0) : 0;
     return income - shortage - tripExps(t.id);
   };
 
@@ -4019,7 +4019,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
       const match = scTrips.find(st =>
         st.lrNo === t.lr && Math.abs(Number(st.frtAmt||0) - Number(t.billedToShree||0)) < 2
       );
-      if(match) return {...t, invoiceNo:invNo, invoiceDate:invDate, status:"billed"};
+      if(match) return {...t, invoiceNo:invNo, invoiceDate:invDate, shreeStatus:"billed"};
       return t;
     }));
     log && log(`Invoice ${invNo} scanned — trips marked Billed`);
@@ -4043,8 +4043,8 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
           paidAmount: Number(t.billedToShree||0),
           paymentDate: pDate,
           utr,
-          status:"paid",
-          shortage: short ? {tonnes:Number(short.tonnes||0), deduction:Number(short.deduction||0)} : t.shortage,
+          shreeStatus:"paid",
+          shreeShortage: short ? {tonnes:Number(short.tonnes||0), deduction:Number(short.deduction||0)} : t.shreeShortage,
         };
       }
       return t;
@@ -4189,8 +4189,8 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
             <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:14,marginBottom:24}}>
               {[
                 {label:"Shree Trips",       val:shreeTrips.length,                                          col:"#5b8dee"},
-                {label:"Pending Billing",   val:shreeTrips.filter(t=>t.status==="pending").length,          col:"#ff9800"},
-                {label:"Billed / Paid",     val:`${shreeTrips.filter(t=>t.status==="billed").length} / ${shreeTrips.filter(t=>t.status==="paid").length}`, col:"#4caf50"},
+                {label:"Pending Billing",   val:shreeTrips.filter(t=>t.shreeStatus==="pending").length,          col:"#ff9800"},
+                {label:"Billed / Paid",     val:`${shreeTrips.filter(t=>t.shreeStatus==="billed").length} / ${shreeTrips.filter(t=>t.shreeStatus==="paid").length}`, col:"#4caf50"},
                 {label:"Shortage Alerts",   val:allShortages.length,                                        col:"#ff6b6b"},
               ].map(c=>(
                 <div key={c.label} style={{background:"#151515",border:"1px solid #222",borderRadius:8,padding:"16px 18px"}}>
@@ -4364,13 +4364,13 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                     </tr></thead>
                     <tbody>
                       {shreeTrips.slice(0,8).map(t=>(
-                        <tr key={t.id} style={{background:t.shortage?"#1a0808":"transparent"}}>
+                        <tr key={t.id} style={{background:t.shreeShortage?"#1a0808":"transparent"}}>
                           <td style={{...TD,fontFamily:"monospace",fontSize:12}}>{t.lr}</td>
                           <td style={TD}>{t.truck}</td>
                           <td style={TDR}>{t.qty||t.loadedMT||"—"}</td>
                           <td style={TDR}>₹{fmtINR(t.billedToShree)}</td>
                           <td style={{...TD,fontFamily:"monospace",fontSize:11,color:"#666"}}>{t.invoiceNo||"—"}</td>
-                          <td style={TD}><StatusPill status={t.status||"pending"} shortage={t.shortage}/></td>
+                          <td style={TD}><StatusPill status={t.shreeStatus||"pending"} shortage={t.shreeShortage}/></td>
                         </tr>
                       ))}
                     </tbody>
@@ -4420,7 +4420,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                         </tr></thead>
                         <tbody>
                           {inv.trips.map(t=>(
-                            <tr key={t.id} style={{background:t.shortage?"#1a0808":"transparent"}}>
+                            <tr key={t.id} style={{background:t.shreeShortage?"#1a0808":"transparent"}}>
                               <td style={{...TD,fontFamily:"monospace",fontSize:12}}>{t.lr}</td>
                               <td style={TD}>{t.truck}</td>
                               <td style={TD}>{t.consignee||t.to||"—"}</td>
@@ -4429,8 +4429,8 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                               <td style={TDR}>₹{fmtINR(t.billedToShree)}</td>
                               <td style={TDR}>{t.paidAmount ? `₹${fmtINR(t.paidAmount)}` : "—"}</td>
                               <td style={TD}>
-                                {t.shortage
-                                  ? <span style={{color:"#ff6b6b"}}>⚠ {t.shortage.tonnes} TO / ₹{fmtINR(t.shortage.deduction)}</span>
+                                {t.shreeShortage
+                                  ? <span style={{color:"#ff6b6b"}}>⚠ {t.shreeShortage.tonnes} TO / ₹{fmtINR(t.shreeShortage.deduction)}</span>
                                   : <span style={{color:"#333"}}>—</span>}
                               </td>
                             </tr>
@@ -4590,10 +4590,10 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
             }
 
             {/* trips with shortage flag */}
-            {shreeTrips.filter(t=>t.shortage).length>0 && (
+            {shreeTrips.filter(t=>t.shreeShortage).length>0 && (
               <div style={{background:"#111",border:"1px solid #222",borderRadius:8,padding:16}}>
                 <div style={{fontSize:13,fontWeight:700,marginBottom:12}}>Flagged Trips</div>
-                {shreeTrips.filter(t=>t.shortage).map(t=>(
+                {shreeTrips.filter(t=>t.shreeShortage).map(t=>(
                   <div key={t.id} style={{background:"#150a0a",border:"1px solid #ff6b6b20",borderRadius:6,
                     padding:"11px 14px",marginBottom:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                     <div>
@@ -4601,8 +4601,8 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                       <span style={{marginLeft:12,fontSize:12,color:"#666"}}>{t.truck}</span>
                     </div>
                     <div style={{textAlign:"right"}}>
-                      <div style={{color:"#ff6b6b",fontWeight:700}}>⚠ {t.shortage.tonnes} Tonnes Short</div>
-                      <div style={{color:"#883333",fontSize:12}}>₹{fmtINR(t.shortage.deduction)} deducted</div>
+                      <div style={{color:"#ff6b6b",fontWeight:700}}>⚠ {t.shreeShortage.tonnes} Tonnes Short</div>
+                      <div style={{color:"#883333",fontSize:12}}>₹{fmtINR(t.shreeShortage.deduction)} deducted</div>
                     </div>
                   </div>
                 ))}
@@ -4669,8 +4669,8 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                         <td style={{...TD,fontFamily:"monospace",fontSize:12}}>{t.lr}</td>
                         <td style={TDR}>₹{fmtINR(t.billedToShree)}</td>
                         <td style={TDR}>{t.paidAmount?`₹${fmtINR(t.paidAmount)}`:<span style={{color:"#444"}}>—</span>}</td>
-                        <td style={{...TDR,color:t.shortage?"#ff6b6b":"#333"}}>
-                          {t.shortage?`₹${fmtINR(t.shortage.deduction)}`:"—"}
+                        <td style={{...TDR,color:t.shreeShortage?"#ff6b6b":"#333"}}>
+                          {t.shreeShortage?`₹${fmtINR(t.shreeShortage.deduction)}`:"—"}
                         </td>
                         <td style={TDR}>
                           <div>₹{fmtINR(tripExps(t.id))}</div>

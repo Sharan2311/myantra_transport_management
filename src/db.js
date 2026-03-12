@@ -15,6 +15,18 @@ const tripFromDB = r => ({
   createdBy: r.created_by, createdAt: r.created_at,
   diLines: r.di_lines || [],
   dieselIndentNo: r.diesel_indent_no || "",
+  // Shree Cement billing fields
+  lr: r.lr || r.lr_no || "",
+  truck: r.truck || r.truck_no || "",
+  billedToShree: +(r.billed_to_shree||0),
+  invoiceDate: r.invoice_date || "",
+  paidAmount: +(r.paid_amount||0),
+  paymentDate: r.payment_date || "",
+  utr: r.utr_shree || "",
+  shreeStatus: r.shree_status || "pending",
+  shreeShortage: r.shree_shortage || null,
+
+  frtRate: +(r.fr_rate||0),
 })
 const tripToDB = t => ({
   id: t.id, type: t.type, lr_no: t.lrNo, di_no: t.diNo, truck_no: t.truckNo,
@@ -28,6 +40,17 @@ const tripToDB = t => ({
   created_by: t.createdBy, created_at: t.createdAt,
   di_lines: t.diLines || [],
   diesel_indent_no: t.dieselIndentNo || "",
+  // Shree Cement billing fields
+  lr: t.lr || t.lrNo || "",
+  truck: t.truck || t.truckNo || "",
+  billed_to_shree: t.billedToShree || 0,
+  invoice_no_shree: t.invoiceNo || "",
+  invoice_date: t.invoiceDate || "",
+  paid_amount: t.paidAmount || 0,
+  payment_date: t.paymentDate || "",
+  utr_shree: t.utr || "",
+  shree_status: t.shreeStatus || t.status || "pending",
+  shree_shortage: t.shortage && typeof t.shortage === 'object' ? t.shortage : null,
 })
 
 const vehicleFromDB = r => ({
@@ -62,13 +85,31 @@ const paymentFromDB = r => ({
   shortageTotal: +(r.shortage_total||0), shortageLines: r.shortage_lines||[],
   otherDeduct: +(r.other_deduct||0), otherDeductLabel: r.other_deduct_label||'',
   paid: +r.paid, utr: r.utr, createdBy: r.created_by, createdAt: r.created_at,
+  // Shree payment advice fields
+  totalPaid: +(r.total_paid||r.paid||0),
+  totalBilled: +(r.total_billed||r.total_bill||0),
+  tdsDeducted: +(r.tds_deducted||r.tds||0),
+  holdAmount: +(r.hold_amount||r.gst_hold||r.hold||0),
+  paymentDate: r.payment_date||r.date||"",
+  invoices: r.invoices||[],
+  shortages: r.shortages||[],
+  penalties: r.penalties||[],
 })
 const paymentToDB = p => ({
-  id: p.id, invoice_no: p.invoiceNo, date: p.date, total_bill: p.totalBill,
-  tds: p.tds, gst_hold: p.gstHold||0, hold: p.gstHold||0,
+  id: p.id, invoice_no: p.invoiceNo, date: p.date||p.paymentDate, total_bill: p.totalBill||p.totalBilled||0,
+  tds: p.tds||p.tdsDeducted||0, gst_hold: p.gstHold||p.holdAmount||0, hold: p.gstHold||p.holdAmount||0,
   shortage_total: p.shortageTotal||0, shortage_lines: p.shortageLines||[],
   other_deduct: p.otherDeduct||0, other_deduct_label: p.otherDeductLabel||'',
-  paid: p.paid, utr: p.utr, created_by: p.createdBy, created_at: p.createdAt,
+  paid: p.paid||p.totalPaid||0, utr: p.utr, created_by: p.createdBy, created_at: p.createdAt,
+  // Shree payment advice fields
+  total_paid: p.totalPaid||p.paid||0,
+  total_billed: p.totalBilled||p.totalBill||0,
+  tds_deducted: p.tdsDeducted||p.tds||0,
+  hold_amount: p.holdAmount||p.gstHold||0,
+  payment_date: p.paymentDate||p.date||"",
+  invoices: p.invoices||[],
+  shortages: p.shortages||[],
+  penalties: p.penalties||[],
 })
 
 const settlementFromDB = r => ({
