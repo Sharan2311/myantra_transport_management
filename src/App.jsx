@@ -69,8 +69,10 @@ function calcNet(t, vehicle, confirmedDiesel) {
   const gross = t.diLines && t.diLines.length > 0
     ? t.diLines.reduce((s, d) => s + (d.qty||0) * (d.givenRate||0), 0)
     : (t.qty||0) * (t.givenRate||0);
-  // Bill to Shree = sum of qty × frRate (same frRate for all DIs under one LR)
-  const billed = (t.qty||0) * (t.frRate||0);
+  // Bill to Shree = per-DI qty × per-DI frRate (falls back to trip-level frRate)
+  const billed = t.diLines && t.diLines.length > 0
+    ? t.diLines.reduce((s,d) => s + (d.qty||0) * (d.frRate || t.frRate || 0), 0)
+    : (t.qty||0) * (t.frRate||0);
   const tafal      = t.tafal || 0;
   const loanDeduct = vehicle ? (vehicle.deductPerTrip||0) : 0;
   const diesel     = confirmedDiesel != null ? confirmedDiesel : (t.dieselEstimate||0);
@@ -700,6 +702,7 @@ function AskLRSheet({ extracted, trips, onConfirm, onCancel }) {
 function MergeDISheet({ conflict, onMerge, onSeparate, onCancel }) {
   const { extracted, existingTrip } = conflict;
   const [driverRate, setDriverRate] = useState("");
+  const [shreeRate,  setShreeRate]  = useState(String(extracted.frRate || ""));
 
   const existingLines = existingTrip.diLines && existingTrip.diLines.length > 0
     ? existingTrip.diLines
@@ -715,9 +718,12 @@ function MergeDISheet({ conflict, onMerge, onSeparate, onCancel }) {
   const newGross      = newQty * newRate;
   const totalGross    = existingGross + newGross;
 
-  // Bill to Shree = total qty × frRate
-  const frRate    = existingTrip.frRate || 0;
-  const totalBill = totalQty * frRate;
+  // Bill to Shree = per-DI qty × per-DI frRate
+  const existingFrRate = existingTrip.frRate || 0;
+  const newFrRateVal   = +shreeRate || +extracted.frRate || existingFrRate;
+  const existingBill   = existingLines.reduce((s,d)=>s+(d.qty||0)*(d.frRate||existingFrRate),0);
+  const newBill        = newQty * newFrRateVal;
+  const totalBill      = existingBill + newBill;
 
   const tafal    = existingTrip.tafal   || 0;
   const advance  = existingTrip.advance || 0;
@@ -749,9 +755,12 @@ function MergeDISheet({ conflict, onMerge, onSeparate, onCancel }) {
         <div style={{fontSize:13,color:C.text,marginBottom:10}}>
           DI <b>{extracted.diNo}</b> · {newQty} MT · {extracted.bags} Bags
         </div>
+        <Field label="Shree Rate ₹/MT (from DI)"
+          value={shreeRate} onChange={setShreeRate} type="number"
+          placeholder="Rate Shree pays" />
         <Field label="Driver Rate ₹/MT for this DI"
           value={driverRate} onChange={setDriverRate} type="number"
-          placeholder="Enter rate for this DI" />
+          placeholder="Enter driver rate" />
       </div>
 
       {/* Merged totals preview */}
@@ -776,7 +785,7 @@ function MergeDISheet({ conflict, onMerge, onSeparate, onCancel }) {
         </div>
       )}
 
-      <Btn onClick={()=>onMerge(driverRate)} full color={C.orange}
+      <Btn onClick={()=>onMerge(driverRate, shreeRate)} full color={C.orange}
         disabled={!driverRate}>
         ➕ Merge into existing trip
       </Btn>
@@ -1036,21 +1045,23 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
     }
   };
 
-  // Merge second DI into existing trip — driver rate entered per DI
-  const addDIToExisting = (newDriverRate) => {
+  // Merge second DI into existing trip — driver rate AND shree rate entered per DI
+  const addDIToExisting = (newDriverRate, newShreeRate) => {
     const { extracted, existingTrip } = diConflict;
-    const newQty  = +extracted.qty  || 0;
-    const newBags = +extracted.bags || 0;
-    const newRate = +newDriverRate  || 0;
+    const newQty     = +extracted.qty  || 0;
+    const newBags    = +extracted.bags || 0;
+    const newRate    = +newDriverRate  || 0;
+    const newFrRate  = +newShreeRate   || +extracted.frRate || 0;
 
-    // Build diLines — migrate existing trip if needed
+    // Build diLines — migrate existing trip if needed, preserving its frRate
     const existingLines = existingTrip.diLines && existingTrip.diLines.length > 0
-      ? existingTrip.diLines
+      ? existingTrip.diLines.map(d => ({...d, frRate: d.frRate || existingTrip.frRate || 0}))
       : [{ diNo: existingTrip.diNo, grNo: existingTrip.grNo,
-           qty: existingTrip.qty, bags: existingTrip.bags, givenRate: existingTrip.givenRate }];
+           qty: existingTrip.qty, bags: existingTrip.bags,
+           givenRate: existingTrip.givenRate, frRate: existingTrip.frRate || 0 }];
 
     const newLine = { diNo: extracted.diNo, grNo: extracted.grNo,
-                      qty: newQty, bags: newBags, givenRate: newRate };
+                      qty: newQty, bags: newBags, givenRate: newRate, frRate: newFrRate };
     const allLines = [...existingLines, newLine];
 
     const totalQty  = allLines.reduce((s,d) => s+(d.qty||0), 0);
@@ -3934,12 +3945,19 @@ function Employees({employees, setEmployees, user, log}) {
 // ─── SHREE PAYMENTS & BILLING ──────────────────────────────────────────────────
 function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles, gstReleases, setGstReleases, expenses, setExpenses, user, log}) {
 
-  const [activeTab,  setActiveTab]  = useState("overview");
-  const [scanResult, setScanResult] = useState(null);
-  const [scanning,   setScanning]   = useState(false);
-  const [scanError,  setScanError]  = useState(null);
-  const [showAlert,  setShowAlert]  = useState(true);
-  const [newExp,     setNewExp]     = useState({tripId:"", label:"", amount:""});
+  const [activeTab,   setActiveTab]   = useState("overview");
+  const [scanResult,  setScanResult]  = useState(null);
+  const [scanning,    setScanning]    = useState(false);
+  const [scanError,   setScanError]   = useState(null);
+  const [showAlert,   setShowAlert]   = useState(true);
+  const [newExp,      setNewExp]      = useState({tripId:"", label:"", amount:""});
+  const [searchInv,   setSearchInv]   = useState("");
+  const [searchAdv,   setSearchAdv]   = useState("");
+  const [searchShort, setSearchShort] = useState("");
+  const [searchTrip,  setSearchTrip]  = useState("");
+  const [expandedInv, setExpandedInv] = useState(null);
+  const [expandedAdv, setExpandedAdv] = useState(null);
+  const isOwner = user?.role === "owner";
 
   const fmtINR = n => Number(n||0).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2});
   const parseDD = s => {
@@ -3948,9 +3966,23 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
     if(p.length===3 && p[2].length===4) return `${p[2]}-${p[1].padStart(2,"0")}-${p[0].padStart(2,"0")}`;
     return s;
   };
+  const fmtDate = s => {
+    if(!s) return "—";
+    const d = new Date(s);
+    if(isNaN(d)) return s;
+    return d.toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"2-digit"});
+  };
 
-  // Only show Shree-style payment advices (have totalPaid or totalBilled)
-  const shreePayments = (payments||[]).filter(p => p.totalPaid || p.totalBilled || (p.invoices||[]).length>0);
+  // Deduplicated Shree payments only
+  const shreePayments = Object.values(
+    (payments||[])
+      .filter(p => p.totalPaid || p.totalBilled || (p.invoices||[]).length>0)
+      .reduce((acc,p) => {
+        const key = p.utr || p.id;
+        if(!acc[key] || Number(p.totalPaid||0) > Number(acc[key].totalPaid||0)) acc[key]=p;
+        return acc;
+      }, {})
+  ).sort((a,b)=>(b.paymentDate||b.date||"").localeCompare(a.paymentDate||a.date||""));
 
   const allShortages = shreePayments.flatMap(p =>
     (p.shortages||[]).map(s=>({...s, utr:p.utr, paymentDate:p.paymentDate||p.date}))
@@ -3966,22 +3998,49 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
       map[t.invoiceNo].totalAmt += Number(t.billedToShree||0);
       if(t.paymentDate) map[t.invoiceNo].status = "paid";
     });
-    return Object.values(map);
+    return Object.values(map).sort((a,b)=>(b.invoiceDate||"").localeCompare(a.invoiceDate||""));
   }, [trips]);
 
-  const shreeTrips = (trips||[]).filter(t=>t.billedToShree);
+  const shreeTrips = (trips||[]).filter(t=>t.billedToShree)
+    .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+
   const tripExps   = tid => ((expenses||{})[tid]||[]).reduce((s,e)=>s+Number(e.amount||0),0);
   const tripProfit = t => Number(t.paidAmount||t.billedToShree||0)
                         - (t.shreeShortage ? Number(t.shreeShortage.deduction||0) : 0)
                         - tripExps(t.id);
 
-  // KPIs
   const totalBilled   = shreeInvoices.reduce((s,i)=>s+i.totalAmt,0);
   const totalReceived = shreePayments.reduce((s,p)=>s+Number(p.totalPaid||0),0);
   const totalHold     = shreePayments.reduce((s,p)=>s+Number(p.holdAmount||0),0);
   const totalShortage = allShortages.reduce((s,sh)=>s+Number(sh.deduction||0),0);
 
-  // ── scan via Netlify ──────────────────────────────────────────────────────
+  // filtered lists
+  const filteredInvoices = shreeInvoices.filter(inv => {
+    const q = searchInv.toLowerCase();
+    return !q || inv.invoiceNo?.toLowerCase().includes(q)
+              || inv.trips.some(t=>(t.lr||t.lrNo||"").toLowerCase().includes(q))
+              || fmtDate(inv.invoiceDate).toLowerCase().includes(q);
+  });
+  const filteredAdvices = shreePayments.filter(p => {
+    const q = searchAdv.toLowerCase();
+    return !q || (p.utr||"").toLowerCase().includes(q)
+              || fmtDate(p.paymentDate||p.date).toLowerCase().includes(q)
+              || (p.invoices||[]).some(i=>(i.invoiceNo||"").toLowerCase().includes(q));
+  });
+  const filteredShortages = allShortages.filter(s => {
+    const q = searchShort.toLowerCase();
+    return !q || (s.lrNo||s.lr||"").toLowerCase().includes(q)
+              || (s.ref||"").toLowerCase().includes(q)
+              || (s.utr||"").toLowerCase().includes(q);
+  });
+  const filteredTrips = shreeTrips.filter(t => {
+    const q = searchTrip.toLowerCase();
+    return !q || (t.lr||t.lrNo||"").toLowerCase().includes(q)
+              || (t.truck||t.truckNo||"").toLowerCase().includes(q)
+              || (t.invoiceNo||"").toLowerCase().includes(q);
+  });
+
+  // scan
   const handleScan = async (file, scanType) => {
     if(!file) return;
     setScanning(true); setScanResult(null); setScanError(null);
@@ -4006,10 +4065,13 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
   const applyInvoiceScan = () => {
     if(!scanResult || scanResult.type!=="invoice") return;
     const invNo = scanResult.invoiceNo;
+    if((trips||[]).some(t=>t.invoiceNo===invNo)) {
+      setScanError(`Invoice ${invNo} is already uploaded. Discard this scan.`); return;
+    }
     const invDate = parseDD(scanResult.invoiceDate);
     const scTrips = scanResult.trips||[];
-    setTrips(prev => prev.map(t => {
-      const match = scTrips.find(st=>st.lrNo===t.lr&&Math.abs(Number(st.frtAmt||0)-Number(t.billedToShree||0))<2);
+    setTrips(prev=>prev.map(t=>{
+      const match=scTrips.find(st=>st.lrNo===t.lr&&Math.abs(Number(st.frtAmt||0)-Number(t.billedToShree||0))<2);
       if(match) return {...t, invoiceNo:invNo, invoiceDate:invDate, shreeStatus:"billed"};
       return t;
     }));
@@ -4020,7 +4082,10 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
   const applyPaymentScan = () => {
     if(!scanResult || scanResult.type!=="payment") return;
     const utr=scanResult.utr, pDate=parseDD(scanResult.paymentDate);
-    const invList=scanResult.invoices||[], shorts=scanResult.shortages||[];
+    if((payments||[]).some(p=>p.utr===utr)) {
+      setScanError(`Payment advice UTR ${utr} is already uploaded. Discard this scan.`); return;
+    }
+    const invList=scanResult.invoices||[], shorts=scanResult.shortages||[], exps=scanResult.expenses||[];
     setTrips(prev=>prev.map(t=>{
       if(invList.some(i=>i.invoiceNo===t.invoiceNo)){
         const short=shorts.find(s=>s.lrNo===t.lr);
@@ -4033,8 +4098,18 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
     const pa={id:"PA"+Date.now(), utr, paymentDate:pDate,
       totalPaid:Number(scanResult.totalPaid||0), totalBilled:Number(scanResult.totalBilled||0),
       tdsDeducted:Number(scanResult.tdsDeducted||0), holdAmount:Number(scanResult.holdAmount||0),
-      invoices:invList, shortages:shorts, penalties:scanResult.penalties||[]};
+      invoices:invList, shortages:shorts, penalties:scanResult.penalties||[], expenses:exps};
     setPayments(prev=>[...(prev||[]),pa]);
+    if(exps.length>0&&setExpenses){
+      exps.forEach(exp=>{
+        const rec={id:"EXP"+Date.now()+Math.random().toString(36).slice(2,6),
+          date:pDate||new Date().toISOString().slice(0,10),
+          label:exp.description||exp.ref, amount:Number(exp.amount||0),
+          category:exp.category||"other",
+          notes:`UTR:${utr}`, createdBy:user?.name||"", createdAt:new Date().toISOString()};
+        setExpenses(prev=>({...prev,shree:[...(prev?.shree||[]),rec]}));
+      });
+    }
     if(shorts.length>0&&setVehicles){
       setVehicles(prev=>(prev||[]).map(v=>{
         const ts=shorts.filter(s=>{const t=(trips||[]).find(t2=>t2.lr===s.lrNo);return t&&t.truck===v.regNo;});
@@ -4042,29 +4117,59 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
         return {...v,shortageOwed:(Number(v.shortageOwed||0)+ts.reduce((s,sh)=>s+Number(sh.deduction||0),0))};
       }));
     }
-    log && log(`Payment advice UTR ${utr} applied`);
+    log && log(`Payment advice UTR ${utr} applied — ${exps.length} expense(s) saved`);
     setScanResult(null);
   };
 
-  // ── style tokens ─────────────────────────────────────────────────────────
-  const TH={padding:"8px 10px",textAlign:"left",fontSize:10,fontWeight:700,letterSpacing:1,
-            color:"#666",borderBottom:"1px solid #222",whiteSpace:"nowrap"};
-  const TD={padding:"8px 10px",fontSize:12,color:"#ccc",borderBottom:"1px solid #1a1a1a",verticalAlign:"middle"};
-  const TDR={...TD,textAlign:"right",fontFamily:"monospace"};
+  // delete (owner only)
+  const deleteInvoice = (invoiceNo) => {
+    if(!window.confirm(`Delete invoice ${invoiceNo}? This will unmark all its trips.`)) return;
+    setTrips(prev=>prev.map(t=>t.invoiceNo===invoiceNo
+      ?{...t,invoiceNo:"",invoiceDate:"",shreeStatus:"pending"}:t));
+    log && log(`Invoice ${invoiceNo} deleted by ${user?.name}`);
+  };
+  const deleteAdvice = (utr, id) => {
+    if(!window.confirm(`Delete payment advice UTR ${utr}? This will revert trips to Billed status.`)) return;
+    setPayments(prev=>prev.filter(p=>p.id!==id));
+    setTrips(prev=>prev.map(t=>t.utr===utr
+      ?{...t,paidAmount:0,paymentDate:"",utr:"",shreeStatus:"billed",shreeShortage:null}:t));
+    log && log(`Payment advice UTR ${utr} deleted by ${user?.name}`);
+  };
 
+  // shared UI
   const Pill = ({status,shortage}) => {
-    const c={pending:{bg:"#2a2a2a",col:"#888",txt:"Pending"},billed:{bg:"#1a2a1a",col:"#4caf50",txt:"Billed"},paid:{bg:"#1a1a2e",col:"#5b8dee",txt:"Paid"}}[status]||{bg:"#2a2a2a",col:"#888",txt:"Pending"};
-    return <span style={{display:"inline-flex",alignItems:"center",gap:4}}>
+    const c={pending:{bg:"#2a2a2a",col:"#888",txt:"Pending"},
+             billed:{bg:"#1a2a1a",col:"#4caf50",txt:"Billed"},
+             paid:{bg:"#1a1a2e",col:"#5b8dee",txt:"Paid"}}[status]||{bg:"#2a2a2a",col:"#888",txt:"Pending"};
+    return <span style={{display:"inline-flex",alignItems:"center",gap:3}}>
       <span style={{background:c.bg,color:c.col,border:`1px solid ${c.col}40`,borderRadius:4,padding:"2px 7px",fontSize:10,fontWeight:700}}>{c.txt}</span>
       {shortage&&<span style={{background:"#2a1515",color:"#ff6b6b",border:"1px solid #ff6b6b40",borderRadius:4,padding:"2px 5px",fontSize:10,fontWeight:700}}>⚠SHORT</span>}
     </span>;
   };
 
-  // ── RENDER ────────────────────────────────────────────────────────────────
+  const SearchBar = ({value,onChange,placeholder}) => (
+    <div style={{position:"relative",marginBottom:12}}>
+      <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",fontSize:14,color:"#555",pointerEvents:"none"}}>🔍</span>
+      <input value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
+        style={{width:"100%",boxSizing:"border-box",background:"#161616",border:"1px solid #2a2a2a",
+          borderRadius:8,padding:"9px 32px 9px 32px",color:"#ccc",fontSize:13,outline:"none"}}/>
+      {value&&<button onClick={()=>onChange("")}
+        style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",
+          background:"none",border:"none",color:"#555",cursor:"pointer",fontSize:16,lineHeight:1}}>✕</button>}
+    </div>
+  );
+
+  const EmptyState = ({icon,text}) => (
+    <div style={{textAlign:"center",padding:"40px 20px",color:"#444"}}>
+      <div style={{fontSize:32,marginBottom:8}}>{icon}</div>
+      <div style={{fontSize:13}}>{text}</div>
+    </div>
+  );
+
   return (
     <div style={{background:"#0d0d0d",minHeight:"100vh",color:"#e0e0e0",fontFamily:"'DM Sans','Segoe UI',sans-serif"}}>
 
-      {/* header — stacks on mobile */}
+      {/* header + KPIs */}
       <div style={{background:"#111",borderBottom:"1px solid #222",padding:"14px 16px"}}>
         <div style={{fontSize:10,letterSpacing:3,color:"#555",marginBottom:2}}>M YANTRA ENTERPRISES</div>
         <div style={{fontSize:17,fontWeight:800,color:"#fff",marginBottom:12}}>💰 Shree Cement — Payments</div>
@@ -4099,23 +4204,30 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
         </div>
       )}
 
-      {/* tabs — scrollable on mobile */}
+      {/* tabs with badges */}
       <div style={{background:"#111",borderBottom:"1px solid #1e1e1e",
-        display:"flex",overflowX:"auto",WebkitOverflowScrolling:"touch"}}>
+        display:"flex",overflowX:"auto",WebkitOverflowScrolling:"touch",scrollbarWidth:"none"}}>
         {[
-          {id:"overview", label:"Overview"},
-          {id:"invoices", label:"Invoices"},
-          {id:"payments", label:"Advice"},
-          {id:"shortages",label:"Shortages"},
-          {id:"profit",   label:"Profit"},
+          {id:"overview",  label:"Overview",  badge:null},
+          {id:"invoices",  label:"Invoices",  badge:shreeInvoices.length||null},
+          {id:"payments",  label:"Advice",    badge:shreePayments.length||null},
+          {id:"shortages", label:"Shortages", badge:allShortages.length||null},
+          {id:"profit",    label:"Profit",    badge:null},
         ].map(t=>(
           <button key={t.id} onClick={()=>setActiveTab(t.id)} style={{
-            background:"none",border:"none",padding:"11px 14px",cursor:"pointer",whiteSpace:"nowrap",
+            background:"none",border:"none",padding:"11px 14px",cursor:"pointer",
+            whiteSpace:"nowrap",flexShrink:0,
             fontSize:13,fontWeight:activeTab===t.id?700:400,
             color:activeTab===t.id?"#fff":"#555",
             borderBottom:activeTab===t.id?"2px solid #5b8dee":"2px solid transparent",
-            flexShrink:0,
-          }}>{t.label}</button>
+          }}>
+            {t.label}
+            {t.badge!=null&&(
+              <span style={{marginLeft:5,background:activeTab===t.id?"#5b8dee22":"#222",
+                color:activeTab===t.id?"#5b8dee":"#666",borderRadius:10,
+                padding:"1px 6px",fontSize:10,fontWeight:700}}>{t.badge}</span>
+            )}
+          </button>
         ))}
       </div>
 
@@ -4124,13 +4236,12 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
         {/* ══ OVERVIEW ══════════════════════════════════════════════ */}
         {activeTab==="overview"&&(
           <div>
-            {/* KPI mini cards */}
             <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:10,marginBottom:16}}>
               {[
-                {label:"Shree Trips",     val:shreeTrips.length,                                                        col:"#5b8dee"},
-                {label:"Pending Billing", val:shreeTrips.filter(t=>!t.shreeStatus||t.shreeStatus==="pending").length,   col:"#ff9800"},
+                {label:"Shree Trips",     val:shreeTrips.length,                                                               col:"#5b8dee"},
+                {label:"Pending Billing", val:shreeTrips.filter(t=>!t.shreeStatus||t.shreeStatus==="pending").length,          col:"#ff9800"},
                 {label:"Billed / Paid",   val:`${shreeTrips.filter(t=>t.shreeStatus==="billed").length} / ${shreeTrips.filter(t=>t.shreeStatus==="paid").length}`, col:"#4caf50"},
-                {label:"Shortages",       val:allShortages.length,                                                      col:"#ff6b6b"},
+                {label:"Shortage Alerts", val:allShortages.length,                                                             col:"#ff6b6b"},
               ].map(c=>(
                 <div key={c.label} style={{background:"#151515",border:"1px solid #222",borderRadius:8,padding:"12px 14px"}}>
                   <div style={{fontSize:10,color:"#555",letterSpacing:1,marginBottom:4}}>{c.label}</div>
@@ -4141,24 +4252,21 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
 
             {/* scan zone */}
             <div style={{background:"#111",border:"1px solid #222",borderRadius:8,padding:14,marginBottom:16}}>
-              <div style={{fontSize:13,fontWeight:700,color:"#fff",marginBottom:10}}>📤 Scan Document with AI</div>
+              <div style={{fontSize:13,fontWeight:700,color:"#fff",marginBottom:10}}>📤 Scan with AI</div>
               <div style={{display:"flex",flexDirection:"column",gap:10}}>
-                <label style={{border:"1.5px dashed #333",borderRadius:6,padding:"14px",
-                  cursor:"pointer",textAlign:"center",display:"block"}}>
-                  <input type="file" accept=".pdf,image/*" style={{display:"none"}}
-                    onChange={e=>{if(e.target.files[0])handleScan(e.target.files[0],"invoice");e.target.value="";}}/>
-                  <div style={{fontSize:22,marginBottom:4}}>📄</div>
-                  <div style={{color:"#ccc",fontWeight:600,fontSize:13}}>Upload Invoice PDF</div>
-                  <div style={{fontSize:11,color:"#555",marginTop:3}}>Extracts LR-wise amounts → marks trips Billed</div>
-                </label>
-                <label style={{border:"1.5px dashed #333",borderRadius:6,padding:"14px",
-                  cursor:"pointer",textAlign:"center",display:"block"}}>
-                  <input type="file" accept=".pdf,image/*" style={{display:"none"}}
-                    onChange={e=>{if(e.target.files[0])handleScan(e.target.files[0],"payment");e.target.value="";}}/>
-                  <div style={{fontSize:22,marginBottom:4}}>💳</div>
-                  <div style={{color:"#ccc",fontWeight:600,fontSize:13}}>Upload Payment Advice</div>
-                  <div style={{fontSize:11,color:"#555",marginTop:3}}>Marks trips Paid + flags shortages</div>
-                </label>
+                {[
+                  {icon:"📄",label:"Upload Invoice PDF",      sub:"Extracts LR-wise FRT amounts → marks trips Billed",   type:"invoice"},
+                  {icon:"💳",label:"Upload Payment Advice",   sub:"Marks trips Paid + saves electricity/penalty expenses",type:"payment"},
+                ].map(btn=>(
+                  <label key={btn.type} style={{border:"1.5px dashed #2a2a2a",borderRadius:8,
+                    padding:"14px",cursor:"pointer",textAlign:"center",display:"block",background:"#0d0d0d"}}>
+                    <input type="file" accept=".pdf,image/*" style={{display:"none"}}
+                      onChange={e=>{if(e.target.files[0])handleScan(e.target.files[0],btn.type);e.target.value="";}}/>
+                    <div style={{fontSize:24,marginBottom:4}}>{btn.icon}</div>
+                    <div style={{color:"#ccc",fontWeight:600,fontSize:13}}>{btn.label}</div>
+                    <div style={{fontSize:11,color:"#555",marginTop:3}}>{btn.sub}</div>
+                  </label>
+                ))}
               </div>
 
               {scanning&&(
@@ -4168,57 +4276,64 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                 </div>
               )}
               {scanError&&(
-                <div style={{marginTop:10,background:"#1a0808",border:"1px solid #ff6b6b40",
-                  borderRadius:6,padding:"10px 12px",color:"#ff6b6b",fontSize:12}}>
-                  ✕ {scanError}
-                  <button onClick={()=>setScanError(null)} style={{marginLeft:10,background:"none",border:"none",color:"#ff6b6b",cursor:"pointer"}}>Dismiss</button>
+                <div style={{marginTop:10,background:"#1a0808",border:"1px solid #ff6b6b40",borderRadius:6,
+                  padding:"10px 12px",color:"#ff6b6b",fontSize:12,display:"flex",justifyContent:"space-between",gap:8}}>
+                  <span>✕ {scanError}</span>
+                  <button onClick={()=>{setScanError(null);setScanResult(null);}}
+                    style={{background:"none",border:"none",color:"#ff6b6b",cursor:"pointer",flexShrink:0}}>Dismiss</button>
                 </div>
               )}
 
-              {scanResult&&(
-                <div style={{marginTop:12,background:"#0d1a0d",border:"1px solid #2a4a2a",borderRadius:6,padding:12}}>
-                  <div style={{fontWeight:700,color:"#4caf50",marginBottom:8,fontSize:13}}>
+              {scanResult&&!scanError&&(
+                <div style={{marginTop:12,background:"#0d1a0d",border:"1px solid #2a4a2a",borderRadius:8,padding:12}}>
+                  <div style={{fontWeight:700,color:"#4caf50",marginBottom:10,fontSize:13}}>
                     ✅ {scanResult.type==="invoice"?"Invoice":"Payment Advice"} scanned
                   </div>
 
                   {scanResult.type==="invoice"&&(
                     <>
-                      <div style={{fontSize:11,color:"#888",marginBottom:8}}>
+                      <div style={{fontSize:12,color:"#888",marginBottom:10,display:"flex",gap:12,flexWrap:"wrap"}}>
                         <b style={{color:"#fff"}}>{scanResult.invoiceNo||"—"}</b>
-                        &nbsp;·&nbsp;{scanResult.invoiceDate||"—"}
-                        &nbsp;·&nbsp;₹{fmtINR(scanResult.totalAmount)}
+                        <span>{scanResult.invoiceDate||"—"}</span>
+                        <span style={{color:"#5b8dee",fontWeight:700}}>₹{fmtINR(scanResult.totalAmount)}</span>
                       </div>
                       {(scanResult.trips||[]).map((st,i)=>{
                         const match=(trips||[]).find(t=>t.lr===st.lrNo&&Math.abs(Number(t.billedToShree||0)-Number(st.frtAmt||0))<2);
                         return (
-                          <div key={i} style={{display:"flex",justifyContent:"space-between",
+                          <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
                             padding:"6px 0",borderBottom:"1px solid #1a2a1a",fontSize:12}}>
                             <span style={{fontFamily:"monospace",color:"#aaa"}}>{st.lrNo}</span>
                             <span style={{fontFamily:"monospace"}}>₹{fmtINR(st.frtAmt)}</span>
-                            <span>{match?<span style={{color:"#4caf50"}}>✓ matched</span>:<span style={{color:"#ff6b6b"}}>✗ no match</span>}</span>
+                            <span>{match
+                              ?<span style={{color:"#4caf50",fontSize:11}}>✓ matched</span>
+                              :<span style={{color:"#ff6b6b",fontSize:11}}>✗ no match</span>}
+                            </span>
                           </div>
                         );
                       })}
-                      <button onClick={applyInvoiceScan}
-                        style={{marginTop:10,width:"100%",background:"#4caf50",color:"#000",border:"none",
-                          borderRadius:6,padding:"10px",fontWeight:700,cursor:"pointer",fontSize:13}}>
-                        ✓ Apply — Mark Trips Billed
-                      </button>
+                      <div style={{display:"flex",gap:8,marginTop:12}}>
+                        <button onClick={applyInvoiceScan}
+                          style={{flex:1,background:"#4caf50",color:"#000",border:"none",borderRadius:6,
+                            padding:"10px",fontWeight:700,cursor:"pointer",fontSize:13}}>✓ Apply — Mark Billed</button>
+                        <button onClick={()=>setScanResult(null)}
+                          style={{background:"#222",color:"#888",border:"1px solid #333",borderRadius:6,
+                            padding:"10px 14px",cursor:"pointer",fontSize:12}}>Discard</button>
+                      </div>
                     </>
                   )}
 
                   {scanResult.type==="payment"&&(
                     <>
-                      <div style={{fontSize:11,color:"#888",marginBottom:8}}>
-                        UTR: <b style={{color:"#fff"}}>{scanResult.utr||"—"}</b>
-                        &nbsp;·&nbsp;{scanResult.paymentDate||"—"}
+                      <div style={{fontSize:12,color:"#888",marginBottom:10,display:"flex",gap:12,flexWrap:"wrap"}}>
+                        <span>UTR: <b style={{color:"#fff"}}>{scanResult.utr||"—"}</b></span>
+                        <span>{scanResult.paymentDate||"—"}</span>
                       </div>
-                      <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:6,marginBottom:8}}>
+                      <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:6,marginBottom:10}}>
                         {[
-                          {l:"Net Paid",   v:scanResult.totalPaid,    c:"#4caf50"},
-                          {l:"TDS",        v:scanResult.tdsDeducted,  c:"#ff9800"},
-                          {l:"Hold",       v:scanResult.holdAmount,   c:"#ff9800"},
-                          {l:"Total Bill", v:scanResult.totalBilled,  c:"#aaa"},
+                          {l:"Net Paid",   v:scanResult.totalPaid,   c:"#4caf50"},
+                          {l:"TDS",        v:scanResult.tdsDeducted, c:"#ff9800"},
+                          {l:"Hold",       v:scanResult.holdAmount,  c:"#ff9800"},
+                          {l:"Total Bill", v:scanResult.totalBilled, c:"#aaa"},
                         ].map(m=>(
                           <div key={m.l} style={{background:"#0d0d0d",borderRadius:4,padding:"6px 8px"}}>
                             <div style={{fontSize:9,color:"#555"}}>{m.l}</div>
@@ -4227,7 +4342,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                         ))}
                       </div>
                       {(scanResult.shortages||[]).length>0&&(
-                        <div style={{background:"#1a0808",borderRadius:4,padding:"8px 10px",marginBottom:8}}>
+                        <div style={{background:"#1a0808",borderRadius:6,padding:"8px 10px",marginBottom:8}}>
                           <div style={{color:"#ff6b6b",fontWeight:700,fontSize:11,marginBottom:4}}>⚠ Shortages</div>
                           {(scanResult.shortages||[]).map((s,i)=>(
                             <div key={i} style={{fontSize:11,color:"#ff9999",padding:"2px 0"}}>
@@ -4236,17 +4351,27 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                           ))}
                         </div>
                       )}
+                      {(scanResult.expenses||[]).length>0&&(
+                        <div style={{background:"#1a1000",borderRadius:6,padding:"8px 10px",marginBottom:8}}>
+                          <div style={{color:"#ff9800",fontWeight:700,fontSize:11,marginBottom:4}}>
+                            📋 Debit Notes → will save as Expenses
+                          </div>
+                          {(scanResult.expenses||[]).map((e,i)=>(
+                            <div key={i} style={{fontSize:11,color:"#ffcc88",padding:"2px 0",
+                              display:"flex",justifyContent:"space-between"}}>
+                              <span>{e.description||e.ref}</span>
+                              <span style={{fontFamily:"monospace"}}>₹{fmtINR(e.amount)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                       <div style={{display:"flex",gap:8}}>
                         <button onClick={applyPaymentScan}
-                          style={{flex:1,background:"#5b8dee",color:"#000",border:"none",
-                            borderRadius:6,padding:"10px",fontWeight:700,cursor:"pointer",fontSize:12}}>
-                          ✓ Apply — Mark Paid
-                        </button>
+                          style={{flex:1,background:"#5b8dee",color:"#000",border:"none",borderRadius:6,
+                            padding:"10px",fontWeight:700,cursor:"pointer",fontSize:12}}>✓ Apply — Mark Paid</button>
                         <button onClick={()=>setScanResult(null)}
-                          style={{background:"#222",color:"#888",border:"1px solid #333",
-                            borderRadius:6,padding:"10px 14px",cursor:"pointer",fontSize:12}}>
-                          Discard
-                        </button>
+                          style={{background:"#222",color:"#888",border:"1px solid #333",borderRadius:6,
+                            padding:"10px 14px",cursor:"pointer",fontSize:12}}>Discard</button>
                       </div>
                     </>
                   )}
@@ -4254,25 +4379,30 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
               )}
             </div>
 
-            {/* trips list */}
+            {/* recent trips */}
             <div style={{background:"#111",border:"1px solid #222",borderRadius:8,overflow:"hidden"}}>
-              <div style={{padding:"10px 14px",borderBottom:"1px solid #1e1e1e",fontWeight:700,fontSize:13}}>
-                Shree Trips
+              <div style={{padding:"10px 14px",borderBottom:"1px solid #1e1e1e",
+                display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span style={{fontWeight:700,fontSize:13}}>Recent Shree Trips</span>
+                {shreeTrips.length>5&&(
+                  <button onClick={()=>setActiveTab("invoices")}
+                    style={{background:"none",border:"none",color:"#5b8dee",fontSize:12,cursor:"pointer"}}>
+                    View all →</button>
+                )}
               </div>
               {shreeTrips.length===0
-                ? <div style={{padding:16,color:"#444",fontSize:13}}>No Shree trips yet.</div>
-                : shreeTrips.slice(0,10).map(t=>(
-                  <div key={t.id} style={{padding:"10px 14px",borderBottom:"1px solid #1a1a1a",
-                    background:t.shreeShortage?"#1a0808":"transparent"}}>
+                ? <EmptyState icon="🚛" text='Trips with "Billed to Shree" amount will appear here.'/>
+                : shreeTrips.slice(0,5).map(t=>(
+                  <div key={t.id} style={{padding:"10px 14px",borderBottom:"1px solid #161616",
+                    background:t.shreeShortage?"#140808":"transparent"}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3}}>
                       <span style={{fontFamily:"monospace",fontSize:12,color:"#ccc"}}>{t.lr||t.lrNo}</span>
                       <Pill status={t.shreeStatus||"pending"} shortage={t.shreeShortage}/>
                     </div>
                     <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:"#666"}}>
-                      <span>{t.truck||t.truckNo}</span>
+                      <span>{t.truck||t.truckNo} · {fmtDate(t.date)}</span>
                       <span style={{fontFamily:"monospace",color:"#5b8dee"}}>₹{fmtINR(t.billedToShree)}</span>
                     </div>
-                    {t.invoiceNo&&<div style={{fontSize:10,color:"#444",marginTop:2}}>{t.invoiceNo}</div>}
                   </div>
                 ))
               }
@@ -4283,39 +4413,76 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
         {/* ══ INVOICES ══════════════════════════════════════════════ */}
         {activeTab==="invoices"&&(
           <div>
-            <div style={{fontSize:14,fontWeight:700,marginBottom:12}}>Invoices to Shree Cement</div>
-            {shreeInvoices.length===0
-              ? <div style={{background:"#111",border:"1px solid #222",borderRadius:8,padding:20,color:"#444",fontSize:13}}>
-                  No invoices yet. Upload an invoice PDF in Overview.
-                </div>
-              : shreeInvoices.map(inv=>(
-                <div key={inv.invoiceNo} style={{background:"#111",border:"1px solid #222",borderRadius:8,marginBottom:12,overflow:"hidden"}}>
-                  <div style={{padding:"10px 14px",borderBottom:"1px solid #1e1e1e",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                    <div>
-                      <div style={{fontFamily:"monospace",fontWeight:700,color:"#fff",fontSize:13}}>{inv.invoiceNo}</div>
-                      <div style={{fontSize:11,color:"#555",marginTop:2}}>{inv.invoiceDate||"—"}</div>
-                    </div>
-                    <div style={{textAlign:"right"}}>
-                      <div style={{fontWeight:800,color:"#5b8dee",fontSize:14}}>₹{fmtINR(inv.totalAmt)}</div>
-                      <Pill status={inv.status}/>
-                    </div>
-                  </div>
-                  {inv.trips.map(t=>(
-                    <div key={t.id} style={{padding:"8px 14px",borderBottom:"1px solid #1a1a1a",
-                      background:t.shreeShortage?"#1a0808":"transparent"}}>
-                      <div style={{display:"flex",justifyContent:"space-between",fontSize:12}}>
-                        <span style={{fontFamily:"monospace",color:"#aaa"}}>{t.lr||t.lrNo}</span>
-                        <span style={{fontFamily:"monospace",color:"#ccc"}}>₹{fmtINR(t.billedToShree)}</span>
-                      </div>
-                      {t.shreeShortage&&(
-                        <div style={{fontSize:11,color:"#ff6b6b",marginTop:2}}>
-                          ⚠ {t.shreeShortage.tonnes} TO short — ₹{fmtINR(t.shreeShortage.deduction)} deducted
+            <SearchBar value={searchInv} onChange={setSearchInv} placeholder="Search invoice no, LR, date…"/>
+            <div style={{fontSize:11,color:"#555",marginBottom:10}}>
+              {filteredInvoices.length} of {shreeInvoices.length} invoice{shreeInvoices.length!==1?"s":""}
+              {searchInv&&` · "${searchInv}"`}
+            </div>
+            {filteredInvoices.length===0
+              ? <EmptyState icon="🧾" text={searchInv?"No invoices match your search.":"No invoices yet. Upload an invoice PDF."}/>
+              : filteredInvoices.map(inv=>{
+                const isOpen = expandedInv===inv.invoiceNo;
+                return (
+                  <div key={inv.invoiceNo} style={{background:"#111",border:"1px solid #222",
+                    borderRadius:8,marginBottom:10,overflow:"hidden"}}>
+                    <div onClick={()=>setExpandedInv(isOpen?null:inv.invoiceNo)}
+                      style={{padding:"12px 14px",cursor:"pointer",
+                        display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3,flexWrap:"wrap"}}>
+                          <span style={{fontFamily:"monospace",fontWeight:700,color:"#fff",fontSize:13}}>
+                            {inv.invoiceNo}
+                          </span>
+                          <Pill status={inv.status}/>
                         </div>
-                      )}
+                        <div style={{display:"flex",gap:10,fontSize:11,color:"#555",flexWrap:"wrap"}}>
+                          <span>{fmtDate(inv.invoiceDate)}</span>
+                          <span>{inv.trips.length} trip{inv.trips.length!==1?"s":""}</span>
+                          <span style={{color:"#5b8dee",fontWeight:700}}>₹{fmtINR(inv.totalAmt)}</span>
+                        </div>
+                      </div>
+                      <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+                        {isOwner&&(
+                          <button onClick={e=>{e.stopPropagation();deleteInvoice(inv.invoiceNo);}}
+                            style={{background:"#1a0808",border:"1px solid #ff6b6b30",color:"#ff6b6b",
+                              borderRadius:5,padding:"5px 9px",fontSize:12,cursor:"pointer"}}>🗑</button>
+                        )}
+                        <span style={{color:"#333",fontSize:16,fontWeight:700}}>{isOpen?"▲":"▼"}</span>
+                      </div>
                     </div>
-                  ))}
-                </div>
-              ))
+                    {isOpen&&(
+                      <div style={{borderTop:"1px solid #1e1e1e"}}>
+                        {inv.trips.map(t=>(
+                          <div key={t.id} style={{padding:"9px 14px",borderBottom:"1px solid #161616",
+                            background:t.shreeShortage?"#140808":"#0d0d0d"}}>
+                            <div style={{display:"flex",justifyContent:"space-between",fontSize:12}}>
+                              <span style={{fontFamily:"monospace",color:"#aaa"}}>{t.lr||t.lrNo}</span>
+                              <span style={{fontFamily:"monospace",color:"#ccc",fontWeight:700}}>
+                                ₹{fmtINR(t.billedToShree)}
+                              </span>
+                            </div>
+                            <div style={{display:"flex",gap:10,fontSize:10,color:"#555",marginTop:2}}>
+                              <span>{t.truck||t.truckNo}</span>
+                              <span>{t.qty} MT</span>
+                              {t.paymentDate&&<span style={{color:"#4caf50"}}>✓ Paid {fmtDate(t.paymentDate)}</span>}
+                            </div>
+                            {t.shreeShortage&&(
+                              <div style={{fontSize:10,color:"#ff6b6b",marginTop:3}}>
+                                ⚠ {t.shreeShortage.tonnes} TO short — ₹{fmtINR(t.shreeShortage.deduction)}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                        <div style={{padding:"8px 14px",display:"flex",justifyContent:"space-between",
+                          fontSize:11,background:"#0d0d0d",borderTop:"1px solid #1a1a1a"}}>
+                          <span style={{color:"#555"}}>Invoice Total</span>
+                          <span style={{fontFamily:"monospace",color:"#fff",fontWeight:700}}>₹{fmtINR(inv.totalAmt)}</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })
             }
           </div>
         )}
@@ -4323,87 +4490,131 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
         {/* ══ PAYMENT ADVICE ════════════════════════════════════════ */}
         {activeTab==="payments"&&(
           <div>
-            <div style={{fontSize:14,fontWeight:700,marginBottom:12}}>Payment Advices Received</div>
-            {shreePayments.length===0
-              ? <div style={{background:"#111",border:"1px solid #222",borderRadius:8,padding:20,color:"#444",fontSize:13}}>
-                  No payment advices yet. Upload a Payment Advice PDF in Overview.
-                </div>
-              : shreePayments.map(p=>(
-                <div key={p.id||p.utr} style={{background:"#111",border:"1px solid #222",borderRadius:8,marginBottom:16,overflow:"hidden"}}>
-                  {/* PA header */}
-                  <div style={{padding:"12px 14px",borderBottom:"1px solid #1e1e1e",
-                    display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
-                    <div>
-                      <div style={{fontWeight:700,fontSize:13,color:"#fff"}}>Payment Advice</div>
-                      <div style={{fontFamily:"monospace",color:"#5b8dee",fontSize:12,marginTop:2}}>UTR: {p.utr}</div>
-                    </div>
-                    <div style={{fontSize:11,color:"#666"}}>{p.paymentDate||p.date}</div>
-                  </div>
-                  {/* amounts grid */}
-                  <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:0}}>
-                    {[
-                      {l:"Total Billed",  v:p.totalBilled||p.totalBill, c:"#aaa"},
-                      {l:"Net Paid",      v:p.totalPaid||p.paid,        c:"#4caf50"},
-                      {l:"TDS Deducted",  v:p.tdsDeducted||p.tds,      c:"#ff9800"},
-                      {l:"On Hold",       v:p.holdAmount||p.gstHold,    c:"#ff9800"},
-                    ].map((m,i)=>(
-                      <div key={m.l} style={{padding:"10px 14px",borderRight:i%2===0?"1px solid #1a1a1a":"none",
-                        borderBottom:i<2?"1px solid #1a1a1a":"none"}}>
-                        <div style={{fontSize:9,color:"#555",letterSpacing:1}}>{m.l}</div>
-                        <div style={{fontWeight:800,color:m.c,fontSize:15}}>₹{fmtINR(m.v)}</div>
-                      </div>
-                    ))}
-                  </div>
-
-                  {/* penalties */}
-                  {(p.penalties||[]).map((pen,i)=>(
-                    <div key={i} style={{padding:"8px 14px",background:"#1a1000",borderTop:"1px solid #333",
-                      fontSize:12,color:"#ff9800"}}>
-                      ⚠ <b>Penalty ₹{fmtINR(pen.amount)}</b> — {pen.description}
-                    </div>
-                  ))}
-
-                  {/* invoices breakdown */}
-                  {(p.invoices||[]).filter(i=>i.invoiceNo&&!i.invoiceNo.startsWith("KR")).length>0&&(
-                    <div style={{borderTop:"1px solid #222"}}>
-                      <div style={{padding:"6px 14px",fontSize:10,fontWeight:700,color:"#555",letterSpacing:1}}>
-                        INVOICE BREAKDOWN
-                      </div>
-                      {(p.invoices||[]).filter(i=>i.invoiceNo&&!i.invoiceNo.startsWith("KR")).map((inv,i)=>(
-                        <div key={i} style={{padding:"7px 14px",borderTop:"1px solid #1a1a1a",
-                          display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:12}}>
-                          <span style={{fontFamily:"monospace",color:"#aaa"}}>{inv.invoiceNo}</span>
-                          <div style={{textAlign:"right"}}>
-                            <div style={{color:"#4caf50",fontWeight:700}}>₹{fmtINR(inv.paymentAmt)}</div>
-                            {inv.tds>0&&<div style={{fontSize:10,color:"#ff9800"}}>TDS ₹{fmtINR(inv.tds)}</div>}
-                          </div>
+            <SearchBar value={searchAdv} onChange={setSearchAdv} placeholder="Search UTR, invoice no, date…"/>
+            <div style={{fontSize:11,color:"#555",marginBottom:10}}>
+              {filteredAdvices.length} of {shreePayments.length} advice{shreePayments.length!==1?"s":""}
+              {searchAdv&&` · "${searchAdv}"`}
+            </div>
+            {filteredAdvices.length===0
+              ? <EmptyState icon="💳" text={searchAdv?"No advices match your search.":"No payment advices yet."}/>
+              : filteredAdvices.map(p=>{
+                const key=p.id||p.utr;
+                const isOpen=expandedAdv===key;
+                const frtInvoices=(p.invoices||[]).filter(i=>i.invoiceNo&&!i.invoiceNo.startsWith("KR"));
+                const allExpenses=[...(p.expenses||[]),...(p.penalties||[])];
+                return (
+                  <div key={key} style={{background:"#111",border:"1px solid #222",
+                    borderRadius:8,marginBottom:12,overflow:"hidden"}}>
+                    <div onClick={()=>setExpandedAdv(isOpen?null:key)}
+                      style={{padding:"12px 14px",cursor:"pointer",
+                        display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3,flexWrap:"wrap"}}>
+                          <span style={{fontFamily:"monospace",color:"#5b8dee",fontSize:13,fontWeight:700}}>
+                            UTR: {p.utr}
+                          </span>
+                          {(p.shortages||[]).length>0&&(
+                            <span style={{background:"#2a1515",color:"#ff6b6b",border:"1px solid #ff6b6b30",
+                              borderRadius:4,padding:"1px 6px",fontSize:10}}>
+                              ⚠ {p.shortages.length} shortage{p.shortages.length>1?"s":""}
+                            </span>
+                          )}
                         </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* shortages */}
-                  {(p.shortages||[]).length>0&&(
-                    <div style={{background:"#150a0a",borderTop:"1px solid #ff6b6b20"}}>
-                      <div style={{padding:"6px 14px",fontSize:10,fontWeight:700,color:"#ff6b6b",letterSpacing:1}}>
-                        🚨 SHORTAGE DEDUCTIONS
-                      </div>
-                      {(p.shortages||[]).map((s,i)=>(
-                        <div key={i} style={{padding:"7px 14px",borderTop:"1px solid #2a1212",
-                          display:"flex",justifyContent:"space-between",fontSize:12}}>
-                          <div>
-                            <div style={{fontFamily:"monospace",color:"#ffaaaa"}}>{s.lrNo||s.lr}</div>
-                            <div style={{fontSize:10,color:"#883333"}}>{s.ref} · {s.tonnes} TO</div>
-                          </div>
-                          <div style={{color:"#ff6b6b",fontWeight:700,fontFamily:"monospace"}}>
-                            ₹{fmtINR(s.deduction)}
-                          </div>
+                        <div style={{display:"flex",gap:10,fontSize:11,color:"#555",flexWrap:"wrap"}}>
+                          <span>{fmtDate(p.paymentDate||p.date)}</span>
+                          <span style={{color:"#4caf50",fontWeight:700}}>₹{fmtINR(p.totalPaid||p.paid)}</span>
+                          <span>{frtInvoices.length} invoice{frtInvoices.length!==1?"s":""}</span>
                         </div>
-                      ))}
+                      </div>
+                      <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+                        {isOwner&&(
+                          <button onClick={e=>{e.stopPropagation();deleteAdvice(p.utr,p.id);}}
+                            style={{background:"#1a0808",border:"1px solid #ff6b6b30",color:"#ff6b6b",
+                              borderRadius:5,padding:"5px 9px",fontSize:12,cursor:"pointer"}}>🗑</button>
+                        )}
+                        <span style={{color:"#333",fontSize:16,fontWeight:700}}>{isOpen?"▲":"▼"}</span>
+                      </div>
                     </div>
-                  )}
-                </div>
-              ))
+
+                    {isOpen&&(
+                      <div style={{borderTop:"1px solid #1e1e1e"}}>
+                        {/* amounts grid */}
+                        <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)"}}>
+                          {[
+                            {l:"Total Billed",  v:p.totalBilled||p.totalBill, c:"#aaa"},
+                            {l:"Net Paid",      v:p.totalPaid||p.paid,        c:"#4caf50"},
+                            {l:"TDS Deducted",  v:p.tdsDeducted||p.tds,      c:"#ff9800"},
+                            {l:"On Hold",       v:p.holdAmount||p.gstHold,    c:"#ff9800"},
+                          ].map((m,i)=>(
+                            <div key={m.l} style={{padding:"10px 14px",background:"#0d0d0d",
+                              borderRight:i%2===0?"1px solid #1a1a1a":"none",
+                              borderBottom:i<2?"1px solid #1a1a1a":"none"}}>
+                              <div style={{fontSize:9,color:"#555",letterSpacing:1}}>{m.l}</div>
+                              <div style={{fontWeight:800,color:m.c,fontSize:14}}>₹{fmtINR(m.v)}</div>
+                            </div>
+                          ))}
+                        </div>
+                        {/* invoices */}
+                        {frtInvoices.length>0&&(
+                          <>
+                            <div style={{padding:"6px 14px",fontSize:10,fontWeight:700,color:"#555",
+                              letterSpacing:1,background:"#0d0d0d",borderTop:"1px solid #1a1a1a"}}>INVOICES</div>
+                            {frtInvoices.map((inv,i)=>(
+                              <div key={i} style={{padding:"8px 14px",borderTop:"1px solid #161616",
+                                display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:12}}>
+                                <span style={{fontFamily:"monospace",color:"#aaa"}}>{inv.invoiceNo}</span>
+                                <div style={{textAlign:"right"}}>
+                                  <div style={{color:"#4caf50",fontWeight:700}}>₹{fmtINR(inv.paymentAmt)}</div>
+                                  {inv.tds>0&&<div style={{fontSize:10,color:"#ff9800"}}>TDS ₹{fmtINR(inv.tds)}</div>}
+                                </div>
+                              </div>
+                            ))}
+                          </>
+                        )}
+                        {/* shortages */}
+                        {(p.shortages||[]).length>0&&(
+                          <>
+                            <div style={{padding:"6px 14px",fontSize:10,fontWeight:700,color:"#ff6b6b",
+                              letterSpacing:1,background:"#140808",borderTop:"1px solid #2a1212"}}>⚠ SHORTAGES</div>
+                            {(p.shortages||[]).map((s,i)=>(
+                              <div key={i} style={{padding:"8px 14px",borderTop:"1px solid #1a0a0a",
+                                background:"#120808",display:"flex",justifyContent:"space-between",fontSize:12}}>
+                                <div>
+                                  <div style={{fontFamily:"monospace",color:"#ffaaaa"}}>{s.lrNo||s.lr}</div>
+                                  <div style={{fontSize:10,color:"#883333"}}>{s.tonnes} TO · {s.ref}</div>
+                                </div>
+                                <span style={{color:"#ff6b6b",fontWeight:700,fontFamily:"monospace"}}>
+                                  ₹{fmtINR(s.deduction)}
+                                </span>
+                              </div>
+                            ))}
+                          </>
+                        )}
+                        {/* expenses / debit notes */}
+                        {allExpenses.length>0&&(
+                          <>
+                            <div style={{padding:"6px 14px",fontSize:10,fontWeight:700,color:"#ff9800",
+                              letterSpacing:1,background:"#130f00",borderTop:"1px solid #2a2000"}}>📋 DEBIT NOTES / EXPENSES</div>
+                            {allExpenses.map((e,i)=>(
+                              <div key={i} style={{padding:"8px 14px",borderTop:"1px solid #1a1500",
+                                background:"#110e00",display:"flex",justifyContent:"space-between",
+                                alignItems:"center",fontSize:12}}>
+                                <div>
+                                  <div style={{color:"#ffcc88"}}>{e.description||e.ref}</div>
+                                  {e.ref&&<div style={{fontSize:10,color:"#665500"}}>{e.ref}</div>}
+                                </div>
+                                <span style={{color:"#ff9800",fontWeight:700,fontFamily:"monospace"}}>
+                                  ₹{fmtINR(e.amount)}
+                                </span>
+                              </div>
+                            ))}
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })
             }
           </div>
         )}
@@ -4411,37 +4622,45 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
         {/* ══ SHORTAGES ══════════════════════════════════════════════ */}
         {activeTab==="shortages"&&(
           <div>
-            <div style={{background:"#150a0a",border:"1px solid #ff6b6b25",borderRadius:8,
-              padding:"12px 14px",marginBottom:14,display:"flex",gap:20,flexWrap:"wrap"}}>
+            <div style={{background:"#140808",border:"1px solid #2a1212",borderRadius:8,
+              padding:"12px 14px",marginBottom:14,
+              display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,textAlign:"center"}}>
               {[
-                {l:"Shortages",    v:allShortages.length,                                                         c:"#ff6b6b"},
-                {l:"Total Deducted", v:`₹${fmtINR(totalShortage)}`,                                              c:"#ff6b6b"},
-                {l:"Tonnes Short",  v:`${allShortages.reduce((s,sh)=>s+Number(sh.tonnes||0),0).toFixed(3)} TO`,  c:"#ff9999"},
+                {l:"Count",    v:allShortages.length,                                                         c:"#ff6b6b"},
+                {l:"Deducted", v:`₹${fmtINR(totalShortage)}`,                                                c:"#ff6b6b"},
+                {l:"Tonnes",   v:`${allShortages.reduce((s,sh)=>s+Number(sh.tonnes||0),0).toFixed(2)} TO`,   c:"#ff9999"},
               ].map(m=>(
                 <div key={m.l}>
-                  <div style={{fontSize:9,color:"#883333",letterSpacing:1}}>{m.l}</div>
-                  <div style={{fontSize:20,fontWeight:800,color:m.c}}>{m.v}</div>
+                  <div style={{fontSize:9,color:"#883333",letterSpacing:1,marginBottom:3}}>{m.l}</div>
+                  <div style={{fontSize:16,fontWeight:800,color:m.c}}>{m.v}</div>
                 </div>
               ))}
             </div>
 
-            {allShortages.length===0
-              ? <div style={{background:"#111",border:"1px solid #222",borderRadius:8,padding:20,color:"#444",fontSize:13}}>
-                  No shortages recorded.
-                </div>
-              : allShortages.map((s,i)=>(
-                <div key={i} style={{background:"#140808",border:"1px solid #2a1212",borderRadius:8,
-                  padding:"10px 14px",marginBottom:8}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
-                    <span style={{fontFamily:"monospace",color:"#ffaaaa",fontSize:13}}>{s.lrNo||s.lr}</span>
+            <SearchBar value={searchShort} onChange={setSearchShort} placeholder="Search LR, ref, UTR…"/>
+            <div style={{fontSize:11,color:"#555",marginBottom:10}}>
+              {filteredShortages.length} of {allShortages.length} deduction{allShortages.length!==1?"s":""}
+              {searchShort&&` · "${searchShort}"`}
+            </div>
+
+            {filteredShortages.length===0
+              ? <EmptyState icon="✅" text={searchShort?"No shortages match your search.":"No shortage deductions recorded."}/>
+              : filteredShortages.map((s,i)=>(
+                <div key={i} style={{background:"#130808",border:"1px solid #2a1212",
+                  borderRadius:8,padding:"11px 14px",marginBottom:8}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
+                    <span style={{fontFamily:"monospace",color:"#ffaaaa",fontSize:13,fontWeight:700}}>
+                      {s.lrNo||s.lr}
+                    </span>
                     <span style={{color:"#ff6b6b",fontWeight:800,fontFamily:"monospace",fontSize:14}}>
                       ₹{fmtINR(s.deduction)}
                     </span>
                   </div>
-                  <div style={{display:"flex",gap:12,fontSize:11,color:"#883333"}}>
-                    <span>{s.tonnes} TO short</span>
-                    <span>UTR: {s.utr}</span>
-                    <span>{s.paymentDate}</span>
+                  <div style={{display:"flex",gap:10,fontSize:11,color:"#665555",flexWrap:"wrap"}}>
+                    <span>📦 {s.tonnes} TO</span>
+                    {s.ref&&<span>Ref: {s.ref}</span>}
+                    {s.utr&&<span>UTR: {s.utr}</span>}
+                    {s.paymentDate&&<span>{fmtDate(s.paymentDate)}</span>}
                   </div>
                 </div>
               ))
@@ -4452,73 +4671,100 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
         {/* ══ PROFIT ════════════════════════════════════════════════ */}
         {activeTab==="profit"&&(
           <div>
-            {/* add expense */}
+            {shreeTrips.length>0&&(
+              <div style={{background:"#0d1a0d",border:"1px solid #1a3a1a",borderRadius:8,
+                padding:"12px 14px",marginBottom:14,
+                display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div>
+                  <div style={{fontSize:10,color:"#2a6a2a",letterSpacing:1,marginBottom:2}}>TOTAL PROFIT</div>
+                  <div style={{fontSize:22,fontWeight:800,color:"#4caf50"}}>
+                    ₹{fmtINR(shreeTrips.reduce((s,t)=>s+tripProfit(t),0))}
+                  </div>
+                </div>
+                <div style={{textAlign:"right",fontSize:11,color:"#555"}}>
+                  <div>{shreeTrips.filter(t=>t.shreeStatus==="paid").length} paid trips</div>
+                  <div>{shreeTrips.filter(t=>t.shreeShortage).length} with shortages</div>
+                </div>
+              </div>
+            )}
+
             <div style={{background:"#111",border:"1px solid #222",borderRadius:8,padding:12,marginBottom:14}}>
-              <div style={{fontSize:13,fontWeight:700,marginBottom:8}}>Add Trip Expense</div>
+              <div style={{fontSize:13,fontWeight:700,marginBottom:8}}>➕ Add Trip Expense</div>
               <div style={{display:"flex",flexDirection:"column",gap:8}}>
                 <select value={newExp.tripId} onChange={e=>setNewExp({...newExp,tripId:e.target.value})}
-                  style={{background:"#0d0d0d",border:"1px solid #333",borderRadius:4,padding:"8px 10px",color:"#ccc",fontSize:13}}>
+                  style={{background:"#0d0d0d",border:"1px solid #333",borderRadius:6,
+                    padding:"8px 10px",color:"#ccc",fontSize:13}}>
                   <option value="">Select trip…</option>
-                  {shreeTrips.map(t=><option key={t.id} value={t.id}>{t.lr||t.lrNo}</option>)}
+                  {shreeTrips.map(t=><option key={t.id} value={t.id}>{t.lr||t.lrNo} · {t.truck||t.truckNo}</option>)}
                 </select>
                 <input value={newExp.label} onChange={e=>setNewExp({...newExp,label:e.target.value})}
-                  placeholder="Expense label (fuel, toll, driver…)"
-                  style={{background:"#0d0d0d",border:"1px solid #333",borderRadius:4,padding:"8px 10px",color:"#ccc",fontSize:13}}/>
+                  placeholder="Expense label (fuel, toll…)"
+                  style={{background:"#0d0d0d",border:"1px solid #333",borderRadius:6,
+                    padding:"8px 10px",color:"#ccc",fontSize:13}}/>
                 <div style={{display:"flex",gap:8}}>
                   <input value={newExp.amount} onChange={e=>setNewExp({...newExp,amount:e.target.value})}
-                    type="number" placeholder="Amount ₹"
-                    style={{flex:1,background:"#0d0d0d",border:"1px solid #333",borderRadius:4,padding:"8px 10px",color:"#ccc",fontSize:13}}/>
+                    type="number" placeholder="₹ Amount"
+                    style={{flex:1,background:"#0d0d0d",border:"1px solid #333",borderRadius:6,
+                      padding:"8px 10px",color:"#ccc",fontSize:13}}/>
                   <button onClick={()=>{
                     if(!newExp.tripId||!newExp.label||!newExp.amount) return;
-                    setExpenses(prev=>({...prev,[newExp.tripId]:[...(prev[newExp.tripId]||[]),{label:newExp.label,amount:Number(newExp.amount)}]}));
+                    setExpenses(prev=>({...prev,[newExp.tripId]:[...(prev[newExp.tripId]||[]),
+                      {label:newExp.label,amount:Number(newExp.amount)}]}));
                     setNewExp({tripId:"",label:"",amount:""});
-                  }} style={{background:"#5b8dee",color:"#000",border:"none",borderRadius:5,padding:"8px 16px",fontWeight:700,cursor:"pointer",fontSize:13}}>
-                    + Add
-                  </button>
+                  }} style={{background:"#5b8dee",color:"#000",border:"none",borderRadius:6,
+                    padding:"8px 16px",fontWeight:700,cursor:"pointer",fontSize:13}}>Add</button>
                 </div>
               </div>
             </div>
 
-            {/* profit cards */}
-            {shreeTrips.map(t=>{
-              const profit=tripProfit(t);
-              return (
-                <div key={t.id} style={{background:"#111",border:"1px solid #222",borderRadius:8,padding:"10px 14px",marginBottom:8}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-                    <span style={{fontFamily:"monospace",fontSize:12,color:"#ccc"}}>{t.lr||t.lrNo}</span>
-                    <span style={{fontWeight:800,fontSize:15,color:profit>=0?"#4caf50":"#ff6b6b"}}>
-                      ₹{fmtINR(profit)}
-                    </span>
-                  </div>
-                  <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:4,fontSize:11}}>
-                    <div style={{color:"#666"}}>Billed<br/><span style={{color:"#ccc",fontFamily:"monospace"}}>₹{fmtINR(t.billedToShree)}</span></div>
-                    <div style={{color:"#666"}}>Shortage<br/><span style={{color:t.shreeShortage?"#ff6b6b":"#444",fontFamily:"monospace"}}>{t.shreeShortage?`₹${fmtINR(t.shreeShortage.deduction)}`:"—"}</span></div>
-                    <div style={{color:"#666"}}>Expenses<br/><span style={{color:"#ccc",fontFamily:"monospace"}}>₹{fmtINR(tripExps(t.id))}</span></div>
-                  </div>
-                  {((expenses||{})[t.id]||[]).length>0&&(
-                    <div style={{marginTop:6,fontSize:10,color:"#555"}}>
-                      {((expenses||{})[t.id]||[]).map(e=>`${e.label}: ₹${fmtINR(e.amount)}`).join("  ·  ")}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+            <SearchBar value={searchTrip} onChange={setSearchTrip} placeholder="Search LR, truck…"/>
+            <div style={{fontSize:11,color:"#555",marginBottom:10}}>
+              {filteredTrips.length} of {shreeTrips.length} trip{shreeTrips.length!==1?"s":""}
+            </div>
 
-            {/* total */}
-            {shreeTrips.length>0&&(
-              <div style={{background:"#151515",border:"1px solid #333",borderRadius:8,padding:"12px 14px",
-                display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:4}}>
-                <span style={{fontWeight:700,color:"#fff"}}>Total Profit</span>
-                <span style={{fontWeight:800,fontSize:16,color:"#4caf50"}}>
-                  ₹{fmtINR(shreeTrips.reduce((s,t)=>s+tripProfit(t),0))}
-                </span>
-              </div>
-            )}
+            {filteredTrips.length===0
+              ? <EmptyState icon="📊" text={searchTrip?"No trips match your search.":"No Shree trips yet."}/>
+              : filteredTrips.map(t=>{
+                const profit=tripProfit(t);
+                return (
+                  <div key={t.id} style={{background:"#111",border:"1px solid #222",
+                    borderRadius:8,padding:"11px 14px",marginBottom:8}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                      <div>
+                        <span style={{fontFamily:"monospace",fontSize:12,color:"#ccc"}}>{t.lr||t.lrNo}</span>
+                        <span style={{fontSize:11,color:"#555",marginLeft:8}}>{t.truck||t.truckNo}</span>
+                      </div>
+                      <span style={{fontWeight:800,fontSize:15,color:profit>=0?"#4caf50":"#ff6b6b"}}>
+                        ₹{fmtINR(profit)}
+                      </span>
+                    </div>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:4,fontSize:11}}>
+                      <div><span style={{color:"#555",display:"block"}}>Billed</span>
+                        <span style={{color:"#ccc",fontFamily:"monospace"}}>₹{fmtINR(t.billedToShree)}</span></div>
+                      <div><span style={{color:"#555",display:"block"}}>Shortage</span>
+                        <span style={{color:t.shreeShortage?"#ff6b6b":"#444",fontFamily:"monospace"}}>
+                          {t.shreeShortage?`₹${fmtINR(t.shreeShortage.deduction)}`:"—"}</span></div>
+                      <div><span style={{color:"#555",display:"block"}}>Expenses</span>
+                        <span style={{color:"#ccc",fontFamily:"monospace"}}>₹{fmtINR(tripExps(t.id))}</span></div>
+                    </div>
+                    {((expenses||{})[t.id]||[]).length>0&&(
+                      <div style={{marginTop:6,fontSize:10,color:"#444"}}>
+                        {((expenses||{})[t.id]||[]).map(e=>`${e.label}: ₹${fmtINR(e.amount)}`).join(" · ")}
+                      </div>
+                    )}
+                  </div>
+                );
+              })
+            }
           </div>
         )}
 
       </div>
-      <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
+      <style>{`
+        @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+        input::placeholder{color:#3a3a3a}
+        ::-webkit-scrollbar{display:none}
+      `}</style>
     </div>
   );
 }
