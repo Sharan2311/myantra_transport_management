@@ -828,7 +828,7 @@ Rules:
 - If a field is not found in the document, use empty string "" for text fields and 0 for number fields
 - For truck numbers, format as uppercase with no spaces e.g. KA34C4617
 - For qty and bags, return only the number e.g. 35 not "35 MT"
-- For frRate, look for "freight", "rate", "F.Rate", "Fr.Rate" or similar — this is the per-MT rate Shree pays`;
+- For frRate: look in the Goods Receipt Particulars table for the "Rate PMT" column — this is the rate per MT that Shree pays M Yantra. It appears as a number like 1030.00 or 1050.00 in the row alongside the quantity and amount. Extract ONLY the rate from THIS specific document — do not reuse rates from other documents. Each GR has its own rate.`;
 
   const fileToBase64 = (file) => new Promise((res, rej) => {
     const r = new FileReader();
@@ -1244,7 +1244,11 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
                 <div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0}}>
                   <Badge label={t.status} color={SC(t.status)} />
                   {/* ✏ EDIT ICON */}
-                  <button onClick={()=>setEditSheet({...t})} style={{background:C.dim,border:"none",borderRadius:8,color:C.muted,padding:"5px 8px",cursor:"pointer",fontSize:14}}>✏</button>
+                  <button onClick={()=>{
+                    // Normalize diLines — ensure each line has frRate populated
+                    const normalized = {...t, diLines: (t.diLines||[]).map(d=>({...d, frRate: d.frRate||t.frRate||0}))};
+                    setEditSheet(normalized);
+                  }} style={{background:C.dim,border:"none",borderRadius:8,color:C.muted,padding:"5px 8px",cursor:"pointer",fontSize:14}}>✏</button>
                   {/* 🗑 DELETE (owner only) */}
                   {user.role==="owner" && (
                     <button onClick={()=>setConfirmDel(t)}
@@ -1386,6 +1390,10 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
 
 // Shared form for add + edit
 function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit, submitLabel, user, showStatus=false, wasScanned=false}) {
+  // Ensure each diLine has frRate — migrate from trip-level frRate if missing
+  const normalizedDiLines = (f.diLines||[]).map(d => ({...d, frRate: d.frRate || +f.frRate || 0}));
+  const fWithLines = normalizedDiLines.length > 1 ? {...f, diLines: normalizedDiLines} : f;
+  // Use fWithLines everywhere diLines are rendered
   const gross    = (+f.qty||0)*(+f.givenRate||0);
   const tafalAmt = +f.tafal||0;
   const net      = gross - (+f.advance||0) - tafalAmt - (+f.dieselEstimate||0);
@@ -1475,12 +1483,12 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
               <Field label="Bags"     value={f.bags||""} onChange={ff("bags")} type="number" half /></>}
       </div>
       {/* Rates — multi-DI: one editable row per DI */}
-      {f.diLines && f.diLines.length > 1 ? (
+      {fWithLines.diLines && fWithLines.diLines.length > 1 ? (
         <div style={{background:C.bg,borderRadius:10,padding:"12px 14px",border:`1px solid ${C.border}`}}>
           <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>
             Rates per DI
           </div>
-          {f.diLines.map((d,i) => (
+          {fWithLines.diLines.map((d,i) => (
             <div key={i} style={{marginBottom:10,paddingBottom:10,borderBottom:`1px solid ${C.border}22`}}>
               <div style={{color:C.blue,fontSize:12,fontWeight:700,marginBottom:6}}>
                 DI {d.diNo||`#${i+1}`} · {d.qty} MT · {d.bags} Bags
@@ -1508,8 +1516,8 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
           ))}
           {/* Totals row */}
           <div style={{fontSize:12,color:C.muted,display:"flex",justifyContent:"space-between",marginTop:4}}>
-            <span>Shree Rates: <b style={{color:C.blue}}>{f.diLines.map(d=>d.frRate||f.frRate||"—").join(" + ")}</b></span>
-            <span>Driver Rates: <b style={{color:C.orange}}>{f.diLines.map(d=>d.givenRate||"—").join(" + ")}</b></span>
+            <span>Shree Rates: <b style={{color:C.blue}}>{fWithLines.diLines.map(d=>d.frRate||"—").join(" + ")}</b></span>
+            <span>Driver Rates: <b style={{color:C.orange}}>{fWithLines.diLines.map(d=>d.givenRate||"—").join(" + ")}</b></span>
           </div>
         </div>
       ) : (
