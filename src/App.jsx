@@ -1394,7 +1394,15 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
   const normalizedDiLines = (f.diLines||[]).map(d => ({...d, frRate: d.frRate || +f.frRate || 0}));
   const fWithLines = normalizedDiLines.length > 1 ? {...f, diLines: normalizedDiLines} : f;
   // Use fWithLines everywhere diLines are rendered
-  const gross    = (+f.qty||0)*(+f.givenRate||0);
+  // Per-DI calculations when multiple DIs exist
+  const isMultiDI = normalizedDiLines.length > 1;
+  const billedToShree = isMultiDI
+    ? normalizedDiLines.reduce((s,d) => s + (d.qty||0)*(d.frRate||0), 0)
+    : (+f.qty||0)*(+f.frRate||0);
+  const gross = isMultiDI
+    ? normalizedDiLines.reduce((s,d) => s + (d.qty||0)*(d.givenRate||0), 0)
+    : (+f.qty||0)*(+f.givenRate||0);
+  const margin = billedToShree - gross;
   const tafalAmt = +f.tafal||0;
   const net      = gross - (+f.advance||0) - tafalAmt - (+f.dieselEstimate||0);
   const veh      = vehicles.find(x => x.truckNo===(f.truckNo||"").toUpperCase().trim());
@@ -1556,16 +1564,16 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
       )}
 
       {/* Live calc */}
-      {f.qty && f.frRate && f.givenRate && (
+      {f.qty && (f.frRate || isMultiDI) && (f.givenRate || isMultiDI) && (
         <div style={{background:C.bg,borderRadius:12,padding:"12px 14px"}}>
           <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Calculation Preview</div>
           {[
-            {l:"Billed to Shree",        v:fmt((+f.qty)*(+f.frRate)),              c:C.blue},
+            {l:"Billed to Shree",        v:fmt(billedToShree),                     c:C.blue},
             {l:"Gross to Driver",         v:fmt(gross),                             c:C.orange},
             {l:"(−) Advance",             v:fmt(+f.advance||0),                    c:C.red},
             {l:"(−) TAFAL",               v:fmt(tafalAmt),                          c:C.purple},
             {l:"(−) Diesel (estimate)",   v:fmt(+f.dieselEstimate||0),             c:C.orange},
-            {l:"My Margin",               v:fmt((+f.qty)*((+f.frRate)-(+f.givenRate))), c:C.green},
+            {l:"My Margin",               v:fmt(margin),                            c:C.green},
             {l:"Est. Net to Driver",      v:fmt(net),                               c:net>=0?C.green:C.red},
           ].map(x => (
             <div key={x.l} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:`1px solid ${C.border}22`}}>
