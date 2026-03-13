@@ -174,11 +174,11 @@ function SearchSelect({label, value, onChange, opts=[], half=false, placeholder=
               <div style={{padding:"14px 12px",color:C.muted,fontSize:13,textAlign:"center"}}>No results</div>
             )}
             {filtered.map((o,i)=>{
-              const v = o.v??o, l = o.l??o;
-              const isSelected = v===value;
-              const isEmpty = v==="" || v===null || v===undefined;
+              const ov = o.v??o, l = o.l??o;
+              const isSelected = ov===value;
+              const isEmpty = ov==="" || ov===null || ov===undefined;
               return (
-                <div key={i} onClick={()=>{onChange(v);setOpen(false);setQuery("");}}
+                <div key={i} onClick={()=>{onChange(ov);setOpen(false);setQuery("");}}
                   style={{padding:"11px 12px",cursor:"pointer",fontSize:13,
                     borderBottom:`1px solid ${C.border}22`,
                     background:isSelected?C.accent+"22":"transparent",
