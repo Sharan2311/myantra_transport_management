@@ -73,19 +73,21 @@ function calcNet(t, vehicle, confirmedDiesel) {
   const billed = t.diLines && t.diLines.length > 0
     ? t.diLines.reduce((s,d) => s + (d.qty||0) * (d.frRate || t.frRate || 0), 0)
     : (t.qty||0) * (t.frRate||0);
-  const tafal      = t.tafal || 0;
-  const loanDeduct = vehicle ? (vehicle.deductPerTrip||0) : 0;
-  const diesel     = confirmedDiesel != null ? confirmedDiesel : (t.dieselEstimate||0);
-  const advance    = t.advance || 0;
-  const shortage   = (t.shortage||0) * (t.givenRate||0);
-  const net        = gross - advance - tafal - loanDeduct - diesel - shortage;
-  return {gross, billed, tafal, loanDeduct, diesel, advance, shortage, net};
+  const tafal            = t.tafal || 0;
+  const loanDeduct       = vehicle ? (vehicle.deductPerTrip||0) : 0;
+  const diesel           = confirmedDiesel != null ? confirmedDiesel : (t.dieselEstimate||0);
+  const advance          = t.advance || 0;
+  const shortageRecovery = t.shortageRecovery || 0;
+  const loanRecovery     = t.loanRecovery || 0;
+  const net              = gross - advance - tafal - loanDeduct - diesel - shortageRecovery - loanRecovery;
+  return {gross, billed, tafal, loanDeduct, diesel, advance, shortageRecovery, loanRecovery, net};
 }
 
 const mkTrip = (o) => ({
   id:uid(), type:"outbound", lrNo:"", diNo:"", truckNo:"", grNo:"",
   consignee:"", from:"", to:"", grade:"Cement Packed", qty:0, bags:0,
   frRate:0, givenRate:0, date:today(), advance:0, shortage:0, tafal:0,
+  shortageRecovery:0, loanRecovery:0,
   status:"Pending Bill", invoiceNo:"", paymentStatus:"Unpaid",
   driverSettled:false, dieselEstimate:0,
   dieselIndentNo:"", // indent number from pump slip — given before loading
@@ -593,8 +595,12 @@ function Dashboard({trips, vehicles, employees, indents, pumps, pumpPayments, ac
 
 // ─── ASK LR SHEET ─────────────────────────────────────────────────────────────
 // Shown after scanning — asks user to enter LR number, then checks for duplicates
-function AskLRSheet({ extracted, trips, onConfirm, onCancel }) {
+function AskLRSheet({ extracted, trips, vehicles, onConfirm, onCancel }) {
   const [lrNo, setLrNo] = useState("");
+  const [driverPhone, setDriverPhone] = useState("");
+  const truckNo = (extracted.truckNo||"").toUpperCase().trim();
+  const existingVehicle = vehicles ? vehicles.find(v => v.truckNo === truckNo) : null;
+  const needsDriverPhone = existingVehicle && !existingVehicle.driverPhone;
 
   // Check for duplicate DI across ALL trips
   const scannedDiNo = (extracted.diNo || "").trim();
@@ -636,6 +642,37 @@ function AskLRSheet({ extracted, trips, onConfirm, onCancel }) {
           ) : null)}
         </div>
       </div>
+
+      {/* Vehicle pending balances — shown once LR is entered or always if truck known */}
+      {existingVehicle && !duplicateDI && (()=>{
+        const loanBal = (existingVehicle.loan||0)-(existingVehicle.loanRecovered||0);
+        const shortBal = (existingVehicle.shortageOwed||0)-(existingVehicle.shortageRecovered||0);
+        if (loanBal<=0 && shortBal<=0) return null;
+        return (
+          <div style={{background:"#1a1000",border:`2px solid ${C.orange}66`,borderRadius:12,padding:"12px 14px"}}>
+            <div style={{color:C.orange,fontWeight:800,fontSize:12,marginBottom:8}}>
+              ⚠ Pending Dues on {truckNo}
+            </div>
+            <div style={{display:"flex",gap:16,fontSize:12}}>
+              {loanBal>0&&(
+                <div>
+                  <div style={{color:C.red,fontWeight:700}}>₹{loanBal.toLocaleString("en-IN")}</div>
+                  <div style={{color:C.muted,fontSize:10}}>LOAN BALANCE</div>
+                </div>
+              )}
+              {shortBal>0&&(
+                <div>
+                  <div style={{color:C.red,fontWeight:700}}>₹{shortBal.toLocaleString("en-IN")}</div>
+                  <div style={{color:C.muted,fontSize:10}}>SHORTAGE BALANCE</div>
+                </div>
+              )}
+            </div>
+            <div style={{color:C.muted,fontSize:11,marginTop:6}}>
+              You can enter Shortage Recovery / Loan Recovery amounts in the trip form.
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Duplicate DI warning — block immediately */}
       {duplicateDI && (
@@ -684,9 +721,20 @@ function AskLRSheet({ extracted, trips, onConfirm, onCancel }) {
         </div>
       )}
 
+      {/* Driver phone prompt if missing */}
+      {!duplicateDI && needsDriverPhone && (
+        <div style={{background:"#1a1000",border:`1px solid ${C.orange}44`,borderRadius:12,padding:"14px"}}>
+          <div style={{color:C.orange,fontWeight:800,fontSize:13,marginBottom:8}}>📞 Driver Phone Required</div>
+          <div style={{color:C.muted,fontSize:12,marginBottom:10}}>
+            Truck <b style={{color:C.text}}>{truckNo}</b> has no driver phone on record. Please add it now.
+          </div>
+          <Field label="Driver Phone *" value={driverPhone} onChange={setDriverPhone} type="tel" placeholder="9XXXXXXXXX" />
+        </div>
+      )}
+
       {!duplicateDI && (
-        <Btn onClick={()=>onConfirm(lrNo)} full color={C.blue}
-          disabled={!lrNo.trim() || !!diAlreadyInLR}>
+        <Btn onClick={()=>onConfirm(lrNo, driverPhone)} full color={C.blue}
+          disabled={!lrNo.trim() || !!diAlreadyInLR || (needsDriverPhone && !driverPhone.trim())}>
           {existing && !diAlreadyInLR ? "Continue → Merge options" : "Continue → Fill trip details"}
         </Btn>
       )}
@@ -883,7 +931,7 @@ Rules:
         bags:   String(extracted.bags   || "0"),
         frRate: String(extracted.frRate || ""),
         tafal:  String(settings?.tafalPerTrip || 300),
-        advance: "0", shortage: "0", dieselEstimate: "0",
+        advance: "0", shortage: "0", shortageRecovery: "0", loanRecovery: "0", dieselEstimate: "0",
         type: isIn ? "inbound" : "outbound",
       }, existingTrip);
 
@@ -1006,7 +1054,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
     from: isIn ? "" : "Kodla", to: isIn ? "Kodla" : "",
     grade: isIn ? "Limestone" : "Cement Packed",
     qty:"", bags:"", frRate:"", givenRate:"",
-    date:today(), advance:"0", shortage:"0",
+    date:today(), advance:"0", shortage:"0", shortageRecovery:"0", loanRecovery:"0",
     tafal: String(settings?.tafalPerTrip||300),
     dieselEstimate:"0",
   });
@@ -1033,24 +1081,30 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
   };
 
   // Called when user confirms LR number after scanning
-  const onLRConfirmed = (lrNo) => {
+  const onLRConfirmed = (lrNo, driverPhone) => {
     const { extracted } = diConflict;
     const existingTrip = lrNo.trim() ? trips.find(t => t.lrNo === lrNo.trim()) : null;
 
     // Auto-create vehicle record if truck not already registered
     const truckNo = (extracted.truckNo||"").toUpperCase().trim();
-    if (truckNo && !vehicles.find(v => v.truckNo === truckNo)) {
+    const existingVehicle = vehicles.find(v => v.truckNo === truckNo);
+    if (truckNo && !existingVehicle) {
       const newVehicle = {
         id: uid(), truckNo,
         ownerName:"", phone:"",
-        driverName:"", driverPhone:"", driverLicense:"",
+        driverName:"", driverPhone: driverPhone||"", driverLicense:"",
         accountNo:"", ifsc:"",
         loan:0, loanRecovered:0, deductPerTrip:0,
         tafalExempt:false, shortageOwed:0, shortageRecovered:0,
+        loanTxns:[], shortageTxns:[],
         createdBy: user.username,
       };
       setVehicles(p => [...(p||[]), newVehicle]);
-      log("AUTO-CREATE VEHICLE", `${truckNo} from DI scan`);
+      log("AUTO-CREATE VEHICLE", `${truckNo} driver:${driverPhone||"—"}`);
+    } else if (existingVehicle && driverPhone && !existingVehicle.driverPhone) {
+      // Save driver phone if it was just entered
+      setVehicles(p => p.map(v => v.truckNo===truckNo ? {...v, driverPhone} : v));
+      log("UPDATE DRIVER PHONE", `${truckNo} → ${driverPhone}`);
     }
 
     if (existingTrip) {
@@ -1118,6 +1172,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
       ...f, type:tripType,
       qty:+f.qty, bags:+f.bags, frRate:+f.frRate, givenRate:+f.givenRate,
       advance:+f.advance, shortage:+f.shortage, tafal:+f.tafal,
+      shortageRecovery:+f.shortageRecovery||0, loanRecovery:+f.loanRecovery||0,
       dieselEstimate:+f.dieselEstimate,
       dieselIndentNo: (f.dieselIndentNo||"").trim(),
       createdBy:user.username, createdAt:nowTs(),
@@ -1157,6 +1212,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
       diLines: savedLines,
       advance:+editSheet.advance,
       shortage:+editSheet.shortage, tafal:+editSheet.tafal,
+      shortageRecovery:+editSheet.shortageRecovery||0, loanRecovery:+editSheet.loanRecovery||0,
       dieselEstimate:+editSheet.dieselEstimate,
       editedBy:user.username, editedAt:nowTs(),
     } : t));
@@ -1337,6 +1393,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
               <AskLRSheet
                 extracted={diConflict.extracted}
                 trips={trips}
+                vehicles={vehicles}
                 onConfirm={onLRConfirmed}
                 onCancel={()=>setDiConflict(null)}
               />
@@ -1586,8 +1643,18 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
         </div>
       )}
       <div style={{display:"flex",gap:10}}>
-        <Field label="Advance ₹"   value={f.advance||""}  onChange={ff("advance")}  type="number" half />
-        <Field label="Shortage MT" value={f.shortage||""} onChange={ff("shortage")} type="number" half />
+        <Field label="Advance ₹"            value={f.advance||""}           onChange={ff("advance")}           type="number" half />
+        <Field label="Shortage Recovery ₹"  value={f.shortageRecovery||""} onChange={ff("shortageRecovery")} type="number" half
+          note={veh&&(veh.shortageOwed||0)>(veh.shortageRecovered||0)?`Pending: ₹${((veh.shortageOwed||0)-(veh.shortageRecovered||0)).toLocaleString("en-IN")}`:""}
+        />
+      </div>
+      <div style={{display:"flex",gap:10}}>
+        <Field label="Loan Recovery ₹" value={f.loanRecovery||""} onChange={ff("loanRecovery")} type="number" half
+          note={veh&&(veh.loan||0)>(veh.loanRecovered||0)?`Pending: ₹${((veh.loan||0)-(veh.loanRecovered||0)).toLocaleString("en-IN")}`:""}
+        />
+        <Field label="Shortage MT (Shree)" value={f.shortage||""} onChange={ff("shortage")} type="number" half
+          note="Shortage reported by Shree Cement (in MT)"
+        />
       </div>
       <div style={{display:"flex",gap:10}}>
         <Field label="TAFAL ₹" value={f.tafal||"0"} onChange={ff("tafal")} type="number" half
@@ -1609,13 +1676,15 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
         <div style={{background:C.bg,borderRadius:12,padding:"12px 14px"}}>
           <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Calculation Preview</div>
           {[
-            {l:"Billed to Shree",        v:fmt(billedToShree),                     c:C.blue},
-            {l:"Gross to Driver",         v:fmt(gross),                             c:C.orange},
-            {l:"(−) Advance",             v:fmt(+f.advance||0),                    c:C.red},
-            {l:"(−) TAFAL",               v:fmt(tafalAmt),                          c:C.purple},
-            {l:"(−) Diesel (estimate)",   v:fmt(+f.dieselEstimate||0),             c:C.orange},
-            {l:"My Margin",               v:fmt(margin),                            c:C.green},
-            {l:"Est. Net to Driver",      v:fmt(net),                               c:net>=0?C.green:C.red},
+            {l:"Billed to Shree",            v:fmt(billedToShree),                      c:C.blue},
+            {l:"Gross to Driver",             v:fmt(gross),                              c:C.orange},
+            {l:"(−) Advance",                 v:fmt(+f.advance||0),                     c:C.red},
+            {l:"(−) TAFAL",                   v:fmt(tafalAmt),                           c:C.purple},
+            {l:"(−) Diesel (estimate)",       v:fmt(+f.dieselEstimate||0),              c:C.orange},
+            {l:"(−) Shortage Recovery",       v:fmt(+f.shortageRecovery||0),            c:(+f.shortageRecovery||0)>0?C.red:C.muted},
+            {l:"(−) Loan Recovery",           v:fmt(+f.loanRecovery||0),               c:(+f.loanRecovery||0)>0?C.red:C.muted},
+            {l:"My Margin",                   v:fmt(margin),                             c:C.green},
+            {l:"Est. Net to Driver",          v:fmt(net-(+f.shortageRecovery||0)-(+f.loanRecovery||0)),  c:(net-(+f.shortageRecovery||0)-(+f.loanRecovery||0))>=0?C.green:C.red},
           ].map(x => (
             <div key={x.l} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:`1px solid ${C.border}22`}}>
               <span style={{color:C.muted,fontSize:13}}>{x.l}</span>
@@ -1806,7 +1875,28 @@ function Settlement({trips, setTrips, vehicles, setVehicles, settlements, setSet
     const s = {id:uid(), tripId:t.id, date:today(), truckNo:t.truckNo, lrNo:t.lrNo, grNo:t.grNo, to:t.to, qty:t.qty, givenRate:t.givenRate, ownerName:v?.ownerName||"—", notes, settledBy:user.username, settledAt:nowTs(), ...calc};
     setSettlements(p => [s, ...(p||[])]);
     setTrips(p => p.map(x => x.id===t.id ? {...x, driverSettled:true, settledBy:user.username, netPaid:calc.net} : x));
-    if (v && calc.loanDeduct>0) setVehicles(p => p.map(x => x.truckNo===t.truckNo ? {...x, loanRecovered:(x.loanRecovered||0)+calc.loanDeduct} : x));
+    // Update vehicle ledger on settlement
+    if (v) setVehicles(p => p.map(x => {
+      if (x.truckNo!==t.truckNo) return x;
+      let updated = {...x};
+      const settleDate = today();
+      // Loan deduct per trip
+      if (calc.loanDeduct>0) {
+        const txn = {id:uid(),type:"recovery",date:settleDate,amount:calc.loanDeduct,lrNo:t.lrNo,note:"Auto — deduct/trip at settlement"};
+        updated = {...updated, loanRecovered:(updated.loanRecovered||0)+calc.loanDeduct, loanTxns:[...(updated.loanTxns||[]),txn]};
+      }
+      // Explicit shortage recovery on this trip
+      if (calc.shortageRecovery>0) {
+        const txn = {id:uid(),type:"recovery",date:settleDate,mt:0,amount:calc.shortageRecovery,lrNo:t.lrNo,note:"Shortage recovery at settlement"};
+        updated = {...updated, shortageRecovered:(updated.shortageRecovered||0)+calc.shortageRecovery, shortageTxns:[...(updated.shortageTxns||[]),txn]};
+      }
+      // Explicit loan recovery on this trip
+      if (calc.loanRecovery>0) {
+        const txn = {id:uid(),type:"recovery",date:settleDate,amount:calc.loanRecovery,lrNo:t.lrNo,note:"Loan recovery at settlement"};
+        updated = {...updated, loanRecovered:(updated.loanRecovered||0)+calc.loanRecovery, loanTxns:[...(updated.loanTxns||[]),txn]};
+      }
+      return updated;
+    }));
     log("SETTLEMENT", `LR:${t.lrNo} ${t.truckNo} — Net ${fmt(calc.net)}`);
     setSel(null); setNotes("");
   };
@@ -1835,12 +1925,13 @@ function Settlement({trips, setTrips, vehicles, setVehicles, settlements, setSet
                 <div><span style={{color:C.muted}}>Qty: </span><b>{sel.qty}MT @ {fmt(sel.givenRate)}/MT</b></div>
               </div>
               {[
-                {l:"Gross Pay (Qty × Driver Rate)", v:calc.gross,     c:C.green,  s:""},
-                {l:"(−) Advance Given",             v:calc.advance,   c:C.red,    s:"−"},
-                {l:"(−) TAFAL",                     v:calc.tafal,     c:C.purple, s:"−"},
-                {l:"(−) Loan Deduction / Trip",     v:calc.loanDeduct,c:C.red,    s:"−"},
-                {l:`(−) Diesel ${usingConfirmed?"(confirmed indents)":"(estimate)"}`, v:calc.diesel, c:C.orange, s:"−"},
-                {l:"(−) Shortage Recovery",         v:calc.shortage,  c:calc.shortage>0?C.red:C.muted, s:"−"},
+                {l:"Gross Pay (Qty × Driver Rate)",           v:calc.gross,              c:C.green,  s:""},
+                {l:"(−) Advance Given",                         v:calc.advance,            c:C.red,    s:"−"},
+                {l:"(−) TAFAL",                                 v:calc.tafal,              c:C.purple, s:"−"},
+                {l:"(−) Loan Deduction / Trip",                 v:calc.loanDeduct,         c:C.red,    s:"−"},
+                {l:`(−) Diesel ${usingConfirmed?"(confirmed indents)":"(estimate)"}`,      v:calc.diesel,  c:C.orange, s:"−"},
+                {l:"(−) Shortage Recovery (Shree deduction)",   v:calc.shortageRecovery,   c:calc.shortageRecovery>0?C.red:C.muted, s:"−"},
+                {l:"(−) Loan Recovery (trip deduction)",        v:calc.loanRecovery,       c:calc.loanRecovery>0?C.red:C.muted, s:"−"},
               ].map(r => (
                 <div key={r.l} style={{display:"flex",justifyContent:"space-between",padding:"9px 0",borderBottom:`1px solid ${C.border}`}}>
                   <span style={{color:C.muted,fontSize:13}}>{r.l}</span>
@@ -3783,13 +3874,24 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
 
 // ─── VEHICLES ─────────────────────────────────────────────────────────────────
 function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log}) {
+  const isOwner = user.role === "owner";
   const [sheet,    setSheet]    = useState(false);
-  const [lSheet,   setLSheet]   = useState(null);
-  const [sSheet,   setSSheet]   = useState(null);
-  const [hSheet,   setHSheet]   = useState(null);
+  const [editId,   setEditId]   = useState(null);
+  const [lSheet,   setLSheet]   = useState(null);  // loan management
+  const [sSheet,   setSSheet]   = useState(null);  // shortage management
+  const [hSheet,   setHSheet]   = useState(null);  // full history
   const [search,   setSearch]   = useState("");
-  const [lAmt,     setLAmt]     = useState(""); const [rAmt, setRAmt] = useState("");
-  const [shAmt,    setShAmt]    = useState(""); const [shTrip, setShTrip] = useState("");
+
+  // Loan txn form
+  const [lAmt,  setLAmt]  = useState(""); const [lDate,  setLDate]  = useState(new Date().toISOString().slice(0,10));
+  const [lRef,  setLRef]  = useState(""); const [lAcct,  setLAcct]  = useState("");
+  // Recovery form  
+  const [rAmt,  setRAmt]  = useState(""); const [rDate,  setRDate]  = useState(new Date().toISOString().slice(0,10));
+  const [rLR,   setRLR]   = useState(""); const [rRef,   setRRef]   = useState("");
+  // Shortage form
+  const [shAmt, setShAmt] = useState(""); const [shTrip, setShTrip] = useState("");
+  // Shortage recovery form
+  const [srAmt, setSrAmt] = useState(""); const [srLR,   setSrLR]   = useState("");
 
   const blank = {
     truckNo:"", ownerName:"", phone:"",
@@ -3798,10 +3900,11 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
     loan:"0", loanRecovered:"0", deductPerTrip:"0", tafalExempt:false,
   };
   const [f, setF] = useState(blank);
-  const ff = k => v => setF(p => ({...p, [k]:v}));
+  const ff = k => v => setF(p => ({...p,[k]:v}));
 
-  const fmt = n => Number(n||0).toLocaleString("en-IN", {minimumFractionDigits:0, maximumFractionDigits:0});
+  const fmt  = n => Number(n||0).toLocaleString("en-IN",{minimumFractionDigits:0,maximumFractionDigits:0});
   const fmtD = s => { if(!s) return "—"; const d=new Date(s); return isNaN(d)?s:d.toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"}); };
+  const today = () => new Date().toISOString().slice(0,10);
 
   const filtered = (vehicles||[]).filter(v => {
     if(!search) return true;
@@ -3813,101 +3916,123 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
         || (v.driverPhone||"").includes(q);
   });
 
-  // ── PDF export for a vehicle ──────────────────────────────────────────────
+  const resetLoanForm = () => { setLAmt(""); setLDate(today()); setLRef(""); setLAcct(""); setRAmt(""); setRDate(today()); setRLR(""); setRRef(""); };
+  const resetShForm   = () => { setShAmt(""); setShTrip(""); setSrAmt(""); setSrLR(""); };
+
+  // ── PDF EXPORT ──────────────────────────────────────────────────────────────
   const exportVehiclePDF = (v) => {
     const vtrips = (trips||[]).filter(t => t.truckNo===v.truckNo || t.truck===v.truckNo)
                                .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
     const pays = (driverPays||[]).filter(p => p.truckNo===v.truckNo);
     const totalPaid = pays.reduce((s,p)=>s+(p.amount||0),0);
     const loanBal = (v.loan||0)-(v.loanRecovered||0);
+    const loanTxns = v.loanTxns||[];
+    const shortageTxns = v.shortageTxns||[];
 
     const tripRows = vtrips.map(t => {
-      const gross = t.diLines&&t.diLines.length>1
-        ? t.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
-        : (t.qty||0)*(t.givenRate||0);
+      const isMultiDI = t.diLines&&t.diLines.length>1;
+      const gross = isMultiDI ? t.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0) : (t.qty||0)*(t.givenRate||0);
       const net = gross-(t.advance||0)-(t.tafal||0)-(t.dieselEstimate||0);
       const shortAmt = (t.shortage||0)*(t.givenRate||0);
       return `<tr>
-        <td>${t.lrNo||"—"}</td>
-        <td>${fmtD(t.date)}</td>
-        <td>${t.from||"—"} → ${t.to||"—"}</td>
-        <td>${t.qty||0} MT</td>
-        <td>₹${fmt(t.billedToShree||t.qty*t.frRate||0)}</td>
-        <td>₹${fmt(gross)}</td>
+        <td>${t.lrNo||"—"}</td><td>${fmtD(t.date)}</td>
+        <td>${t.from||"—"} → ${t.to||"—"}</td><td>${t.qty||0} MT</td>
+        <td>₹${fmt(t.billedToShree||0)}</td><td>₹${fmt(gross)}</td>
         <td>${(t.shortage||0)>0?`${t.shortage}MT (₹${fmt(shortAmt)})`:"—"}</td>
         <td>₹${fmt(net)}</td>
         <td style="color:${t.driverSettled?"#1a7f37":"#b45309"}">${t.driverSettled?"Settled":"Pending"}</td>
       </tr>`;
     }).join("");
 
-    const payRows = pays.map(p=>`<tr>
-      <td>${fmtD(p.date)}</td>
-      <td>${p.lrNo||"—"}</td>
-      <td>${p.referenceNo||"—"}</td>
-      <td>₹${fmt(p.amount)}</td>
-      <td>${p.note||"—"}</td>
+    const loanGivenRows = loanTxns.filter(x=>x.type==="given").map(x=>`<tr>
+      <td>${fmtD(x.date)}</td><td>₹${fmt(x.amount)}</td>
+      <td>${x.ref||"—"}</td><td>${x.accountName||"—"}</td><td>${x.note||"—"}</td>
     </tr>`).join("");
 
-    const html = `
-<style>
-  body{font-family:'Segoe UI',Arial,sans-serif;font-size:11px;color:#111;margin:20px}
-  h1{font-size:18px;margin-bottom:2px} h2{font-size:14px;color:#333;margin:18px 0 6px}
-  .meta{display:grid;grid-template-columns:1fr 1fr;gap:4px 20px;margin:10px 0 16px;font-size:11px}
-  .meta span{color:#555} .meta b{color:#111}
-  .kpis{display:flex;gap:16px;margin:12px 0}
-  .kpi{border:1px solid #ddd;border-radius:6px;padding:8px 14px;min-width:100px;text-align:center}
-  .kpi .val{font-size:16px;font-weight:800} .kpi .lbl{font-size:9px;color:#888;margin-top:2px}
-  table{width:100%;border-collapse:collapse;margin-bottom:12px}
-  th{background:#f0f0f0;padding:5px 7px;text-align:left;font-size:10px;border:1px solid #ccc}
-  td{padding:4px 7px;border:1px solid #e0e0e0;font-size:10px}
-  tr:nth-child(even){background:#fafafa}
-  .footer{margin-top:20px;font-size:9px;color:#aaa;border-top:1px solid #eee;padding-top:8px}
-</style>
-<h1>🚛 Vehicle Report — ${v.truckNo}</h1>
-<div style="font-size:11px;color:#888">Generated by M Yantra Enterprises · ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}</div>
+    const loanRecoveryRows = loanTxns.filter(x=>x.type==="recovery").map(x=>`<tr>
+      <td>${fmtD(x.date)}</td><td>₹${fmt(x.amount)}</td>
+      <td>${x.lrNo||"—"}</td><td>${x.ref||"—"}</td><td>${x.note||"—"}</td>
+    </tr>`).join("");
 
-<div class="meta">
-  <div><span>Owner: </span><b>${v.ownerName||"—"}</b></div>
-  <div><span>Owner Phone: </span><b>${v.phone||"—"}</b></div>
-  <div><span>Driver: </span><b>${v.driverName||"—"}</b></div>
-  <div><span>Driver Phone: </span><b>${v.driverPhone||"—"}</b></div>
-  <div><span>License: </span><b>${v.driverLicense||"—"}</b></div>
-  <div><span>Bank A/C: </span><b>${v.accountNo||"—"}${v.ifsc?` · IFSC: ${v.ifsc}`:""}</b></div>
-</div>
+    const shortageRows = shortageTxns.filter(x=>x.type==="shortage").map(x=>`<tr>
+      <td>${fmtD(x.date)}</td><td>${x.qty||0} MT</td>
+      <td>${x.lrNo||"—"}</td><td>₹${fmt(x.amount||0)}</td><td>${x.note||"—"}</td>
+    </tr>`).join("");
 
-<div class="kpis">
-  <div class="kpi"><div class="val" style="color:#1d4ed8">${vtrips.length}</div><div class="lbl">TOTAL TRIPS</div></div>
-  <div class="kpi"><div class="val" style="color:#15803d">₹${fmt(totalPaid)}</div><div class="lbl">TOTAL PAID</div></div>
-  <div class="kpi"><div class="val" style="color:${loanBal>0?"#dc2626":"#15803d"}">₹${fmt(loanBal)}</div><div class="lbl">LOAN BALANCE</div></div>
-  <div class="kpi"><div class="val" style="color:#d97706">₹${fmt(v.shortageOwed||0)}</div><div class="lbl">SHORTAGE OWED</div></div>
-  <div class="kpi"><div class="val" style="color:#7c3aed">${vtrips.filter(t=>!t.driverSettled).length}</div><div class="lbl">UNSETTLED</div></div>
-</div>
+    const shortRecovRows = shortageTxns.filter(x=>x.type==="recovery").map(x=>`<tr>
+      <td>${fmtD(x.date)}</td><td>${x.qty||0} MT</td>
+      <td>${x.lrNo||"—"}</td><td>₹${fmt(x.amount||0)}</td><td>${x.note||"—"}</td>
+    </tr>`).join("");
 
-<h2>📦 Trip History (${vtrips.length})</h2>
-${vtrips.length===0?"<p style='color:#888'>No trips recorded.</p>":
-`<table>
-  <tr><th>LR No</th><th>Date</th><th>Route</th><th>Qty</th><th>Billed</th><th>Gross</th><th>Shortage</th><th>Net</th><th>Status</th></tr>
-  ${tripRows}
-</table>`}
+    const payRows = pays.map(p=>`<tr>
+      <td>${fmtD(p.date)}</td><td>${p.lrNo||"—"}</td>
+      <td>${p.referenceNo||"—"}</td><td>₹${fmt(p.amount)}</td><td>${p.note||"—"}</td>
+    </tr>`).join("");
 
-<h2>💳 Payment History (${pays.length})</h2>
-${pays.length===0?"<p style='color:#888'>No payments recorded.</p>":
-`<table>
-  <tr><th>Date</th><th>LR No</th><th>Reference</th><th>Amount</th><th>Note</th></tr>
-  ${payRows}
-</table>`}
+    const html = `<style>
+      body{font-family:'Segoe UI',Arial,sans-serif;font-size:11px;color:#111;margin:20px}
+      h1{font-size:18px;margin-bottom:2px} h2{font-size:13px;color:#333;margin:18px 0 5px;border-bottom:2px solid #eee;padding-bottom:4px}
+      .meta{display:grid;grid-template-columns:1fr 1fr;gap:4px 20px;margin:10px 0 16px;font-size:11px}
+      .meta span{color:#555} .meta b{color:#111}
+      .kpis{display:flex;gap:12px;margin:12px 0;flex-wrap:wrap}
+      .kpi{border:1px solid #ddd;border-radius:6px;padding:8px 14px;min-width:90px;text-align:center}
+      .kpi .val{font-size:15px;font-weight:800} .kpi .lbl{font-size:9px;color:#888;margin-top:2px}
+      table{width:100%;border-collapse:collapse;margin-bottom:10px;font-size:10px}
+      th{background:#f4f4f4;padding:5px 7px;text-align:left;border:1px solid #ccc;font-size:9px;text-transform:uppercase}
+      td{padding:4px 7px;border:1px solid #e0e0e0} tr:nth-child(even){background:#fafafa}
+      .footer{margin-top:20px;font-size:9px;color:#aaa;border-top:1px solid #eee;padding-top:8px}
+      .empty{color:#999;font-style:italic;font-size:11px;padding:6px 0}
+    </style>
+    <h1>🚛 Vehicle Report — ${v.truckNo}</h1>
+    <div style="font-size:11px;color:#888">Generated by M Yantra Enterprises · ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}</div>
+    <div class="meta">
+      <div><span>Owner: </span><b>${v.ownerName||"—"}</b></div>
+      <div><span>Owner Phone: </span><b>${v.phone||"—"}</b></div>
+      <div><span>Driver: </span><b>${v.driverName||"—"}</b></div>
+      <div><span>Driver Phone: </span><b>${v.driverPhone||"—"}</b></div>
+      <div><span>License: </span><b>${v.driverLicense||"—"}</b></div>
+      <div><span>Bank A/C: </span><b>${v.accountNo||"—"}${v.ifsc?` · IFSC: ${v.ifsc}`:""}</b></div>
+    </div>
+    <div class="kpis">
+      <div class="kpi"><div class="val" style="color:#1d4ed8">${vtrips.length}</div><div class="lbl">TOTAL TRIPS</div></div>
+      <div class="kpi"><div class="val" style="color:#15803d">₹${fmt(totalPaid)}</div><div class="lbl">TOTAL PAID</div></div>
+      <div class="kpi"><div class="val" style="color:${loanBal>0?"#dc2626":"#15803d"}">₹${fmt(loanBal)}</div><div class="lbl">LOAN BALANCE</div></div>
+      <div class="kpi"><div class="val" style="color:#d97706">₹${fmt((v.shortageOwed||0)-(v.shortageRecovered||0))}</div><div class="lbl">SHORTAGE BALANCE</div></div>
+      <div class="kpi"><div class="val" style="color:#7c3aed">${vtrips.filter(t=>!t.driverSettled).length}</div><div class="lbl">UNSETTLED</div></div>
+    </div>
 
-<h2>🏦 Loan Summary</h2>
-<table style="max-width:400px">
-  <tr><th>Total Loan Given</th><td>₹${fmt(v.loan||0)}</td></tr>
-  <tr><th>Recovered</th><td>₹${fmt(v.loanRecovered||0)}</td></tr>
-  <tr><th>Balance Due</th><td style="font-weight:800;color:${loanBal>0?"#dc2626":"#15803d"}">₹${fmt(loanBal)}</td></tr>
-  <tr><th>Deduct / Trip</th><td>₹${fmt(v.deductPerTrip||0)}</td></tr>
-  <tr><th>Shortage Owed</th><td>₹${fmt(v.shortageOwed||0)}</td></tr>
-  <tr><th>Shortage Recovered</th><td>₹${fmt(v.shortageRecovered||0)}</td></tr>
-</table>
+    <h2>📦 Trip History (${vtrips.length})</h2>
+    ${vtrips.length===0?'<div class="empty">No trips recorded.</div>':`<table><tr><th>LR No</th><th>Date</th><th>Route</th><th>Qty</th><th>Billed</th><th>Gross</th><th>Shortage</th><th>Net</th><th>Status</th></tr>${tripRows}</table>`}
 
-<div class="footer">M Yantra Enterprises · PAN: ABBFM6370M · GSTN: 29ABBFM6370M1ZR · Report generated ${new Date().toLocaleString("en-IN")}</div>`;
+    <h2>💳 Driver Payment History (${pays.length})</h2>
+    ${pays.length===0?'<div class="empty">No payments recorded.</div>':`<table><tr><th>Date</th><th>LR No</th><th>Reference</th><th>Amount</th><th>Note</th></tr>${payRows}</table>`}
+
+    <h2>🏦 Loan Ledger — Given (${loanTxns.filter(x=>x.type==="given").length})</h2>
+    ${loanGivenRows?`<table><tr><th>Date</th><th>Amount</th><th>Reference</th><th>Account</th><th>Note</th></tr>${loanGivenRows}</table>`:'<div class="empty">No loan disbursements recorded.</div>'}
+
+    <h2>🏦 Loan Ledger — Recoveries (${loanTxns.filter(x=>x.type==="recovery").length})</h2>
+    ${loanRecoveryRows?`<table><tr><th>Date</th><th>Amount</th><th>LR No</th><th>Reference</th><th>Note</th></tr>${loanRecoveryRows}</table>`:'<div class="empty">No loan recoveries recorded.</div>'}
+
+    <table style="max-width:380px;margin-top:8px">
+      <tr><th>Total Loan Given</th><td>₹${fmt(v.loan||0)}</td></tr>
+      <tr><th>Recovered</th><td>₹${fmt(v.loanRecovered||0)}</td></tr>
+      <tr><th style="color:#dc2626">Balance Due</th><td style="font-weight:800;color:${loanBal>0?"#dc2626":"#15803d"}">₹${fmt(loanBal)}</td></tr>
+      <tr><th>Deduct / Trip</th><td>₹${fmt(v.deductPerTrip||0)}</td></tr>
+    </table>
+
+    <h2>⚠ Shortage Ledger (${shortageTxns.filter(x=>x.type==="shortage").length})</h2>
+    ${shortageRows?`<table><tr><th>Date</th><th>Qty</th><th>LR No</th><th>Amount</th><th>Note</th></tr>${shortageRows}</table>`:'<div class="empty">No shortages recorded.</div>'}
+
+    <h2>⚠ Shortage Recoveries (${shortageTxns.filter(x=>x.type==="recovery").length})</h2>
+    ${shortRecovRows?`<table><tr><th>Date</th><th>Qty</th><th>LR No</th><th>Amount</th><th>Note</th></tr>${shortRecovRows}</table>`:'<div class="empty">No shortage recoveries recorded.</div>'}
+
+    <table style="max-width:380px;margin-top:8px">
+      <tr><th>Total Shortage</th><td>₹${fmt(v.shortageOwed||0)}</td></tr>
+      <tr><th>Recovered</th><td>₹${fmt(v.shortageRecovered||0)}</td></tr>
+      <tr><th>Balance Owed</th><td style="font-weight:800;color:#d97706">₹${fmt((v.shortageOwed||0)-(v.shortageRecovered||0))}</td></tr>
+    </table>
+
+    <div class="footer">M Yantra Enterprises · PAN: ABBFM6370M · GSTN: 29ABBFM6370M1ZR · Report generated ${new Date().toLocaleString("en-IN")}</div>`;
 
     const w = window.open("","_blank");
     w.document.write(`<!DOCTYPE html><html><head><title>${v.truckNo} — Vehicle Report</title></head><body onload="window.print()">${html}</body></html>`);
@@ -3919,13 +4044,13 @@ ${pays.length===0?"<p style='color:#888'>No payments recorded.</p>":
       {/* Header */}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div style={{color:C.accent,fontWeight:800,fontSize:16}}>🚛 Vehicles & Drivers</div>
-        <Btn onClick={()=>setSheet(true)} sm>+ Add</Btn>
+        {isOwner && <Btn onClick={()=>{setEditId(null);setF(blank);setSheet(true);}} sm>+ Add</Btn>}
       </div>
 
-      {/* KPI */}
+      {/* KPIs */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-        <KPI icon="🔴" label="Loan Due"     value={fmt(vehicles.reduce((s,v)=>s+Math.max(0,(v.loan||0)-(v.loanRecovered||0)),0))} color={C.red} />
-        <KPI icon="🚛" label="Total Vehicles" value={(vehicles||[]).length} color={C.blue} />
+        <KPI icon="🔴" label="Loan Due"       value={fmt((vehicles||[]).reduce((s,v)=>s+Math.max(0,(v.loan||0)-(v.loanRecovered||0)),0))} color={C.red} />
+        <KPI icon="🚛" label="Total Vehicles"  value={(vehicles||[]).length} color={C.blue} />
       </div>
 
       {/* Search */}
@@ -3939,11 +4064,11 @@ ${pays.length===0?"<p style='color:#888'>No payments recorded.</p>":
           style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",
             background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:16}}>✕</button>}
       </div>
-      {search&&<div style={{fontSize:11,color:C.muted}}>{filtered.length} of {vehicles.length} vehicles</div>}
+      {search&&<div style={{fontSize:11,color:C.muted}}>{filtered.length} of {(vehicles||[]).length} vehicles</div>}
 
-      {/* Add Vehicle Sheet */}
-      {sheet&&(
-        <Sheet title="Register Vehicle" onClose={()=>{setSheet(false);setF(blank);}}>
+      {/* ── ADD / EDIT SHEET ── */}
+      {sheet && (
+        <Sheet title={editId ? `Edit — ${f.truckNo}` : "Register Vehicle"} onClose={()=>{setSheet(false);setF(blank);setEditId(null);}}>
           <div style={{display:"flex",flexDirection:"column",gap:13}}>
             <div style={{color:C.blue,fontSize:11,fontWeight:700,letterSpacing:1}}>TRUCK INFO</div>
             <div style={{display:"flex",gap:10}}>
@@ -3962,70 +4087,273 @@ ${pays.length===0?"<p style='color:#888'>No payments recorded.</p>":
             <div style={{color:C.green,fontSize:11,fontWeight:700,letterSpacing:1,marginTop:4}}>BANK DETAILS</div>
             <div style={{display:"flex",gap:10}}>
               <Field label="Bank A/C No" value={f.accountNo||""} onChange={ff("accountNo")} half />
-              <Field label="IFSC Code" value={f.ifsc||""} onChange={ff("ifsc")} half />
+              <Field label="IFSC Code"   value={f.ifsc||""}      onChange={ff("ifsc")}      half />
             </div>
 
             <div style={{color:C.red,fontSize:11,fontWeight:700,letterSpacing:1,marginTop:4}}>LOAN / DEDUCTIONS</div>
             <div style={{display:"flex",gap:10}}>
-              <Field label="Loan ₹" value={f.loan} onChange={ff("loan")} type="number" half />
-              <Field label="Recovered ₹" value={f.loanRecovered} onChange={ff("loanRecovered")} type="number" half />
+              <Field label="Loan ₹"       value={f.loan}          onChange={ff("loan")}          type="number" half />
+              <Field label="Recovered ₹"  value={f.loanRecovered}  onChange={ff("loanRecovered")}  type="number" half />
             </div>
             <Field label="Deduct Per Trip ₹" value={f.deductPerTrip} onChange={ff("deductPerTrip")} type="number" />
             <div style={{display:"flex",gap:10,alignItems:"center",padding:"4px 0"}}>
               <input type="checkbox" checked={f.tafalExempt} onChange={e=>setF(p=>({...p,tafalExempt:e.target.checked}))} style={{width:20,height:20}} />
               <span style={{color:C.text,fontSize:15}}>TAFAL Exempt</span>
             </div>
-            <div style={{color:C.muted,fontSize:12}}>Adding as: <b style={{color:ROLES[user.role]?.color}}>{user.name}</b></div>
+
+            {!f.driverPhone.trim() && (
+              <div style={{background:"#1a1000",border:`1px solid ${C.orange}44`,borderRadius:8,
+                padding:"8px 12px",fontSize:12,color:C.orange}}>
+                ⚠ Driver Phone is mandatory
+              </div>
+            )}
+
             <Btn onClick={()=>{
               if(!f.truckNo.trim()){alert("Truck No is required");return;}
               if(!f.driverPhone.trim()){alert("Driver Phone is mandatory");return;}
-              const v={...f,id:uid(),
-                truckNo:f.truckNo.toUpperCase().trim(),
-                loan:+f.loan,loanRecovered:+f.loanRecovered,deductPerTrip:+f.deductPerTrip,
-                createdBy:user.username};
-              setVehicles(p=>[...(p||[]),v]);
-              log("ADD VEHICLE",`${v.truckNo} (${v.ownerName}) Driver:${v.driverName}`);
-              setF(blank); setSheet(false);
-            }} full>Save Vehicle</Btn>
+              if(editId) {
+                setVehicles(p=>p.map(v=>v.id===editId?{...v,...f,
+                  loan:+f.loan,loanRecovered:+f.loanRecovered,deductPerTrip:+f.deductPerTrip,
+                  truckNo:f.truckNo.toUpperCase().trim()}:v));
+                log("EDIT VEHICLE",`${f.truckNo} updated`);
+              } else {
+                const v={...f,id:uid(),
+                  truckNo:f.truckNo.toUpperCase().trim(),
+                  loan:+f.loan,loanRecovered:+f.loanRecovered,deductPerTrip:+f.deductPerTrip,
+                  loanTxns:[],shortageTxns:[],createdBy:user.username};
+                setVehicles(p=>[...(p||[]),v]);
+                log("ADD VEHICLE",`${v.truckNo} driver:${v.driverPhone}`);
+              }
+              setF(blank); setSheet(false); setEditId(null);
+            }} full>{editId?"Save Changes":"Save Vehicle"}</Btn>
+
+            {editId && isOwner && (
+              <Btn color={C.red} outline full onClick={()=>{
+                if(!window.confirm(`Delete vehicle ${f.truckNo}? This cannot be undone.`)) return;
+                setVehicles(p=>p.filter(v=>v.id!==editId));
+                log("DELETE VEHICLE",f.truckNo);
+                setSheet(false);setEditId(null);setF(blank);
+              }}>🗑 Delete Vehicle</Btn>
+            )}
           </div>
         </Sheet>
       )}
 
-      {/* Loan Sheet */}
-      {lSheet&&(()=>{const v=vehicles.find(x=>x.id===lSheet); const bal=(v.loan||0)-(v.loanRecovered||0); return (
-        <Sheet title={`Loan — ${v.truckNo} (${v.ownerName})`} onClose={()=>{setLSheet(null);setLAmt("");setRAmt("");}}>
-          <div style={{display:"flex",flexDirection:"column",gap:14}}>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
-              {[{l:"Loan",v:fmt(v.loan||0),c:C.red},{l:"Recovered",v:fmt(v.loanRecovered||0),c:C.green},{l:"Balance",v:fmt(bal),c:C.accent}].map(x=>(
-                <div key={x.l} style={{background:C.bg,borderRadius:10,padding:12,textAlign:"center"}}><div style={{color:x.c,fontWeight:800}}>{x.v}</div><div style={{color:C.muted,fontSize:10}}>{x.l}</div></div>
-              ))}
+      {/* ── LOAN MANAGEMENT SHEET ── */}
+      {lSheet&&(()=>{
+        const v = vehicles.find(x=>x.id===lSheet);
+        if(!v) return null;
+        const bal = (v.loan||0)-(v.loanRecovered||0);
+        const loanTxns = v.loanTxns||[];
+        const vtrips = (trips||[]).filter(t=>t.truckNo===v.truckNo&&!t.driverSettled);
+        return (
+          <Sheet title={`🏦 Loan — ${v.truckNo}`} onClose={()=>{setLSheet(null);resetLoanForm();}}>
+            <div style={{display:"flex",flexDirection:"column",gap:14}}>
+              {/* Balance summary */}
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
+                {[{l:"Loan Given",v:fmt(v.loan||0),c:C.red},{l:"Recovered",v:fmt(v.loanRecovered||0),c:C.green},{l:"Balance",v:fmt(bal),c:bal>0?C.accent:C.green}].map(x=>(
+                  <div key={x.l} style={{background:C.bg,borderRadius:10,padding:12,textAlign:"center"}}>
+                    <div style={{color:x.c,fontWeight:800}}>{x.v}</div>
+                    <div style={{color:C.muted,fontSize:10}}>{x.l}</div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Give Loan */}
+              <div style={{background:C.bg,borderRadius:12,padding:14}}>
+                <div style={{color:C.red,fontWeight:700,fontSize:12,marginBottom:10}}>➕ Give Loan</div>
+                <div style={{display:"flex",gap:10}}>
+                  <Field label="Amount ₹ *" value={lAmt} onChange={setLAmt} type="number" half />
+                  <Field label="Date"        value={lDate} onChange={setLDate} type="date"   half />
+                </div>
+                <div style={{display:"flex",gap:10}}>
+                  <Field label="Reference / Cheque No" value={lRef}  onChange={setLRef}  half />
+                  <Field label="Account Name"           value={lAcct} onChange={setLAcct} half />
+                </div>
+                <Btn onClick={()=>{
+                  if(!lAmt||+lAmt<=0){alert("Enter loan amount");return;}
+                  const txn={id:uid(),type:"given",date:lDate,amount:+lAmt,ref:lRef,accountName:lAcct,note:""};
+                  setVehicles(p=>p.map(x=>x.id===lSheet?{...x,
+                    loan:(x.loan||0)+ +lAmt,
+                    loanTxns:[...(x.loanTxns||[]),txn]}:x));
+                  log("ADD LOAN",`${v.truckNo} ₹${fmt(+lAmt)} ref:${lRef||"—"}`);
+                  setLAmt(""); setLDate(today()); setLRef(""); setLAcct("");
+                }} color={C.red} full>Add Loan</Btn>
+              </div>
+
+              {/* Record Recovery */}
+              <div style={{background:C.bg,borderRadius:12,padding:14}}>
+                <div style={{color:C.green,fontWeight:700,fontSize:12,marginBottom:10}}>💰 Record Recovery</div>
+                <div style={{display:"flex",gap:10}}>
+                  <Field label="Amount ₹ *" value={rAmt}  onChange={setRAmt}  type="number" half />
+                  <Field label="Date"        value={rDate} onChange={setRDate} type="date"   half />
+                </div>
+                <div style={{display:"flex",gap:10}}>
+                  <Field label="Link LR No" value={rLR} onChange={setRLR}
+                    opts={[{v:"",l:"— Select LR —"},...vtrips.map(t=>({v:t.lrNo||t.id,l:`${t.lrNo||"—"} · ${t.date} · ${t.to}`}))]}
+                    half />
+                  <Field label="Reference" value={rRef} onChange={setRRef} half />
+                </div>
+                <Btn onClick={()=>{
+                  if(!rAmt||+rAmt<=0){alert("Enter recovery amount");return;}
+                  const txn={id:uid(),type:"recovery",date:rDate,amount:+rAmt,lrNo:rLR,ref:rRef,note:""};
+                  setVehicles(p=>p.map(x=>x.id===lSheet?{...x,
+                    loanRecovered:(x.loanRecovered||0)+ +rAmt,
+                    loanTxns:[...(x.loanTxns||[]),txn]}:x));
+                  log("LOAN RECOVERY",`${v.truckNo} ₹${fmt(+rAmt)} LR:${rLR||"—"}`);
+                  setRAmt(""); setRDate(today()); setRLR(""); setRRef("");
+                }} color={C.green} full>Record Recovery</Btn>
+              </div>
+
+              {/* Deduct per trip */}
+              <div style={{display:"flex",gap:10,alignItems:"center"}}>
+                <div style={{flex:1}}>
+                  <Field label="Deduct Per Trip ₹" value={String(v.deductPerTrip||0)}
+                    onChange={val=>setVehicles(p=>p.map(x=>x.id===lSheet?{...x,deductPerTrip:+val}:x))}
+                    type="number" />
+                </div>
+              </div>
+
+              {/* Loan transaction history */}
+              {loanTxns.length>0&&(
+                <>
+                  <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1,marginTop:4}}>TRANSACTION HISTORY ({loanTxns.length})</div>
+                  {[...loanTxns].reverse().map(tx=>(
+                    <div key={tx.id} style={{background:C.bg,borderRadius:10,padding:"10px 12px",
+                      display:"flex",justifyContent:"space-between",alignItems:"center",
+                      borderLeft:`3px solid ${tx.type==="given"?C.red:C.green}`}}>
+                      <div>
+                        <div style={{fontSize:12,fontWeight:700,color:tx.type==="given"?C.red:C.green}}>
+                          {tx.type==="given"?"➕ Given":"💰 Recovery"} · ₹{fmt(tx.amount)}
+                        </div>
+                        <div style={{fontSize:11,color:C.muted}}>{fmtD(tx.date)}{tx.ref?` · Ref: ${tx.ref}`:""}</div>
+                        {tx.accountName&&<div style={{fontSize:11,color:C.muted}}>Acct: {tx.accountName}</div>}
+                        {tx.lrNo&&<div style={{fontSize:11,color:C.blue}}>LR: {tx.lrNo}</div>}
+                      </div>
+                      {isOwner&&<button onClick={()=>{
+                        if(!window.confirm("Delete this transaction?")) return;
+                        const delta = tx.type==="given"?-tx.amount:tx.amount;
+                        const recoDelta = tx.type==="recovery"?-tx.amount:0;
+                        setVehicles(p=>p.map(x=>x.id===lSheet?{...x,
+                          loan: tx.type==="given"?(x.loan||0)-tx.amount:x.loan,
+                          loanRecovered: tx.type==="recovery"?(x.loanRecovered||0)-tx.amount:x.loanRecovered,
+                          loanTxns:(x.loanTxns||[]).filter(t=>t.id!==tx.id)}:x));
+                      }} style={{background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:16}}>🗑</button>}
+                    </div>
+                  ))}
+                </>
+              )}
             </div>
-            <Field label="Give Loan ₹" value={lAmt} onChange={setLAmt} type="number" />
-            <Btn onClick={()=>{setVehicles(p=>p.map(x=>x.id===lSheet?{...x,loan:(x.loan||0)+ +lAmt}:x)); log("ADD LOAN",`${v.truckNo} +${fmt(+lAmt)}`); setLAmt("");}} color={C.red} full>Add Loan</Btn>
-            <Field label="Record Recovery ₹" value={rAmt} onChange={setRAmt} type="number" />
-            <Btn onClick={()=>{setVehicles(p=>p.map(x=>x.id===lSheet?{...x,loanRecovered:(x.loanRecovered||0)+ +rAmt}:x)); log("LOAN RECOVERY",`${v.truckNo} recovered ${fmt(+rAmt)}`); setRAmt("");}} color={C.green} full>Record Recovery</Btn>
-            <Field label="Deduct Per Trip ₹" value={String(v.deductPerTrip||0)} onChange={val=>setVehicles(p=>p.map(x=>x.id===lSheet?{...x,deductPerTrip:+val}:x))} type="number" />
-          </div>
-        </Sheet>
-      );})()}
+          </Sheet>
+        );
+      })()}
 
-      {/* Shortage Sheet */}
-      {sSheet&&(()=>{const v=vehicles.find(x=>x.id===sSheet); const vt=(trips||[]).filter(t=>(t.truckNo===v.truckNo||t.truck===v.truckNo)&&!t.driverSettled); return (
-        <Sheet title={`Shortage — ${v.truckNo}`} onClose={()=>{setSSheet(null);setShAmt("");setShTrip("");}}>
-          <div style={{display:"flex",flexDirection:"column",gap:13}}>
-            <Field label="Shortage MT" value={shAmt} onChange={setShAmt} type="number" />
-            <Field label="Link to Trip" value={shTrip} onChange={setShTrip}
-              opts={[{v:"",l:"— Select trip —"},...vt.map(t=>({v:t.id,l:`LR:${t.lrNo||"—"} · ${t.date} · ${t.to}`}))]} />
-            <Btn onClick={()=>{if(shTrip)setTrips(p=>p.map(t=>t.id===shTrip?{...t,shortage:(t.shortage||0)+ +shAmt}:t)); log("SHORTAGE",`${v.truckNo} — ${shAmt}MT`); setSSheet(null);setShAmt("");setShTrip("");}} color={C.red} full>Record Shortage</Btn>
-          </div>
-        </Sheet>
-      );})()}
+      {/* ── SHORTAGE MANAGEMENT SHEET ── */}
+      {sSheet&&(()=>{
+        const v = vehicles.find(x=>x.id===sSheet);
+        if(!v) return null;
+        const shortageTxns = v.shortageTxns||[];
+        const shortOwed = (v.shortageOwed||0)-(v.shortageRecovered||0);
+        const vtrips = (trips||[]).filter(t=>(t.truckNo===v.truckNo||t.truck===v.truckNo)&&!t.driverSettled);
+        return (
+          <Sheet title={`⚠ Shortage — ${v.truckNo}`} onClose={()=>{setSSheet(null);resetShForm();}}>
+            <div style={{display:"flex",flexDirection:"column",gap:14}}>
+              {/* Balance */}
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
+                {[{l:"Owed",v:fmt(v.shortageOwed||0),c:C.red},{l:"Recovered",v:fmt(v.shortageRecovered||0),c:C.green},{l:"Balance",v:fmt(shortOwed),c:shortOwed>0?C.orange:C.green}].map(x=>(
+                  <div key={x.l} style={{background:C.bg,borderRadius:10,padding:12,textAlign:"center"}}>
+                    <div style={{color:x.c,fontWeight:800}}>{x.v}</div>
+                    <div style={{color:C.muted,fontSize:10}}>{x.l}</div>
+                  </div>
+                ))}
+              </div>
 
-      {/* Vehicle Cards */}
+              {/* Record Shortage */}
+              <div style={{background:C.bg,borderRadius:12,padding:14}}>
+                <div style={{color:C.red,fontWeight:700,fontSize:12,marginBottom:10}}>⚠ Record Shortage</div>
+                <div style={{display:"flex",gap:10}}>
+                  <Field label="Shortage MT *" value={shAmt} onChange={setShAmt} type="number" half />
+                  <Field label="Link LR *" value={shTrip} onChange={setShTrip}
+                    opts={[{v:"",l:"— Select LR —"},...vtrips.map(t=>({v:t.id,l:`${t.lrNo||"—"} · ${t.date} · ${t.to}`}))]}
+                    half />
+                </div>
+                <Btn onClick={()=>{
+                  if(!shAmt||+shAmt<=0){alert("Enter shortage MT");return;}
+                  if(!shTrip){alert("Link to an LR");return;}
+                  const trip = vtrips.find(t=>t.id===shTrip);
+                  const lrNo = trip?.lrNo||"";
+                  const rate = trip?.givenRate||0;
+                  const amount = +shAmt * rate;
+                  const txn={id:uid(),type:"shortage",date:trip?.date||today(),qty:+shAmt,lrNo,amount,note:""};
+                  // Update trip shortage too
+                  setTrips(p=>p.map(t=>t.id===shTrip?{...t,shortage:(t.shortage||0)+ +shAmt}:t));
+                  setVehicles(p=>p.map(x=>x.id===sSheet?{...x,
+                    shortageOwed:(x.shortageOwed||0)+amount,
+                    shortageTxns:[...(x.shortageTxns||[]),txn]}:x));
+                  log("SHORTAGE",`${v.truckNo} ${shAmt}MT LR:${lrNo}`);
+                  setShAmt(""); setShTrip("");
+                }} color={C.red} full>Record Shortage</Btn>
+              </div>
+
+              {/* Record Shortage Recovery */}
+              <div style={{background:C.bg,borderRadius:12,padding:14}}>
+                <div style={{color:C.green,fontWeight:700,fontSize:12,marginBottom:10}}>💰 Shortage Recovery</div>
+                <div style={{display:"flex",gap:10}}>
+                  <Field label="Recovery MT *" value={srAmt} onChange={setSrAmt} type="number" half />
+                  <Field label="Link LR" value={srLR} onChange={setSrLR}
+                    opts={[{v:"",l:"— Select LR —"},...vtrips.map(t=>({v:t.lrNo||"",l:`${t.lrNo||"—"} · ${t.date} · ${t.to}`}))]}
+                    half />
+                </div>
+                <Btn onClick={()=>{
+                  if(!srAmt||+srAmt<=0){alert("Enter recovery MT");return;}
+                  const trip = srLR ? (trips||[]).find(t=>t.lrNo===srLR) : null;
+                  const rate = trip?.givenRate||0;
+                  const amount = +srAmt * rate;
+                  const txn={id:uid(),type:"recovery",date:today(),qty:+srAmt,lrNo:srLR,amount,note:""};
+                  setVehicles(p=>p.map(x=>x.id===sSheet?{...x,
+                    shortageRecovered:(x.shortageRecovered||0)+amount,
+                    shortageTxns:[...(x.shortageTxns||[]),txn]}:x));
+                  log("SHORTAGE RECOVERY",`${v.truckNo} ${srAmt}MT LR:${srLR||"—"}`);
+                  setSrAmt(""); setSrLR("");
+                }} color={C.green} full>Record Recovery</Btn>
+              </div>
+
+              {/* Shortage transaction history */}
+              {shortageTxns.length>0&&(
+                <>
+                  <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1,marginTop:4}}>SHORTAGE HISTORY ({shortageTxns.length})</div>
+                  {[...shortageTxns].reverse().map(tx=>(
+                    <div key={tx.id} style={{background:C.bg,borderRadius:10,padding:"10px 12px",
+                      display:"flex",justifyContent:"space-between",alignItems:"center",
+                      borderLeft:`3px solid ${tx.type==="shortage"?C.red:C.green}`}}>
+                      <div>
+                        <div style={{fontSize:12,fontWeight:700,color:tx.type==="shortage"?C.red:C.green}}>
+                          {tx.type==="shortage"?"⚠ Shortage":"💰 Recovery"} · {tx.qty}MT · ₹{fmt(tx.amount||0)}
+                        </div>
+                        <div style={{fontSize:11,color:C.muted}}>{fmtD(tx.date)}</div>
+                        {tx.lrNo&&<div style={{fontSize:11,color:C.blue}}>LR: {tx.lrNo}</div>}
+                      </div>
+                      {isOwner&&<button onClick={()=>{
+                        if(!window.confirm("Delete this entry?")) return;
+                        setVehicles(p=>p.map(x=>x.id===sSheet?{...x,
+                          shortageOwed: tx.type==="shortage"?(x.shortageOwed||0)-(tx.amount||0):x.shortageOwed,
+                          shortageRecovered: tx.type==="recovery"?(x.shortageRecovered||0)-(tx.amount||0):x.shortageRecovered,
+                          shortageTxns:(x.shortageTxns||[]).filter(t=>t.id!==tx.id)}:x));
+                      }} style={{background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:16}}>🗑</button>}
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+          </Sheet>
+        );
+      })()}
+
+      {/* ── VEHICLE CARDS ── */}
       {filtered.length===0&&(
         <div style={{textAlign:"center",padding:"40px 20px",color:C.muted}}>
           <div style={{fontSize:32,marginBottom:8}}>🚛</div>
-          <div style={{fontSize:13}}>{search?"No vehicles match your search.":"No vehicles yet. Add one above."}</div>
+          <div style={{fontSize:13}}>{search?"No vehicles match your search.":"No vehicles yet. Owner can add one above."}</div>
         </div>
       )}
 
@@ -4036,7 +4364,7 @@ ${pays.length===0?"<p style='color:#888'>No payments recorded.</p>":
         return (
           <div key={v.id} style={{background:C.card,borderRadius:14,padding:"14px 16px",
             borderLeft:`4px solid ${bal>0?C.red:C.green}`,marginBottom:8}}>
-            {/* Truck + Owner row */}
+            {/* Truck + owner row */}
             <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
               <div>
                 <div style={{fontWeight:800,fontSize:15}}>{v.truckNo}</div>
@@ -4045,6 +4373,15 @@ ${pays.length===0?"<p style='color:#888'>No payments recorded.</p>":
               <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:4}}>
                 <Badge label={bal>0?"Loan Due":"Clear"} color={bal>0?C.red:C.green} />
                 {v.tafalExempt&&<Badge label="TAFAL Exempt" color={C.muted} />}
+                {isOwner&&<button onClick={()=>{setF({
+                  truckNo:v.truckNo,ownerName:v.ownerName||"",phone:v.phone||"",
+                  driverName:v.driverName||"",driverPhone:v.driverPhone||"",driverLicense:v.driverLicense||"",
+                  accountNo:v.accountNo||"",ifsc:v.ifsc||"",
+                  loan:String(v.loan||0),loanRecovered:String(v.loanRecovered||0),
+                  deductPerTrip:String(v.deductPerTrip||0),tafalExempt:v.tafalExempt||false,
+                });setEditId(v.id);setSheet(true);}}
+                  style={{background:"none",border:`1px solid ${C.muted}44`,borderRadius:6,
+                    padding:"3px 8px",color:C.muted,cursor:"pointer",fontSize:11}}>✏ Edit</button>}
               </div>
             </div>
 
@@ -4055,8 +4392,7 @@ ${pays.length===0?"<p style='color:#888'>No payments recorded.</p>":
                 <span style={{color:C.muted,fontSize:10,fontWeight:700}}>DRIVER</span>
                 {v.driverName&&<span style={{color:C.text,fontWeight:600}}>{v.driverName}</span>}
                 {v.driverPhone&&(
-                  <a href={`tel:${v.driverPhone}`}
-                    style={{color:C.green,textDecoration:"none",fontFamily:"monospace"}}>
+                  <a href={`tel:${v.driverPhone}`} style={{color:C.green,textDecoration:"none",fontFamily:"monospace"}}>
                     📞 {v.driverPhone}
                   </a>
                 )}
@@ -4066,11 +4402,9 @@ ${pays.length===0?"<p style='color:#888'>No payments recorded.</p>":
             {!v.driverPhone&&(
               <div style={{background:"#1a1000",border:`1px solid ${C.orange}33`,borderRadius:8,
                 padding:"5px 10px",marginBottom:8,fontSize:11,color:C.orange}}>
-                ⚠ Driver phone missing — edit to add
+                ⚠ Driver phone missing — {isOwner?"tap ✏ Edit to add":"contact owner to update"}
               </div>
             )}
-
-            {/* Bank */}
             {v.accountNo&&<div style={{color:C.blue,fontSize:11,marginBottom:6}}>🏦 A/C: {v.accountNo}{v.ifsc?` · ${v.ifsc}`:""}</div>}
 
             {/* Loan KPIs */}
@@ -4091,8 +4425,8 @@ ${pays.length===0?"<p style='color:#888'>No payments recorded.</p>":
 
             {/* Action buttons */}
             <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-              <Btn onClick={()=>setLSheet(v.id)} sm outline color={C.blue}>Loan</Btn>
-              <Btn onClick={()=>setSSheet(v.id)} sm outline color={C.red}>Shortage</Btn>
+              <Btn onClick={()=>{resetLoanForm();setLSheet(v.id);}} sm outline color={C.blue}>🏦 Loan</Btn>
+              <Btn onClick={()=>{resetShForm();setSSheet(v.id);}} sm outline color={C.red}>⚠ Shortage</Btn>
               <Btn onClick={()=>setHSheet(v.id)} sm outline color={C.purple}>📋 History</Btn>
               <Btn onClick={()=>exportVehiclePDF(v)} sm outline color={C.orange}>📄 PDF</Btn>
               {v.driverPhone&&(
@@ -4106,7 +4440,7 @@ ${pays.length===0?"<p style='color:#888'>No payments recorded.</p>":
         );
       })}
 
-      {/* ── TRUCK HISTORY SHEET ── */}
+      {/* ── FULL HISTORY SHEET ── */}
       {hSheet&&(()=>{
         const v = vehicles.find(x=>x.id===hSheet);
         if(!v) return null;
@@ -4114,10 +4448,12 @@ ${pays.length===0?"<p style='color:#888'>No payments recorded.</p>":
                                .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
         const pays = (driverPays||[]).filter(p=>p.truckNo===v.truckNo);
         const totalPaid = pays.reduce((s,p)=>s+(p.amount||0),0);
+        const loanTxns = v.loanTxns||[];
+        const shortageTxns = v.shortageTxns||[];
         return (
           <Sheet title={`📋 ${v.truckNo} — Full History`} onClose={()=>setHSheet(null)}>
             <div style={{display:"flex",flexDirection:"column",gap:12}}>
-              {/* Vehicle card */}
+              {/* Vehicle summary card */}
               <div style={{background:C.bg,borderRadius:10,padding:"12px 14px",fontSize:13}}>
                 <div style={{fontWeight:800,fontSize:15,marginBottom:4}}>{v.ownerName||"—"}</div>
                 <div style={{color:C.muted,fontSize:12,marginBottom:2}}>{v.phone||"—"}</div>
@@ -4130,10 +4466,10 @@ ${pays.length===0?"<p style='color:#888'>No payments recorded.</p>":
                 {v.accountNo&&<div style={{color:C.blue,fontSize:11,marginTop:2}}>A/C: {v.accountNo}{v.ifsc?` · IFSC: ${v.ifsc}`:""}</div>}
                 <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginTop:10}}>
                   {[
-                    {v:vt.length,          l:"TRIPS",    c:C.blue},
+                    {v:vt.length,              l:"TRIPS",   c:C.blue},
                     {v:vt.filter(t=>t.driverSettled).length, l:"SETTLED", c:C.green},
                     {v:vt.filter(t=>!t.driverSettled).length,l:"PENDING", c:C.orange},
-                    {v:`₹${fmt(totalPaid)}`,l:"PAID",     c:C.green},
+                    {v:`₹${fmt(totalPaid)}`,   l:"PAID",    c:C.green},
                   ].map(x=>(
                     <div key={x.l} style={{background:C.card,borderRadius:8,padding:"8px",textAlign:"center"}}>
                       <div style={{fontWeight:700,color:x.c,fontSize:12}}>{x.v}</div>
@@ -4143,18 +4479,16 @@ ${pays.length===0?"<p style='color:#888'>No payments recorded.</p>":
                 </div>
               </div>
 
-              {/* Export PDF button */}
               <Btn onClick={()=>exportVehiclePDF(v)} full outline color={C.orange}>📄 Export Full PDF Report</Btn>
 
-              {/* Trip list */}
+              {/* Trips */}
               <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1}}>TRIPS ({vt.length})</div>
               {vt.length===0&&<div style={{textAlign:"center",color:C.muted,padding:24}}>No trips recorded</div>}
               {vt.map(t=>{
                 const isMultiDI = t.diLines&&t.diLines.length>1;
-                const gross = isMultiDI
-                  ? t.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
-                  : (t.qty||0)*(t.givenRate||0);
+                const gross = isMultiDI ? t.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0) : (t.qty||0)*(t.givenRate||0);
                 const net = gross-(t.advance||0)-(t.tafal||0)-(t.dieselEstimate||0);
+                const tripPays = pays.filter(p=>p.lrNo===t.lrNo);
                 return (
                   <div key={t.id} style={{background:C.card,borderRadius:12,padding:"11px 14px",
                     borderLeft:`3px solid ${t.driverSettled?C.green:C.orange}`}}>
@@ -4165,9 +4499,7 @@ ${pays.length===0?"<p style='color:#888'>No payments recorded.</p>":
                         </div>
                         <div style={{color:C.muted,fontSize:11,marginTop:2}}>{t.from||"—"} → {t.to||"—"} · {t.qty}MT</div>
                         <div style={{color:C.muted,fontSize:11}}>
-                          {isMultiDI
-                            ? `DIs: ${t.diLines.map(d=>d.diNo).join(" + ")}`
-                            : `DI: ${t.diNo||"—"}`}
+                          {isMultiDI ? `DIs: ${t.diLines.map(d=>d.diNo).join(" + ")}` : `DI: ${t.diNo||"—"}`}
                         </div>
                         {(t.shortage||0)>0&&(
                           <div style={{color:C.red,fontSize:11}}>⚠ Shortage: {t.shortage}MT · ₹{fmt((t.shortage||0)*(t.givenRate||0))}</div>
@@ -4176,31 +4508,62 @@ ${pays.length===0?"<p style='color:#888'>No payments recorded.</p>":
                       <div style={{textAlign:"right"}}>
                         <div style={{color:C.green,fontWeight:800,fontSize:14}}>₹{fmt(net)}</div>
                         <div style={{fontSize:10,color:C.muted}}>Net</div>
-                        {t.driverSettled
-                          ?<Badge label="Settled" color={C.green}/>
-                          :<Badge label="Pending" color={C.orange}/>}
+                        {t.driverSettled?<Badge label="Settled" color={C.green}/>:<Badge label="Pending" color={C.orange}/>}
                       </div>
                     </div>
-                    {/* Payment breakdown */}
                     <div style={{display:"flex",gap:10,marginTop:6,fontSize:11,color:C.muted,flexWrap:"wrap"}}>
                       <span>Gross: <b style={{color:C.orange}}>₹{fmt(gross)}</b></span>
                       {(t.advance||0)>0&&<span>(−) Adv: <b style={{color:C.red}}>₹{fmt(t.advance)}</b></span>}
                       {(t.tafal||0)>0&&<span>(−) Tafal: <b>₹{fmt(t.tafal)}</b></span>}
-                      {pays.filter(p=>p.lrNo===t.lrNo).length>0&&(
-                        <span style={{color:C.green}}>Paid: ₹{fmt(pays.filter(p=>p.lrNo===t.lrNo).reduce((s,p)=>s+(p.amount||0),0))}</span>
-                      )}
+                      {tripPays.length>0&&<span style={{color:C.green}}>Paid: ₹{fmt(tripPays.reduce((s,p)=>s+(p.amount||0),0))}</span>}
                     </div>
                   </div>
                 );
               })}
 
-              {/* Payment history */}
+              {/* Loan transactions */}
+              {loanTxns.length>0&&(
+                <>
+                  <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1,marginTop:4}}>LOAN TRANSACTIONS ({loanTxns.length})</div>
+                  {[...loanTxns].reverse().map(tx=>(
+                    <div key={tx.id} style={{background:C.bg,borderRadius:8,padding:"9px 12px",
+                      borderLeft:`3px solid ${tx.type==="given"?C.red:C.green}`}}>
+                      <div style={{display:"flex",justifyContent:"space-between"}}>
+                        <div>
+                          <div style={{fontSize:12,fontWeight:700,color:tx.type==="given"?C.red:C.green}}>
+                            {tx.type==="given"?"➕ Loan Given":"💰 Recovery"} · ₹{fmt(tx.amount)}
+                          </div>
+                          <div style={{fontSize:11,color:C.muted}}>{fmtD(tx.date)}{tx.ref?` · ${tx.ref}`:""}</div>
+                          {tx.accountName&&<div style={{fontSize:11,color:C.muted}}>Acct: {tx.accountName}</div>}
+                          {tx.lrNo&&<div style={{fontSize:11,color:C.blue}}>LR: {tx.lrNo}</div>}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </>
+              )}
+
+              {/* Shortage transactions */}
+              {shortageTxns.length>0&&(
+                <>
+                  <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1,marginTop:4}}>SHORTAGE HISTORY ({shortageTxns.length})</div>
+                  {[...shortageTxns].reverse().map(tx=>(
+                    <div key={tx.id} style={{background:C.bg,borderRadius:8,padding:"9px 12px",
+                      borderLeft:`3px solid ${tx.type==="shortage"?C.red:C.green}`}}>
+                      <div style={{fontSize:12,fontWeight:700,color:tx.type==="shortage"?C.red:C.green}}>
+                        {tx.type==="shortage"?"⚠ Shortage":"💰 Recovery"} · {tx.qty}MT · ₹{fmt(tx.amount||0)}
+                      </div>
+                      <div style={{fontSize:11,color:C.muted}}>{fmtD(tx.date)}{tx.lrNo?` · LR: ${tx.lrNo}`:""}</div>
+                    </div>
+                  ))}
+                </>
+              )}
+
+              {/* Driver payments */}
               {pays.length>0&&(
                 <>
-                  <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1,marginTop:4}}>
-                    PAYMENT HISTORY ({pays.length})
-                  </div>
-                  {pays.sort((a,b)=>(b.date||"").localeCompare(a.date||"")).map(p=>(
+                  <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1,marginTop:4}}>DRIVER PAYMENTS ({pays.length})</div>
+                  {[...pays].sort((a,b)=>(b.date||"").localeCompare(a.date||"")).map(p=>(
                     <div key={p.id} style={{background:C.bg,borderRadius:8,padding:"9px 12px",
                       display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                       <div>
@@ -4426,20 +4789,33 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
       setScanError(`Payment advice UTR ${utr} is already uploaded. Discard this scan.`); return;
     }
     const invList=scanResult.invoices||[], shorts=scanResult.shortages||[], exps=scanResult.expenses||[];
+
+    // Build a map of lrNo → trip for shortages lookup
+    const allTrips = trips||[];
+    const lrToTrip = {};
+    allTrips.forEach(t=>{ if(t.lrNo||t.lr) lrToTrip[(t.lrNo||t.lr).trim()]=t; });
+
+    // Apply trip updates — mark paid, attach shreeShortage
     setTrips(prev=>prev.map(t=>{
       if(invList.some(i=>i.invoiceNo===t.invoiceNo)){
-        const short=shorts.find(s=>s.lrNo===t.lr);
+        const lrKey=(t.lrNo||t.lr||"").trim();
+        const short=shorts.find(s=>(s.lrNo||"").trim()===lrKey);
         return {...t, paidAmount:Number(t.billedToShree||0), paymentDate:pDate, utr,
           shreeStatus:"paid",
+          // Record shortage MT on trip so it shows in vehicle history
+          shortage: short ? (t.shortage||0)+Number(short.tonnes||0) : t.shortage,
           shreeShortage:short?{tonnes:Number(short.tonnes||0),deduction:Number(short.deduction||0)}:t.shreeShortage};
       }
       return t;
     }));
+
     const pa={id:"PA"+Date.now(), utr, paymentDate:pDate,
       totalPaid:Number(scanResult.totalPaid||0), totalBilled:Number(scanResult.totalBilled||0),
       tdsDeducted:Number(scanResult.tdsDeducted||0), holdAmount:Number(scanResult.holdAmount||0),
       invoices:invList, shortages:shorts, penalties:scanResult.penalties||[], expenses:exps};
     setPayments(prev=>[...(prev||[]),pa]);
+
+    // Save expenses
     if(exps.length>0&&setExpenses){
       exps.forEach(exp=>{
         const rec={id:"EXP"+Date.now()+Math.random().toString(36).slice(2,6),
@@ -4450,14 +4826,35 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
         setExpenses(prev=>({...prev,shree:[...(prev?.shree||[]),rec]}));
       });
     }
+
+    // Push shortages to vehicle shortage ledger (linked to LR)
     if(shorts.length>0&&setVehicles){
       setVehicles(prev=>(prev||[]).map(v=>{
-        const ts=shorts.filter(s=>{const t=(trips||[]).find(t2=>t2.lr===s.lrNo);return t&&t.truck===v.regNo;});
-        if(!ts.length) return v;
-        return {...v,shortageOwed:(Number(v.shortageOwed||0)+ts.reduce((s,sh)=>s+Number(sh.deduction||0),0))};
+        const vehicleShorts = shorts.filter(s=>{
+          const lrKey=(s.lrNo||"").trim();
+          const trip=lrToTrip[lrKey];
+          return trip && (trip.truckNo===v.truckNo || trip.truck===v.truckNo);
+        });
+        if(!vehicleShorts.length) return v;
+        const newTxns = vehicleShorts.map(s=>({
+          id:uid(), type:"recorded",
+          date: pDate||new Date().toISOString().slice(0,10),
+          mt: Number(s.tonnes||0),
+          amount: Number(s.deduction||0),
+          lrNo: (s.lrNo||"").trim(),
+          note: `Shree deduction · UTR:${utr}`,
+          source: "shree_scan",
+        }));
+        const addedOwed = vehicleShorts.reduce((s,sh)=>s+Number(sh.deduction||0),0);
+        return {
+          ...v,
+          shortageOwed: (Number(v.shortageOwed||0)+addedOwed),
+          shortageTxns: [...(v.shortageTxns||[]),...newTxns],
+        };
       }));
     }
-    log && log(`Payment advice UTR ${utr} applied — ${exps.length} expense(s) saved`);
+
+    log && log(`Payment advice UTR ${utr} applied — ${shorts.length} shortage(s), ${exps.length} expense(s)`);
     setScanResult(null);
   };
 
@@ -4985,25 +5382,40 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
 
             {filteredShortages.length===0
               ? <EmptyState icon="✅" text={searchShort?"No shortages match your search.":"No shortage deductions recorded."}/>
-              : filteredShortages.map((s,i)=>(
-                <div key={i} style={{background:"#130808",border:"1px solid #2a1212",
+              : filteredShortages.map((s,i)=>{
+                const lrKey=(s.lrNo||s.lr||"").trim();
+                const linkedTrip = lrKey ? (trips||[]).find(t=>(t.lrNo||t.lr||"").trim()===lrKey) : null;
+                const linkedVeh  = linkedTrip ? (vehicles||[]).find(v=>v.truckNo===linkedTrip.truckNo||v.truckNo===linkedTrip.truck) : null;
+                return (
+                <div key={i} style={{background:"#130808",border:`1px solid ${linkedTrip?"#2a1212":"#5a2200"}`,
                   borderRadius:8,padding:"11px 14px",marginBottom:8}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
                     <span style={{fontFamily:"monospace",color:"#ffaaaa",fontSize:13,fontWeight:700}}>
-                      {s.lrNo||s.lr}
+                      {lrKey||"— No LR —"}
                     </span>
                     <span style={{color:"#ff6b6b",fontWeight:800,fontFamily:"monospace",fontSize:14}}>
                       ₹{fmtINR(s.deduction)}
                     </span>
                   </div>
-                  <div style={{display:"flex",gap:10,fontSize:11,color:"#665555",flexWrap:"wrap"}}>
+                  <div style={{display:"flex",gap:8,fontSize:11,color:"#665555",flexWrap:"wrap",marginBottom:4}}>
                     <span>📦 {s.tonnes} TO</span>
                     {s.ref&&<span>Ref: {s.ref}</span>}
                     {s.utr&&<span>UTR: {s.utr}</span>}
                     {s.paymentDate&&<span>{fmtDate(s.paymentDate)}</span>}
                   </div>
+                  {linkedTrip?(
+                    <div style={{background:"#0a2000",borderRadius:6,padding:"5px 8px",fontSize:11,
+                      display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <span style={{color:"#4caf50"}}>✓ Linked · {linkedTrip.truckNo||linkedTrip.truck} · {linkedTrip.to}</span>
+                      {linkedVeh&&<span style={{color:"#888"}}>Balance: ₹{fmtINR((linkedVeh.shortageOwed||0)-(linkedVeh.shortageRecovered||0))}</span>}
+                    </div>
+                  ):(
+                    <div style={{background:"#2a1000",borderRadius:6,padding:"5px 8px",fontSize:11,color:"#ff8800"}}>
+                      ⚠ LR not found in trips — verify LR number
+                    </div>
+                  )}
                 </div>
-              ))
+              );})
             }
           </div>
         )}

@@ -8,6 +8,7 @@ const tripFromDB = r => ({
   grNo: r.gr_no, consignee: r.consignee, from: r.from, to: r.to, grade: r.grade,
   qty: +r.qty, bags: +r.bags, frRate: +r.fr_rate, givenRate: +r.given_rate,
   date: r.date, advance: +r.advance, shortage: +r.shortage, tafal: +r.tafal,
+  shortageRecovery: +(r.shortage_recovery||0), loanRecovery: +(r.loan_recovery||0),
   dieselEstimate: +r.diesel_estimate, status: r.status, invoiceNo: r.invoice_no,
   paymentStatus: r.payment_status, driverSettled: r.driver_settled,
   settledBy: r.settled_by, netPaid: +r.net_paid, billedBy: r.billed_by,
@@ -33,6 +34,7 @@ const tripToDB = t => ({
   gr_no: t.grNo, consignee: t.consignee, from: t.from, to: t.to, grade: t.grade,
   qty: t.qty, bags: t.bags, fr_rate: t.frRate, given_rate: t.givenRate,
   date: t.date, advance: t.advance, shortage: t.shortage, tafal: t.tafal,
+  shortage_recovery: t.shortageRecovery||0, loan_recovery: t.loanRecovery||0,
   diesel_estimate: t.dieselEstimate, status: t.status, invoice_no: t.invoiceNo,
   payment_status: t.paymentStatus, driver_settled: t.driverSettled,
   settled_by: t.settledBy, net_paid: t.netPaid, billed_by: t.billedBy,
@@ -60,6 +62,7 @@ const vehicleFromDB = r => ({
   loan: +r.loan, loanRecovered: +r.loan_recovered, deductPerTrip: +r.deduct_per_trip,
   tafalExempt: r.tafal_exempt, shortageOwed: +(r.shortage_owed||0),
   shortageRecovered: +(r.shortage_recovered||0), createdBy: r.created_by,
+  loanTxns: r.loan_txns||[], shortageTxns: r.shortage_txns||[],
 })
 const vehicleToDB = v => ({
   id: v.id, truck_no: v.truckNo, owner_name: v.ownerName, phone: v.phone,
@@ -68,6 +71,7 @@ const vehicleToDB = v => ({
   loan: v.loan, loan_recovered: v.loanRecovered, deduct_per_trip: v.deductPerTrip,
   tafal_exempt: v.tafalExempt, shortage_owed: v.shortageOwed||0,
   shortage_recovered: v.shortageRecovered||0, created_by: v.createdBy,
+  loan_txns: v.loanTxns||[], shortage_txns: v.shortageTxns||[],
 })
 
 const employeeFromDB = r => ({
