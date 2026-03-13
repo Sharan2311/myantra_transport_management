@@ -2440,7 +2440,7 @@ function ScanPaymentBtn({ onResult }) {
 
   return (
     <>
-      <input ref={inputRef} type="file" accept="image/*" capture="environment"
+      <input ref={inputRef} type="file" accept="image/*,application/pdf"
         style={{display:"none"}} onChange={e=>scan(e.target.files[0])} />
       <button onClick={()=>inputRef.current.click()} disabled={scanning}
         style={{background:scanning?"#333":C.purple||"#7c3aed",border:"none",borderRadius:8,
@@ -4943,7 +4943,7 @@ function DriverPayments({trips, driverPays, setDriverPays, vehicles, user, log})
         <div style={{color:C.blue,fontWeight:800,fontSize:16}}>🏧 Driver Payments</div>
         {/* Global scan button */}
         <div>
-          <input ref={scanInputRef} type="file" accept="image/*" capture="environment"
+          <input ref={scanInputRef} type="file" accept="image/*,application/pdf"
             style={{display:"none"}} onChange={e=>scanGlobal(e.target.files[0])} />
           <button onClick={()=>scanInputRef.current.click()} disabled={scanningGlobal}
             style={{background:scanningGlobal?"#333":C.purple||"#7c3aed",border:"none",borderRadius:8,
