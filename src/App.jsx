@@ -985,7 +985,7 @@ Rules:
 }
 
 // ─── TRIPS ────────────────────────────────────────────────────────────────────
-function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, log, driverPays}) {
+function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripType, user, log, driverPays}) {
   const isIn = tripType === "inbound";
   const ac   = isIn ? C.teal : C.accent;
 
