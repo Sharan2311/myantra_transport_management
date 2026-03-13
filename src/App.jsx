@@ -1036,6 +1036,23 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
   const onLRConfirmed = (lrNo) => {
     const { extracted } = diConflict;
     const existingTrip = lrNo.trim() ? trips.find(t => t.lrNo === lrNo.trim()) : null;
+
+    // Auto-create vehicle record if truck not already registered
+    const truckNo = (extracted.truckNo||"").toUpperCase().trim();
+    if (truckNo && !vehicles.find(v => v.truckNo === truckNo)) {
+      const newVehicle = {
+        id: uid(), truckNo,
+        ownerName:"", phone:"",
+        driverName:"", driverPhone:"", driverLicense:"",
+        accountNo:"", ifsc:"",
+        loan:0, loanRecovered:0, deductPerTrip:0,
+        tafalExempt:false, shortageOwed:0, shortageRecovered:0,
+        createdBy: user.username,
+      };
+      setVehicles(p => [...(p||[]), newVehicle]);
+      log("AUTO-CREATE VEHICLE", `${truckNo} from DI scan`);
+    }
+
     if (existingTrip) {
       setDiConflict({ extracted: { ...extracted, lrNo }, existingTrip, askLR: false });
     } else {
@@ -1107,6 +1124,16 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
     });
     setTrips(p => [t, ...(p||[])]);
     log("ADD TRIP", `LR:${t.lrNo} ${t.truckNo}→${t.to} ${t.qty}MT`);
+    // Also auto-create vehicle if manually added and not registered yet
+    const tn = (t.truckNo||"").toUpperCase().trim();
+    if (tn && !vehicles.find(v => v.truckNo === tn)) {
+      const nv = { id:uid(), truckNo:tn, ownerName:"", phone:"",
+        driverName:"", driverPhone:"", driverLicense:"",
+        accountNo:"", ifsc:"", loan:0, loanRecovered:0, deductPerTrip:0,
+        tafalExempt:false, shortageOwed:0, shortageRecovered:0, createdBy:user.username };
+      setVehicles(p => [...(p||[]), nv]);
+      log("AUTO-CREATE VEHICLE", `${tn} from trip save`);
+    }
     setF(blankForm()); setAddSheet(false); setWasScanned(false);
   };
 
@@ -3755,55 +3782,235 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
 }
 
 // ─── VEHICLES ─────────────────────────────────────────────────────────────────
-function Vehicles({trips, setTrips, vehicles, setVehicles, user, log}) {
-  const [sheet,   setSheet]   = useState(false);
-  const [lSheet,  setLSheet]  = useState(null);
-  const [sSheet,  setSSheet]  = useState(null);
-  const [hSheet,  setHSheet]  = useState(null); // truck history
-  const [lAmt, setLAmt] = useState(""); const [rAmt, setRAmt] = useState("");
-  const [shAmt, setShAmt] = useState(""); const [shTrip, setShTrip] = useState("");
-  const blank = {truckNo:"",ownerName:"",phone:"",accountNo:"",ifsc:"",loan:"0",loanRecovered:"0",deductPerTrip:"0",tafalExempt:false};
-  const [f,setF]=useState(blank); const ff=k=>v=>setF(p=>({...p,[k]:v}));
+function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log}) {
+  const [sheet,    setSheet]    = useState(false);
+  const [lSheet,   setLSheet]   = useState(null);
+  const [sSheet,   setSSheet]   = useState(null);
+  const [hSheet,   setHSheet]   = useState(null);
+  const [search,   setSearch]   = useState("");
+  const [lAmt,     setLAmt]     = useState(""); const [rAmt, setRAmt] = useState("");
+  const [shAmt,    setShAmt]    = useState(""); const [shTrip, setShTrip] = useState("");
+
+  const blank = {
+    truckNo:"", ownerName:"", phone:"",
+    driverName:"", driverPhone:"", driverLicense:"",
+    accountNo:"", ifsc:"",
+    loan:"0", loanRecovered:"0", deductPerTrip:"0", tafalExempt:false,
+  };
+  const [f, setF] = useState(blank);
+  const ff = k => v => setF(p => ({...p, [k]:v}));
+
+  const fmt = n => Number(n||0).toLocaleString("en-IN", {minimumFractionDigits:0, maximumFractionDigits:0});
+  const fmtD = s => { if(!s) return "—"; const d=new Date(s); return isNaN(d)?s:d.toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"}); };
+
+  const filtered = (vehicles||[]).filter(v => {
+    if(!search) return true;
+    const q = search.toLowerCase();
+    return (v.truckNo||"").toLowerCase().includes(q)
+        || (v.ownerName||"").toLowerCase().includes(q)
+        || (v.driverName||"").toLowerCase().includes(q)
+        || (v.phone||"").includes(q)
+        || (v.driverPhone||"").includes(q);
+  });
+
+  // ── PDF export for a vehicle ──────────────────────────────────────────────
+  const exportVehiclePDF = (v) => {
+    const vtrips = (trips||[]).filter(t => t.truckNo===v.truckNo || t.truck===v.truckNo)
+                               .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+    const pays = (driverPays||[]).filter(p => p.truckNo===v.truckNo);
+    const totalPaid = pays.reduce((s,p)=>s+(p.amount||0),0);
+    const loanBal = (v.loan||0)-(v.loanRecovered||0);
+
+    const tripRows = vtrips.map(t => {
+      const gross = t.diLines&&t.diLines.length>1
+        ? t.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
+        : (t.qty||0)*(t.givenRate||0);
+      const net = gross-(t.advance||0)-(t.tafal||0)-(t.dieselEstimate||0);
+      const shortAmt = (t.shortage||0)*(t.givenRate||0);
+      return `<tr>
+        <td>${t.lrNo||"—"}</td>
+        <td>${fmtD(t.date)}</td>
+        <td>${t.from||"—"} → ${t.to||"—"}</td>
+        <td>${t.qty||0} MT</td>
+        <td>₹${fmt(t.billedToShree||t.qty*t.frRate||0)}</td>
+        <td>₹${fmt(gross)}</td>
+        <td>${(t.shortage||0)>0?`${t.shortage}MT (₹${fmt(shortAmt)})`:"—"}</td>
+        <td>₹${fmt(net)}</td>
+        <td style="color:${t.driverSettled?"#1a7f37":"#b45309"}">${t.driverSettled?"Settled":"Pending"}</td>
+      </tr>`;
+    }).join("");
+
+    const payRows = pays.map(p=>`<tr>
+      <td>${fmtD(p.date)}</td>
+      <td>${p.lrNo||"—"}</td>
+      <td>${p.referenceNo||"—"}</td>
+      <td>₹${fmt(p.amount)}</td>
+      <td>${p.note||"—"}</td>
+    </tr>`).join("");
+
+    const html = `
+<style>
+  body{font-family:'Segoe UI',Arial,sans-serif;font-size:11px;color:#111;margin:20px}
+  h1{font-size:18px;margin-bottom:2px} h2{font-size:14px;color:#333;margin:18px 0 6px}
+  .meta{display:grid;grid-template-columns:1fr 1fr;gap:4px 20px;margin:10px 0 16px;font-size:11px}
+  .meta span{color:#555} .meta b{color:#111}
+  .kpis{display:flex;gap:16px;margin:12px 0}
+  .kpi{border:1px solid #ddd;border-radius:6px;padding:8px 14px;min-width:100px;text-align:center}
+  .kpi .val{font-size:16px;font-weight:800} .kpi .lbl{font-size:9px;color:#888;margin-top:2px}
+  table{width:100%;border-collapse:collapse;margin-bottom:12px}
+  th{background:#f0f0f0;padding:5px 7px;text-align:left;font-size:10px;border:1px solid #ccc}
+  td{padding:4px 7px;border:1px solid #e0e0e0;font-size:10px}
+  tr:nth-child(even){background:#fafafa}
+  .footer{margin-top:20px;font-size:9px;color:#aaa;border-top:1px solid #eee;padding-top:8px}
+</style>
+<h1>🚛 Vehicle Report — ${v.truckNo}</h1>
+<div style="font-size:11px;color:#888">Generated by M Yantra Enterprises · ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}</div>
+
+<div class="meta">
+  <div><span>Owner: </span><b>${v.ownerName||"—"}</b></div>
+  <div><span>Owner Phone: </span><b>${v.phone||"—"}</b></div>
+  <div><span>Driver: </span><b>${v.driverName||"—"}</b></div>
+  <div><span>Driver Phone: </span><b>${v.driverPhone||"—"}</b></div>
+  <div><span>License: </span><b>${v.driverLicense||"—"}</b></div>
+  <div><span>Bank A/C: </span><b>${v.accountNo||"—"}${v.ifsc?` · IFSC: ${v.ifsc}`:""}</b></div>
+</div>
+
+<div class="kpis">
+  <div class="kpi"><div class="val" style="color:#1d4ed8">${vtrips.length}</div><div class="lbl">TOTAL TRIPS</div></div>
+  <div class="kpi"><div class="val" style="color:#15803d">₹${fmt(totalPaid)}</div><div class="lbl">TOTAL PAID</div></div>
+  <div class="kpi"><div class="val" style="color:${loanBal>0?"#dc2626":"#15803d"}">₹${fmt(loanBal)}</div><div class="lbl">LOAN BALANCE</div></div>
+  <div class="kpi"><div class="val" style="color:#d97706">₹${fmt(v.shortageOwed||0)}</div><div class="lbl">SHORTAGE OWED</div></div>
+  <div class="kpi"><div class="val" style="color:#7c3aed">${vtrips.filter(t=>!t.driverSettled).length}</div><div class="lbl">UNSETTLED</div></div>
+</div>
+
+<h2>📦 Trip History (${vtrips.length})</h2>
+${vtrips.length===0?"<p style='color:#888'>No trips recorded.</p>":
+`<table>
+  <tr><th>LR No</th><th>Date</th><th>Route</th><th>Qty</th><th>Billed</th><th>Gross</th><th>Shortage</th><th>Net</th><th>Status</th></tr>
+  ${tripRows}
+</table>`}
+
+<h2>💳 Payment History (${pays.length})</h2>
+${pays.length===0?"<p style='color:#888'>No payments recorded.</p>":
+`<table>
+  <tr><th>Date</th><th>LR No</th><th>Reference</th><th>Amount</th><th>Note</th></tr>
+  ${payRows}
+</table>`}
+
+<h2>🏦 Loan Summary</h2>
+<table style="max-width:400px">
+  <tr><th>Total Loan Given</th><td>₹${fmt(v.loan||0)}</td></tr>
+  <tr><th>Recovered</th><td>₹${fmt(v.loanRecovered||0)}</td></tr>
+  <tr><th>Balance Due</th><td style="font-weight:800;color:${loanBal>0?"#dc2626":"#15803d"}">₹${fmt(loanBal)}</td></tr>
+  <tr><th>Deduct / Trip</th><td>₹${fmt(v.deductPerTrip||0)}</td></tr>
+  <tr><th>Shortage Owed</th><td>₹${fmt(v.shortageOwed||0)}</td></tr>
+  <tr><th>Shortage Recovered</th><td>₹${fmt(v.shortageRecovered||0)}</td></tr>
+</table>
+
+<div class="footer">M Yantra Enterprises · PAN: ABBFM6370M · GSTN: 29ABBFM6370M1ZR · Report generated ${new Date().toLocaleString("en-IN")}</div>`;
+
+    const w = window.open("","_blank");
+    w.document.write(`<!DOCTYPE html><html><head><title>${v.truckNo} — Vehicle Report</title></head><body onload="window.print()">${html}</body></html>`);
+    w.document.close();
+  };
+
   return (
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      {/* Header */}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-        <div style={{color:C.accent,fontWeight:800,fontSize:16}}>🚛 Vehicles & Loans</div>
+        <div style={{color:C.accent,fontWeight:800,fontSize:16}}>🚛 Vehicles & Drivers</div>
         <Btn onClick={()=>setSheet(true)} sm>+ Add</Btn>
       </div>
-      <KPI icon="🔴" label="Total Loans Due" value={fmt(vehicles.reduce((s,v)=>s+Math.max(0,v.loan-v.loanRecovered),0))} color={C.red} />
-      {sheet&&<Sheet title="Register Vehicle" onClose={()=>{setSheet(false);setF(blank);}}>
-        <div style={{display:"flex",flexDirection:"column",gap:13}}>
-          <div style={{display:"flex",gap:10}}><Field label="Truck No" value={f.truckNo} onChange={ff("truckNo")} half /><Field label="Owner Name" value={f.ownerName} onChange={ff("ownerName")} half /></div>
-          <div style={{display:"flex",gap:10}}><Field label="Phone" value={f.phone||""} onChange={ff("phone")} half /><Field label="Bank A/C No" value={f.accountNo||""} onChange={ff("accountNo")} half /></div>
-          <Field label="IFSC Code" value={f.ifsc||""} onChange={ff("ifsc")} />
-          <Field label="Phone" value={f.phone} onChange={ff("phone")} type="tel" />
-          <div style={{display:"flex",gap:10}}><Field label="Loan ₹" value={f.loan} onChange={ff("loan")} type="number" half /><Field label="Recovered ₹" value={f.loanRecovered} onChange={ff("loanRecovered")} type="number" half /></div>
-          <Field label="Deduct Per Trip ₹" value={f.deductPerTrip} onChange={ff("deductPerTrip")} type="number" />
-          <div style={{display:"flex",gap:10,alignItems:"center",padding:"4px 0"}}>
-            <input type="checkbox" checked={f.tafalExempt} onChange={e=>setF(p=>({...p,tafalExempt:e.target.checked}))} style={{width:20,height:20}} />
-            <span style={{color:C.text,fontSize:15}}>TAFAL Exempt</span>
+
+      {/* KPI */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+        <KPI icon="🔴" label="Loan Due"     value={fmt(vehicles.reduce((s,v)=>s+Math.max(0,(v.loan||0)-(v.loanRecovered||0)),0))} color={C.red} />
+        <KPI icon="🚛" label="Total Vehicles" value={(vehicles||[]).length} color={C.blue} />
+      </div>
+
+      {/* Search */}
+      <div style={{position:"relative"}}>
+        <span style={{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)",fontSize:14,color:"#555",pointerEvents:"none"}}>🔍</span>
+        <input value={search} onChange={e=>setSearch(e.target.value)}
+          placeholder="Search truck no, owner, driver…"
+          style={{width:"100%",boxSizing:"border-box",background:C.bg,border:`1px solid ${C.border}`,
+            borderRadius:10,padding:"9px 12px 9px 34px",color:C.text,fontSize:13,outline:"none"}}/>
+        {search&&<button onClick={()=>setSearch("")}
+          style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",
+            background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:16}}>✕</button>}
+      </div>
+      {search&&<div style={{fontSize:11,color:C.muted}}>{filtered.length} of {vehicles.length} vehicles</div>}
+
+      {/* Add Vehicle Sheet */}
+      {sheet&&(
+        <Sheet title="Register Vehicle" onClose={()=>{setSheet(false);setF(blank);}}>
+          <div style={{display:"flex",flexDirection:"column",gap:13}}>
+            <div style={{color:C.blue,fontSize:11,fontWeight:700,letterSpacing:1}}>TRUCK INFO</div>
+            <div style={{display:"flex",gap:10}}>
+              <Field label="Truck No *" value={f.truckNo} onChange={ff("truckNo")} half />
+              <Field label="Owner Name" value={f.ownerName} onChange={ff("ownerName")} half />
+            </div>
+            <Field label="Owner Phone" value={f.phone||""} onChange={ff("phone")} type="tel" />
+
+            <div style={{color:C.orange,fontSize:11,fontWeight:700,letterSpacing:1,marginTop:4}}>DRIVER INFO</div>
+            <div style={{display:"flex",gap:10}}>
+              <Field label="Driver Name" value={f.driverName||""} onChange={ff("driverName")} half />
+              <Field label="Driver Phone *" value={f.driverPhone||""} onChange={ff("driverPhone")} type="tel" half />
+            </div>
+            <Field label="Driver License No" value={f.driverLicense||""} onChange={ff("driverLicense")} placeholder="e.g. KA0320180012345" />
+
+            <div style={{color:C.green,fontSize:11,fontWeight:700,letterSpacing:1,marginTop:4}}>BANK DETAILS</div>
+            <div style={{display:"flex",gap:10}}>
+              <Field label="Bank A/C No" value={f.accountNo||""} onChange={ff("accountNo")} half />
+              <Field label="IFSC Code" value={f.ifsc||""} onChange={ff("ifsc")} half />
+            </div>
+
+            <div style={{color:C.red,fontSize:11,fontWeight:700,letterSpacing:1,marginTop:4}}>LOAN / DEDUCTIONS</div>
+            <div style={{display:"flex",gap:10}}>
+              <Field label="Loan ₹" value={f.loan} onChange={ff("loan")} type="number" half />
+              <Field label="Recovered ₹" value={f.loanRecovered} onChange={ff("loanRecovered")} type="number" half />
+            </div>
+            <Field label="Deduct Per Trip ₹" value={f.deductPerTrip} onChange={ff("deductPerTrip")} type="number" />
+            <div style={{display:"flex",gap:10,alignItems:"center",padding:"4px 0"}}>
+              <input type="checkbox" checked={f.tafalExempt} onChange={e=>setF(p=>({...p,tafalExempt:e.target.checked}))} style={{width:20,height:20}} />
+              <span style={{color:C.text,fontSize:15}}>TAFAL Exempt</span>
+            </div>
+            <div style={{color:C.muted,fontSize:12}}>Adding as: <b style={{color:ROLES[user.role]?.color}}>{user.name}</b></div>
+            <Btn onClick={()=>{
+              if(!f.truckNo.trim()){alert("Truck No is required");return;}
+              if(!f.driverPhone.trim()){alert("Driver Phone is mandatory");return;}
+              const v={...f,id:uid(),
+                truckNo:f.truckNo.toUpperCase().trim(),
+                loan:+f.loan,loanRecovered:+f.loanRecovered,deductPerTrip:+f.deductPerTrip,
+                createdBy:user.username};
+              setVehicles(p=>[...(p||[]),v]);
+              log("ADD VEHICLE",`${v.truckNo} (${v.ownerName}) Driver:${v.driverName}`);
+              setF(blank); setSheet(false);
+            }} full>Save Vehicle</Btn>
           </div>
-          <div style={{color:C.muted,fontSize:12}}>Adding as: <b style={{color:ROLES[user.role]?.color}}>{user.name}</b></div>
-          <Btn onClick={()=>{const v={...f,id:uid(),loan:+f.loan,loanRecovered:+f.loanRecovered,deductPerTrip:+f.deductPerTrip,createdBy:user.username}; setVehicles(p=>[...(p||[]),v]); log("ADD VEHICLE",`${v.truckNo} (${v.ownerName})`); setF(blank); setSheet(false);}} full>Save Vehicle</Btn>
-        </div>
-      </Sheet>}
-      {lSheet&&(()=>{const v=vehicles.find(x=>x.id===lSheet); const bal=v.loan-v.loanRecovered; return (
+        </Sheet>
+      )}
+
+      {/* Loan Sheet */}
+      {lSheet&&(()=>{const v=vehicles.find(x=>x.id===lSheet); const bal=(v.loan||0)-(v.loanRecovered||0); return (
         <Sheet title={`Loan — ${v.truckNo} (${v.ownerName})`} onClose={()=>{setLSheet(null);setLAmt("");setRAmt("");}}>
           <div style={{display:"flex",flexDirection:"column",gap:14}}>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
-              {[{l:"Loan",v:fmt(v.loan),c:C.red},{l:"Recovered",v:fmt(v.loanRecovered),c:C.green},{l:"Balance",v:fmt(bal),c:C.accent}].map(x=>(
+              {[{l:"Loan",v:fmt(v.loan||0),c:C.red},{l:"Recovered",v:fmt(v.loanRecovered||0),c:C.green},{l:"Balance",v:fmt(bal),c:C.accent}].map(x=>(
                 <div key={x.l} style={{background:C.bg,borderRadius:10,padding:12,textAlign:"center"}}><div style={{color:x.c,fontWeight:800}}>{x.v}</div><div style={{color:C.muted,fontSize:10}}>{x.l}</div></div>
               ))}
             </div>
             <Field label="Give Loan ₹" value={lAmt} onChange={setLAmt} type="number" />
-            <Btn onClick={()=>{setVehicles(p=>p.map(x=>x.id===lSheet?{...x,loan:x.loan+ +lAmt}:x)); log("ADD LOAN",`${v.truckNo} +${fmt(+lAmt)}`); setLAmt("");}} color={C.red} full>Add Loan</Btn>
+            <Btn onClick={()=>{setVehicles(p=>p.map(x=>x.id===lSheet?{...x,loan:(x.loan||0)+ +lAmt}:x)); log("ADD LOAN",`${v.truckNo} +${fmt(+lAmt)}`); setLAmt("");}} color={C.red} full>Add Loan</Btn>
             <Field label="Record Recovery ₹" value={rAmt} onChange={setRAmt} type="number" />
-            <Btn onClick={()=>{setVehicles(p=>p.map(x=>x.id===lSheet?{...x,loanRecovered:x.loanRecovered+ +rAmt}:x)); log("LOAN RECOVERY",`${v.truckNo} recovered ${fmt(+rAmt)}`); setRAmt("");}} color={C.green} full>Record Recovery</Btn>
-            <Field label="Deduct Per Trip ₹" value={String(v.deductPerTrip)} onChange={val=>setVehicles(p=>p.map(x=>x.id===lSheet?{...x,deductPerTrip:+val}:x))} type="number" />
+            <Btn onClick={()=>{setVehicles(p=>p.map(x=>x.id===lSheet?{...x,loanRecovered:(x.loanRecovered||0)+ +rAmt}:x)); log("LOAN RECOVERY",`${v.truckNo} recovered ${fmt(+rAmt)}`); setRAmt("");}} color={C.green} full>Record Recovery</Btn>
+            <Field label="Deduct Per Trip ₹" value={String(v.deductPerTrip||0)} onChange={val=>setVehicles(p=>p.map(x=>x.id===lSheet?{...x,deductPerTrip:+val}:x))} type="number" />
           </div>
         </Sheet>
       );})()}
-      {sSheet&&(()=>{const v=vehicles.find(x=>x.id===sSheet); const vt=trips.filter(t=>t.truckNo===v.truckNo&&!t.driverSettled); return (
+
+      {/* Shortage Sheet */}
+      {sSheet&&(()=>{const v=vehicles.find(x=>x.id===sSheet); const vt=(trips||[]).filter(t=>(t.truckNo===v.truckNo||t.truck===v.truckNo)&&!t.driverSettled); return (
         <Sheet title={`Shortage — ${v.truckNo}`} onClose={()=>{setSSheet(null);setShAmt("");setShTrip("");}}>
           <div style={{display:"flex",flexDirection:"column",gap:13}}>
             <Field label="Shortage MT" value={shAmt} onChange={setShAmt} type="number" />
@@ -3813,96 +4020,199 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, user, log}) {
           </div>
         </Sheet>
       );})()}
-      {vehicles.map(v=>{
-        const bal=v.loan-v.loanRecovered; const vt=trips.filter(t=>t.truckNo===v.truckNo); const short=vt.reduce((s,t)=>s+(t.shortage||0),0);
+
+      {/* Vehicle Cards */}
+      {filtered.length===0&&(
+        <div style={{textAlign:"center",padding:"40px 20px",color:C.muted}}>
+          <div style={{fontSize:32,marginBottom:8}}>🚛</div>
+          <div style={{fontSize:13}}>{search?"No vehicles match your search.":"No vehicles yet. Add one above."}</div>
+        </div>
+      )}
+
+      {filtered.map(v=>{
+        const bal=(v.loan||0)-(v.loanRecovered||0);
+        const vt=(trips||[]).filter(t=>t.truckNo===v.truckNo||t.truck===v.truckNo);
+        const short=vt.reduce((s,t)=>s+(t.shortage||0),0);
         return (
-          <div key={v.id} style={{background:C.card,borderRadius:14,padding:"14px 16px",borderLeft:`4px solid ${bal>0?C.red:C.green}`,marginBottom:8}}>
-            <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
+          <div key={v.id} style={{background:C.card,borderRadius:14,padding:"14px 16px",
+            borderLeft:`4px solid ${bal>0?C.red:C.green}`,marginBottom:8}}>
+            {/* Truck + Owner row */}
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
               <div>
                 <div style={{fontWeight:800,fontSize:15}}>{v.truckNo}</div>
-                <div style={{color:C.muted,fontSize:12}}>{v.ownerName} · {v.phone}</div>
-                {v.accountNo && <div style={{color:C.blue,fontSize:11}}>A/C: {v.accountNo}{v.ifsc?` · IFSC: ${v.ifsc}`:""}</div>}
+                <div style={{color:C.muted,fontSize:12}}>{v.ownerName||"—"}{v.phone?` · ${v.phone}`:""}</div>
               </div>
               <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:4}}>
                 <Badge label={bal>0?"Loan Due":"Clear"} color={bal>0?C.red:C.green} />
-                {v.tafalExempt && <Badge label="TAFAL Exempt" color={C.muted} />}
+                {v.tafalExempt&&<Badge label="TAFAL Exempt" color={C.muted} />}
               </div>
             </div>
+
+            {/* Driver row */}
+            {(v.driverName||v.driverPhone)&&(
+              <div style={{background:C.bg,borderRadius:8,padding:"7px 10px",marginBottom:8,
+                fontSize:12,display:"flex",gap:12,flexWrap:"wrap",alignItems:"center"}}>
+                <span style={{color:C.muted,fontSize:10,fontWeight:700}}>DRIVER</span>
+                {v.driverName&&<span style={{color:C.text,fontWeight:600}}>{v.driverName}</span>}
+                {v.driverPhone&&(
+                  <a href={`tel:${v.driverPhone}`}
+                    style={{color:C.green,textDecoration:"none",fontFamily:"monospace"}}>
+                    📞 {v.driverPhone}
+                  </a>
+                )}
+                {v.driverLicense&&<span style={{color:C.muted,fontSize:11}}>🪪 {v.driverLicense}</span>}
+              </div>
+            )}
+            {!v.driverPhone&&(
+              <div style={{background:"#1a1000",border:`1px solid ${C.orange}33`,borderRadius:8,
+                padding:"5px 10px",marginBottom:8,fontSize:11,color:C.orange}}>
+                ⚠ Driver phone missing — edit to add
+              </div>
+            )}
+
+            {/* Bank */}
+            {v.accountNo&&<div style={{color:C.blue,fontSize:11,marginBottom:6}}>🏦 A/C: {v.accountNo}{v.ifsc?` · ${v.ifsc}`:""}</div>}
+
+            {/* Loan KPIs */}
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:10}}>
-              {[{l:"Loan",v:fmt(v.loan),c:C.red},{l:"Recovered",v:fmt(v.loanRecovered),c:C.green},{l:"Balance",v:fmt(bal),c:bal>0?C.accent:C.green}].map(x=>(
-                <div key={x.l} style={{background:C.bg,borderRadius:8,padding:"8px",textAlign:"center"}}><div style={{color:x.c,fontWeight:700,fontSize:12}}>{x.v}</div><div style={{color:C.muted,fontSize:9}}>{x.l.toUpperCase()}</div></div>
+              {[{l:"Loan",v:fmt(v.loan||0),c:C.red},{l:"Recovered",v:fmt(v.loanRecovered||0),c:C.green},{l:"Balance",v:fmt(bal),c:bal>0?C.accent:C.green}].map(x=>(
+                <div key={x.l} style={{background:C.bg,borderRadius:8,padding:"8px",textAlign:"center"}}>
+                  <div style={{color:x.c,fontWeight:700,fontSize:12}}>{x.v}</div>
+                  <div style={{color:C.muted,fontSize:9}}>{x.l.toUpperCase()}</div>
+                </div>
               ))}
             </div>
+
             <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:C.muted,marginBottom:10}}>
               <span>Trips: <b style={{color:C.text}}>{vt.length}</b></span>
-              <span>Deduct/trip: <b style={{color:C.blue}}>{fmt(v.deductPerTrip)}</b></span>
+              <span>Deduct/trip: <b style={{color:C.blue}}>{fmt(v.deductPerTrip||0)}</b></span>
               <span style={{color:short>0?C.red:C.muted}}>Short: {short}MT</span>
             </div>
-            <div style={{display:"flex",gap:8}}>
+
+            {/* Action buttons */}
+            <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
               <Btn onClick={()=>setLSheet(v.id)} sm outline color={C.blue}>Loan</Btn>
               <Btn onClick={()=>setSSheet(v.id)} sm outline color={C.red}>Shortage</Btn>
               <Btn onClick={()=>setHSheet(v.id)} sm outline color={C.purple}>📋 History</Btn>
-              <Btn onClick={()=>window.open(`https://wa.me/91${v.phone.replace(/\D/g,"")}?text=${encodeURIComponent(`Dear ${v.ownerName}, loan balance ${fmt(bal)}. - M.Yantra 9606477257`)}`,"_blank")} sm outline color={C.teal}>📲</Btn>
+              <Btn onClick={()=>exportVehiclePDF(v)} sm outline color={C.orange}>📄 PDF</Btn>
+              {v.driverPhone&&(
+                <Btn onClick={()=>window.open(`https://wa.me/91${v.driverPhone.replace(/\D/g,"")}?text=${encodeURIComponent(`Dear ${v.driverName||"Driver"}, this is M Yantra Enterprises. - 9606477257`)}`,`_blank`)} sm outline color={C.teal}>📲 Driver</Btn>
+              )}
+              {v.phone&&(
+                <Btn onClick={()=>window.open(`https://wa.me/91${v.phone.replace(/\D/g,"")}?text=${encodeURIComponent(`Dear ${v.ownerName}, loan balance ₹${fmt(bal)}. - M.Yantra 9606477257`)}`,`_blank`)} sm outline color={C.green}>📲 Owner</Btn>
+              )}
             </div>
           </div>
         );
       })}
 
       {/* ── TRUCK HISTORY SHEET ── */}
-      {hSheet && (()=>{
-        const v  = vehicles.find(x => x.id === hSheet);
-        if (!v) return null;
-        const vt = trips.filter(t => t.truckNo === v.truckNo)
-                        .sort((a,b) => b.date.localeCompare(a.date));
+      {hSheet&&(()=>{
+        const v = vehicles.find(x=>x.id===hSheet);
+        if(!v) return null;
+        const vt = (trips||[]).filter(t=>t.truckNo===v.truckNo||t.truck===v.truckNo)
+                               .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+        const pays = (driverPays||[]).filter(p=>p.truckNo===v.truckNo);
+        const totalPaid = pays.reduce((s,p)=>s+(p.amount||0),0);
         return (
-          <Sheet title={`📋 ${v.truckNo} — All Trips`} onClose={()=>setHSheet(null)}>
+          <Sheet title={`📋 ${v.truckNo} — Full History`} onClose={()=>setHSheet(null)}>
             <div style={{display:"flex",flexDirection:"column",gap:12}}>
-              {/* Owner card */}
+              {/* Vehicle card */}
               <div style={{background:C.bg,borderRadius:10,padding:"12px 14px",fontSize:13}}>
-                <div style={{fontWeight:800,fontSize:15,marginBottom:4}}>{v.ownerName}</div>
-                <div style={{color:C.muted}}>{v.phone}</div>
-                {v.accountNo && <div style={{color:C.blue,marginTop:2}}>A/C: {v.accountNo}{v.ifsc?` · IFSC: ${v.ifsc}`:""}</div>}
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginTop:10}}>
-                  <div style={{background:C.card,borderRadius:8,padding:"8px",textAlign:"center"}}>
-                    <div style={{fontWeight:700,color:C.blue}}>{vt.length}</div>
-                    <div style={{color:C.muted,fontSize:10}}>TOTAL TRIPS</div>
+                <div style={{fontWeight:800,fontSize:15,marginBottom:4}}>{v.ownerName||"—"}</div>
+                <div style={{color:C.muted,fontSize:12,marginBottom:2}}>{v.phone||"—"}</div>
+                {(v.driverName||v.driverPhone)&&(
+                  <div style={{color:C.orange,fontSize:12,marginBottom:2}}>
+                    Driver: {v.driverName||"—"} · {v.driverPhone||"—"}
+                    {v.driverLicense&&` · 🪪 ${v.driverLicense}`}
                   </div>
-                  <div style={{background:C.card,borderRadius:8,padding:"8px",textAlign:"center"}}>
-                    <div style={{fontWeight:700,color:C.green}}>{vt.filter(t=>t.driverSettled).length}</div>
-                    <div style={{color:C.muted,fontSize:10}}>SETTLED</div>
-                  </div>
-                  <div style={{background:C.card,borderRadius:8,padding:"8px",textAlign:"center"}}>
-                    <div style={{fontWeight:700,color:C.orange}}>{vt.filter(t=>!t.driverSettled).length}</div>
-                    <div style={{color:C.muted,fontSize:10}}>PENDING</div>
-                  </div>
+                )}
+                {v.accountNo&&<div style={{color:C.blue,fontSize:11,marginTop:2}}>A/C: {v.accountNo}{v.ifsc?` · IFSC: ${v.ifsc}`:""}</div>}
+                <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginTop:10}}>
+                  {[
+                    {v:vt.length,          l:"TRIPS",    c:C.blue},
+                    {v:vt.filter(t=>t.driverSettled).length, l:"SETTLED", c:C.green},
+                    {v:vt.filter(t=>!t.driverSettled).length,l:"PENDING", c:C.orange},
+                    {v:`₹${fmt(totalPaid)}`,l:"PAID",     c:C.green},
+                  ].map(x=>(
+                    <div key={x.l} style={{background:C.card,borderRadius:8,padding:"8px",textAlign:"center"}}>
+                      <div style={{fontWeight:700,color:x.c,fontSize:12}}>{x.v}</div>
+                      <div style={{color:C.muted,fontSize:9}}>{x.l}</div>
+                    </div>
+                  ))}
                 </div>
               </div>
+
+              {/* Export PDF button */}
+              <Btn onClick={()=>exportVehiclePDF(v)} full outline color={C.orange}>📄 Export Full PDF Report</Btn>
+
               {/* Trip list */}
-              {vt.length === 0 && <div style={{textAlign:"center",color:C.muted,padding:24}}>No trips recorded</div>}
-              {vt.map(t => {
-                const calc = calcNet(t, v, t.dieselEstimate||0);
+              <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1}}>TRIPS ({vt.length})</div>
+              {vt.length===0&&<div style={{textAlign:"center",color:C.muted,padding:24}}>No trips recorded</div>}
+              {vt.map(t=>{
+                const isMultiDI = t.diLines&&t.diLines.length>1;
+                const gross = isMultiDI
+                  ? t.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
+                  : (t.qty||0)*(t.givenRate||0);
+                const net = gross-(t.advance||0)-(t.tafal||0)-(t.dieselEstimate||0);
                 return (
                   <div key={t.id} style={{background:C.card,borderRadius:12,padding:"11px 14px",
                     borderLeft:`3px solid ${t.driverSettled?C.green:C.orange}`}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
                       <div>
                         <div style={{fontWeight:700,fontSize:13}}>LR {t.lrNo||"—"}
-                          <span style={{color:C.muted,fontWeight:400,fontSize:11,marginLeft:6}}>{t.date}</span>
+                          <span style={{color:C.muted,fontWeight:400,fontSize:11,marginLeft:6}}>{fmtD(t.date)}</span>
                         </div>
-                        <div style={{color:C.muted,fontSize:11,marginTop:2}}>{t.from||"—"} → {t.to} · {t.qty}MT</div>
-                        <div style={{color:C.muted,fontSize:11}}>DI: {t.diNo||"—"} · {t.grade}</div>
+                        <div style={{color:C.muted,fontSize:11,marginTop:2}}>{t.from||"—"} → {t.to||"—"} · {t.qty}MT</div>
+                        <div style={{color:C.muted,fontSize:11}}>
+                          {isMultiDI
+                            ? `DIs: ${t.diLines.map(d=>d.diNo).join(" + ")}`
+                            : `DI: ${t.diNo||"—"}`}
+                        </div>
+                        {(t.shortage||0)>0&&(
+                          <div style={{color:C.red,fontSize:11}}>⚠ Shortage: {t.shortage}MT · ₹{fmt((t.shortage||0)*(t.givenRate||0))}</div>
+                        )}
                       </div>
                       <div style={{textAlign:"right"}}>
-                        <div style={{color:C.green,fontWeight:800,fontSize:14}}>{fmt(calc.net)}</div>
+                        <div style={{color:C.green,fontWeight:800,fontSize:14}}>₹{fmt(net)}</div>
                         <div style={{fontSize:10,color:C.muted}}>Net</div>
                         {t.driverSettled
-                          ? <Badge label="Settled" color={C.green} />
-                          : <Badge label="Pending" color={C.orange} />}
+                          ?<Badge label="Settled" color={C.green}/>
+                          :<Badge label="Pending" color={C.orange}/>}
                       </div>
+                    </div>
+                    {/* Payment breakdown */}
+                    <div style={{display:"flex",gap:10,marginTop:6,fontSize:11,color:C.muted,flexWrap:"wrap"}}>
+                      <span>Gross: <b style={{color:C.orange}}>₹{fmt(gross)}</b></span>
+                      {(t.advance||0)>0&&<span>(−) Adv: <b style={{color:C.red}}>₹{fmt(t.advance)}</b></span>}
+                      {(t.tafal||0)>0&&<span>(−) Tafal: <b>₹{fmt(t.tafal)}</b></span>}
+                      {pays.filter(p=>p.lrNo===t.lrNo).length>0&&(
+                        <span style={{color:C.green}}>Paid: ₹{fmt(pays.filter(p=>p.lrNo===t.lrNo).reduce((s,p)=>s+(p.amount||0),0))}</span>
+                      )}
                     </div>
                   </div>
                 );
               })}
+
+              {/* Payment history */}
+              {pays.length>0&&(
+                <>
+                  <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1,marginTop:4}}>
+                    PAYMENT HISTORY ({pays.length})
+                  </div>
+                  {pays.sort((a,b)=>(b.date||"").localeCompare(a.date||"")).map(p=>(
+                    <div key={p.id} style={{background:C.bg,borderRadius:8,padding:"9px 12px",
+                      display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <div>
+                        <div style={{fontSize:12,fontWeight:600,color:C.text}}>₹{fmt(p.amount)}</div>
+                        <div style={{fontSize:11,color:C.muted}}>{fmtD(p.date)} · LR: {p.lrNo||"—"}</div>
+                        {p.referenceNo&&<div style={{fontSize:10,color:C.muted}}>Ref: {p.referenceNo}</div>}
+                      </div>
+                      <Badge label="Paid" color={C.green}/>
+                    </div>
+                  ))}
+                </>
+              )}
             </div>
           </Sheet>
         );
