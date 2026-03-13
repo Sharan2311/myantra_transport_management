@@ -4306,7 +4306,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
       )}
 
       {/* ── LOAN MANAGEMENT SHEET ── */}
-      {lSheet&&(<ErrBound key={lSheet+"L"}>{(()=>{
+      {lSheet&&(()=>{
         const v = vehicles.find(x=>x.id===lSheet);
         if(!v) return null;
         const bal = (v.loan||0)-(v.loanRecovered||0);
@@ -4432,7 +4432,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
             </div>
           </Sheet>
         );
-      })()}</ErrBound>)}
+      })()}
 
       {/* ── SHORTAGE MANAGEMENT SHEET ── */}
       {sSheet&&(()=>{
