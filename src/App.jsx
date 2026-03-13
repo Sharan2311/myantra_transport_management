@@ -119,6 +119,89 @@ const Field = ({label, value, onChange, type="text", placeholder="", opts=null, 
   </div>
 );
 
+// ─── SEARCHSELECT — searchable dropdown for LR/trip lists ─────────────────────
+function SearchSelect({label, value, onChange, opts=[], half=false, placeholder="Search…", note=""}) {
+  const [open,   setOpen]   = React.useState(false);
+  const [query,  setQuery]  = React.useState("");
+  const ref = React.useRef(null);
+
+  // Close on outside click
+  React.useEffect(()=>{
+    const handler = e => { if(ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  },[]);
+
+  const filtered = query.trim()
+    ? opts.filter(o => (o.l??o).toLowerCase().includes(query.toLowerCase()))
+    : opts;
+
+  const selected = opts.find(o => (o.v??o) === value);
+  const displayLabel = selected ? (selected.l??selected) : "";
+
+  return (
+    <div ref={ref} style={{display:"flex",flexDirection:"column",gap:5,flex:half?"1 1 45%":"1 1 100%",minWidth:0,position:"relative"}}>
+      {label && <label style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>{label}</label>}
+      {/* Trigger button */}
+      <div onClick={()=>{setOpen(o=>!o); setQuery("");}}
+        style={{background:C.bg,border:`1.5px solid ${open?C.accent:C.border}`,borderRadius:10,
+          color:value?C.text:C.muted,padding:"13px 12px",fontSize:15,cursor:"pointer",
+          display:"flex",justifyContent:"space-between",alignItems:"center",userSelect:"none"}}>
+        <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>
+          {displayLabel || <span style={{color:C.muted}}>{placeholder}</span>}
+        </span>
+        <span style={{color:C.muted,fontSize:12,marginLeft:8,flexShrink:0}}>{open?"▲":"▼"}</span>
+      </div>
+
+      {/* Dropdown panel */}
+      {open && (
+        <div style={{position:"absolute",top:"100%",left:0,right:0,zIndex:9999,
+          background:C.card,border:`1.5px solid ${C.accent}`,borderRadius:12,
+          boxShadow:"0 8px 32px #00000088",marginTop:4,overflow:"hidden"}}>
+          {/* Search input */}
+          <div style={{padding:"10px 10px 8px",borderBottom:`1px solid ${C.border}`}}>
+            <input
+              autoFocus
+              value={query} onChange={e=>setQuery(e.target.value)}
+              placeholder="Type to search…"
+              onClick={e=>e.stopPropagation()}
+              style={{width:"100%",boxSizing:"border-box",background:C.bg,border:`1px solid ${C.border}`,
+                borderRadius:8,padding:"9px 10px",color:C.text,fontSize:13,outline:"none"}}/>
+          </div>
+          {/* Options list */}
+          <div style={{maxHeight:220,overflowY:"auto"}}>
+            {filtered.length===0 && (
+              <div style={{padding:"14px 12px",color:C.muted,fontSize:13,textAlign:"center"}}>No results</div>
+            )}
+            {filtered.map((o,i)=>{
+              const v = o.v??o, l = o.l??o;
+              const isSelected = v===value;
+              const isEmpty = v==="" || v===null || v===undefined;
+              return (
+                <div key={i} onClick={()=>{onChange(v);setOpen(false);setQuery("");}}
+                  style={{padding:"11px 12px",cursor:"pointer",fontSize:13,
+                    borderBottom:`1px solid ${C.border}22`,
+                    background:isSelected?C.accent+"22":"transparent",
+                    color:isEmpty?C.muted:isSelected?C.accent:C.text}}>
+                  {l}
+                </div>
+              );
+            })}
+          </div>
+          {value && (
+            <div onClick={()=>{onChange("");setOpen(false);setQuery("");}}
+              style={{padding:"9px 12px",borderTop:`1px solid ${C.border}`,
+                color:C.red,fontSize:12,cursor:"pointer",textAlign:"center"}}>
+              ✕ Clear selection
+            </div>
+          )}
+        </div>
+      )}
+      {note && <div style={{color:C.muted,fontSize:11}}>{note}</div>}
+    </div>
+  );
+}
+
 const Btn = ({children, onClick, color=C.accent, outline=false, sm=false, full=false, disabled=false, loading=false}) => (
   <button onClick={onClick} disabled={disabled||loading} style={{
     background: (disabled||loading) ? C.dim : (outline ? "transparent" : color),
@@ -4079,7 +4162,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
 
             <div style={{color:C.orange,fontSize:11,fontWeight:700,letterSpacing:1,marginTop:4}}>DRIVER INFO</div>
             <div style={{display:"flex",gap:10}}>
-              <Field label="Driver Name" value={f.driverName||""} onChange={ff("driverName")} half />
+              <Field label="Driver Name *" value={f.driverName||""} onChange={ff("driverName")} half />
               <Field label="Driver Phone *" value={f.driverPhone||""} onChange={ff("driverPhone")} type="tel" half />
             </div>
             <Field label="Driver License No" value={f.driverLicense||""} onChange={ff("driverLicense")} placeholder="e.g. KA0320180012345" />
@@ -4101,16 +4184,25 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
               <span style={{color:C.text,fontSize:15}}>TAFAL Exempt</span>
             </div>
 
-            {!f.driverPhone.trim() && (
+            {(!f.driverName.trim() || !f.driverPhone.trim() || (f.driverPhone.replace(/\\D/g,"").length!==10)) && (
               <div style={{background:"#1a1000",border:`1px solid ${C.orange}44`,borderRadius:8,
                 padding:"8px 12px",fontSize:12,color:C.orange}}>
-                ⚠ Driver Phone is mandatory
+                {!f.driverName.trim() && <div>⚠ Driver Name is mandatory</div>}
+                {!f.driverPhone.trim() && <div>⚠ Driver Phone is mandatory</div>}
+                {f.driverPhone.trim() && f.driverPhone.replace(/\\D/g,"").length!==10 &&
+                  <div>⚠ Driver Phone must be 10 digits ({f.driverPhone.replace(/\\D/g,"").length} entered)</div>}
+                {f.driverPhone.replace(/\\D/g,"").length===10 && !/^[6-9]/.test(f.driverPhone.replace(/\\D/g,"")) &&
+                  <div>⚠ Phone must start with 6, 7, 8 or 9</div>}
               </div>
             )}
 
             <Btn onClick={()=>{
               if(!f.truckNo.trim()){alert("Truck No is required");return;}
-              if(!f.driverPhone.trim()){alert("Driver Phone is mandatory");return;}
+              if(!f.driverName.trim()){alert("Driver Name is mandatory");return;}
+              const rawPhone = (f.driverPhone||"").replace(/\\D/g,"");
+              if(!rawPhone){alert("Driver Phone is mandatory");return;}
+              if(rawPhone.length!==10){alert(`Driver Phone must be 10 digits (entered ${rawPhone.length})`);return;}
+              if(!/^[6-9]/.test(rawPhone)){alert("Driver Phone must start with 6, 7, 8 or 9");return;}
               if(editId) {
                 setVehicles(p=>p.map(v=>v.id===editId?{...v,...f,
                   loan:+f.loan,loanRecovered:+f.loanRecovered,deductPerTrip:+f.deductPerTrip,
@@ -4145,7 +4237,15 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
         if(!v) return null;
         const bal = (v.loan||0)-(v.loanRecovered||0);
         const loanTxns = v.loanTxns||[];
-        const vtrips = (trips||[]).filter(t=>t.truckNo===v.truckNo&&!t.driverSettled);
+        // Same-owner filter: owner can see all LRs; others see only vehicles with same owner
+        const sameOwnerTrucks = isOwner
+          ? null  // null means no filter
+          : new Set((vehicles||[]).filter(x=>x.ownerName&&x.ownerName===v.ownerName).map(x=>x.truckNo));
+        const vtrips = (trips||[]).filter(t=>{
+          if(t.driverSettled) return false;
+          if(sameOwnerTrucks===null) return true;  // owner sees all
+          return sameOwnerTrucks.has(t.truckNo)||sameOwnerTrucks.has(t.truck);
+        });
         return (
           <Sheet title={`🏦 Loan — ${v.truckNo}`} onClose={()=>{setLSheet(null);resetLoanForm();}}>
             <div style={{display:"flex",flexDirection:"column",gap:14}}>
@@ -4189,9 +4289,9 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
                   <Field label="Date"        value={rDate} onChange={setRDate} type="date"   half />
                 </div>
                 <div style={{display:"flex",gap:10}}>
-                  <Field label="Link LR No" value={rLR} onChange={setRLR}
-                    opts={[{v:"",l:"— Select LR —"},...vtrips.map(t=>({v:t.lrNo||t.id,l:`${t.lrNo||"—"} · ${t.date} · ${t.to}`}))]}
-                    half />
+                  <SearchSelect label="Link LR No" value={rLR} onChange={setRLR}
+                    opts={[{v:"",l:"— None —"},...vtrips.map(t=>({v:t.lrNo||t.id,l:`${t.lrNo||"—"} · ${t.truckNo} · ${t.date}`}))]}
+                    half placeholder={`Search LR… (${vtrips.length} available)`} />
                   <Field label="Reference" value={rRef} onChange={setRRef} half />
                 </div>
                 <Btn onClick={()=>{
@@ -4254,7 +4354,15 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
         if(!v) return null;
         const shortageTxns = v.shortageTxns||[];
         const shortOwed = (v.shortageOwed||0)-(v.shortageRecovered||0);
-        const vtrips = (trips||[]).filter(t=>(t.truckNo===v.truckNo||t.truck===v.truckNo)&&!t.driverSettled);
+        // Same-owner filter: owner can see all LRs; others see only vehicles with same owner
+        const sameOwnerTrucksS = isOwner
+          ? null
+          : new Set((vehicles||[]).filter(x=>x.ownerName&&x.ownerName===v.ownerName).map(x=>x.truckNo));
+        const vtrips = (trips||[]).filter(t=>{
+          if(t.driverSettled) return false;
+          if(sameOwnerTrucksS===null) return true;  // owner sees all
+          return sameOwnerTrucksS.has(t.truckNo)||sameOwnerTrucksS.has(t.truck);
+        });
         return (
           <Sheet title={`⚠ Shortage — ${v.truckNo}`} onClose={()=>{setSSheet(null);resetShForm();}}>
             <div style={{display:"flex",flexDirection:"column",gap:14}}>
@@ -4273,9 +4381,9 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
                 <div style={{color:C.red,fontWeight:700,fontSize:12,marginBottom:10}}>⚠ Record Shortage</div>
                 <div style={{display:"flex",gap:10}}>
                   <Field label="Shortage MT *" value={shAmt} onChange={setShAmt} type="number" half />
-                  <Field label="Link LR *" value={shTrip} onChange={setShTrip}
-                    opts={[{v:"",l:"— Select LR —"},...vtrips.map(t=>({v:t.id,l:`${t.lrNo||"—"} · ${t.date} · ${t.to}`}))]}
-                    half />
+                  <SearchSelect label="Link LR *" value={shTrip} onChange={setShTrip}
+                    opts={[{v:"",l:"— None —"},...vtrips.map(t=>({v:t.id,l:`${t.lrNo||"—"} · ${t.truckNo} · ${t.date}`}))]}
+                    half placeholder={`Search LR… (${vtrips.length} available)`} />
                 </div>
                 <Btn onClick={()=>{
                   if(!shAmt||+shAmt<=0){alert("Enter shortage MT");return;}
@@ -4300,9 +4408,9 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
                 <div style={{color:C.green,fontWeight:700,fontSize:12,marginBottom:10}}>💰 Shortage Recovery</div>
                 <div style={{display:"flex",gap:10}}>
                   <Field label="Recovery MT *" value={srAmt} onChange={setSrAmt} type="number" half />
-                  <Field label="Link LR" value={srLR} onChange={setSrLR}
-                    opts={[{v:"",l:"— Select LR —"},...vtrips.map(t=>({v:t.lrNo||"",l:`${t.lrNo||"—"} · ${t.date} · ${t.to}`}))]}
-                    half />
+                  <SearchSelect label="Link LR" value={srLR} onChange={setSrLR}
+                    opts={[{v:"",l:"— None —"},...vtrips.map(t=>({v:t.lrNo||"",l:`${t.lrNo||"—"} · ${t.truckNo} · ${t.date}`}))]}
+                    half placeholder={`Search LR… (${vtrips.length} available)`} />
                 </div>
                 <Btn onClick={()=>{
                   if(!srAmt||+srAmt<=0){alert("Enter recovery MT");return;}
@@ -5443,12 +5551,12 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
             <div style={{background:"#111",border:"1px solid #222",borderRadius:8,padding:12,marginBottom:14}}>
               <div style={{fontSize:13,fontWeight:700,marginBottom:8}}>➕ Add Trip Expense</div>
               <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                <select value={newExp.tripId} onChange={e=>setNewExp({...newExp,tripId:e.target.value})}
-                  style={{background:"#0d0d0d",border:"1px solid #333",borderRadius:6,
-                    padding:"8px 10px",color:"#ccc",fontSize:13}}>
-                  <option value="">Select trip…</option>
-                  {shreeTrips.map(t=><option key={t.id} value={t.id}>{t.lr||t.lrNo} · {t.truck||t.truckNo}</option>)}
-                </select>
+                <SearchSelect
+                  value={newExp.tripId}
+                  onChange={val=>setNewExp({...newExp,tripId:val})}
+                  opts={[{v:"",l:"— Select trip —"},...shreeTrips.map(t=>({v:t.id,l:`${t.lr||t.lrNo||"—"} · ${t.truck||t.truckNo} · ${fmtDate(t.date)}`}))]}
+                  placeholder={`Search trip… (${shreeTrips.length})`}
+                />
                 <input value={newExp.label} onChange={e=>setNewExp({...newExp,label:e.target.value})}
                   placeholder="Expense label (fuel, toll…)"
                   style={{background:"#0d0d0d",border:"1px solid #333",borderRadius:6,
