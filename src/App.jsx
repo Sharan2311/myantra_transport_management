@@ -121,16 +121,8 @@ const Field = ({label, value, onChange, type="text", placeholder="", opts=null, 
 
 // ─── SEARCHSELECT — searchable dropdown for LR/trip lists ─────────────────────
 function SearchSelect({label, value, onChange, opts=[], half=false, placeholder="Search…", note=""}) {
-  const [open,   setOpen]   = React.useState(false);
-  const [query,  setQuery]  = React.useState("");
-  const ref = React.useRef(null);
-
-  // Close on outside click
-  React.useEffect(()=>{
-    const handler = e => { if(ref.current && !ref.current.contains(e.target)) setOpen(false); };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  },[]);
+  const [open,  setOpen]  = useState(false);
+  const [query, setQuery] = useState("");
 
   const filtered = query.trim()
     ? opts.filter(o => (o.l??o).toLowerCase().includes(query.toLowerCase()))
@@ -139,67 +131,104 @@ function SearchSelect({label, value, onChange, opts=[], half=false, placeholder=
   const selected = opts.find(o => (o.v??o) === value);
   const displayLabel = selected ? (selected.l??selected) : "";
 
+  const select = ov => { onChange(ov); setOpen(false); setQuery(""); };
+
   return (
-    <div ref={ref} style={{display:"flex",flexDirection:"column",gap:5,flex:half?"1 1 45%":"1 1 100%",minWidth:0,position:"relative"}}>
+    <div style={{display:"flex",flexDirection:"column",gap:5,flex:half?"1 1 45%":"1 1 100%",minWidth:0}}>
       {label && <label style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>{label}</label>}
-      {/* Trigger button */}
-      <div onClick={()=>{setOpen(o=>!o); setQuery("");}}
+
+      {/* Trigger — shows selected value or placeholder */}
+      <div onTouchEnd={e=>{e.preventDefault();setOpen(o=>!o);setQuery("");}}
+           onClick={()=>{setOpen(o=>!o);setQuery("");}}
         style={{background:C.bg,border:`1.5px solid ${open?C.accent:C.border}`,borderRadius:10,
-          color:value?C.text:C.muted,padding:"13px 12px",fontSize:15,cursor:"pointer",
-          display:"flex",justifyContent:"space-between",alignItems:"center",userSelect:"none"}}>
-        <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>
-          {displayLabel || <span style={{color:C.muted}}>{placeholder}</span>}
+          padding:"13px 12px",fontSize:15,cursor:"pointer",
+          display:"flex",justifyContent:"space-between",alignItems:"center",userSelect:"none",
+          WebkitTapHighlightColor:"transparent"}}>
+        <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1,
+          color:value?C.text:C.muted}}>
+          {displayLabel || placeholder}
         </span>
         <span style={{color:C.muted,fontSize:12,marginLeft:8,flexShrink:0}}>{open?"▲":"▼"}</span>
       </div>
 
-      {/* Dropdown panel */}
+      {/* Inline expand — no absolute, no overflow issues on mobile */}
       {open && (
-        <div style={{position:"absolute",top:"100%",left:0,right:0,zIndex:9999,
-          background:C.card,border:`1.5px solid ${C.accent}`,borderRadius:12,
-          boxShadow:"0 8px 32px #00000088",marginTop:4,overflow:"hidden"}}>
-          {/* Search input */}
-          <div style={{padding:"10px 10px 8px",borderBottom:`1px solid ${C.border}`}}>
+        <div style={{background:C.card,border:`1.5px solid ${C.accent}44`,borderRadius:12,overflow:"hidden"}}>
+          {/* Search box */}
+          <div style={{padding:"8px 10px",borderBottom:`1px solid ${C.border}`}}>
             <input
-              autoFocus
               value={query} onChange={e=>setQuery(e.target.value)}
               placeholder="Type to search…"
-              onClick={e=>e.stopPropagation()}
               style={{width:"100%",boxSizing:"border-box",background:C.bg,border:`1px solid ${C.border}`,
-                borderRadius:8,padding:"9px 10px",color:C.text,fontSize:13,outline:"none"}}/>
+                borderRadius:8,padding:"9px 10px",color:C.text,fontSize:14,outline:"none",
+                WebkitAppearance:"none"}}/>
           </div>
-          {/* Options list */}
-          <div style={{maxHeight:220,overflowY:"auto"}}>
+          {/* Options */}
+          <div style={{maxHeight:200,overflowY:"auto",WebkitOverflowScrolling:"touch"}}>
             {filtered.length===0 && (
               <div style={{padding:"14px 12px",color:C.muted,fontSize:13,textAlign:"center"}}>No results</div>
             )}
             {filtered.map((o,i)=>{
-              const ov = o.v??o, l = o.l??o;
-              const isSelected = ov===value;
-              const isEmpty = ov==="" || ov===null || ov===undefined;
+              const ov = o.v??o, ol = o.l??o;
+              const isSel = ov===value;
+              const isEmpty = ov===""||ov===null||ov===undefined;
               return (
-                <div key={i} onClick={()=>{onChange(ov);setOpen(false);setQuery("");}}
-                  style={{padding:"11px 12px",cursor:"pointer",fontSize:13,
+                <div key={i}
+                  onTouchEnd={e=>{e.preventDefault();select(ov);}}
+                  onClick={()=>select(ov)}
+                  style={{padding:"12px",cursor:"pointer",fontSize:13,
                     borderBottom:`1px solid ${C.border}22`,
-                    background:isSelected?C.accent+"22":"transparent",
-                    color:isEmpty?C.muted:isSelected?C.accent:C.text}}>
-                  {l}
+                    background:isSel?C.accent+"22":"transparent",
+                    color:isEmpty?C.muted:isSel?C.accent:C.text,
+                    WebkitTapHighlightColor:"transparent"}}>
+                  {ol}
                 </div>
               );
             })}
           </div>
-          {value && (
-            <div onClick={()=>{onChange("");setOpen(false);setQuery("");}}
-              style={{padding:"9px 12px",borderTop:`1px solid ${C.border}`,
-                color:C.red,fontSize:12,cursor:"pointer",textAlign:"center"}}>
-              ✕ Clear selection
+          {/* Clear + Close */}
+          <div style={{display:"flex",borderTop:`1px solid ${C.border}`}}>
+            {value && (
+              <div onTouchEnd={e=>{e.preventDefault();select("");}}
+                   onClick={()=>select("")}
+                style={{flex:1,padding:"10px 12px",color:C.red,fontSize:12,cursor:"pointer",
+                  textAlign:"center",borderRight:`1px solid ${C.border}`,
+                  WebkitTapHighlightColor:"transparent"}}>
+                ✕ Clear
+              </div>
+            )}
+            <div onTouchEnd={e=>{e.preventDefault();setOpen(false);setQuery("");}}
+                 onClick={()=>{setOpen(false);setQuery("");}}
+              style={{flex:1,padding:"10px 12px",color:C.muted,fontSize:12,cursor:"pointer",
+                textAlign:"center",WebkitTapHighlightColor:"transparent"}}>
+              ✕ Close
             </div>
-          )}
+          </div>
         </div>
       )}
       {note && <div style={{color:C.muted,fontSize:11}}>{note}</div>}
     </div>
   );
+}
+
+// ─── ERROR BOUNDARY — prevents blank screen crashes ───────────────────────────
+class ErrBound extends React.Component {
+  constructor(p){super(p);this.state={err:null};}
+  static getDerivedStateFromError(e){return {err:e};}
+  render(){
+    if(this.state.err) return (
+      <div style={{background:"#1a0808",border:"1px solid #da3633",borderRadius:12,padding:16,margin:8}}>
+        <div style={{color:"#da3633",fontWeight:800,marginBottom:6}}>⚠ Something went wrong</div>
+        <div style={{color:"#888",fontSize:12}}>{this.state.err?.message||"Unknown error"}</div>
+        <button onClick={()=>this.setState({err:null})}
+          style={{marginTop:10,background:"#da3633",border:"none",color:"#fff",
+            borderRadius:8,padding:"8px 16px",cursor:"pointer",fontWeight:700}}>
+          Retry
+        </button>
+      </div>
+    );
+    return this.props.children;
+  }
 }
 
 const Btn = ({children, onClick, color=C.accent, outline=false, sm=false, full=false, disabled=false, loading=false}) => (
@@ -1262,6 +1291,23 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
     });
     setTrips(p => [t, ...(p||[])]);
     log("ADD TRIP", `LR:${t.lrNo} ${t.truckNo}→${t.to} ${t.qty}MT`);
+    // Reflect shortageRecovery / loanRecovery into vehicle ledger
+    const tn2 = (t.truckNo||"").toUpperCase().trim();
+    if(tn2 && (t.shortageRecovery>0 || t.loanRecovery>0)){
+      setVehicles(prev=>prev.map(veh=>{
+        if(veh.truckNo!==tn2) return veh;
+        let upd={...veh};
+        if(t.shortageRecovery>0){
+          const txn={id:uid(),type:"recovery",date:t.date||today(),qty:0,amount:t.shortageRecovery,lrNo:t.lrNo,note:"From trip form"};
+          upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+t.shortageRecovery,shortageTxns:[...(upd.shortageTxns||[]),txn]};
+        }
+        if(t.loanRecovery>0){
+          const txn={id:uid(),type:"recovery",date:t.date||today(),amount:t.loanRecovery,lrNo:t.lrNo,note:"From trip form"};
+          upd={...upd,loanRecovered:(upd.loanRecovered||0)+t.loanRecovery,loanTxns:[...(upd.loanTxns||[]),txn]};
+        }
+        return upd;
+      }));
+    }
     // Also auto-create vehicle if manually added and not registered yet
     const tn = (t.truckNo||"").toUpperCase().trim();
     if (tn && !vehicles.find(v => v.truckNo === tn)) {
@@ -1299,6 +1345,34 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
       dieselEstimate:+editSheet.dieselEstimate,
       editedBy:user.username, editedAt:nowTs(),
     } : t));
+    // Reflect shortageRecovery / loanRecovery change into vehicle ledger (delta only)
+    const prevTrip = trips.find(t=>t.id===editSheet.id);
+    const prevSR = prevTrip?.shortageRecovery||0;
+    const prevLR = prevTrip?.loanRecovery||0;
+    const newSR = +editSheet.shortageRecovery||0;
+    const newLR = +editSheet.loanRecovery||0;
+    const deltaSR = newSR - prevSR;
+    const deltaLR = newLR - prevLR;
+    const tn3 = (editSheet.truckNo||"").toUpperCase().trim();
+    if(tn3 && (deltaSR!==0||deltaLR!==0)){
+      setVehicles(prev=>prev.map(veh=>{
+        if(veh.truckNo!==tn3) return veh;
+        let upd={...veh};
+        if(deltaSR>0){
+          const txn={id:uid(),type:"recovery",date:editSheet.date||today(),qty:0,amount:deltaSR,lrNo:editSheet.lrNo,note:"From trip edit"};
+          upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+deltaSR,shortageTxns:[...(upd.shortageTxns||[]),txn]};
+        } else if(deltaSR<0){
+          upd={...upd,shortageRecovered:Math.max(0,(upd.shortageRecovered||0)+deltaSR)};
+        }
+        if(deltaLR>0){
+          const txn={id:uid(),type:"recovery",date:editSheet.date||today(),amount:deltaLR,lrNo:editSheet.lrNo,note:"From trip edit"};
+          upd={...upd,loanRecovered:(upd.loanRecovered||0)+deltaLR,loanTxns:[...(upd.loanTxns||[]),txn]};
+        } else if(deltaLR<0){
+          upd={...upd,loanRecovered:Math.max(0,(upd.loanRecovered||0)+deltaLR)};
+        }
+        return upd;
+      }));
+    }
     log("EDIT TRIP", `LR:${editSheet.lrNo} ${editSheet.truckNo}`);
     setEditSheet(null);
   };
@@ -4232,7 +4306,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
       )}
 
       {/* ── LOAN MANAGEMENT SHEET ── */}
-      {lSheet&&(()=>{
+      {lSheet&&(<ErrBound key={lSheet+"L"}>{(()=>{
         const v = vehicles.find(x=>x.id===lSheet);
         if(!v) return null;
         const bal = (v.loan||0)-(v.loanRecovered||0);
@@ -4284,6 +4358,8 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
               {/* Record Recovery */}
               <div style={{background:C.bg,borderRadius:12,padding:14}}>
                 <div style={{color:C.green,fontWeight:700,fontSize:12,marginBottom:10}}>💰 Record Recovery</div>
+                {bal<=0&&<div style={{background:"#002200",borderRadius:8,padding:"7px 10px",fontSize:11,color:C.green,marginBottom:8}}>✓ Loan fully recovered — no balance pending</div>}
+                {bal>0&&<div style={{background:"#1a0a00",borderRadius:8,padding:"7px 10px",fontSize:11,color:C.orange,marginBottom:8}}>Outstanding balance: ₹{fmt(bal)}{+rAmt>0?` · Entering: ₹${fmt(+rAmt)}${+rAmt>bal?" ⚠ exceeds balance":" ✓"}`:""}  </div>}
                 <div style={{display:"flex",gap:10}}>
                   <Field label="Amount ₹ *" value={rAmt}  onChange={setRAmt}  type="number" half />
                   <Field label="Date"        value={rDate} onChange={setRDate} type="date"   half />
@@ -4296,10 +4372,20 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
                 </div>
                 <Btn onClick={()=>{
                   if(!rAmt||+rAmt<=0){alert("Enter recovery amount");return;}
+                  // Validate: cannot recover more than outstanding balance
+                  if(+rAmt > bal){alert(`Recovery ₹${fmt(+rAmt)} exceeds loan balance ₹${fmt(bal)}. Max recoverable: ₹${fmt(bal)}`);return;}
                   const txn={id:uid(),type:"recovery",date:rDate,amount:+rAmt,lrNo:rLR,ref:rRef,note:""};
                   setVehicles(p=>p.map(x=>x.id===lSheet?{...x,
                     loanRecovered:(x.loanRecovered||0)+ +rAmt,
                     loanTxns:[...(x.loanTxns||[]),txn]}:x));
+                  // Reflect in linked trip's loanRecovery field
+                  if(rLR){
+                    setTrips(p=>p.map(t=>{
+                      if((t.lrNo||t.id)!==rLR) return t;
+                      const prev = t.loanRecovery||0;
+                      return {...t, loanRecovery: prev + +rAmt};
+                    }));
+                  }
                   log("LOAN RECOVERY",`${v.truckNo} ₹${fmt(+rAmt)} LR:${rLR||"—"}`);
                   setRAmt(""); setRDate(today()); setRLR(""); setRRef("");
                 }} color={C.green} full>Record Recovery</Btn>
@@ -4346,10 +4432,10 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
             </div>
           </Sheet>
         );
-      })()}
+      })()}</ErrBound>}
 
       {/* ── SHORTAGE MANAGEMENT SHEET ── */}
-      {sSheet&&(()=>{
+      {sSheet&&(<ErrBound key={sSheet+"S"}>{(()=>{
         const v = vehicles.find(x=>x.id===sSheet);
         if(!v) return null;
         const shortageTxns = v.shortageTxns||[];
@@ -4406,6 +4492,17 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
               {/* Record Shortage Recovery */}
               <div style={{background:C.bg,borderRadius:12,padding:14}}>
                 <div style={{color:C.green,fontWeight:700,fontSize:12,marginBottom:10}}>💰 Shortage Recovery</div>
+                {(()=>{
+                  const txns=v.shortageTxns||[];
+                  const owedMT  = txns.filter(x=>x.type==="shortage").reduce((s,x)=>s+(x.qty||0),0);
+                  const recvdMT = txns.filter(x=>x.type==="recovery").reduce((s,x)=>s+(x.qty||0),0);
+                  const balMT   = Math.max(0, owedMT-recvdMT);
+                  if(owedMT===0) return <div style={{background:"#002200",borderRadius:8,padding:"7px 10px",fontSize:11,color:C.green,marginBottom:8}}>✓ No shortage recorded — nothing to recover</div>;
+                  if(balMT<=0)  return <div style={{background:"#002200",borderRadius:8,padding:"7px 10px",fontSize:11,color:C.green,marginBottom:8}}>✓ Shortage fully recovered</div>;
+                  return <div style={{background:"#1a0a00",borderRadius:8,padding:"7px 10px",fontSize:11,color:C.orange,marginBottom:8}}>
+                    Outstanding: {balMT.toFixed(3)} MT{+srAmt>0?` · Entering: ${srAmt}MT${+srAmt>balMT?" ⚠ exceeds balance":" ✓"}`:""}
+                  </div>;
+                })()}
                 <div style={{display:"flex",gap:10}}>
                   <Field label="Recovery MT *" value={srAmt} onChange={setSrAmt} type="number" half />
                   <SearchSelect label="Link LR" value={srLR} onChange={setSrLR}
@@ -4414,6 +4511,18 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
                 </div>
                 <Btn onClick={()=>{
                   if(!srAmt||+srAmt<=0){alert("Enter recovery MT");return;}
+                  // Validate: cannot recover more MT than outstanding shortage balance
+                  const shortBalMT = v.shortageOwed>0&&v.shortageOwed===v.shortageRecovered?0
+                    : (() => {
+                        // compute outstanding in MT from transactions
+                        const txns = v.shortageTxns||[];
+                        const owedMT   = txns.filter(x=>x.type==="shortage").reduce((s,x)=>s+(x.qty||0),0);
+                        const recvdMT  = txns.filter(x=>x.type==="recovery").reduce((s,x)=>s+(x.qty||0),0);
+                        return Math.max(0, owedMT - recvdMT);
+                      })();
+                  if(shortBalMT > 0 && +srAmt > shortBalMT){
+                    alert(`Recovery ${srAmt}MT exceeds shortage balance ${shortBalMT.toFixed(3)}MT`);return;
+                  }
                   const trip = srLR ? (trips||[]).find(t=>t.lrNo===srLR) : null;
                   const rate = trip?.givenRate||0;
                   const amount = +srAmt * rate;
@@ -4421,7 +4530,14 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
                   setVehicles(p=>p.map(x=>x.id===sSheet?{...x,
                     shortageRecovered:(x.shortageRecovered||0)+amount,
                     shortageTxns:[...(x.shortageTxns||[]),txn]}:x));
-                  log("SHORTAGE RECOVERY",`${v.truckNo} ${srAmt}MT LR:${srLR||"—"}`);
+                  // Reflect in linked trip's shortageRecovery field (₹)
+                  if(srLR && trip){
+                    setTrips(p=>p.map(t=>{
+                      if(t.lrNo!==srLR) return t;
+                      return {...t, shortageRecovery:(t.shortageRecovery||0)+amount};
+                    }));
+                  }
+                  log("SHORTAGE RECOVERY",`${v.truckNo} ${srAmt}MT ₹${fmt(amount)} LR:${srLR||"—"}`);
                   setSrAmt(""); setSrLR("");
                 }} color={C.green} full>Record Recovery</Btn>
               </div>
