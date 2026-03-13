@@ -4432,10 +4432,10 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
             </div>
           </Sheet>
         );
-      })()}</ErrBound>}
+      })()}</ErrBound>)}
 
       {/* ── SHORTAGE MANAGEMENT SHEET ── */}
-      {sSheet&&(<ErrBound key={sSheet+"S"}>{(()=>{
+      {sSheet&&(()=>{
         const v = vehicles.find(x=>x.id===sSheet);
         if(!v) return null;
         const shortageTxns = v.shortageTxns||[];
