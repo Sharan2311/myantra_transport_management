@@ -1111,16 +1111,23 @@ function Trips({trips, setTrips, vehicles, indents, settings, tripType, user, lo
   };
 
   const saveEdit = () => {
-    // For multi-DI trips, recalculate gross givenRate from diLines
+    // For multi-DI trips, recalculate blended rates from diLines
     const diLines = editSheet.diLines || [];
-    const totalQty = diLines.length > 1 ? diLines.reduce((s,d)=>s+(d.qty||0),0) : +editSheet.qty;
-    const totalGross = diLines.length > 1 ? diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0) : 0;
-    const blendedRate = diLines.length > 1 && totalQty > 0 ? totalGross/totalQty : +editSheet.givenRate;
+    const isMultiDI = diLines.length > 1;
+    const totalQty    = isMultiDI ? diLines.reduce((s,d)=>s+(d.qty||0),0)                  : +editSheet.qty;
+    const totalGross  = isMultiDI ? diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0) : 0;
+    const totalBilled = isMultiDI ? diLines.reduce((s,d)=>s+(d.qty||0)*(d.frRate||0),0)    : 0;
+    const blendedGivenRate = isMultiDI && totalQty>0 ? totalGross/totalQty  : +editSheet.givenRate;
+    const blendedFrRate    = isMultiDI && totalQty>0 ? totalBilled/totalQty : +editSheet.frRate;
+    // Persist frRate on each diLine so it survives future edits
+    const savedLines = isMultiDI ? diLines.map(d=>({...d, frRate:d.frRate||+editSheet.frRate||0})) : diLines;
 
     setTrips(p => p.map(t => t.id===editSheet.id ? {
       ...editSheet,
-      qty:+editSheet.qty, bags:+editSheet.bags, frRate:+editSheet.frRate,
-      givenRate: blendedRate,
+      qty:+editSheet.qty, bags:+editSheet.bags,
+      frRate: blendedFrRate || +editSheet.frRate,
+      givenRate: blendedGivenRate,
+      diLines: savedLines,
       advance:+editSheet.advance,
       shortage:+editSheet.shortage, tafal:+editSheet.tafal,
       dieselEstimate:+editSheet.dieselEstimate,
@@ -1496,6 +1503,13 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
           <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>
             Rates per DI
           </div>
+          {/* Warn if any diLine is missing its own frRate — old trips saved before per-DI fix */}
+          {(f.diLines||[]).some(d=>!d.frRate) && (
+            <div style={{background:"#1a1000",border:"1px solid #ff980044",borderRadius:6,
+              padding:"7px 10px",marginBottom:10,fontSize:11,color:"#ff9800"}}>
+              ⚠ Shree rates below were auto-filled from trip level — please verify each DI rate and save.
+            </div>
+          )}
           {fWithLines.diLines.map((d,i) => (
             <div key={i} style={{marginBottom:10,paddingBottom:10,borderBottom:`1px solid ${C.border}22`}}>
               <div style={{color:C.blue,fontSize:12,fontWeight:700,marginBottom:6}}>
