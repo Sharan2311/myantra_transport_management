@@ -1280,6 +1280,15 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
       alert(`Diesel Indent No "${f.dieselIndentNo}" already exists on another trip. Each indent number must be unique.`);
       return;
     }
+    // Validate: Est. Net to Driver cannot be negative
+    {
+      const _gross = (+f.qty||0)*(+f.givenRate||0);
+      const _net = _gross - (+f.advance||0) - (+f.tafal||0) - (+f.dieselEstimate||0) - (+f.shortageRecovery||0) - (+f.loanRecovery||0);
+      if(_net < 0){
+        alert(`Cannot save: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\nPlease reduce Advance, Loan Recovery, or Shortage Recovery so the driver's net is ≥ ₹0.`);
+        return;
+      }
+    }
     const t = mkTrip({
       ...f, type:tripType,
       qty:+f.qty, bags:+f.bags, frRate:+f.frRate, givenRate:+f.givenRate,
@@ -1291,8 +1300,18 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
     });
     setTrips(p => [t, ...(p||[])]);
     log("ADD TRIP", `LR:${t.lrNo} ${t.truckNo}→${t.to} ${t.qty}MT`);
-    // Reflect shortageRecovery / loanRecovery into vehicle ledger
     const tn2 = (t.truckNo||"").toUpperCase().trim();
+    // Auto-create vehicle FIRST if not yet registered — so ledger update below finds it
+    if (tn2 && !vehicles.find(v => v.truckNo === tn2)) {
+      const nv = { id:uid(), truckNo:tn2, ownerName:"", phone:"",
+        driverName:"", driverPhone:"", driverLicense:"",
+        accountNo:"", ifsc:"", loan:0, loanRecovered:0, deductPerTrip:0,
+        tafalExempt:false, shortageOwed:0, shortageRecovered:0,
+        shortageTxns:[], loanTxns:[], createdBy:user.username };
+      setVehicles(p => [...(p||[]), nv]);
+      log("AUTO-CREATE VEHICLE", `${tn2} from trip save`);
+    }
+    // Reflect shortageRecovery / loanRecovery into vehicle ledger
     if(tn2 && (t.shortageRecovery>0 || t.loanRecovery>0)){
       setVehicles(prev=>prev.map(veh=>{
         if(veh.truckNo!==tn2) return veh;
@@ -1307,16 +1326,6 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
         }
         return upd;
       }));
-    }
-    // Also auto-create vehicle if manually added and not registered yet
-    const tn = (t.truckNo||"").toUpperCase().trim();
-    if (tn && !vehicles.find(v => v.truckNo === tn)) {
-      const nv = { id:uid(), truckNo:tn, ownerName:"", phone:"",
-        driverName:"", driverPhone:"", driverLicense:"",
-        accountNo:"", ifsc:"", loan:0, loanRecovered:0, deductPerTrip:0,
-        tafalExempt:false, shortageOwed:0, shortageRecovered:0, createdBy:user.username };
-      setVehicles(p => [...(p||[]), nv]);
-      log("AUTO-CREATE VEHICLE", `${tn} from trip save`);
     }
     setF(blankForm()); setAddSheet(false); setWasScanned(false);
   };
@@ -1372,6 +1381,19 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
         }
         return upd;
       }));
+    }
+    // Validate: Est. Net to Driver cannot be negative
+    {
+      const _diLines = editSheet.diLines||[];
+      const _isMulti = _diLines.length > 1;
+      const _gross = _isMulti
+        ? _diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
+        : (+editSheet.qty||0)*(+editSheet.givenRate||0);
+      const _net = _gross - (+editSheet.advance||0) - (+editSheet.tafal||0) - (+editSheet.dieselEstimate||0) - (+editSheet.shortageRecovery||0) - (+editSheet.loanRecovery||0);
+      if(_net < 0){
+        alert(`Cannot save: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\nPlease reduce Advance, Loan Recovery, or Shortage Recovery so the driver's net is ≥ ₹0.`);
+        return;
+      }
     }
     log("EDIT TRIP", `LR:${editSheet.lrNo} ${editSheet.truckNo}`);
     setEditSheet(null);
@@ -4396,8 +4418,25 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
                 </div>
                 <Btn onClick={()=>{
                   if(!rAmt||+rAmt<=0){alert("Enter recovery amount");return;}
-                  // Validate: cannot recover more than outstanding balance
-                  if(+rAmt > bal){alert(`Recovery ₹${fmt(+rAmt)} exceeds loan balance ₹${fmt(bal)}. Max recoverable: ₹${fmt(bal)}`);return;}
+                  // Validate 1: cannot recover more than outstanding loan balance
+                  if(+rAmt > bal){alert(`Recovery ₹${fmt(+rAmt)} exceeds loan balance ₹${fmt(bal)}.\nMax recoverable: ₹${fmt(bal)}`);return;}
+                  // Validate 2: if linked to an LR, cannot exceed that trip's Est. Net to Driver
+                  if(rLR){
+                    const linkedTrip = (trips||[]).find(t=>(t.lrNo||t.id)===rLR);
+                    if(linkedTrip){
+                      const tripVeh = vehicles.find(x=>x.truckNo===(linkedTrip.truckNo||"").toUpperCase().trim());
+                      const tripNet = (linkedTrip.qty||0)*(linkedTrip.givenRate||0)
+                        - (linkedTrip.advance||0) - (linkedTrip.tafal||0)
+                        - (linkedTrip.dieselEstimate||0)
+                        - (linkedTrip.shortageRecovery||0)
+                        - (linkedTrip.loanRecovery||0);
+                      const maxFromTrip = Math.max(0, tripNet);
+                      if(+rAmt > maxFromTrip){
+                        alert(`Recovery ₹${fmt(+rAmt)} would make Est. Net to Driver negative for LR: ${rLR}.\nMax you can recover from this trip: ₹${fmt(maxFromTrip)}`);
+                        return;
+                      }
+                    }
+                  }
                   const txn={id:uid(),type:"recovery",date:rDate,amount:+rAmt,lrNo:rLR,ref:rRef,note:""};
                   setVehicles(p=>p.map(x=>x.id===lSheet?{...x,
                     loanRecovered:(x.loanRecovered||0)+ +rAmt,
