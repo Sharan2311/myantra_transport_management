@@ -712,7 +712,8 @@ function AskLRSheet({ extracted, trips, vehicles, onConfirm, onCancel }) {
   const [driverPhone, setDriverPhone] = useState("");
   const truckNo = (extracted.truckNo||"").toUpperCase().trim();
   const existingVehicle = vehicles ? vehicles.find(v => v.truckNo === truckNo) : null;
-  const needsDriverPhone = existingVehicle && !existingVehicle.driverPhone;
+  // Phone required if: vehicle exists but has no phone, OR vehicle doesn't exist yet (new truck)
+  const needsDriverPhone = !existingVehicle || !existingVehicle.driverPhone;
 
   // Check for duplicate DI across ALL trips
   const scannedDiNo = (extracted.diNo || "").trim();
@@ -859,7 +860,7 @@ function AskLRSheet({ extracted, trips, vehicles, onConfirm, onCancel }) {
 
 // ─── MERGE DI SHEET ───────────────────────────────────────────────────────────
 // Shown when scanning a second DI with same LR — confirms merge with driver rate
-function MergeDISheet({ conflict, onMerge, onSeparate, onCancel }) {
+function MergeDISheet({ conflict, onMerge, onSeparate, onCancel, isOwner=false }) {
   const { extracted, existingTrip } = conflict;
   const [driverRate, setDriverRate] = useState("");
   const [shreeRate,  setShreeRate]  = useState(String(extracted.frRate || ""));
@@ -915,9 +916,22 @@ function MergeDISheet({ conflict, onMerge, onSeparate, onCancel }) {
         <div style={{fontSize:13,color:C.text,marginBottom:10}}>
           DI <b>{extracted.diNo}</b> · {newQty} MT · {extracted.bags} Bags
         </div>
-        <Field label="Shree Rate ₹/MT (from DI)"
-          value={shreeRate} onChange={setShreeRate} type="number"
-          placeholder="Rate Shree pays" />
+        {/* Shree Rate — locked for non-owners, they cannot change billing rate */}
+        {isOwner ? (
+          <Field label="Shree Rate ₹/MT (from DI)"
+            value={shreeRate} onChange={setShreeRate} type="number"
+            placeholder="Rate Shree pays" />
+        ) : (
+          <div style={{display:"flex",flexDirection:"column",gap:5,marginBottom:8}}>
+            <label style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Shree Rate ₹/MT</label>
+            <div style={{background:C.dim,border:`1.5px solid ${C.border}`,borderRadius:10,
+              color:C.muted,padding:"13px 12px",fontSize:15,display:"flex",
+              justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{color:C.text}}>{shreeRate||extracted.frRate||"—"}</span>
+              <span style={{fontSize:11,color:C.muted}}>🔒 Owner only</span>
+            </div>
+          </div>
+        )}
         <Field label="Driver Rate ₹/MT for this DI"
           value={driverRate} onChange={setDriverRate} type="number"
           placeholder="Enter driver rate" />
@@ -1275,10 +1289,16 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
       alert("Diesel Indent No is mandatory when Diesel Estimate is entered.\nPlease enter the indent number from the pump slip.");
       return;
     }
-    // Validate: diesel indent no must be unique
-    if (f.dieselIndentNo && trips.some(t => t.dieselIndentNo && t.dieselIndentNo === f.dieselIndentNo.trim())) {
-      alert(`Diesel Indent No "${f.dieselIndentNo}" already exists on another trip. Each indent number must be unique.`);
-      return;
+    // Validate: diesel indent no must be unique across trips AND diesel indents
+    if (f.dieselIndentNo && f.dieselIndentNo.trim()) {
+      if (trips.some(t => t.dieselIndentNo && t.dieselIndentNo.trim() === f.dieselIndentNo.trim())) {
+        alert(`Indent No "${f.dieselIndentNo}" already exists on another trip. Each indent number must be unique.`);
+        return;
+      }
+      if ((indents||[]).some(i => i.indentNo && String(i.indentNo).trim() === f.dieselIndentNo.trim())) {
+        alert(`Indent No "${f.dieselIndentNo}" already exists in Diesel records. Each indent number must be unique.`);
+        return;
+      }
     }
     // Validate: Est. Net to Driver cannot be negative
     {
@@ -1582,6 +1602,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                 onMerge={addDIToExisting}
                 onSeparate={()=>{setF(p=>({...p,...diConflict.extracted}));setDiConflict(null);}}
                 onCancel={()=>setDiConflict(null)}
+                isOwner={user.role==="owner"}
               />
             )
           ) : (
@@ -3276,9 +3297,21 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
   };
 
   const saveIndent = () => {
+    // Validate: indent number must be unique across both indents AND trips
+    if (f.indentNo && f.indentNo.trim()) {
+      const dupIndent = (indents||[]).find(i => i.indentNo && String(i.indentNo).trim() === f.indentNo.trim());
+      if (dupIndent) {
+        alert(`Indent No "${f.indentNo}" already exists in Diesel records (Truck: ${dupIndent.truckNo}, Date: ${dupIndent.date}).\nEach indent number must be unique.`);
+        return;
+      }
+      const dupTrip = (trips||[]).find(t => t.dieselIndentNo && t.dieselIndentNo.trim() === f.indentNo.trim());
+      if (dupTrip) {
+        alert(`Indent No "${f.indentNo}" is already linked to Trip LR: ${dupTrip.lrNo||"—"} (Truck: ${dupTrip.truckNo}).\nEach indent number must be unique.`);
+        return;
+      }
+    }
     const ind = {...f, id:uid(), amount:+f.amount, litres:+f.litres, ratePerLitre:+f.ratePerLitre, paid:false, createdBy:user.username, createdAt:nowTs()};
     setIndents(p => [ind, ...(p||[])]);
-    // update trip's dieselEstimate if linked
     log("DIESEL INDENT", `${ind.truckNo} · Indent ${ind.indentNo} · ${fmt(ind.amount)}`);
     setF(blankI); setAddSheet(false);
   };
@@ -4122,6 +4155,10 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
   const resetLoanForm = () => { setLAmt(""); setLDate(today()); setLRef(""); setLAcct(""); setRAmt(""); setRDate(today()); setRLR(""); setRRef(""); };
   const resetShForm   = () => { setShAmt(""); setShTrip(""); setSrAmt(""); setSrLR(""); };
 
+  // Phone-only edit for non-owners
+  const [phoneEditId,  setPhoneEditId]  = useState(null);
+  const [phoneEditVal, setPhoneEditVal] = useState("");
+
   // ── PDF EXPORT ──────────────────────────────────────────────────────────────
   const exportVehiclePDF = (v) => {
     const vtrips = (trips||[]).filter(t => t.truckNo===v.truckNo || t.truck===v.truckNo)
@@ -4268,6 +4305,33 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
             background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:16}}>✕</button>}
       </div>
       {search&&<div style={{fontSize:11,color:C.muted}}>{filtered.length} of {(vehicles||[]).length} vehicles</div>}
+
+      {/* ── PHONE-ONLY EDIT SHEET (non-owner) ── */}
+      {phoneEditId && (()=>{
+        const v = vehicles.find(x=>x.id===phoneEditId);
+        if(!v) return null;
+        return (
+          <Sheet title={`📞 Update Phone — ${v.truckNo}`} onClose={()=>{setPhoneEditId(null);setPhoneEditVal("");}}>
+            <div style={{display:"flex",flexDirection:"column",gap:14}}>
+              <div style={{background:C.bg,borderRadius:10,padding:"12px 14px"}}>
+                <div style={{color:C.muted,fontSize:12,marginBottom:4}}>Truck: <b style={{color:C.text}}>{v.truckNo}</b></div>
+                <div style={{color:C.muted,fontSize:12}}>Driver: <b style={{color:C.text}}>{v.driverName||"—"}</b></div>
+              </div>
+              <Field label="Driver Phone *" value={phoneEditVal} onChange={setPhoneEditVal} type="tel" placeholder="9XXXXXXXXX"
+                note="Enter 10-digit mobile number" />
+              <Btn onClick={()=>{
+                const raw = (phoneEditVal||"").replace(/\D/g,"");
+                if(!raw){alert("Phone number is required");return;}
+                if(raw.length!==10){alert(`Must be 10 digits (entered ${raw.length})`);return;}
+                if(!/^[6-9]/.test(raw)){alert("Must start with 6, 7, 8 or 9");return;}
+                setVehicles(p=>p.map(x=>x.id===phoneEditId?{...x,driverPhone:raw}:x));
+                log("UPDATE DRIVER PHONE",`${v.truckNo} → ${raw}`);
+                setPhoneEditId(null); setPhoneEditVal("");
+              }} full color={C.blue}>Save Phone Number</Btn>
+            </div>
+          </Sheet>
+        );
+      })()}
 
       {/* ── ADD / EDIT SHEET ── */}
       {sheet && (
@@ -4697,7 +4761,8 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
               <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:4}}>
                 <Badge label={bal>0?"Loan Due":"Clear"} color={bal>0?C.red:C.green} />
                 {v.tafalExempt&&<Badge label="TAFAL Exempt" color={C.muted} />}
-                {isOwner&&<button onClick={()=>{setF({
+                {isOwner ? (
+                <button onClick={()=>{setF({
                   truckNo:v.truckNo,ownerName:v.ownerName||"",phone:v.phone||"",
                   driverName:v.driverName||"",driverPhone:v.driverPhone||"",driverLicense:v.driverLicense||"",
                   accountNo:v.accountNo||"",ifsc:v.ifsc||"",
@@ -4705,7 +4770,12 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
                   deductPerTrip:String(v.deductPerTrip||0),tafalExempt:v.tafalExempt||false,
                 });setEditId(v.id);setSheet(true);}}
                   style={{background:"none",border:`1px solid ${C.muted}44`,borderRadius:6,
-                    padding:"3px 8px",color:C.muted,cursor:"pointer",fontSize:11}}>✏ Edit</button>}
+                    padding:"3px 8px",color:C.muted,cursor:"pointer",fontSize:11}}>✏ Edit</button>
+              ) : (
+                <button onClick={()=>{setPhoneEditId(v.id);setPhoneEditVal(v.driverPhone||"");}}
+                  style={{background:"none",border:`1px solid ${C.blue}44`,borderRadius:6,
+                    padding:"3px 8px",color:C.blue,cursor:"pointer",fontSize:11}}>📞 Update Phone</button>
+              )}
               </div>
             </div>
 
