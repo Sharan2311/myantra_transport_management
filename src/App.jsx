@@ -249,7 +249,7 @@ const Sheet = ({title, onClose, children}) => (
     <div style={{background:C.card,borderRadius:"20px 20px 0 0",width:"100%",maxWidth:600,maxHeight:"92vh",overflowY:"auto",paddingBottom:40}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"18px 20px 14px",borderBottom:`1px solid ${C.border}`,position:"sticky",top:0,background:C.card,zIndex:1}}>
         <span style={{color:C.text,fontWeight:800,fontSize:17}}>{title}</span>
-        <button onClick={onClose} style={{background:C.dim,border:"none",color:C.text,borderRadius:"50%",width:32,height:32,fontSize:18,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
+        <button onClick={onClose} style={{background:C.red,border:`2px solid ${C.red}`,color:"#fff",borderRadius:"50%",width:40,height:40,fontSize:22,fontWeight:900,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,boxShadow:"0 2px 8px #da363366"}}>×</button>
       </div>
       <div style={{padding:"18px 20px 0"}}>{children}</div>
     </div>
@@ -1342,6 +1342,19 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
     // Persist frRate on each diLine so it survives future edits
     const savedLines = isMultiDI ? diLines.map(d=>({...d, frRate:d.frRate||+editSheet.frRate||0})) : diLines;
 
+    // ── Validate FIRST before any state mutation ──────────────────────────────
+    {
+      const _diLines = editSheet.diLines||[];
+      const _isMulti = _diLines.length > 1;
+      const _gross = _isMulti
+        ? _diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
+        : (+editSheet.qty||0)*(+editSheet.givenRate||0);
+      const _net = _gross - (+editSheet.advance||0) - (+editSheet.tafal||0) - (+editSheet.dieselEstimate||0) - (+editSheet.shortageRecovery||0) - (+editSheet.loanRecovery||0);
+      if(_net < 0){
+        alert(`Cannot save: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\nPlease reduce Advance, Loan Recovery, or Shortage Recovery so the driver's net is ≥ ₹0.`);
+        return;
+      }
+    }
     setTrips(p => p.map(t => t.id===editSheet.id ? {
       ...editSheet,
       qty:+editSheet.qty, bags:+editSheet.bags,
@@ -1381,19 +1394,6 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
         }
         return upd;
       }));
-    }
-    // Validate: Est. Net to Driver cannot be negative
-    {
-      const _diLines = editSheet.diLines||[];
-      const _isMulti = _diLines.length > 1;
-      const _gross = _isMulti
-        ? _diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
-        : (+editSheet.qty||0)*(+editSheet.givenRate||0);
-      const _net = _gross - (+editSheet.advance||0) - (+editSheet.tafal||0) - (+editSheet.dieselEstimate||0) - (+editSheet.shortageRecovery||0) - (+editSheet.loanRecovery||0);
-      if(_net < 0){
-        alert(`Cannot save: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\nPlease reduce Advance, Loan Recovery, or Shortage Recovery so the driver's net is ≥ ₹0.`);
-        return;
-      }
     }
     log("EDIT TRIP", `LR:${editSheet.lrNo} ${editSheet.truckNo}`);
     setEditSheet(null);
@@ -4491,10 +4491,10 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
                           setVehicles(p=>p.map(x=>x.id===lSheet?{...x,
                             loanRecovered:(x.loanRecovered||0)-tx.amount,
                             loanTxns:(x.loanTxns||[]).filter(t=>t.id!==tx.id)}:x));
-                          // Reverse loanRecovery on the linked trip
+                          // Reverse loanRecovery on the linked trip (match by lrNo OR trip id)
                           if(linkedTrip){
                             setTrips(p=>p.map(t=>{
-                              if(t.lrNo!==linkedLR) return t;
+                              if(t.id!==linkedTrip.id) return t;
                               return {...t, loanRecovery:Math.max(0,(t.loanRecovery||0)-tx.amount)};
                             }));
                           }
