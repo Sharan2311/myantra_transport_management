@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { DB } from "./db.js";
 import { supabase } from "./supabase.js";
 
@@ -1806,9 +1806,33 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
         />
       </div>
       <div style={{display:"flex",gap:10}}>
-        <Field label="Loan Recovery ₹" value={f.loanRecovery||""} onChange={ff("loanRecovery")} type="number" half
-          note={veh&&(veh.loan||0)>(veh.loanRecovered||0)?`Pending: ₹${((veh.loan||0)-(veh.loanRecovered||0)).toLocaleString("en-IN")}`:""}
-        />
+        <div style={{display:"flex",flexDirection:"column",gap:5,flex:"1 1 45%",minWidth:0}}>
+          <label style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Loan Recovery ₹</label>
+          {(()=>{
+            const loanBal = veh ? Math.max(0,(veh.loan||0)-(veh.loanRecovered||0)) : null;
+            const overLimit = loanBal !== null && (+f.loanRecovery||0) > loanBal;
+            return (<>
+              <input type="number" value={f.loanRecovery||""} inputMode="decimal"
+                onChange={e=>{
+                  const val = +e.target.value||0;
+                  if(loanBal !== null && val > loanBal){
+                    ff("loanRecovery")(String(loanBal));
+                  } else {
+                    ff("loanRecovery")(e.target.value);
+                  }
+                }}
+                style={{background:C.bg,border:`1.5px solid ${overLimit?C.red:C.border}`,borderRadius:10,color:C.text,padding:"13px 12px",fontSize:15,outline:"none",width:"100%",boxSizing:"border-box"}} />
+              {loanBal !== null && loanBal > 0 && (
+                <div style={{color:overLimit?C.red:C.muted,fontSize:11}}>
+                  {overLimit ? `⚠ Max allowed: ₹${loanBal.toLocaleString("en-IN")}` : `Pending: ₹${loanBal.toLocaleString("en-IN")}`}
+                </div>
+              )}
+              {loanBal !== null && loanBal === 0 && (
+                <div style={{color:C.green,fontSize:11}}>✓ Loan fully cleared</div>
+              )}
+            </>);
+          })()}
+        </div>
         <Field label="Shortage MT (Shree)" value={f.shortage||""} onChange={ff("shortage")} type="number" half
           note="Shortage reported by Shree Cement (in MT)"
         />
@@ -4417,13 +4441,31 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
                         {tx.lrNo&&<div style={{fontSize:11,color:C.blue}}>LR: {tx.lrNo}</div>}
                       </div>
                       {isOwner&&<button onClick={()=>{
-                        if(!window.confirm("Delete this transaction?")) return;
-                        const delta = tx.type==="given"?-tx.amount:tx.amount;
-                        const recoDelta = tx.type==="recovery"?-tx.amount:0;
-                        setVehicles(p=>p.map(x=>x.id===lSheet?{...x,
-                          loan: tx.type==="given"?(x.loan||0)-tx.amount:x.loan,
-                          loanRecovered: tx.type==="recovery"?(x.loanRecovered||0)-tx.amount:x.loanRecovered,
-                          loanTxns:(x.loanTxns||[]).filter(t=>t.id!==tx.id)}:x));
+                        if(tx.type==="recovery"){
+                          const linkedLR = tx.lrNo;
+                          const linkedTrip = linkedLR ? (trips||[]).find(t=>t.lrNo===linkedLR) : null;
+                          const warningMsg = linkedTrip
+                            ? `Delete this ₹${fmt(tx.amount)} recovery?\n\nThis is linked to LR: ${linkedLR}\nThe Loan Recovery on that trip will be reduced by ₹${fmt(tx.amount)} (from ₹${fmt(linkedTrip.loanRecovery||0)} → ₹${fmt(Math.max(0,(linkedTrip.loanRecovery||0)-tx.amount))}).`
+                            : `Delete this ₹${fmt(tx.amount)} recovery?\n\nVehicle loan balance will increase by ₹${fmt(tx.amount)}.`;
+                          if(!window.confirm(warningMsg)) return;
+                          // Reverse loan recovered on vehicle
+                          setVehicles(p=>p.map(x=>x.id===lSheet?{...x,
+                            loanRecovered:(x.loanRecovered||0)-tx.amount,
+                            loanTxns:(x.loanTxns||[]).filter(t=>t.id!==tx.id)}:x));
+                          // Reverse loanRecovery on the linked trip
+                          if(linkedTrip){
+                            setTrips(p=>p.map(t=>{
+                              if(t.lrNo!==linkedLR) return t;
+                              return {...t, loanRecovery:Math.max(0,(t.loanRecovery||0)-tx.amount)};
+                            }));
+                          }
+                        } else {
+                          // "given" transaction — just remove it and reduce loan amount
+                          if(!window.confirm(`Delete this ₹${fmt(tx.amount)} loan entry?\nVehicle loan total will decrease by ₹${fmt(tx.amount)}.`)) return;
+                          setVehicles(p=>p.map(x=>x.id===lSheet?{...x,
+                            loan:(x.loan||0)-tx.amount,
+                            loanTxns:(x.loanTxns||[]).filter(t=>t.id!==tx.id)}:x));
+                        }
                       }} style={{background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:16}}>🗑</button>}
                     </div>
                   ))}
@@ -4558,11 +4600,30 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
                         {tx.lrNo&&<div style={{fontSize:11,color:C.blue}}>LR: {tx.lrNo}</div>}
                       </div>
                       {isOwner&&<button onClick={()=>{
-                        if(!window.confirm("Delete this entry?")) return;
-                        setVehicles(p=>p.map(x=>x.id===sSheet?{...x,
-                          shortageOwed: tx.type==="shortage"?(x.shortageOwed||0)-(tx.amount||0):x.shortageOwed,
-                          shortageRecovered: tx.type==="recovery"?(x.shortageRecovered||0)-(tx.amount||0):x.shortageRecovered,
-                          shortageTxns:(x.shortageTxns||[]).filter(t=>t.id!==tx.id)}:x));
+                        if(tx.type==="recovery"){
+                          const linkedLR = tx.lrNo;
+                          const linkedTrip = linkedLR ? (trips||[]).find(t=>t.lrNo===linkedLR) : null;
+                          const warningMsg = linkedTrip
+                            ? `Delete this ₹${fmt(tx.amount)} shortage recovery?\n\nThis is linked to LR: ${linkedLR}\nThe Shortage Recovery on that trip will be reduced by ₹${fmt(tx.amount)} (from ₹${fmt(linkedTrip.shortageRecovery||0)} → ₹${fmt(Math.max(0,(linkedTrip.shortageRecovery||0)-tx.amount))}).`
+                            : `Delete this ₹${fmt(tx.amount)} shortage recovery?\n\nVehicle shortage balance will increase by ₹${fmt(tx.amount)}.`;
+                          if(!window.confirm(warningMsg)) return;
+                          setVehicles(p=>p.map(x=>x.id===sSheet?{...x,
+                            shortageRecovered:(x.shortageRecovered||0)-(tx.amount||0),
+                            shortageTxns:(x.shortageTxns||[]).filter(t=>t.id!==tx.id)}:x));
+                          // Reverse shortageRecovery on the linked trip
+                          if(linkedTrip){
+                            setTrips(p=>p.map(t=>{
+                              if(t.lrNo!==linkedLR) return t;
+                              return {...t, shortageRecovery:Math.max(0,(t.shortageRecovery||0)-tx.amount)};
+                            }));
+                          }
+                        } else {
+                          // shortage "owed" entry
+                          if(!window.confirm(`Delete this ${tx.qty}MT shortage entry?\nVehicle shortage owed will decrease by ₹${fmt(tx.amount||0)}.`)) return;
+                          setVehicles(p=>p.map(x=>x.id===sSheet?{...x,
+                            shortageOwed:(x.shortageOwed||0)-(tx.amount||0),
+                            shortageTxns:(x.shortageTxns||[]).filter(t=>t.id!==tx.id)}:x));
+                        }
                       }} style={{background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:16}}>🗑</button>}
                     </div>
                   ))}
