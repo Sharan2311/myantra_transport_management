@@ -1325,24 +1325,43 @@ function PartyEmailModal({ trip, fromEmail, toEmail, onToEmailChange, onMarkSent
   const [opened,  setOpened]  = useState(false);
   const fmtD = d => { if(!d) return "—"; const [y,m,dy]=d.split("-"); return `${dy}-${m}-${y}`; };
 
-  const subject = `Delivery Confirmation Request — ${trip.lrNo||""} / ${trip.consignee||""}`;
+  const subject = `Delivery Confirmation Request — M Yantra Enterprises`;
+
+  // Plain text body for mailto — tab-separated table renders well in Gmail
+  const COL_W = 22; // pad each column to this width
+  const pad = (s, w) => String(s||"—").padEnd(w);
+  const tableHeader =
+    pad("Transport Name",     20) + "	" +
+    pad("Shipment Date",      16) + "	" +
+    pad("Bill of Lading",     18) + "	" +
+    pad("Delivery Number",    18) + "	" +
+    pad("Freight Qty.",       14) + "	" +
+    pad("Customer/Vendor",    24) + "	" +
+    pad("Vehicle Number",     16) + "	" +
+    pad("To Location",        24) + "	" +
+    pad("District",           18) + "	" +
+    "State";
+  const tableRow =
+    pad("M YANTRA ENTERPRISES",       20) + "	" +
+    pad(fmtD(trip.date),              16) + "	" +
+    pad(trip.lrNo||"—",               18) + "	" +
+    pad(trip.diNo||"—",               18) + "	" +
+    pad((trip.qty||0)+" MT",          14) + "	" +
+    pad(trip.consignee||"—",          24) + "	" +
+    pad(trip.truckNo||"—",            16) + "	" +
+    pad(trip.to||"—",                 24) + "	" +
+    pad(trip.district||"—",           18) + "	" +
+    (trip.state||"—");
+
   const body =
 `Dear Sir,
 
-Please confirm receipt of cement for the following consignment by return mail.
+Please confirm receipt of cement for the following consignment(s) by return mail.
 
-Transport Name: M YANTRA ENTERPRISES
-Shipment Date: ${fmtD(trip.date)}
-Bill of Lading: ${trip.lrNo||"—"}
-Delivery Number: ${trip.diNo||"—"}
-Freight Qty: ${trip.qty||0} MT
-Customer/Vendor: ${trip.consignee||"—"}
-Vehicle Number: ${trip.truckNo||"—"}
-To Location: ${trip.to||"—"}
-District: ${trip.district||"—"}
-State: ${trip.state||"—"}
+${tableHeader}
+${tableRow}
 
-Kindly reply confirming receipt at the earliest.
+Kindly reply to this email confirming receipt at the earliest.
 
 Regards,
 M Yantra Enterprises
@@ -1354,6 +1373,20 @@ M Yantra Enterprises
     setOpened(true);
     onToEmailChange(localTo);
   };
+
+  // Styled table rows for in-app preview
+  const previewRows = [
+    ["Transport Name",  "M YANTRA ENTERPRISES"],
+    ["Shipment Date",   fmtD(trip.date)],
+    ["Bill of Lading",  trip.lrNo||"—"],
+    ["Delivery Number", trip.diNo||"—"],
+    ["Freight Qty.",    `${trip.qty||0} MT`],
+    ["Customer/Vendor", trip.consignee||"—"],
+    ["Vehicle Number",  trip.truckNo||"—"],
+    ["To Location",     trip.to||"—"],
+    ["District",        trip.district||"—"],
+    ["State",           trip.state||"—"],
+  ];
 
   return (
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
@@ -1370,15 +1403,43 @@ M Yantra Enterprises
       <Field label="To Email *" value={localTo} onChange={setLocalTo}
         placeholder="party@example.com" />
 
+      {/* In-app preview — styled table */}
       <div style={{background:C.bg,borderRadius:10,padding:"12px 14px"}}>
-        <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:6}}>EMAIL PREVIEW</div>
-        <div style={{color:C.text,fontSize:12,lineHeight:1.6,whiteSpace:"pre-wrap",
-          maxHeight:180,overflowY:"auto"}}>{body}</div>
+        <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:8}}>EMAIL PREVIEW</div>
+        <div style={{color:C.muted,fontSize:12,marginBottom:8,lineHeight:1.5}}>
+          Dear Sir,<br/>Please confirm receipt of cement for the following consignment(s) by return mail.
+        </div>
+        <div style={{overflowX:"auto",WebkitOverflowScrolling:"touch"}}>
+          <table style={{borderCollapse:"collapse",fontSize:11,minWidth:600,width:"100%"}}>
+            <thead>
+              <tr>{previewRows.map(([h])=>(
+                <th key={h} style={{background:C.dim,color:C.muted,padding:"6px 8px",
+                  border:`1px solid ${C.border}`,fontWeight:700,
+                  textTransform:"uppercase",fontSize:9,letterSpacing:0.5,
+                  whiteSpace:"nowrap",textAlign:"left"}}>{h}</th>
+              ))}</tr>
+            </thead>
+            <tbody>
+              <tr>{previewRows.map(([h,v])=>(
+                <td key={h} style={{color:C.text,padding:"7px 8px",
+                  border:`1px solid ${C.border}`,fontSize:11,
+                  whiteSpace:"nowrap",fontWeight:h==="Customer/Vendor"||h==="Bill of Lading"?700:400}}>
+                  {v}
+                </td>
+              ))}</tr>
+            </tbody>
+          </table>
+        </div>
+        <div style={{color:C.muted,fontSize:12,marginTop:8,lineHeight:1.5}}>
+          Kindly reply to this email confirming receipt at the earliest.<br/>
+          <br/>Regards,<br/><b style={{color:C.text}}>M Yantra Enterprises</b><br/>9606477257
+        </div>
       </div>
 
       <div style={{background:"#1a1000",border:`1px solid ${C.orange}44`,borderRadius:8,
         padding:"9px 12px",color:C.orange,fontSize:11}}>
-        ⚠ After tapping "Open Gmail", attach the GR Copy and Invoice from your Downloads/Files app before sending.
+        📱 On mobile: Gmail will open with the email pre-filled. Attach GR Copy and Invoice from your Files app before sending.<br/>
+        🖥 On desktop: Copy the email body above and paste into Gmail manually.
       </div>
 
       {!opened ? (
