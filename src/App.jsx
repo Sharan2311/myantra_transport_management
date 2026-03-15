@@ -2010,10 +2010,10 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                 {t.orderType==="party" && <Badge label="🤝 Party" color={C.accent} />}
                 {t.orderType==="party" && !t.emailSentAt && <Badge label="⚠ Email Pending" color={C.red} />}
                 {t.orderType==="party" && t.emailSentAt && !t.receiptFilePath && <Badge label="📧 Sent · Awaiting Reply" color={C.blue} />}
-                {t.orderType==="party" && t.receiptFilePath && !t.mergedPdfPath && <Badge label="🔄 Receipt uploaded" color={C.teal} />}
-                {t.orderType==="party" && t.mergedPdfPath && <Badge label="✅ Merged PDF ready" color={C.green} />}
-                {/* Upload receipt confirmation button */}
-                {t.orderType==="party" && t.emailSentAt && (
+                {(t.orderType==="party"||t.grFilePath) && t.receiptFilePath && !t.mergedPdfPath && <Badge label="🔄 Receipt uploaded" color={C.teal} />}
+                {(t.orderType==="party"||t.grFilePath) && t.mergedPdfPath && <Badge label="✅ Merged PDF ready" color={C.green} />}
+                {/* Upload receipt — show for any party trip or any trip that has GR file stored */}
+                {(t.orderType==="party" || t.grFilePath) && (t.emailSentAt || t.grFilePath) && (
                   <button onClick={()=>setReceiptSheet(t)}
                     style={{background:t.receiptFilePath?C.teal+"22":C.accent+"22",
                       color:t.receiptFilePath?C.teal:C.accent,
@@ -2024,7 +2024,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                   </button>
                 )}
                 {/* Download merged PDF */}
-                {t.orderType==="party" && t.mergedPdfPath && (
+                {(t.orderType==="party"||t.grFilePath) && t.mergedPdfPath && (
                   <button onClick={async()=>{
                     try{
                       const url = await getSignedUrl(t.mergedPdfPath, 3600);
@@ -2293,6 +2293,20 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
           <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,borderRadius:10,padding:"9px 12px",color:C.orange,fontSize:12,fontWeight:700,marginBottom:14}}>
             Editing trip · LR: {editSheet.lrNo||"—"} · {editSheet.truckNo}
           </div>
+          {/* Order type toggle in edit — owner can fix godown↔party */}
+          {user.role==="owner" && (
+            <div style={{display:"flex",gap:8,marginBottom:4}}>
+              {["godown","party"].map(ot=>(
+                <button key={ot} onClick={()=>setEditSheet(p=>({...p,orderType:ot}))}
+                  style={{flex:1,padding:"10px",borderRadius:10,cursor:"pointer",fontWeight:700,fontSize:13,
+                    background: editSheet.orderType===ot ? (ot==="party"?C.accent+"33":C.teal+"33") : C.bg,
+                    border:`2px solid ${editSheet.orderType===ot?(ot==="party"?C.accent:C.teal):C.border}`,
+                    color: editSheet.orderType===ot ? (ot==="party"?C.accent:C.teal) : C.muted}}>
+                  {ot==="party"?"🤝 Party Order":"🏭 Godown Order"}
+                </button>
+              ))}
+            </div>
+          )}
           <TripForm
             f={editSheet}
             ff={k=>v=>setEditSheet(p=>({...p,[k]:v}))}
@@ -2301,6 +2315,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
             onSubmit={saveEdit} submitLabel="Save Changes" user={user}
             showStatus={true}
             wasScanned={user.role !== "owner"}
+            isParty={editSheet.orderType==="party"}
           />
         </Sheet>
       )}
