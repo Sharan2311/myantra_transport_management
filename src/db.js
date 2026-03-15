@@ -28,6 +28,17 @@ const tripFromDB = r => ({
   shreeShortage: r.shree_shortage || null,
 
   frtRate: +(r.fr_rate||0),
+  // Party order fields
+  orderType: r.order_type || 'godown',
+  grFilePath: r.gr_file_path || '',
+  invoiceFilePath: r.invoice_file_path || '',
+  mergedPdfPath: r.merged_pdf_path || '',
+  receiptFilePath: r.receipt_file_path || '',
+  receiptUploadedAt: r.receipt_uploaded_at || '',
+  district: r.district || '',
+  state: r.state || '',
+  emailSentAt: r.email_sent_at || '',
+  partyEmail: r.party_email || '',
 })
 const tripToDB = t => ({
   id: t.id, type: t.type, lr_no: t.lrNo, di_no: t.diNo, truck_no: t.truckNo,
@@ -53,6 +64,17 @@ const tripToDB = t => ({
   utr_shree: t.utr || "",
   shree_status: t.shreeStatus || t.status || "pending",
   shree_shortage: t.shortage && typeof t.shortage === 'object' ? t.shortage : null,
+  // Party order fields
+  order_type: t.orderType || 'godown',
+  gr_file_path: t.grFilePath || '',
+  invoice_file_path: t.invoiceFilePath || '',
+  merged_pdf_path: t.mergedPdfPath || '',
+  receipt_file_path: t.receiptFilePath || '',
+  receipt_uploaded_at: t.receiptUploadedAt || '',
+  district: t.district || '',
+  state: t.state || '',
+  email_sent_at: t.emailSentAt || '',
+  party_email: t.partyEmail || '',
 })
 
 const vehicleFromDB = r => ({
