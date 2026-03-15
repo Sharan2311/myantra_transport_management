@@ -2503,7 +2503,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
         ? <LockedField label="Grade" value={f.grade} />
         : <Field label="Grade" value={f.grade||""} onChange={ff("grade")}
             opts={isIn ? ["Limestone","Coal","Gypsum","Fly Ash","Slag","Other"].map(x=>({v:x,l:x}))
-                       : ["Cement Packed","Cement Bulk"].map(x=>({v:x,l:x}))} />}
+                       : ["Cement Packed","Cement Bulk","Clinker"].map(x=>({v:x,l:x}))} />}
       <div style={{display:"flex",gap:10}}>
         {locked
           ? <><LockedField label="Qty (MT)" value={f.qty} half /><LockedField label="Bags" value={f.bags} half /></>
@@ -7104,32 +7104,303 @@ function ExpensesLedger({expenses, setExpenses, payments, user, log}) {
 
 // ─── REPORTS ──────────────────────────────────────────────────────────────────
 function Reports({trips, vehicles, employees, payments, settlements, indents}) {
-  const [df,setDf]=useState("2026-01-01"); const [dt,setDt]=useState(today());
-  const fil=trips.filter(t=>t.date>=df&&t.date<=dt);
-  const exportCSV=(rows,name)=>{if(!rows.length)return;const k=Object.keys(rows[0]);const csv=[k.join(","),...rows.map(r=>k.map(x=>`"${String(r[x]??"").replace(/"/g,'""')}"`).join(","))].join("\n");const b=new Blob([csv],{type:"text/csv"});const u=URL.createObjectURL(b);const a=document.createElement("a");a.href=u;a.download=name;a.click();URL.revokeObjectURL(u);};
-  const printR=(html,title)=>{const w=window.open("","_blank");w.document.write(`<!DOCTYPE html><html><head><title>${title}</title><style>body{font-family:monospace;padding:20px;font-size:12px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ccc;padding:5px 8px;text-align:left}th{background:#f0f0f0}h2{margin-bottom:4px}</style></head><body onload="window.print()">${html}</body></html>`);w.document.close();};
+  // ── Date range ───────────────────────────────────────────────────────────────
+  const [df, setDf] = useState(() => {
+    const d = new Date(); d.setDate(1);
+    return d.toISOString().split("T")[0];
+  });
+  const [dt, setDt]   = useState(today());
+  const [monthSel, setMonthSel] = useState(""); // "YYYY-MM" quick picker
+
+  // ── Filters ──────────────────────────────────────────────────────────────────
+  const [stateFilter,  setStateFilter]  = useState("All"); // All|Karnataka|Telangana|Other
+  const [orderFilter,  setOrderFilter]  = useState("All"); // All|godown|party
+  const [reportTab,    setReportTab]    = useState("dispatch"); // dispatch|csv
+
+  // Quick month picker
+  const applyMonth = m => {
+    if(!m) return;
+    const [y,mo] = m.split("-");
+    const last = new Date(+y, +mo, 0).getDate();
+    setDf(m+"-01"); setDt(m+"-"+String(last).padStart(2,"0")); setMonthSel(m);
+  };
+
+  // ── All outbound trips in date range ────────────────────────────────────────
+  const base = trips.filter(t =>
+    t.type==="outbound" && t.date>=df && t.date<=dt
+  );
+
+  // Apply order type filter
+  const afterOrder = orderFilter==="All" ? base
+    : orderFilter==="party"  ? base.filter(t=>t.orderType==="party")
+    : base.filter(t=>!t.orderType||t.orderType==="godown");
+
+  // Clinker trips (separate)
+  const clinkerTrips = afterOrder.filter(t=>(t.grade||"").toLowerCase().includes("clinker"));
+
+  // Cement trips (non-clinker outbound)
+  const cementBase = afterOrder.filter(t=>!(t.grade||"").toLowerCase().includes("clinker"));
+
+  // Helper: get state from trip (party trips have state field; godown trips derive from 'to')
+  const getState = t => {
+    if(t.state&&t.state.trim()) return t.state.trim();
+    // Fallback: try to guess from destination
+    const to = (t.to||"").toLowerCase();
+    if(to.includes("maharashtra")||to.includes("pune")||to.includes("patas")||to.includes("nashik")) return "Maharashtra";
+    if(to.includes("telangana")||to.includes("hyderabad")||to.includes("rangareddy")||to.includes("warangal")) return "Telangana";
+    if(to.includes("karnataka")||to.includes("raichur")||to.includes("gulbarga")||to.includes("kalaburagi")||to.includes("kodla")) return "Karnataka";
+    return "Other";
+  };
+
+  // Apply state filter to cement trips
+  const cementFiltered = stateFilter==="All" ? cementBase
+    : stateFilter==="Other" ? cementBase.filter(t=>!["Karnataka","Telangana","Maharashtra"].includes(getState(t)))
+    : cementBase.filter(t=>getState(t)===stateFilter);
+
+  // ── State breakdown for cement ───────────────────────────────────────────────
+  const STATES = ["Karnataka","Telangana","Maharashtra","Other"];
+  const stateBreakdown = STATES.map(st=>{
+    const rows = cementBase.filter(t=>
+      st==="Other" ? !["Karnataka","Telangana","Maharashtra"].includes(getState(t)) : getState(t)===st
+    );
+    return {state:st, trips:rows.length, qty:rows.reduce((s,t)=>s+(+t.qty||0),0), rows};
+  }).filter(s=>s.trips>0);
+
+  // ── CSV / Print helpers ───────────────────────────────────────────────────────
+  const exportCSV=(rows,name)=>{if(!rows.length)return;const k=Object.keys(rows[0]);const csv=[k.join(","),...rows.map(r=>k.map(x=>'"'+String(r[x]??"").replace(/"/g,'""')+'"').join(","))].join("\n");const b=new Blob([csv],{type:"text/csv"});const u=URL.createObjectURL(b);const a=document.createElement("a");a.href=u;a.download=name;a.click();URL.revokeObjectURL(u);};
+  const printR=(html,title)=>{const w=window.open("","_blank");w.document.write("<!DOCTYPE html><html><head><title>"+title+"</title><style>body{font-family:Arial,sans-serif;padding:20px;font-size:11px}table{width:100%;border-collapse:collapse;margin-bottom:12px}th,td{border:1px solid #ccc;padding:4px 7px;text-align:left}th{background:#f0f0f0;font-size:10px;text-transform:uppercase}.section{margin-top:16px;font-weight:bold;font-size:13px;border-bottom:2px solid #333;padding-bottom:3px;margin-bottom:6px}.summary{display:flex;gap:20px;margin:6px 0 10px;font-size:12px}.sv{font-weight:bold}</style></head><body onload='window.print()'>"+html+"</body></html>");w.document.close();};
+
+  const fmtN = n => Number(n||0).toLocaleString("en-IN",{maximumFractionDigits:2});
+
+  const dispatchTableHTML = (rows, title) => {
+    if(!rows.length) return "";
+    const trs = rows.map(t=>
+      "<tr><td>"+t.date+"</td><td>"+(t.lrNo||"—")+"</td><td>"+(t.diNo||"—")+"</td><td>"+t.truckNo+"</td><td>"+(t.to||"—")+"</td><td>"+getState(t)+"</td><td>"+t.qty+"</td><td>"+(t.grade||"—")+"</td><td>"+(t.orderType==="party"?"🤝 Party":"🏭 Godown")+"</td><td>"+(t.status||"—")+"</td></tr>"
+    ).join("");
+    return "<div class='section'>"+title+" ("+rows.length+" trips · "+fmtN(rows.reduce((s,t)=>s+(+t.qty||0),0))+" MT)</div>"
+      +"<table><thead><tr><th>Date</th><th>LR</th><th>DI</th><th>Truck</th><th>To</th><th>State</th><th>MT</th><th>Grade</th><th>Order</th><th>Status</th></tr></thead><tbody>"+trs+"</tbody></table>";
+  };
+
+  // ── Months for quick pick ────────────────────────────────────────────────────
+  const months = [];
+  const now = new Date();
+  for(let i=0;i<12;i++){
+    const d=new Date(now.getFullYear(),now.getMonth()-i,1);
+    months.push(d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0"));
+  }
+
+  const StatCard = ({state, qty, trips, color, onClick, active}) => (
+    <button onClick={onClick} style={{
+      background: active ? color+"33" : C.card,
+      border: "2px solid "+(active?color:C.border),
+      borderRadius:12, padding:"12px 10px", cursor:"pointer",
+      textAlign:"center", flex:"1 1 0"}}>
+      <div style={{color:active?color:C.text, fontWeight:800, fontSize:16}}>{fmtN(qty)}</div>
+      <div style={{color:C.muted, fontSize:9, textTransform:"uppercase", letterSpacing:1}}>{state} MT</div>
+      <div style={{color:active?color:C.muted, fontSize:10, marginTop:2}}>{trips} trips</div>
+    </button>
+  );
+
   return (
-    <div style={{display:"flex",flexDirection:"column",gap:12}}>
-      <div style={{color:C.blue,fontWeight:800,fontSize:16}}>📤 Reports</div>
-      <div style={{display:"flex",gap:10}}><Field label="From" value={df} onChange={setDf} type="date" half /><Field label="To" value={dt} onChange={setDt} type="date" half /></div>
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
-        <KPI label="Trips" value={fil.length} color={C.blue} />
-        <KPI label="Billed" value={fmt(fil.reduce((s,t)=>s+t.qty*t.frRate,0))} color={C.green} />
-        <KPI label="Margin" value={fmt(fil.reduce((s,t)=>s+t.qty*(t.frRate-t.givenRate),0))} color={C.accent} />
+    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+      <div style={{color:C.blue,fontWeight:800,fontSize:16}}>📊 Dispatch Report</div>
+
+      {/* Date range */}
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"flex-end"}}>
+        <div style={{flex:1,minWidth:120}}>
+          <div style={{color:C.muted,fontSize:10,marginBottom:3,fontWeight:700}}>FROM</div>
+          <input type="date" value={df} onChange={e=>{setDf(e.target.value);setMonthSel("");}}
+            onClick={e=>e.target.showPicker?.()}
+            style={{background:C.bg,border:"1.5px solid "+C.border,borderRadius:8,color:C.text,
+              padding:"8px 10px",fontSize:13,width:"100%",colorScheme:"dark",boxSizing:"border-box"}} />
+        </div>
+        <div style={{flex:1,minWidth:120}}>
+          <div style={{color:C.muted,fontSize:10,marginBottom:3,fontWeight:700}}>TO</div>
+          <input type="date" value={dt} onChange={e=>{setDt(e.target.value);setMonthSel("");}}
+            onClick={e=>e.target.showPicker?.()}
+            style={{background:C.bg,border:"1.5px solid "+C.border,borderRadius:8,color:C.text,
+              padding:"8px 10px",fontSize:13,width:"100%",colorScheme:"dark",boxSizing:"border-box"}} />
+        </div>
       </div>
-      {[
-        {l:"🚚 Trip Report CSV",     c:C.blue,   fn:()=>exportCSV(fil.map(t=>({Date:t.date,Type:t.type,LR:t.lrNo,Truck:t.truckNo,GR:t.grNo,DI:t.diNo,From:t.from,To:t.to,MT:t.qty,FR:t.frRate,Driver:t.givenRate,Margin:t.qty*(t.frRate-t.givenRate),TAFAL:t.tafal,Diesel:t.dieselEstimate,Advance:t.advance,Shortage:t.shortage,Status:t.status,By:t.createdBy})),"trips.csv")},
-        {l:"🚛 Vehicle Loan CSV",    c:C.red,    fn:()=>exportCSV(vehicles.map(v=>({Truck:v.truckNo,Owner:v.ownerName,Loan:v.loan,Recovered:v.loanRecovered,Balance:v.loan-v.loanRecovered})),"loans.csv")},
-        {l:"💵 Settlements CSV",     c:C.green,  fn:()=>exportCSV(settlements,"settlements.csv")},
-        {l:"⛽ Diesel Indents CSV",  c:C.orange, fn:()=>exportCSV(indents.map(i=>({Date:i.date,Truck:i.truckNo,Indent:i.indentNo,Litres:i.litres,Rate:i.ratePerLitre,Amount:i.amount,Confirmed:i.confirmed,Paid:i.paid,PaidRef:i.paidRef})),"diesel.csv")},
-        {l:"🖨 Print Trip Report",   c:C.blue,   fn:()=>{const rows=fil.map(t=>`<tr><td>${t.date}</td><td>${t.lrNo||"—"}</td><td>${t.truckNo}</td><td>${t.to}</td><td>${t.qty}</td><td>₹${(t.qty*t.frRate).toLocaleString("en-IN")}</td><td>₹${t.tafal}</td><td>${t.status}</td><td>${t.createdBy}</td></tr>`).join(""); printR(`<h2>M.YANTRA — Trip Report ${df} to ${dt}</h2><table><thead><tr><th>Date</th><th>LR</th><th>Truck</th><th>To</th><th>MT</th><th>Billed</th><th>TAFAL</th><th>Status</th><th>By</th></tr></thead><tbody>${rows}</tbody></table>`,"Trip Report");}},
-        {l:"🖨 Print Loan Report",   c:C.red,    fn:()=>{const vr=vehicles.map(v=>`<tr><td>${v.truckNo}</td><td>${v.ownerName}</td><td>₹${v.loan.toLocaleString("en-IN")}</td><td>₹${v.loanRecovered.toLocaleString("en-IN")}</td><td>₹${(v.loan-v.loanRecovered).toLocaleString("en-IN")}</td></tr>`).join(""); printR(`<h2>M.YANTRA — Loan Report</h2><table><thead><tr><th>Truck</th><th>Owner</th><th>Loan</th><th>Recovered</th><th>Balance</th></tr></thead><tbody>${vr}</tbody></table>`,"Loan Report");}},
-      ].map(r=>(
-        <button key={r.l} onClick={r.fn} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:"15px 16px",display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer",width:"100%"}}>
-          <span style={{color:C.text,fontWeight:700,fontSize:14}}>{r.l}</span>
-          <span style={{color:r.c,fontSize:18}}>→</span>
+
+      {/* Monthly quick picks */}
+      <div style={{overflowX:"auto",WebkitOverflowScrolling:"touch",paddingBottom:4}}>
+        <div style={{display:"flex",gap:6,width:"max-content"}}>
+          {months.map(m=>{
+            const [y,mo]=m.split("-");
+            const label=new Date(+y,+mo-1,1).toLocaleString("en-IN",{month:"short",year:"2-digit"});
+            return (
+              <button key={m} onClick={()=>applyMonth(m)} style={{
+                background:monthSel===m?C.blue+"33":C.card,
+                border:"1.5px solid "+(monthSel===m?C.blue:C.border),
+                color:monthSel===m?C.blue:C.muted,
+                borderRadius:20,padding:"5px 12px",fontSize:12,fontWeight:700,
+                cursor:"pointer",whiteSpace:"nowrap"}}>
+                {label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Filters row */}
+      <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+        {/* Order type filter */}
+        <div style={{display:"flex",gap:6,background:C.card,borderRadius:10,padding:"4px"}}>
+          {["All","godown","party"].map(o=>(
+            <button key={o} onClick={()=>setOrderFilter(o)} style={{
+              background:orderFilter===o?C.accent+"33":"transparent",
+              border:"none",borderRadius:8,padding:"5px 10px",
+              color:orderFilter===o?C.accent:C.muted,
+              fontSize:11,fontWeight:700,cursor:"pointer"}}>
+              {o==="All"?"All Orders":o==="party"?"🤝 Party":"🏭 Godown"}
+            </button>
+          ))}
+        </div>
+        {/* State filter */}
+        <div style={{display:"flex",gap:6,background:C.card,borderRadius:10,padding:"4px",flexWrap:"wrap"}}>
+          {["All","Karnataka","Telangana","Maharashtra","Other"].map(s=>(
+            <button key={s} onClick={()=>setStateFilter(s)} style={{
+              background:stateFilter===s?C.teal+"33":"transparent",
+              border:"none",borderRadius:8,padding:"5px 10px",
+              color:stateFilter===s?C.teal:C.muted,
+              fontSize:11,fontWeight:700,cursor:"pointer"}}>
+              {s}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* ── CEMENT DISPATCH ─────────────────────────────────────────────────────── */}
+      <div style={{background:C.card,borderRadius:14,padding:"14px 16px"}}>
+        <div style={{color:C.blue,fontWeight:800,fontSize:13,marginBottom:10}}>
+          🚚 Cement Dispatch
+          <span style={{color:C.muted,fontWeight:400,fontSize:11,marginLeft:8}}>
+            {cementFiltered.length} trips · {fmtN(cementFiltered.reduce((s,t)=>s+(+t.qty||0),0))} MT
+          </span>
+        </div>
+
+        {/* State breakdown cards — always All */}
+        <div style={{display:"flex",gap:6,marginBottom:12,flexWrap:"wrap"}}>
+          {stateBreakdown.map(s=>(
+            <StatCard key={s.state}
+              state={s.state} qty={s.qty} trips={s.trips}
+              color={s.state==="Karnataka"?C.green:s.state==="Telangana"?C.blue:s.state==="Maharashtra"?C.orange:C.muted}
+              onClick={()=>setStateFilter(stateFilter===s.state?"All":s.state)}
+              active={stateFilter===s.state} />
+          ))}
+          {stateBreakdown.length>0 && (
+            <StatCard key="total" state="TOTAL"
+              qty={cementBase.reduce((s,t)=>s+(+t.qty||0),0)}
+              trips={cementBase.length}
+              color={C.accent}
+              onClick={()=>setStateFilter("All")}
+              active={stateFilter==="All"} />
+          )}
+        </div>
+
+        {/* Trip list */}
+        {cementFiltered.length===0 ? (
+          <div style={{color:C.muted,fontSize:13,textAlign:"center",padding:"20px 0"}}>No trips in this period</div>
+        ) : (
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            {cementFiltered.map(t=>(
+              <div key={t.id} style={{background:C.bg,borderRadius:10,padding:"10px 12px",
+                borderLeft:"3px solid "+(getState(t)==="Karnataka"?C.green:getState(t)==="Telangana"?C.blue:getState(t)==="Maharashtra"?C.orange:C.muted)}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                  <div>
+                    <span style={{fontWeight:700,fontSize:13}}>{t.truckNo}</span>
+                    <span style={{color:C.blue,fontSize:11,marginLeft:6}}>LR:{t.lrNo||"—"}</span>
+                    <span style={{color:C.muted,fontSize:11,marginLeft:6}}>DI:{t.diNo||"—"}</span>
+                  </div>
+                  <div style={{display:"flex",gap:5,alignItems:"center"}}>
+                    {t.orderType==="party"&&<Badge label="🤝" color={C.accent} />}
+                    <span style={{color:C.orange,fontWeight:800,fontSize:13}}>{t.qty} MT</span>
+                  </div>
+                </div>
+                <div style={{color:C.muted,fontSize:11,marginTop:3}}>
+                  {t.to||"—"} · <span style={{color:C.teal,fontWeight:700}}>{getState(t)}</span> · {t.date} · {t.grade||"—"}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Print cement dispatch */}
+        <button onClick={()=>{
+          let html="<h2>M.YANTRA — Cement Dispatch Report</h2><div>Period: "+df+" to "+dt+" | State: "+stateFilter+" | Orders: "+orderFilter+"</div>";
+          if(stateFilter==="All"){
+            stateBreakdown.forEach(s=>{ html+=dispatchTableHTML(s.rows.filter(t=>orderFilter==="All"||t.orderType===orderFilter||(orderFilter==="godown"&&!t.orderType)), s.state); });
+          } else {
+            html+=dispatchTableHTML(cementFiltered,"Cement — "+stateFilter);
+          }
+          printR(html,"Cement Dispatch");
+        }} style={{marginTop:12,background:C.blue+"22",border:"1px solid "+C.blue+"44",
+          borderRadius:10,padding:"9px 14px",color:C.blue,fontWeight:700,
+          fontSize:12,cursor:"pointer",width:"100%"}}>
+          🖨 Print Cement Dispatch
         </button>
-      ))}
+      </div>
+
+      {/* ── CLINKER DISPATCH ────────────────────────────────────────────────────── */}
+      {(clinkerTrips.length>0 || true) && (
+        <div style={{background:C.card,borderRadius:14,padding:"14px 16px"}}>
+          <div style={{color:C.orange,fontWeight:800,fontSize:13,marginBottom:10}}>
+            🏗 Clinker Dispatch
+            <span style={{color:C.muted,fontWeight:400,fontSize:11,marginLeft:8}}>
+              {clinkerTrips.length} trips · {fmtN(clinkerTrips.reduce((s,t)=>s+(+t.qty||0),0))} MT
+            </span>
+          </div>
+          {clinkerTrips.length===0 ? (
+            <div style={{color:C.muted,fontSize:13,textAlign:"center",padding:"12px 0"}}>No clinker trips in this period</div>
+          ) : (
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {clinkerTrips.map(t=>(
+                <div key={t.id} style={{background:C.bg,borderRadius:10,padding:"10px 12px",
+                  borderLeft:"3px solid "+C.orange}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                    <div>
+                      <span style={{fontWeight:700,fontSize:13}}>{t.truckNo}</span>
+                      <span style={{color:C.blue,fontSize:11,marginLeft:6}}>LR:{t.lrNo||"—"}</span>
+                      <span style={{color:C.muted,fontSize:11,marginLeft:6}}>DI:{t.diNo||"—"}</span>
+                    </div>
+                    <span style={{color:C.orange,fontWeight:800,fontSize:13}}>{t.qty} MT</span>
+                  </div>
+                  <div style={{color:C.muted,fontSize:11,marginTop:3}}>
+                    {t.to||"—"} · {t.consignee||"—"} · {t.date}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          {clinkerTrips.length>0&&(
+            <button onClick={()=>printR(dispatchTableHTML(clinkerTrips,"Clinker Dispatch"),"Clinker Dispatch")}
+              style={{marginTop:12,background:C.orange+"22",border:"1px solid "+C.orange+"44",
+                borderRadius:10,padding:"9px 14px",color:C.orange,fontWeight:700,
+                fontSize:12,cursor:"pointer",width:"100%"}}>
+              🖨 Print Clinker Dispatch
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* ── CSV EXPORTS ──────────────────────────────────────────────────────────── */}
+      <div style={{background:C.card,borderRadius:14,padding:"14px 16px"}}>
+        <div style={{color:C.muted,fontWeight:700,fontSize:12,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>CSV Exports</div>
+        {[
+          {l:"🚚 Trip Report CSV",  c:C.blue,   fn:()=>exportCSV(cementFiltered.map(t=>({Date:t.date,LR:t.lrNo,DI:t.diNo,Truck:t.truckNo,To:t.to,State:getState(t),Grade:t.grade,MT:t.qty,OrderType:t.orderType||"godown",FR:t.frRate,Driver:t.givenRate,Margin:t.qty*(t.frRate-t.givenRate),Status:t.status,By:t.createdBy})),"cement_dispatch.csv")},
+          {l:"🏗 Clinker CSV",      c:C.orange, fn:()=>exportCSV(clinkerTrips.map(t=>({Date:t.date,LR:t.lrNo,DI:t.diNo,Truck:t.truckNo,To:t.to,Consignee:t.consignee,MT:t.qty,Status:t.status,By:t.createdBy})),"clinker_dispatch.csv")},
+          {l:"🚛 Vehicle Loan CSV", c:C.red,    fn:()=>exportCSV(vehicles.map(v=>({Truck:v.truckNo,Owner:v.ownerName,Loan:v.loan,Recovered:v.loanRecovered,Balance:v.loan-v.loanRecovered})),"loans.csv")},
+          {l:"💵 Settlements CSV",  c:C.green,  fn:()=>exportCSV(settlements,"settlements.csv")},
+          {l:"⛽ Diesel Indents CSV",c:C.teal,  fn:()=>exportCSV(indents.map(i=>({Date:i.date,Truck:i.truckNo,Indent:i.indentNo,Litres:i.litres,Rate:i.ratePerLitre,Amount:i.amount,Confirmed:i.confirmed,Paid:i.paid,PaidRef:i.paidRef})),"diesel.csv")},
+          {l:"🖨 Print Loan Report", c:C.red,   fn:()=>{const vr=vehicles.map(v=>"<tr><td>"+v.truckNo+"</td><td>"+v.ownerName+"</td><td>"+fmtN(v.loan)+"</td><td>"+fmtN(v.loanRecovered)+"</td><td>"+fmtN(v.loan-v.loanRecovered)+"</td></tr>").join(""); printR("<h2>M.YANTRA — Loan Report</h2><table><thead><tr><th>Truck</th><th>Owner</th><th>Loan</th><th>Recovered</th><th>Balance</th></tr></thead><tbody>"+vr+"</tbody></table>","Loan Report");}},
+        ].map(r=>(
+          <button key={r.l} onClick={r.fn} style={{background:C.bg,border:"1px solid "+C.border,borderRadius:12,padding:"12px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer",width:"100%",marginBottom:6}}>
+            <span style={{color:C.text,fontWeight:700,fontSize:13}}>{r.l}</span>
+            <span style={{color:r.c,fontSize:16}}>→</span>
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
