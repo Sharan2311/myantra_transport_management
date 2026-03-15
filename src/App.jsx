@@ -2017,53 +2017,66 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
             </div>
 
             {/* Footer badges */}
-            <div style={{padding:"7px 12px",display:"flex",gap:5,flexWrap:"wrap",alignItems:"center",justifyContent:"space-between"}}>
-              <span style={{color:ROLES[t.createdBy]?.color||C.muted,fontSize:11}}>by {t.createdBy} · {t.createdAt}</span>
-              <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
-                {t.tafal>0     && <Badge label={`TAFAL ₹${t.tafal}`} color={C.purple} />}
-                {t.shortage>0  && <Badge label={`⚠ ${t.shortage}MT`} color={C.red} />}
-                {t.advance>0   && <Badge label={`Adv ${fmt(t.advance)}`} color={C.orange} />}
-                {confirmedDiesel>0 && <Badge label={`⛽ ${fmt(confirmedDiesel)}`} color={C.orange} />}
-                {t.driverSettled   && <Badge label="✓ Settled" color={C.green} />}
-                {t.diLines && t.diLines.length > 1 && <Badge label={`${t.diLines.length} DIs`} color={C.teal} />}
-                {t.orderType==="party" && <Badge label="🤝 Party" color={C.accent} />}
-                {t.orderType==="party" && !t.emailSentAt && <Badge label="⚠ Email Pending" color={C.red} />}
-                {t.orderType==="party" && t.emailSentAt && !t.receiptFilePath && <Badge label="📧 Sent · Awaiting Reply" color={C.blue} />}
-                {(t.orderType==="party"||t.grFilePath) && t.receiptFilePath && !t.mergedPdfPath && <Badge label="🔄 Receipt uploaded" color={C.teal} />}
-                {(t.orderType==="party"||t.grFilePath) && t.mergedPdfPath && <Badge label="✅ Merged PDF ready" color={C.green} />}
-                {/* Upload receipt — show for any party trip or any trip that has GR file stored */}
-                {(t.orderType==="party" || t.grFilePath) && (t.emailSentAt || t.grFilePath) && (
-                  <button onClick={()=>setReceiptSheet(t)}
-                    style={{background:t.receiptFilePath?C.teal+"22":C.accent+"22",
-                      color:t.receiptFilePath?C.teal:C.accent,
-                      border:`1px solid ${t.receiptFilePath?C.teal:C.accent}44`,
-                      borderRadius:20,padding:"3px 10px",fontSize:11,fontWeight:700,
-                      cursor:"pointer",whiteSpace:"nowrap"}}>
-                    {t.receiptFilePath ? "📎 Re-upload Receipt" : "📎 Upload Receipt"}
-                  </button>
-                )}
-                {/* Download merged PDF */}
-                {(t.orderType==="party"||t.grFilePath) && t.mergedPdfPath && (
-                  <button onClick={async()=>{
-                    try{
-                      const url = await getSignedUrl(t.mergedPdfPath, 3600);
-                      const a=document.createElement("a"); a.href=url;
-                      a.download=`MergedConfirmation_${t.lrNo||t.id}.pdf`;
-                      a.target="_blank"; document.body.appendChild(a); a.click();
-                      document.body.removeChild(a);
-                    }catch(e){alert("Download failed: "+e.message);}
-                  }} style={{background:C.green+"22",color:C.green,
-                    border:`1px solid ${C.green}44`,borderRadius:20,
-                    padding:"3px 10px",fontSize:11,fontWeight:700,
-                    cursor:"pointer",whiteSpace:"nowrap"}}>
-                    ⬇ Download PDF
-                  </button>
+            {(()=>{
+              const isPartyTrip = t.orderType==="party" || t.grFilePath;
+              return (
+              <div style={{padding:"7px 12px",display:"flex",flexDirection:"column",gap:6}}>
+                {/* Row 1: created by + standard badges */}
+                <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center",justifyContent:"space-between"}}>
+                  <span style={{color:ROLES[t.createdBy]?.color||C.muted,fontSize:11}}>by {t.createdBy} · {t.createdAt}</span>
+                  <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}}>
+                    {t.tafal>0     && <Badge label={`TAFAL ₹${t.tafal}`} color={C.purple} />}
+                    {t.shortage>0  && <Badge label={`⚠ ${t.shortage}MT`} color={C.red} />}
+                    {t.advance>0   && <Badge label={`Adv ${fmt(t.advance)}`} color={C.orange} />}
+                    {confirmedDiesel>0 && <Badge label={`⛽ ${fmt(confirmedDiesel)}`} color={C.orange} />}
+                    {t.driverSettled   && <Badge label="✓ Settled" color={C.green} />}
+                    {t.diLines && t.diLines.length > 1 && <Badge label={`${t.diLines.length} DIs`} color={C.teal} />}
+                  </div>
+                </div>
+                {/* Row 2: party status badges + action buttons — always on own row */}
+                {isPartyTrip && (
+                  <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",
+                    borderTop:`1px solid ${C.border}33`,paddingTop:6}}>
+                    <Badge label="🤝 Party" color={C.accent} />
+                    {t.orderType==="party" && !t.emailSentAt && <Badge label="⚠ Email Pending" color={C.red} />}
+                    {t.orderType==="party" && t.emailSentAt && !t.receiptFilePath && <Badge label="📧 Awaiting Reply" color={C.blue} />}
+                    {t.receiptFilePath && !t.mergedPdfPath && <Badge label="🔄 Receipt uploaded" color={C.teal} />}
+                    {t.mergedPdfPath && <Badge label="✅ Merged PDF ready" color={C.green} />}
+                    {/* Upload receipt button */}
+                    {(t.emailSentAt || t.grFilePath) && (
+                      <button onClick={()=>setReceiptSheet(t)}
+                        style={{background:t.receiptFilePath?C.teal+"22":C.accent+"22",
+                          color:t.receiptFilePath?C.teal:C.accent,
+                          border:`1px solid ${t.receiptFilePath?C.teal:C.accent}44`,
+                          borderRadius:20,padding:"4px 12px",fontSize:11,fontWeight:700,
+                          cursor:"pointer",whiteSpace:"nowrap"}}>
+                        {t.receiptFilePath ? "📎 Re-upload Receipt" : "📎 Upload Receipt"}
+                      </button>
+                    )}
+                    {/* Download merged PDF */}
+                    {t.mergedPdfPath && (
+                      <button onClick={async()=>{
+                        try{
+                          const url = await getSignedUrl(t.mergedPdfPath, 3600);
+                          const a=document.createElement("a"); a.href=url;
+                          a.download=`MergedConfirmation_${t.lrNo||t.id}.pdf`;
+                          a.target="_blank"; document.body.appendChild(a); a.click();
+                          document.body.removeChild(a);
+                        }catch(e){alert("Download failed: "+e.message);}
+                      }} style={{background:C.green+"22",color:C.green,
+                        border:`1px solid ${C.green}44`,borderRadius:20,
+                        padding:"4px 12px",fontSize:11,fontWeight:700,
+                        cursor:"pointer",whiteSpace:"nowrap"}}>
+                        ⬇ Download PDF
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
             </div>
           </div>
         );
-      })}
+      })()}
       {shown.length===0 && <div style={{textAlign:"center",color:C.muted,padding:40}}>No trips found</div>}
 
       {/* ── RECEIPT CONFIRMATION UPLOAD SHEET ── */}
@@ -2116,6 +2129,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
         <Sheet title={isIn?"New Raw Material Trip":"New Cement Trip"} onClose={()=>{
           setAddSheet(false);setF(blankForm());setDiConflict(null);setWasScanned(false);
           setOrderTypeStep(null);setPartyStep("docs");setEmailSent(false);setShowEmailModal(false);
+          setUploadingFiles(false);
           grFileRef.current=null; invoiceFileRef.current=null;
         }}>
 
@@ -2176,11 +2190,11 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
             />
           )}
 
-          {/* STEP 2 (PARTY): Fill trip form */}
+          {/* STEP 2 (PARTY): Fill trip form — same scan/conflict flow as godown */}
           {orderTypeStep==="party" && partyStep==="form" && (
             <>
               {/* Attached docs indicator */}
-              <div style={{display:"flex",gap:8,marginBottom:4}}>
+              <div style={{display:"flex",gap:8,marginBottom:4,flexWrap:"wrap"}}>
                 <div style={{background:C.green+"22",border:`1px solid ${C.green}44`,borderRadius:8,
                   padding:"5px 10px",fontSize:11,color:C.green,fontWeight:700}}>
                   ✓ GR: {grFileRef.current?.name||"uploaded"}
@@ -2189,31 +2203,78 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                   padding:"5px 10px",fontSize:11,color:C.blue,fontWeight:700}}>
                   ✓ Inv: {invoiceFileRef.current?.name||"uploaded"}
                 </div>
-                <button onClick={()=>setPartyStep("docs")}
+                <button onClick={()=>{setPartyStep("docs");setDiConflict(null);setWasScanned(false);}}
                   style={{background:"none",border:"none",color:C.muted,fontSize:11,cursor:"pointer"}}>
                   ✏ Change
                 </button>
               </div>
-              {/* Scan uploader for party trips too */}
-              <DIUploader onExtracted={e=>{
-                setF(p=>({...p,...e, orderType:"party",
-                  district: e.district||p.district||"",
-                  state: e.state||p.state||""}));
-                setWasScanned(true);
-              }} trips={trips} settings={settings} isIn={false} />
-              <TripForm f={f} ff={ff} isIn={false} ac={C.accent} vehicles={vehicles} settings={settings}
-                onTruckChange={onTruckChange}
-                onSubmit={async ()=>{
-                  // Validate net first
-                  const _gross=(+f.qty||0)*(+f.givenRate||0);
-                  const _net=_gross-(+f.advance||0)-(+f.tafal||0)-(+f.dieselEstimate||0)-(+f.shortageRecovery||0)-(+f.loanRecovery||0);
-                  if(_net<0){alert("Cannot save: Est. Net to Driver is negative. Please reduce deductions.");return;}
-                  if(!f.district||!f.state){alert("District and State are required for Party orders.");return;}
-                  setShowEmailModal(true);
-                }}
-                submitLabel="📧 Send Email & Save"
-                user={user} wasScanned={wasScanned}
-                isParty={true} />
+
+              {/* Same DI conflict flow as godown — handles duplicate DI, LR entry, merge */}
+              {diConflict ? (
+                diConflict.askLR ? (
+                  <AskLRSheet extracted={diConflict.extracted} trips={trips} vehicles={vehicles}
+                    onConfirm={(lrNo, driverPhone)=>{
+                      // Carry party fields through LR confirm
+                      onLRConfirmed(lrNo, driverPhone);
+                      setF(p=>({...p, orderType:"party",
+                        district:diConflict.extracted.district||p.district||"",
+                        state:diConflict.extracted.state||p.state||""}));
+                    }}
+                    onCancel={()=>setDiConflict(null)} />
+                ) : (
+                  <MergeDISheet conflict={diConflict} onMerge={addDIToExisting}
+                    onSeparate={()=>{setF(p=>({...p,...diConflict.extracted,orderType:"party"}));setDiConflict(null);}}
+                    onCancel={()=>setDiConflict(null)} isOwner={user.role==="owner"} />
+                )
+              ) : (
+                <>
+                  {/* Scan uploader — goes through same onDIExtracted → AskLRSheet flow */}
+                  <DIUploader onExtracted={e=>{
+                    // Preserve party orderType and district/state through the scan flow
+                    setF(p=>({...p, orderType:"party",
+                      district:e.district||p.district||"",
+                      state:e.state||p.state||""}));
+                    onDIExtracted(e);
+                  }} trips={trips} settings={settings} isIn={false} />
+
+                  {/* Show form only after scan + LR confirmed (wasScanned) or owner */}
+                  {(wasScanned || user.role==="owner") ? (
+                    <TripForm f={f} ff={ff} isIn={false} ac={C.accent} vehicles={vehicles} settings={settings}
+                      onTruckChange={onTruckChange}
+                      onSubmit={async ()=>{
+                        // All same validations as godown saveNew
+                        if(!f.givenRate||+f.givenRate<=0){alert("Driver Rate ₹/MT is mandatory.");return;}
+                        if((+f.dieselEstimate||0)>0&&!f.dieselIndentNo?.trim()){alert("Diesel Indent No is mandatory when Diesel Estimate is entered.");return;}
+                        if(f.dieselIndentNo&&f.dieselIndentNo.trim()){
+                          if(trips.some(t=>t.dieselIndentNo&&t.dieselIndentNo.trim()===f.dieselIndentNo.trim()))
+                            {alert(`Indent No "${f.dieselIndentNo}" already exists on another trip.`);return;}
+                          if((indents||[]).some(i=>i.indentNo&&String(i.indentNo).trim()===f.dieselIndentNo.trim()))
+                            {alert(`Indent No "${f.dieselIndentNo}" already exists in Diesel records.`);return;}
+                        }
+                        // Duplicate LR check
+                        if(f.lrNo&&f.lrNo.trim()&&trips.some(t=>t.lrNo===f.lrNo.trim()))
+                          {alert(`LR "${f.lrNo}" already exists. Each LR must be unique.`);return;}
+                        // Net check
+                        const _gross=(+f.qty||0)*(+f.givenRate||0);
+                        const _net=_gross-(+f.advance||0)-(+f.tafal||0)-(+f.dieselEstimate||0)-(+f.shortageRecovery||0)-(+f.loanRecovery||0);
+                        if(_net<0){alert("Cannot save: Est. Net to Driver is negative. Please reduce deductions.");return;}
+                        // Party-specific checks
+                        if(!f.district||!f.state){alert("District and State are required for Party orders.");return;}
+                        setShowEmailModal(true);
+                      }}
+                      submitLabel="📧 Send Email & Save"
+                      user={user} wasScanned={wasScanned}
+                      isParty={true} />
+                  ) : (
+                    <div style={{background:C.bg,border:`2px dashed ${C.border}`,borderRadius:14,
+                      padding:"28px 20px",textAlign:"center",marginTop:8}}>
+                      <div style={{fontSize:32,marginBottom:8}}>📄</div>
+                      <div style={{color:C.muted,fontWeight:700,fontSize:14,marginBottom:4}}>Scan the GR copy above to fill trip details</div>
+                      <div style={{color:C.muted,fontSize:12}}>Fields will be filled automatically from the document</div>
+                    </div>
+                  )}
+                </>
+              )}
             </>
           )}
 
@@ -2234,6 +2295,11 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                 toEmail={partyToEmail}
                 onToEmailChange={setPartyToEmail}
                 onMarkSent={async (toEmail)=>{
+                  // Final duplicate LR check before saving
+                  if(f.lrNo&&f.lrNo.trim()&&trips.some(t=>t.lrNo===f.lrNo.trim())){
+                    alert(`LR "${f.lrNo}" already exists. Please go back and change the LR number.`);
+                    return;
+                  }
                   setUploadingFiles(true);
                   try {
                     const tripId = uid();
