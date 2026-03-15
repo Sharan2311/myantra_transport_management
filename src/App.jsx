@@ -2062,15 +2062,22 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
             <ReceiptUploadSheet
               trip={receiptSheet}
               onMerge={(tripId, receiptPath, mergedPath) => {
-                setTrips(p => p.map(t => t.id===tripId ? {
-                  ...t,
-                  receiptFilePath: receiptPath,
-                  receiptUploadedAt: nowTs(),
-                  mergedPdfPath: mergedPath,
-                } : t));
+                // Use dbSetTrips (not raw setTrips) so changes persist to Supabase
+                setTrips(p => p.map(t => {
+                  if(t.id!==tripId) return t;
+                  const updated = {
+                    ...t,
+                    receiptFilePath: receiptPath,
+                    receiptUploadedAt: nowTs(),
+                    mergedPdfPath: mergedPath,
+                  };
+                  // Explicitly persist to DB
+                  DB.saveTrip(updated).catch(e => console.error("saveTrip after merge:", e));
+                  return updated;
+                }));
                 log("RECEIPT UPLOADED", `LR:${receiptSheet.lrNo} merged PDF stored`);
                 setReceiptSheet(null);
-                alert("✅ PDFs merged successfully!\nTap ⬇ Download PDF on the trip card to download for portal submission.");
+                alert("✅ PDFs merged!\nThe ⬇ Download PDF button will now appear on the trip card.");
               }}
               onClose={()=>setReceiptSheet(null)}
             />
