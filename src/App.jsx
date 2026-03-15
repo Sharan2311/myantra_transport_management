@@ -992,6 +992,8 @@ Extract the following fields from this document image and return ONLY a JSON obj
   "from": "Source/loading location",
   "to": "Destination/unloading location",
   "grade": "Material grade - use exactly 'Cement Packed' or 'Cement Bulk' for cement, else actual material name",
+  "district": "Destination district name from consignee address — use the district/taluka/tehsil name from the address",
+  "state": "Destination state name — derive from consignee address or pincode (e.g. 501218=Telangana, 412219=Maharashtra, 585222=Karnataka)",
   "qty": "Quantity in MT as a number only (no units)",
   "bags": "Number of bags as a number only (0 if not applicable)",
   "frRate": "Freight rate per MT in rupees as a number only (the Shree/company rate, not driver rate)",
@@ -1158,6 +1160,250 @@ Rules:
   );
 }
 
+// ─── PARTY TRIP STORAGE HELPERS ──────────────────────────────────────────────
+const PARTY_BUCKET = "party-trip-files";
+
+async function uploadPartyFile(tripId, role, file) {
+  const ext  = (file.name||"file").split(".").pop() || "pdf";
+  const path = `${tripId}/${role}.${ext}`;
+  const { error } = await supabase.storage.from(PARTY_BUCKET).upload(path, file, {upsert:true});
+  if (error) throw new Error("Upload failed: " + error.message);
+  const { data } = supabase.storage.from(PARTY_BUCKET).getPublicUrl(path);
+  return { path, url: data.publicUrl };
+}
+async function deletePartyFiles(tripId) {
+  const { data:files } = await supabase.storage.from(PARTY_BUCKET).list(tripId);
+  if (!files||!files.length) return;
+  await supabase.storage.from(PARTY_BUCKET).remove(files.map(f=>`${tripId}/${f.name}`));
+}
+function buildConfirmationHTML(trip) {
+  const fmtD = d => { if(!d) return "—"; const [y,m,dy]=d.split("-"); return `${dy}-${m}-${y}`; };
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Delivery Confirmation</title>
+<style>
+  body{font-family:Arial,sans-serif;font-size:12px;margin:28px;color:#111}
+  h2{font-size:15px;margin-bottom:2px}
+  p{margin:6px 0}
+  table{border-collapse:collapse;width:100%;margin:10px 0;font-size:10.5px}
+  th{background:#f0f0f0;border:1px solid #bbb;padding:5px 7px;text-align:left;font-size:9.5px;text-transform:uppercase}
+  td{border:1px solid #ccc;padding:5px 7px}
+  .footer{margin-top:18px;font-size:11px}
+  .pb{page-break-before:always;padding-top:16px}
+  .st{font-size:12px;font-weight:bold;color:#444;margin:10px 0 4px;border-bottom:1px solid #ddd;padding-bottom:3px}
+  img{max-width:100%;height:auto;display:block}
+</style></head><body>
+<h2>Delivery Confirmation Request</h2>
+<p>Dear Sir,</p>
+<p>Please confirm receipt of cement for the following consignment(s) by return mail.</p>
+<table>
+  <tr>
+    <th>Transport Name</th><th>Shipment Date</th><th>Bill of Lading</th>
+    <th>Delivery Number</th><th>Freight Qty.</th><th>Customer/Vendor</th>
+    <th>Vehicle Number</th><th>To Location</th><th>District</th><th>State</th>
+  </tr>
+  <tr>
+    <td>M YANTRA ENTERPRISES</td>
+    <td>${fmtD(trip.date)}</td>
+    <td>${trip.lrNo||"—"}</td>
+    <td>${trip.diNo||"—"}</td>
+    <td>${trip.qty||0}</td>
+    <td>${trip.consignee||"—"}</td>
+    <td>${trip.truckNo||"—"}</td>
+    <td>${trip.to||"—"}</td>
+    <td>${trip.district||"—"}</td>
+    <td>${trip.state||"—"}</td>
+  </tr>
+</table>
+<p>Kindly reply to this email confirming receipt at the earliest.</p>
+<div class="footer">Regards,<br><strong>M Yantra Enterprises</strong><br>9606477257</div>
+<!-- GR and Invoice will be appended as pages -->
+</body></html>`;
+}
+
+// ─── ORDER TYPE SELECTOR ──────────────────────────────────────────────────────
+function OrderTypeSelector({ onSelect }) {
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:14,padding:"4px 0"}}>
+      <div style={{color:C.text,fontWeight:800,fontSize:15,textAlign:"center"}}>What type of order is this?</div>
+      {[
+        {id:"godown", icon:"🏭", label:"Godown Order", sub:"Unloading managed by Shree Cement · standard flow", color:C.teal},
+        {id:"party",  icon:"🤝", label:"Party Order",  sub:"Private party · GR + Invoice upload + email required", color:C.accent},
+      ].map(o=>(
+        <button key={o.id} onClick={()=>onSelect(o.id)} style={{
+          background:C.card, border:`2px solid ${o.color}`,
+          borderRadius:16, padding:"18px 16px", cursor:"pointer",
+          textAlign:"left", display:"flex", gap:14, alignItems:"center",
+          WebkitTapHighlightColor:"transparent"}}>
+          <span style={{fontSize:30}}>{o.icon}</span>
+          <div>
+            <div style={{color:o.color,fontWeight:800,fontSize:15}}>{o.label}</div>
+            <div style={{color:C.muted,fontSize:12,marginTop:3}}>{o.sub}</div>
+          </div>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ─── PARTY DOC UPLOAD ─────────────────────────────────────────────────────────
+function PartyDocUpload({ tripId, grFileRef, invoiceFileRef, onDone, onBack }) {
+  const [grFile,      setGrFile]      = useState(grFileRef.current);
+  const [invoiceFile, setInvoiceFile] = useState(invoiceFileRef.current);
+  const [grPreview,   setGrPreview]   = useState(null);
+  const [invPreview,  setInvPreview]  = useState(null);
+  const grRef  = useRef(null);
+  const invRef = useRef(null);
+
+  const readPreview = (file, setter) => {
+    if (!file) return;
+    const r = new FileReader();
+    r.onload = e => setter(e.target.result);
+    r.readAsDataURL(file);
+  };
+
+  const pickGR = f => { grFileRef.current=f; setGrFile(f); readPreview(f, setGrPreview); };
+  const pickInv = f => { invoiceFileRef.current=f; setInvoiceFile(f); readPreview(f, setInvPreview); };
+
+  const canProceed = grFile && invoiceFile;
+
+  const FileBox = ({label, file, preview, inputRef, onPick, color}) => (
+    <div style={{background:C.bg,borderRadius:12,padding:14,border:`2px dashed ${file?color:C.border}`}}>
+      <div style={{color:color,fontWeight:700,fontSize:12,marginBottom:8}}>{label}</div>
+      {preview ? (
+        <div style={{position:"relative"}}>
+          {preview.startsWith("data:image") ? (
+            <img src={preview} style={{width:"100%",maxHeight:160,objectFit:"contain",borderRadius:8}} />
+          ) : (
+            <div style={{background:C.card,borderRadius:8,padding:"12px",textAlign:"center",color:C.green,fontWeight:700}}>
+              ✓ PDF loaded: {file.name}
+            </div>
+          )}
+          <button onClick={()=>{if(label.includes("GR")){grFileRef.current=null;setGrFile(null);setGrPreview(null);}else{invoiceFileRef.current=null;setInvoiceFile(null);setInvPreview(null);}}}
+            style={{position:"absolute",top:4,right:4,background:C.red,border:"none",color:"#fff",
+              borderRadius:"50%",width:24,height:24,fontSize:14,cursor:"pointer",
+              display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
+        </div>
+      ) : (
+        <button onClick={()=>inputRef.current?.click()}
+          style={{width:"100%",background:color+"11",border:`1.5px dashed ${color}`,
+            borderRadius:10,padding:"20px",color:color,fontWeight:700,
+            fontSize:13,cursor:"pointer",textAlign:"center"}}>
+          📎 Tap to upload {label}
+        </button>
+      )}
+      <input ref={inputRef} type="file" accept="image/*,application/pdf"
+        style={{display:"none"}} onChange={e=>onPick(e.target.files?.[0])} />
+    </div>
+  );
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+      <div style={{background:C.accent+"11",border:`1px solid ${C.accent}33`,borderRadius:10,
+        padding:"10px 14px",color:C.accent,fontSize:12,fontWeight:700}}>
+        🤝 Party Order — Upload documents before filling trip details
+      </div>
+      <FileBox label="GR Copy *"  file={grFile}      preview={grPreview}  inputRef={grRef}
+        onPick={pickGR}  color={C.green} />
+      <FileBox label="Invoice *"  file={invoiceFile} preview={invPreview} inputRef={invRef}
+        onPick={pickInv} color={C.blue} />
+      {canProceed && (
+        <div style={{background:C.green+"11",border:`1px solid ${C.green}33`,borderRadius:8,
+          padding:"8px 12px",color:C.green,fontSize:12,fontWeight:700}}>
+          ✓ Both documents uploaded — proceed to fill trip details
+        </div>
+      )}
+      <Btn onClick={onDone} full color={C.accent} disabled={!canProceed}>
+        Continue → Fill Trip Details
+      </Btn>
+      <Btn onClick={onBack} full outline color={C.muted}>← Back</Btn>
+    </div>
+  );
+}
+
+// ─── PARTY EMAIL MODAL ────────────────────────────────────────────────────────
+function PartyEmailModal({ trip, fromEmail, toEmail, onToEmailChange, onMarkSent, onClose }) {
+  const [localTo, setLocalTo] = useState(toEmail||"");
+  const [opened,  setOpened]  = useState(false);
+  const fmtD = d => { if(!d) return "—"; const [y,m,dy]=d.split("-"); return `${dy}-${m}-${y}`; };
+
+  const subject = `Delivery Confirmation Request — ${trip.lrNo||""} / ${trip.consignee||""}`;
+  const body =
+`Dear Sir,
+
+Please confirm receipt of cement for the following consignment by return mail.
+
+Transport Name: M YANTRA ENTERPRISES
+Shipment Date: ${fmtD(trip.date)}
+Bill of Lading: ${trip.lrNo||"—"}
+Delivery Number: ${trip.diNo||"—"}
+Freight Qty: ${trip.qty||0} MT
+Customer/Vendor: ${trip.consignee||"—"}
+Vehicle Number: ${trip.truckNo||"—"}
+To Location: ${trip.to||"—"}
+District: ${trip.district||"—"}
+State: ${trip.state||"—"}
+
+Kindly reply confirming receipt at the earliest.
+
+Regards,
+M Yantra Enterprises
+9606477257`;
+
+  const openMail = () => {
+    const mailto = `mailto:${localTo}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    window.open(mailto, "_blank");
+    setOpened(true);
+    onToEmailChange(localTo);
+  };
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+      <div style={{background:C.blue+"11",border:`1px solid ${C.blue}33`,borderRadius:10,
+        padding:"10px 14px",color:C.blue,fontSize:12,fontWeight:700}}>
+        📧 Send Confirmation Email
+      </div>
+
+      <div style={{background:C.bg,borderRadius:10,padding:"10px 12px",fontSize:12}}>
+        <div style={{color:C.muted,marginBottom:2}}>From:</div>
+        <div style={{color:C.text,fontWeight:700}}>{fromEmail||"(set in Settings)"}</div>
+      </div>
+
+      <Field label="To Email *" value={localTo} onChange={setLocalTo}
+        placeholder="party@example.com" />
+
+      <div style={{background:C.bg,borderRadius:10,padding:"12px 14px"}}>
+        <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:6}}>EMAIL PREVIEW</div>
+        <div style={{color:C.text,fontSize:12,lineHeight:1.6,whiteSpace:"pre-wrap",
+          maxHeight:180,overflowY:"auto"}}>{body}</div>
+      </div>
+
+      <div style={{background:"#1a1000",border:`1px solid ${C.orange}44`,borderRadius:8,
+        padding:"9px 12px",color:C.orange,fontSize:11}}>
+        ⚠ After tapping "Open Gmail", attach the GR Copy and Invoice from your Downloads/Files app before sending.
+      </div>
+
+      {!opened ? (
+        <Btn onClick={openMail} full color={C.blue} disabled={!localTo.trim()}>
+          📧 Open Gmail / Mail App
+        </Btn>
+      ) : (
+        <>
+          <div style={{background:C.green+"11",border:`1px solid ${C.green}33`,borderRadius:8,
+            padding:"9px 12px",color:C.green,fontSize:12,fontWeight:700}}>
+            ✓ Email app opened — send the email with attachments, then confirm below
+          </div>
+          <Btn onClick={()=>onMarkSent(localTo)} full color={C.green}>
+            ✓ Email Sent — Save Trip Now
+          </Btn>
+          <Btn onClick={openMail} full outline color={C.blue}>
+            Re-open Mail App
+          </Btn>
+        </>
+      )}
+      <Btn onClick={onClose} full outline color={C.muted}>Cancel</Btn>
+    </div>
+  );
+}
+
 // ─── TRIPS ────────────────────────────────────────────────────────────────────
 function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripType, user, log, driverPays}) {
   const isIn = tripType === "inbound";
@@ -1173,8 +1419,18 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
   const [showDateFilter, setShowDateFilter] = useState(false);
   const [dateFrom,    setDateFrom]    = useState("");
   const [dateTo,      setDateTo]      = useState("");
+  // Party order flow state
+  const [orderTypeStep, setOrderTypeStep] = useState(null); // null | "selecting" | "godown" | "party"
+  const [partyStep,     setPartyStep]     = useState("docs"); // "docs" | "form" | "email"
+  const [partyToEmail,  setPartyToEmail]  = useState("");
+  const [showEmailModal,setShowEmailModal]= useState(false);
+  const [emailSent,     setEmailSent]     = useState(false);
+  const [uploadingFiles,setUploadingFiles]= useState(false);
+  // Refs to hold file objects across re-renders without triggering state
+  const grFileRef      = useRef(null);
+  const invoiceFileRef = useRef(null);
 
-  const blankForm = () => ({
+  const blankForm = (isParty=false) => ({
     type:tripType, lrNo:"", diNo:"", truckNo:"", grNo:"", dieselIndentNo:"",
     consignee: isIn ? "Shree Cement Ltd" : "",
     from: isIn ? "" : "Kodla", to: isIn ? "Kodla" : "",
@@ -1183,6 +1439,11 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
     date:today(), advance:"0", shortage:"0", shortageRecovery:"0", loanRecovery:"0",
     tafal: String(settings?.tafalPerTrip||300),
     dieselEstimate:"0",
+    // Party order fields
+    orderType: isParty ? "party" : "godown",
+    district:"", state:"",
+    grFileUrl:"", invoiceFileUrl:"", mergedPdfUrl:"",
+    emailSentAt:"", partyEmail:"",
   });
 
   const [f, setF] = useState(blankForm);
@@ -1202,6 +1463,10 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
   // Called when AI extracts fields from DI/GR copy
   // LR is always manual — so we show LR-ask screen first, then check for duplicates
   const onDIExtracted = (extracted, _ignored) => {
+    // Carry district+state into form if present (party orders)
+    if(extracted.district || extracted.state){
+      setF(p=>({...p, district:extracted.district||p.district||"", state:extracted.state||p.state||""}));
+    }
     // Always ask for LR number — it's never on the GR copy
     setDiConflict({ extracted, existingTrip: null, askLR: true, lrInput: "" });
   };
@@ -1236,7 +1501,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
     if (existingTrip) {
       setDiConflict({ extracted: { ...extracted, lrNo }, existingTrip, askLR: false });
     } else {
-      setF(p => ({ ...p, ...extracted, lrNo }));
+      setF(p => ({ ...p, ...extracted, lrNo, district:extracted.district||p.district||"", state:extracted.state||p.state||"" }));
       setWasScanned(true);
       setDiConflict(null);
     }
@@ -1432,6 +1697,8 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
     setTrips(p => p.filter(x => x.id !== t.id));
     setConfirmDel(null);
     log("DELETE TRIP", `LR:${t.lrNo} ${t.truckNo} ${t.qty}MT`);
+    // Delete party files if applicable
+    if(t.orderType==="party") deletePartyFiles(t.id).catch(e=>console.warn("Party file delete:", e));
     // Persist to Supabase
     try {
       await DB.deleteTrip(t.id);
@@ -1448,7 +1715,11 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
         <div style={{color:ac,fontWeight:800,fontSize:16}}>{isIn?"🏭 Raw Material":"🚚 Cement Trips"}</div>
         <div style={{display:"flex",gap:8}}>
           <Btn onClick={()=>setShowDateFilter(v=>!v)} sm outline color={showDateFilter||(dateFrom||dateTo)?C.orange:C.muted}>📅</Btn>
-          <Btn onClick={()=>{setF(blankForm());setAddSheet(true);}} color={ac} sm>+ Add Trip</Btn>
+          <Btn onClick={()=>{
+            if(isIn){setOrderTypeStep("godown");setF(blankForm(false));}
+            else{setOrderTypeStep("selecting");}
+            setAddSheet(true);
+          }} color={ac} sm>+ Add Trip</Btn>
         </div>
       </div>
 
@@ -1575,6 +1846,17 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                 {confirmedDiesel>0 && <Badge label={`⛽ ${fmt(confirmedDiesel)}`} color={C.orange} />}
                 {t.driverSettled   && <Badge label="✓ Settled" color={C.green} />}
                 {t.diLines && t.diLines.length > 1 && <Badge label={`${t.diLines.length} DIs`} color={C.teal} />}
+                {t.orderType==="party" && <Badge label="🤝 Party" color={C.accent} />}
+                {t.orderType==="party" && !t.emailSentAt && <Badge label="⚠ Email Pending" color={C.red} />}
+                {t.orderType==="party" && t.emailSentAt && <Badge label="📧 Email Sent" color={C.green} />}
+                {t.orderType==="party" && t.mergedPdfUrl && (
+                  <a href={t.mergedPdfUrl} target="_blank" rel="noreferrer"
+                    style={{background:C.blue+"22",color:C.blue,border:`1px solid ${C.blue}44`,
+                      borderRadius:20,padding:"3px 10px",fontSize:11,fontWeight:700,
+                      whiteSpace:"nowrap",textDecoration:"none"}}>
+                    📄 Doc
+                  </a>
+                )}
               </div>
             </div>
           </div>
@@ -1584,49 +1866,189 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
 
       {/* ── ADD SHEET ── */}
       {addSheet && (
-        <Sheet title={isIn?"New Raw Material Trip":"New Cement Trip"} onClose={()=>{setAddSheet(false);setF(blankForm());setDiConflict(null);setWasScanned(false);}}>
+        <Sheet title={isIn?"New Raw Material Trip":"New Cement Trip"} onClose={()=>{
+          setAddSheet(false);setF(blankForm());setDiConflict(null);setWasScanned(false);
+          setOrderTypeStep(null);setPartyStep("docs");setEmailSent(false);setShowEmailModal(false);
+          grFileRef.current=null; invoiceFileRef.current=null;
+        }}>
 
-          {/* DI Conflict — same LR already exists */}
-          {diConflict ? (
-            diConflict.askLR ? (
-              <AskLRSheet
-                extracted={diConflict.extracted}
-                trips={trips}
-                vehicles={vehicles}
-                onConfirm={onLRConfirmed}
-                onCancel={()=>setDiConflict(null)}
-              />
-            ) : (
-              <MergeDISheet
-                conflict={diConflict}
-                onMerge={addDIToExisting}
-                onSeparate={()=>{setF(p=>({...p,...diConflict.extracted}));setDiConflict(null);}}
-                onCancel={()=>setDiConflict(null)}
-                isOwner={user.role==="owner"}
-              />
-            )
-          ) : (
+          {/* STEP 0: Order type selection */}
+          {orderTypeStep==="selecting" && !isIn && (
+            <OrderTypeSelector onSelect={ot=>{
+              if(ot==="godown"){
+                setOrderTypeStep("godown");
+                setF(blankForm(false));
+              } else {
+                setOrderTypeStep("party");
+                setPartyStep("docs");
+                setF(blankForm(true));
+              }
+            }} />
+          )}
+
+          {/* STEP 0b: inbound always godown flow */}
+          {(orderTypeStep==="godown" || (isIn && orderTypeStep!=="selecting" && orderTypeStep!==null)) && (
             <>
-              <DIUploader onExtracted={onDIExtracted} trips={trips} settings={settings} isIn={isIn} />
-
-              {/* Non-owner: block form until scan done */}
-              {user.role !== "owner" && !wasScanned ? (
-                <div style={{background:C.bg,border:`2px dashed ${C.border}`,borderRadius:14,
-                  padding:"28px 20px",textAlign:"center",marginTop:8}}>
-                  <div style={{fontSize:32,marginBottom:8}}>📄</div>
-                  <div style={{color:C.muted,fontWeight:700,fontSize:14,marginBottom:4}}>
-                    Upload GR / DI copy to fill trip details
-                  </div>
-                  <div style={{color:C.muted,fontSize:12}}>
-                    Scan the document above — fields will be filled automatically
-                  </div>
-                </div>
+              {diConflict ? (
+                diConflict.askLR ? (
+                  <AskLRSheet extracted={diConflict.extracted} trips={trips} vehicles={vehicles}
+                    onConfirm={onLRConfirmed} onCancel={()=>setDiConflict(null)} />
+                ) : (
+                  <MergeDISheet conflict={diConflict} onMerge={addDIToExisting}
+                    onSeparate={()=>{setF(p=>({...p,...diConflict.extracted}));setDiConflict(null);}}
+                    onCancel={()=>setDiConflict(null)} isOwner={user.role==="owner"} />
+                )
               ) : (
-                <TripForm f={f} ff={ff} isIn={isIn} ac={ac} vehicles={vehicles} settings={settings}
-                  onTruckChange={onTruckChange} onSubmit={saveNew} submitLabel="Save Trip"
-                  user={user} wasScanned={wasScanned} />
+                <>
+                  <DIUploader onExtracted={onDIExtracted} trips={trips} settings={settings} isIn={isIn} />
+                  {user.role !== "owner" && !wasScanned ? (
+                    <div style={{background:C.bg,border:`2px dashed ${C.border}`,borderRadius:14,
+                      padding:"28px 20px",textAlign:"center",marginTop:8}}>
+                      <div style={{fontSize:32,marginBottom:8}}>📄</div>
+                      <div style={{color:C.muted,fontWeight:700,fontSize:14,marginBottom:4}}>Upload GR / DI copy to fill trip details</div>
+                      <div style={{color:C.muted,fontSize:12}}>Scan the document above — fields will be filled automatically</div>
+                    </div>
+                  ) : (
+                    <TripForm f={f} ff={ff} isIn={isIn} ac={ac} vehicles={vehicles} settings={settings}
+                      onTruckChange={onTruckChange} onSubmit={saveNew} submitLabel="Save Trip"
+                      user={user} wasScanned={wasScanned} />
+                  )}
+                </>
               )}
             </>
+          )}
+
+          {/* STEP 1 (PARTY): Upload GR + Invoice */}
+          {orderTypeStep==="party" && partyStep==="docs" && (
+            <PartyDocUpload
+              tripId={f.id||"new"}
+              grFileRef={grFileRef}
+              invoiceFileRef={invoiceFileRef}
+              onDone={()=>setPartyStep("form")}
+              onBack={()=>setOrderTypeStep("selecting")}
+            />
+          )}
+
+          {/* STEP 2 (PARTY): Fill trip form */}
+          {orderTypeStep==="party" && partyStep==="form" && (
+            <>
+              {/* Attached docs indicator */}
+              <div style={{display:"flex",gap:8,marginBottom:4}}>
+                <div style={{background:C.green+"22",border:`1px solid ${C.green}44`,borderRadius:8,
+                  padding:"5px 10px",fontSize:11,color:C.green,fontWeight:700}}>
+                  ✓ GR: {grFileRef.current?.name||"uploaded"}
+                </div>
+                <div style={{background:C.blue+"22",border:`1px solid ${C.blue}44`,borderRadius:8,
+                  padding:"5px 10px",fontSize:11,color:C.blue,fontWeight:700}}>
+                  ✓ Inv: {invoiceFileRef.current?.name||"uploaded"}
+                </div>
+                <button onClick={()=>setPartyStep("docs")}
+                  style={{background:"none",border:"none",color:C.muted,fontSize:11,cursor:"pointer"}}>
+                  ✏ Change
+                </button>
+              </div>
+              {/* Scan uploader for party trips too */}
+              <DIUploader onExtracted={e=>{
+                setF(p=>({...p,...e, orderType:"party",
+                  district: e.district||p.district||"",
+                  state: e.state||p.state||""}));
+                setWasScanned(true);
+              }} trips={trips} settings={settings} isIn={false} />
+              <TripForm f={f} ff={ff} isIn={false} ac={C.accent} vehicles={vehicles} settings={settings}
+                onTruckChange={onTruckChange}
+                onSubmit={async ()=>{
+                  // Validate net first
+                  const _gross=(+f.qty||0)*(+f.givenRate||0);
+                  const _net=_gross-(+f.advance||0)-(+f.tafal||0)-(+f.dieselEstimate||0)-(+f.shortageRecovery||0)-(+f.loanRecovery||0);
+                  if(_net<0){alert("Cannot save: Est. Net to Driver is negative. Please reduce deductions.");return;}
+                  if(!f.district||!f.state){alert("District and State are required for Party orders.");return;}
+                  setShowEmailModal(true);
+                }}
+                submitLabel="📧 Send Email & Save"
+                user={user} wasScanned={wasScanned}
+                isParty={true} />
+            </>
+          )}
+
+          {/* STEP 3 (PARTY): Email modal */}
+          {uploadingFiles && (
+            <div style={{position:"fixed",inset:0,background:"#000a",zIndex:999,
+              display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:12}}>
+              <div style={{fontSize:36}}>⏳</div>
+              <div style={{color:C.text,fontWeight:700,fontSize:16}}>Uploading documents…</div>
+              <div style={{color:C.muted,fontSize:13}}>Please wait, saving party trip files</div>
+            </div>
+          )}
+          {orderTypeStep==="party" && showEmailModal && (
+            <Sheet title="Send Confirmation Email" onClose={()=>setShowEmailModal(false)}>
+              <PartyEmailModal
+                trip={{...f, qty:+f.qty, diNo:f.diNo}}
+                fromEmail="myantraenterprises@gmail.com"
+                toEmail={partyToEmail}
+                onToEmailChange={setPartyToEmail}
+                onMarkSent={async (toEmail)=>{
+                  setUploadingFiles(true);
+                  try {
+                    const tripId = uid();
+                    // Upload GR + Invoice to Supabase Storage
+                    let grUrl="", invUrl="", mergedUrl="";
+                    if(grFileRef.current)  { const r=await uploadPartyFile(tripId,"gr",grFileRef.current);  grUrl=r.url; }
+                    if(invoiceFileRef.current) { const r=await uploadPartyFile(tripId,"invoice",invoiceFileRef.current); invUrl=r.url; }
+                    // Build + upload merged HTML confirmation doc
+                    const html = buildConfirmationHTML({...f,qty:+f.qty});
+                    const blob = new Blob([html],{type:"text/html"});
+                    const { url:mUrl } = await uploadPartyFile(tripId,"merged_confirmation",new File([blob],"confirmation.html",{type:"text/html"}));
+                    mergedUrl=mUrl;
+                    // Download merged doc for user (portal submission)
+                    const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
+                    a.download=`Confirmation_${f.lrNo||tripId}.html`; a.click(); URL.revokeObjectURL(a.href);
+                    // Save the trip
+                    const t = mkTrip({
+                      ...f, id:tripId, type:tripType,
+                      qty:+f.qty, bags:+f.bags, frRate:+f.frRate, givenRate:+f.givenRate,
+                      advance:+f.advance, shortage:+f.shortage, tafal:+f.tafal,
+                      shortageRecovery:+f.shortageRecovery||0, loanRecovery:+f.loanRecovery||0,
+                      dieselEstimate:+f.dieselEstimate,
+                      dieselIndentNo:(f.dieselIndentNo||"").trim(),
+                      orderType:"party", district:f.district||"", state:f.state||"",
+                      grFileUrl:grUrl, invoiceFileUrl:invUrl, mergedPdfUrl:mergedUrl,
+                      emailSentAt:nowTs(), partyEmail:toEmail,
+                      createdBy:user.username, createdAt:nowTs(),
+                    });
+                    setTrips(p=>[t,...(p||[])]);
+                    log("ADD PARTY TRIP",`LR:${t.lrNo} ${t.truckNo} email→${toEmail}`);
+                    // Vehicle ledger sync (same as godown)
+                    const tn2=(t.truckNo||"").toUpperCase().trim();
+                    if(tn2&&!vehicles.find(v=>v.truckNo===tn2)){
+                      const nv={id:uid(),truckNo:tn2,ownerName:"",phone:"",driverName:"",driverPhone:"",
+                        driverLicense:"",accountNo:"",ifsc:"",loan:0,loanRecovered:0,deductPerTrip:0,
+                        tafalExempt:false,shortageOwed:0,shortageRecovered:0,shortageTxns:[],loanTxns:[],createdBy:user.username};
+                      setVehicles(p=>[...(p||[]),nv]);
+                    }
+                    if(tn2&&(t.loanRecovery>0||t.shortageRecovery>0)){
+                      setVehicles(prev=>prev.map(veh=>{
+                        if(veh.truckNo!==tn2) return veh;
+                        let upd={...veh};
+                        if(t.loanRecovery>0){const txn={id:uid(),type:"recovery",date:t.date,amount:t.loanRecovery,lrNo:t.lrNo,note:"Party trip"};upd={...upd,loanRecovered:(upd.loanRecovered||0)+t.loanRecovery,loanTxns:[...(upd.loanTxns||[]),txn]};}
+                        if(t.shortageRecovery>0){const txn={id:uid(),type:"recovery",date:t.date,qty:0,amount:t.shortageRecovery,lrNo:t.lrNo,note:"Party trip"};upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+t.shortageRecovery,shortageTxns:[...(upd.shortageTxns||[]),txn]};}
+                        return upd;
+                      }));
+                    }
+                    setShowEmailModal(false);
+                    setAddSheet(false);
+                    setF(blankForm());
+                    setOrderTypeStep(null);setPartyStep("docs");setEmailSent(false);
+                    grFileRef.current=null; invoiceFileRef.current=null;
+                    alert(`✓ Party trip saved!\nLR: ${t.lrNo}\nConfirmation doc downloaded for portal submission.`);
+                  } catch(e) {
+                    alert("Error saving trip: "+e.message);
+                  } finally {
+                    setUploadingFiles(false);
+                  }
+                }}
+                onClose={()=>setShowEmailModal(false)}
+              />
+            </Sheet>
           )}
         </Sheet>
       )}
@@ -1680,7 +2102,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
 }
 
 // Shared form for add + edit
-function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit, submitLabel, user, showStatus=false, wasScanned=false}) {
+function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit, submitLabel, user, showStatus=false, wasScanned=false, isParty=false}) {
   // Ensure each diLine has frRate — migrate from trip-level frRate if missing
   const normalizedDiLines = (f.diLines||[]).map(d => ({...d, frRate: d.frRate || +f.frRate || 0}));
   const fWithLines = normalizedDiLines.length > 1 ? {...f, diLines: normalizedDiLines} : f;
@@ -1880,6 +2302,17 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
           note="Shortage reported by Shree Cement (in MT)"
         />
       </div>
+      {isParty && (
+        <div style={{background:C.accent+"11",border:`1px solid ${C.accent}33`,borderRadius:10,padding:"12px 14px"}}>
+          <div style={{color:C.accent,fontWeight:700,fontSize:11,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>
+            🤝 Party Order — Destination Details (for confirmation email)
+          </div>
+          <div style={{display:"flex",gap:10}}>
+            <Field label="District *" value={f.district||""} onChange={ff("district")} placeholder="e.g. Pune" half />
+            <Field label="State *"    value={f.state||""}    onChange={ff("state")}    placeholder="e.g. Maharashtra" half />
+          </div>
+        </div>
+      )}
       <div style={{display:"flex",gap:10}}>
         <Field label="TAFAL ₹" value={f.tafal||"0"} onChange={ff("tafal")} type="number" half
           note={veh?.tafalExempt?"This vehicle is exempt":""} />
@@ -5190,18 +5623,23 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
     allTrips.forEach(t=>{ if(t.lrNo||t.lr) lrToTrip[(t.lrNo||t.lr).trim()]=t; });
 
     // Apply trip updates — mark paid, attach shreeShortage
+    const paidTrips = [];
     setTrips(prev=>prev.map(t=>{
       if(invList.some(i=>i.invoiceNo===t.invoiceNo)){
         const lrKey=(t.lrNo||t.lr||"").trim();
         const short=shorts.find(s=>(s.lrNo||"").trim()===lrKey);
+        if(t.orderType==="party" && t.id) paidTrips.push(t.id); // track for file deletion
         return {...t, paidAmount:Number(t.billedToShree||0), paymentDate:pDate, utr,
           shreeStatus:"paid",
-          // Record shortage MT on trip so it shows in vehicle history
           shortage: short ? (t.shortage||0)+Number(short.tonnes||0) : t.shortage,
           shreeShortage:short?{tonnes:Number(short.tonnes||0),deduction:Number(short.deduction||0)}:t.shreeShortage};
       }
       return t;
     }));
+    // Delete party files from Supabase Storage for paid trips
+    if(paidTrips.length>0){
+      paidTrips.forEach(tid => deletePartyFiles(tid).catch(e=>console.warn("File delete error:",e)));
+    }
 
     const pa={id:"PA"+Date.now(), utr, paymentDate:pDate,
       totalPaid:Number(scanResult.totalPaid||0), totalBilled:Number(scanResult.totalBilled||0),
