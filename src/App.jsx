@@ -2016,67 +2016,55 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
               ))}
             </div>
 
-            {/* Footer badges */}
-            {(()=>{
-              const isPartyTrip = t.orderType==="party" || t.grFilePath;
-              return (
-              <div style={{padding:"7px 12px",display:"flex",flexDirection:"column",gap:6}}>
-                {/* Row 1: created by + standard badges */}
-                <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center",justifyContent:"space-between"}}>
-                  <span style={{color:ROLES[t.createdBy]?.color||C.muted,fontSize:11}}>by {t.createdBy} · {t.createdAt}</span>
-                  <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}}>
-                    {t.tafal>0     && <Badge label={`TAFAL ₹${t.tafal}`} color={C.purple} />}
-                    {t.shortage>0  && <Badge label={`⚠ ${t.shortage}MT`} color={C.red} />}
-                    {t.advance>0   && <Badge label={`Adv ${fmt(t.advance)}`} color={C.orange} />}
-                    {confirmedDiesel>0 && <Badge label={`⛽ ${fmt(confirmedDiesel)}`} color={C.orange} />}
-                    {t.driverSettled   && <Badge label="✓ Settled" color={C.green} />}
-                    {t.diLines && t.diLines.length > 1 && <Badge label={`${t.diLines.length} DIs`} color={C.teal} />}
-                  </div>
-                </div>
-                {/* Row 2: party status badges + action buttons — always on own row */}
-                {isPartyTrip && (
-                  <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",
-                    borderTop:`1px solid ${C.border}33`,paddingTop:6}}>
-                    <Badge label="🤝 Party" color={C.accent} />
-                    {t.orderType==="party" && !t.emailSentAt && <Badge label="⚠ Email Pending" color={C.red} />}
-                    {t.orderType==="party" && t.emailSentAt && !t.receiptFilePath && <Badge label="📧 Awaiting Reply" color={C.blue} />}
-                    {t.receiptFilePath && !t.mergedPdfPath && <Badge label="🔄 Receipt uploaded" color={C.teal} />}
-                    {t.mergedPdfPath && <Badge label="✅ Merged PDF ready" color={C.green} />}
-                    {/* Upload receipt button */}
-                    {(t.emailSentAt || t.grFilePath) && (
-                      <button onClick={()=>setReceiptSheet(t)}
-                        style={{background:t.receiptFilePath?C.teal+"22":C.accent+"22",
-                          color:t.receiptFilePath?C.teal:C.accent,
-                          border:`1px solid ${t.receiptFilePath?C.teal:C.accent}44`,
-                          borderRadius:20,padding:"4px 12px",fontSize:11,fontWeight:700,
-                          cursor:"pointer",whiteSpace:"nowrap"}}>
-                        {t.receiptFilePath ? "📎 Re-upload Receipt" : "📎 Upload Receipt"}
-                      </button>
-                    )}
-                    {/* Download merged PDF */}
-                    {t.mergedPdfPath && (
-                      <button onClick={async()=>{
-                        try{
-                          const url = await getSignedUrl(t.mergedPdfPath, 3600);
-                          const a=document.createElement("a"); a.href=url;
-                          a.download=`MergedConfirmation_${t.lrNo||t.id}.pdf`;
-                          a.target="_blank"; document.body.appendChild(a); a.click();
-                          document.body.removeChild(a);
-                        }catch(e){alert("Download failed: "+e.message);}
-                      }} style={{background:C.green+"22",color:C.green,
-                        border:`1px solid ${C.green}44`,borderRadius:20,
-                        padding:"4px 12px",fontSize:11,fontWeight:700,
-                        cursor:"pointer",whiteSpace:"nowrap"}}>
-                        ⬇ Download PDF
-                      </button>
-                    )}
-                  </div>
-                )}
+            {/* Footer — Row 1: meta + standard badges */}
+            <div style={{padding:"7px 12px 4px",display:"flex",gap:5,flexWrap:"wrap",alignItems:"center",justifyContent:"space-between"}}>
+              <span style={{color:ROLES[t.createdBy]?.color||C.muted,fontSize:11}}>by {t.createdBy} · {t.createdAt}</span>
+              <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}}>
+                {t.tafal>0     && <Badge label={"TAFAL ₹"+t.tafal} color={C.purple} />}
+                {t.shortage>0  && <Badge label={"⚠ "+t.shortage+"MT"} color={C.red} />}
+                {t.advance>0   && <Badge label={"Adv "+fmt(t.advance)} color={C.orange} />}
+                {confirmedDiesel>0 && <Badge label={"⛽ "+fmt(confirmedDiesel)} color={C.orange} />}
+                {t.driverSettled   && <Badge label="✓ Settled" color={C.green} />}
+                {t.diLines && t.diLines.length > 1 && <Badge label={t.diLines.length+" DIs"} color={C.teal} />}
               </div>
             </div>
+            {/* Footer — Row 2: party actions (own row, always visible) */}
+            {(t.orderType==="party"||t.grFilePath) && (
+              <div style={{padding:"5px 12px 8px",display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",
+                borderTop:"1px solid "+C.border+"33"}}>
+                <Badge label="🤝 Party" color={C.accent} />
+                {t.orderType==="party" && !t.emailSentAt && <Badge label="⚠ Email Pending" color={C.red} />}
+                {t.orderType==="party" && t.emailSentAt && !t.receiptFilePath && <Badge label="📧 Awaiting Reply" color={C.blue} />}
+                {t.receiptFilePath && !t.mergedPdfPath && <Badge label="🔄 Receipt uploaded" color={C.teal} />}
+                {t.mergedPdfPath && <Badge label="✅ Merged PDF ready" color={C.green} />}
+                {(t.emailSentAt||t.grFilePath) && (
+                  <button onClick={()=>setReceiptSheet(t)} style={{
+                    background:t.receiptFilePath ? C.teal+"22" : C.accent+"22",
+                    color:t.receiptFilePath ? C.teal : C.accent,
+                    border:"1px solid "+(t.receiptFilePath ? C.teal : C.accent)+"44",
+                    borderRadius:20,padding:"4px 12px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+                    {t.receiptFilePath ? "📎 Re-upload Receipt" : "📎 Upload Receipt"}
+                  </button>
+                )}
+                {t.mergedPdfPath && (
+                  <button onClick={async()=>{
+                    try{
+                      const url=await getSignedUrl(t.mergedPdfPath,3600);
+                      const a=document.createElement("a");a.href=url;
+                      a.download="MergedConfirmation_"+(t.lrNo||t.id)+".pdf";
+                      a.target="_blank";document.body.appendChild(a);a.click();document.body.removeChild(a);
+                    }catch(e){alert("Download failed: "+e.message);}
+                  }} style={{background:C.green+"22",color:C.green,
+                    border:"1px solid "+C.green+"44",borderRadius:20,
+                    padding:"4px 12px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+                    ⬇ Download PDF
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         );
-      })()}
+      })}
       {shown.length===0 && <div style={{textAlign:"center",color:C.muted,padding:40}}>No trips found</div>}
 
       {/* ── RECEIPT CONFIRMATION UPLOAD SHEET ── */}
