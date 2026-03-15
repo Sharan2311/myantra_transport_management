@@ -34,7 +34,26 @@ function useDB(fetcher, initial = []) {
   const load = useCallback(async () => {
     try {
       const result = await fetcher();
-      setData(result);
+      // Merge: preserve locally-set party fields that may not be in DB yet
+      // (receiptFilePath, mergedPdfPath, orderType, grFilePath, invoiceFilePath)
+      const PARTY_FIELDS = ["receiptFilePath","receiptUploadedAt","mergedPdfPath",
+        "orderType","grFilePath","invoiceFilePath","emailSentAt","partyEmail",
+        "district","state"];
+      setData(prev => {
+        if(!Array.isArray(result)||!Array.isArray(prev)) return result;
+        const prevMap = {};
+        (prev||[]).forEach(t=>{ if(t.id) prevMap[t.id]=t; });
+        return result.map(r => {
+          const p = prevMap[r.id];
+          if(!p) return r;
+          // For each party field: use local value if DB value is empty/missing
+          const merged = {...r};
+          PARTY_FIELDS.forEach(f => {
+            if(!merged[f] && p[f]) merged[f] = p[f];
+          });
+          return merged;
+        });
+      });
       setError(null);
     } catch(e) {
       console.error("DB load error:", e);
@@ -2061,23 +2080,30 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
           {!merging && (
             <ReceiptUploadSheet
               trip={receiptSheet}
-              onMerge={(tripId, receiptPath, mergedPath) => {
-                // Use dbSetTrips (not raw setTrips) so changes persist to Supabase
-                setTrips(p => p.map(t => {
-                  if(t.id!==tripId) return t;
-                  const updated = {
-                    ...t,
-                    receiptFilePath: receiptPath,
-                    receiptUploadedAt: nowTs(),
-                    mergedPdfPath: mergedPath,
-                  };
-                  // Explicitly persist to DB
-                  DB.saveTrip(updated).catch(e => console.error("saveTrip after merge:", e));
-                  return updated;
-                }));
+              onMerge={async (tripId, receiptPath, mergedPath) => {
+                // Find the trip and build updated version
+                const tripToUpdate = trips.find(t=>t.id===tripId);
+                if(!tripToUpdate){alert("Trip not found");return;}
+                const updated = {
+                  ...tripToUpdate,
+                  receiptFilePath: receiptPath,
+                  receiptUploadedAt: nowTs(),
+                  mergedPdfPath: mergedPath,
+                  orderType: tripToUpdate.orderType||"party",
+                };
+                // SAVE TO DB FIRST — before any state update
+                // This ensures the 15s poll won't wipe the data
+                try {
+                  await DB.saveTrip(updated);
+                } catch(e) {
+                  alert("Failed to save to database: "+e.message);
+                  return;
+                }
+                // Now update local state
+                setTrips(p => p.map(t => t.id===tripId ? updated : t));
                 log("RECEIPT UPLOADED", `LR:${receiptSheet.lrNo} merged PDF stored`);
                 setReceiptSheet(null);
-                alert("✅ PDFs merged!\nThe ⬇ Download PDF button will now appear on the trip card.");
+                alert("✅ PDFs merged and saved!\nThe ⬇ Download PDF button is now on the trip card.");
               }}
               onClose={()=>setReceiptSheet(null)}
             />
