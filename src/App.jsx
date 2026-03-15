@@ -1161,7 +1161,7 @@ Rules:
 }
 
 // ─── PARTY TRIP STORAGE HELPERS ──────────────────────────────────────────────
-// IMPORTANT: This must exactly match the bucket name in Supabase Storage
+// IMPORTANT: Must match bucket name exactly in Supabase Storage
 const PARTY_BUCKET = "party-trip-files";
 
 async function uploadPartyFile(tripId, role, file) {
@@ -1169,61 +1169,48 @@ async function uploadPartyFile(tripId, role, file) {
   const path = `${tripId}/${role}.${ext}`;
   const { error } = await supabase.storage.from(PARTY_BUCKET).upload(path, file, {upsert:true});
   if (error) {
-    if(error.message?.includes("Bucket not found") || error.statusCode==="404"){
-      throw new Error(`Storage bucket "${PARTY_BUCKET}" not found. Go to Supabase → Storage and create a bucket named exactly: ${PARTY_BUCKET}`);
-    }
+    if(error.message?.includes("Bucket not found")||error.statusCode==="404")
+      throw new Error(`Storage bucket "${PARTY_BUCKET}" not found. Create it in Supabase → Storage.`);
     throw new Error("Upload failed: " + error.message);
   }
-  const { data } = supabase.storage.from(PARTY_BUCKET).getPublicUrl(path);
-  return { path, url: data.publicUrl };
+  return { path };  // store only path, generate signed URLs on demand
 }
+
+async function getSignedUrl(path, expiresIn=3600) {
+  const { data, error } = await supabase.storage.from(PARTY_BUCKET).createSignedUrl(path, expiresIn);
+  if (error) throw new Error("Could not generate download link: " + error.message);
+  return data.signedUrl;
+}
+
 async function deletePartyFiles(tripId) {
   const { data:files } = await supabase.storage.from(PARTY_BUCKET).list(tripId);
   if (!files||!files.length) return;
   await supabase.storage.from(PARTY_BUCKET).remove(files.map(f=>`${tripId}/${f.name}`));
 }
-function buildConfirmationHTML(trip) {
-  const fmtD = d => { if(!d) return "—"; const [y,m,dy]=d.split("-"); return `${dy}-${m}-${y}`; };
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Delivery Confirmation</title>
-<style>
-  body{font-family:Arial,sans-serif;font-size:12px;margin:28px;color:#111}
-  h2{font-size:15px;margin-bottom:2px}
-  p{margin:6px 0}
-  table{border-collapse:collapse;width:100%;margin:10px 0;font-size:10.5px}
-  th{background:#f0f0f0;border:1px solid #bbb;padding:5px 7px;text-align:left;font-size:9.5px;text-transform:uppercase}
-  td{border:1px solid #ccc;padding:5px 7px}
-  .footer{margin-top:18px;font-size:11px}
-  .pb{page-break-before:always;padding-top:16px}
-  .st{font-size:12px;font-weight:bold;color:#444;margin:10px 0 4px;border-bottom:1px solid #ddd;padding-bottom:3px}
-  img{max-width:100%;height:auto;display:block}
-</style></head><body>
-<h2>Delivery Confirmation Request</h2>
-<p>Dear Sir,</p>
-<p>Please confirm receipt of cement for the following consignment(s) by return mail.</p>
-<table>
-  <tr>
-    <th>Transport Name</th><th>Shipment Date</th><th>Bill of Lading</th>
-    <th>Delivery Number</th><th>Freight Qty.</th><th>Customer/Vendor</th>
-    <th>Vehicle Number</th><th>To Location</th><th>District</th><th>State</th>
-  </tr>
-  <tr>
-    <td>M YANTRA ENTERPRISES</td>
-    <td>${fmtD(trip.date)}</td>
-    <td>${trip.lrNo||"—"}</td>
-    <td>${trip.diNo||"—"}</td>
-    <td>${trip.qty||0}</td>
-    <td>${trip.consignee||"—"}</td>
-    <td>${trip.truckNo||"—"}</td>
-    <td>${trip.to||"—"}</td>
-    <td>${trip.district||"—"}</td>
-    <td>${trip.state||"—"}</td>
-  </tr>
-</table>
-<p>Kindly reply to this email confirming receipt at the earliest.</p>
-<div class="footer">Regards,<br><strong>M Yantra Enterprises</strong><br>9606477257</div>
-<!-- GR and Invoice will be appended as pages -->
-</body></html>`;
+
+// Merge PDFs using pdf-lib — returns Uint8Array blob
+async function mergePDFs(pdfBuffers) {
+  const { PDFDocument } = await import("pdf-lib");
+  const merged = await PDFDocument.create();
+  for (const buf of pdfBuffers) {
+    try {
+      const doc = await PDFDocument.load(buf, { ignoreEncryption: true });
+      const pages = await merged.copyPages(doc, doc.getPageIndices());
+      pages.forEach(p => merged.addPage(p));
+    } catch(e) {
+      console.warn("Could not merge one PDF:", e.message);
+    }
+  }
+  return await merged.save();
 }
+
+// Fetch a file from Supabase Storage as ArrayBuffer
+async function fetchStorageFile(path) {
+  const { data, error } = await supabase.storage.from(PARTY_BUCKET).download(path);
+  if (error) throw new Error("Could not fetch file: " + error.message);
+  return await data.arrayBuffer();
+}
+// buildConfirmationHTML removed — confirmation doc now built via pdf-lib after receipt reply
 
 // ─── ORDER TYPE SELECTOR ──────────────────────────────────────────────────────
 function OrderTypeSelector({ onSelect }) {
@@ -1445,6 +1432,134 @@ M Yantra Enterprises
   );
 }
 
+// ─── RECEIPT CONFIRMATION UPLOAD SHEET ───────────────────────────────────────
+function ReceiptUploadSheet({ trip, onMerge, onClose }) {
+  const [receiptFile, setReceiptFile] = useState(null);
+  const [preview,     setPreview]     = useState(null);
+  const [merging,     setMerging]     = useState(false);
+  const [error,       setError]       = useState("");
+  const inputRef = useRef(null);
+
+  const pick = f => {
+    setReceiptFile(f);
+    setError("");
+    const r = new FileReader();
+    r.onload = e => setPreview(e.target.result);
+    r.readAsDataURL(f);
+    if(inputRef.current) inputRef.current.value="";
+  };
+
+  const handleMerge = async () => {
+    if(!receiptFile){setError("Please upload the reply email PDF first.");return;}
+    if(!trip.grFilePath||!trip.invoiceFilePath){
+      setError("GR Copy or Invoice path missing on this trip. Cannot merge.");return;
+    }
+    setMerging(true); setError("");
+    try {
+      // Upload receipt email PDF
+      const receiptResult = await uploadPartyFile(trip.id, "receipt_confirmation", receiptFile);
+
+      // Fetch all three source PDFs from Supabase Storage
+      const [receiptBuf, grBuf, invoiceBuf] = await Promise.all([
+        fetchStorageFile(receiptResult.path),
+        fetchStorageFile(trip.grFilePath),
+        fetchStorageFile(trip.invoiceFilePath),
+      ]);
+
+      // Merge: Receipt Reply (page 1) → GR Copy → Invoice
+      const mergedBytes = await mergePDFs([receiptBuf, grBuf, invoiceBuf]);
+      const mergedFile  = new File([mergedBytes], "merged_confirmation.pdf", {type:"application/pdf"});
+
+      // Upload merged PDF
+      const mergedResult = await uploadPartyFile(trip.id, "merged_confirmation", mergedFile);
+
+      onMerge(trip.id, receiptResult.path, mergedResult.path);
+    } catch(e) {
+      setError("Merge failed: " + e.message);
+    } finally {
+      setMerging(false);
+    }
+  };
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+      {/* Trip summary */}
+      <div style={{background:C.bg,borderRadius:10,padding:"12px 14px"}}>
+        <div style={{color:C.accent,fontWeight:800,fontSize:13,marginBottom:4}}>🤝 {trip.consignee||"—"}</div>
+        <div style={{color:C.muted,fontSize:12}}>LR: <b style={{color:C.text}}>{trip.lrNo||"—"}</b> · {trip.truckNo} · {trip.date}</div>
+        <div style={{color:C.muted,fontSize:12,marginTop:2}}>DI: {trip.diNo||"—"} · {trip.qty}MT → {trip.to}</div>
+      </div>
+
+      {/* What this does */}
+      <div style={{background:C.blue+"11",border:`1px solid ${C.blue}33`,borderRadius:10,
+        padding:"10px 14px",color:C.blue,fontSize:12}}>
+        <div style={{fontWeight:700,marginBottom:4}}>📎 Upload party's reply email (confirming receipt)</div>
+        <div style={{color:C.muted}}>The app will merge: <b style={{color:C.text}}>Reply Email → GR Copy → Invoice</b> into one PDF for portal submission</div>
+      </div>
+
+      {/* File upload */}
+      <div style={{background:C.bg,borderRadius:12,padding:14,
+        border:`2px dashed ${receiptFile?C.green:C.border}`}}>
+        <div style={{color:C.green,fontWeight:700,fontSize:12,marginBottom:8}}>Reply Email PDF *</div>
+        {receiptFile ? (
+          <div style={{position:"relative"}}>
+            {preview&&preview.startsWith("data:image") ? (
+              <img src={preview} style={{width:"100%",maxHeight:160,objectFit:"contain",borderRadius:8}} />
+            ) : (
+              <div style={{background:C.card,borderRadius:8,padding:"12px",
+                textAlign:"center",color:C.green,fontWeight:700}}>
+                ✓ {receiptFile.name}
+              </div>
+            )}
+            <button onClick={()=>{setReceiptFile(null);setPreview(null);}}
+              style={{position:"absolute",top:4,right:4,background:C.red,border:"none",
+                color:"#fff",borderRadius:"50%",width:24,height:24,fontSize:14,
+                cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
+          </div>
+        ) : (
+          <button onClick={()=>inputRef.current?.click()}
+            style={{width:"100%",background:C.green+"11",border:`1.5px dashed ${C.green}`,
+              borderRadius:10,padding:"20px",color:C.green,fontWeight:700,
+              fontSize:13,cursor:"pointer",textAlign:"center"}}>
+            📎 Tap to upload Reply Email PDF
+          </button>
+        )}
+        <input ref={inputRef} type="file" accept="application/pdf,image/*"
+          style={{display:"none"}} onChange={e=>{const f=e.target.files?.[0];if(f)pick(f);e.target.value="";}} />
+      </div>
+
+      {/* Merge summary */}
+      {receiptFile && (
+        <div style={{background:C.bg,borderRadius:10,padding:"12px 14px"}}>
+          <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:8}}>MERGE ORDER</div>
+          {[
+            {n:"1. Reply Email (receipt confirmation)", c:C.green,  ok:!!receiptFile},
+            {n:"2. GR Copy",                           c:C.teal,   ok:!!trip.grFilePath},
+            {n:"3. Invoice",                           c:C.blue,   ok:!!trip.invoiceFilePath},
+          ].map(x=>(
+            <div key={x.n} style={{display:"flex",alignItems:"center",gap:8,padding:"4px 0",
+              borderBottom:`1px solid ${C.border}22`}}>
+              <span style={{color:x.ok?x.c:C.red,fontSize:14}}>{x.ok?"✓":"✗"}</span>
+              <span style={{color:x.ok?C.text:C.red,fontSize:12}}>{x.n}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {error && (
+        <div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,
+          padding:"9px 12px",color:C.red,fontSize:12}}>{error}</div>
+      )}
+
+      <Btn onClick={handleMerge} full color={C.green}
+        disabled={!receiptFile||merging} loading={merging}>
+        {merging ? "Merging PDFs…" : "🔀 Merge & Store PDF"}
+      </Btn>
+      <Btn onClick={onClose} full outline color={C.muted}>Cancel</Btn>
+    </div>
+  );
+}
+
 // ─── TRIPS ────────────────────────────────────────────────────────────────────
 function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripType, user, log, driverPays}) {
   const isIn = tripType === "inbound";
@@ -1470,6 +1585,9 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
   // Refs to hold file objects across re-renders without triggering state
   const grFileRef      = useRef(null);
   const invoiceFileRef = useRef(null);
+  // Receipt confirmation upload
+  const [receiptSheet, setReceiptSheet] = useState(null); // trip object
+  const [merging,      setMerging]      = useState(false);
 
   const blankForm = (isParty=false) => ({
     type:tripType, lrNo:"", diNo:"", truckNo:"", grNo:"", dieselIndentNo:"",
@@ -1483,8 +1601,10 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
     // Party order fields
     orderType: isParty ? "party" : "godown",
     district:"", state:"",
-    grFileUrl:"", invoiceFileUrl:"", mergedPdfUrl:"",
+    grFilePath:"", invoiceFilePath:"", mergedPdfPath:"",
     emailSentAt:"", partyEmail:"",
+    receiptFilePath:"",       // uploaded reply email PDF from party
+    receiptUploadedAt:"",
   });
 
   const [f, setF] = useState(blankForm);
@@ -1889,14 +2009,36 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                 {t.diLines && t.diLines.length > 1 && <Badge label={`${t.diLines.length} DIs`} color={C.teal} />}
                 {t.orderType==="party" && <Badge label="🤝 Party" color={C.accent} />}
                 {t.orderType==="party" && !t.emailSentAt && <Badge label="⚠ Email Pending" color={C.red} />}
-                {t.orderType==="party" && t.emailSentAt && <Badge label="📧 Email Sent" color={C.green} />}
-                {t.orderType==="party" && t.mergedPdfUrl && (
-                  <a href={t.mergedPdfUrl} target="_blank" rel="noreferrer"
-                    style={{background:C.blue+"22",color:C.blue,border:`1px solid ${C.blue}44`,
+                {t.orderType==="party" && t.emailSentAt && !t.receiptFilePath && <Badge label="📧 Sent · Awaiting Reply" color={C.blue} />}
+                {t.orderType==="party" && t.receiptFilePath && !t.mergedPdfPath && <Badge label="🔄 Receipt uploaded" color={C.teal} />}
+                {t.orderType==="party" && t.mergedPdfPath && <Badge label="✅ Merged PDF ready" color={C.green} />}
+                {/* Upload receipt confirmation button */}
+                {t.orderType==="party" && t.emailSentAt && (
+                  <button onClick={()=>setReceiptSheet(t)}
+                    style={{background:t.receiptFilePath?C.teal+"22":C.accent+"22",
+                      color:t.receiptFilePath?C.teal:C.accent,
+                      border:`1px solid ${t.receiptFilePath?C.teal:C.accent}44`,
                       borderRadius:20,padding:"3px 10px",fontSize:11,fontWeight:700,
-                      whiteSpace:"nowrap",textDecoration:"none"}}>
-                    📄 Doc
-                  </a>
+                      cursor:"pointer",whiteSpace:"nowrap"}}>
+                    {t.receiptFilePath ? "📎 Re-upload Receipt" : "📎 Upload Receipt"}
+                  </button>
+                )}
+                {/* Download merged PDF */}
+                {t.orderType==="party" && t.mergedPdfPath && (
+                  <button onClick={async()=>{
+                    try{
+                      const url = await getSignedUrl(t.mergedPdfPath, 3600);
+                      const a=document.createElement("a"); a.href=url;
+                      a.download=`MergedConfirmation_${t.lrNo||t.id}.pdf`;
+                      a.target="_blank"; document.body.appendChild(a); a.click();
+                      document.body.removeChild(a);
+                    }catch(e){alert("Download failed: "+e.message);}
+                  }} style={{background:C.green+"22",color:C.green,
+                    border:`1px solid ${C.green}44`,borderRadius:20,
+                    padding:"3px 10px",fontSize:11,fontWeight:700,
+                    cursor:"pointer",whiteSpace:"nowrap"}}>
+                    ⬇ Download PDF
+                  </button>
                 )}
               </div>
             </div>
@@ -1904,6 +2046,37 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
         );
       })}
       {shown.length===0 && <div style={{textAlign:"center",color:C.muted,padding:40}}>No trips found</div>}
+
+      {/* ── RECEIPT CONFIRMATION UPLOAD SHEET ── */}
+      {receiptSheet && (
+        <Sheet title={`📎 Receipt Confirmation — ${receiptSheet.lrNo||"—"}`}
+          onClose={()=>setReceiptSheet(null)}>
+          {merging && (
+            <div style={{textAlign:"center",padding:"30px 0"}}>
+              <div style={{fontSize:32,marginBottom:8}}>🔀</div>
+              <div style={{color:C.text,fontWeight:700}}>Merging PDFs…</div>
+              <div style={{color:C.muted,fontSize:12,marginTop:4}}>Please wait</div>
+            </div>
+          )}
+          {!merging && (
+            <ReceiptUploadSheet
+              trip={receiptSheet}
+              onMerge={(tripId, receiptPath, mergedPath) => {
+                setTrips(p => p.map(t => t.id===tripId ? {
+                  ...t,
+                  receiptFilePath: receiptPath,
+                  receiptUploadedAt: nowTs(),
+                  mergedPdfPath: mergedPath,
+                } : t));
+                log("RECEIPT UPLOADED", `LR:${receiptSheet.lrNo} merged PDF stored`);
+                setReceiptSheet(null);
+                alert("✅ PDFs merged successfully!\nTap ⬇ Download PDF on the trip card to download for portal submission.");
+              }}
+              onClose={()=>setReceiptSheet(null)}
+            />
+          )}
+        </Sheet>
+      )}
 
       {/* ── ADD SHEET ── */}
       {addSheet && (
@@ -2032,17 +2205,9 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                   try {
                     const tripId = uid();
                     // Upload GR + Invoice to Supabase Storage
-                    let grUrl="", invUrl="", mergedUrl="";
-                    if(grFileRef.current)  { const r=await uploadPartyFile(tripId,"gr",grFileRef.current);  grUrl=r.url; }
-                    if(invoiceFileRef.current) { const r=await uploadPartyFile(tripId,"invoice",invoiceFileRef.current); invUrl=r.url; }
-                    // Build + upload merged HTML confirmation doc
-                    const html = buildConfirmationHTML({...f,qty:+f.qty});
-                    const blob = new Blob([html],{type:"text/html"});
-                    const { url:mUrl } = await uploadPartyFile(tripId,"merged_confirmation",new File([blob],"confirmation.html",{type:"text/html"}));
-                    mergedUrl=mUrl;
-                    // Download merged doc for user (portal submission)
-                    const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
-                    a.download=`Confirmation_${f.lrNo||tripId}.html`; a.click(); URL.revokeObjectURL(a.href);
+                    let grUrl="", invUrl="";
+                    if(grFileRef.current)  { const r=await uploadPartyFile(tripId,"gr",grFileRef.current);  grUrl=r.path; }
+                    if(invoiceFileRef.current) { const r=await uploadPartyFile(tripId,"invoice",invoiceFileRef.current); invUrl=r.path; }
                     // Save the trip
                     const t = mkTrip({
                       ...f, id:tripId, type:tripType,
@@ -2052,8 +2217,9 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                       dieselEstimate:+f.dieselEstimate,
                       dieselIndentNo:(f.dieselIndentNo||"").trim(),
                       orderType:"party", district:f.district||"", state:f.state||"",
-                      grFileUrl:grUrl, invoiceFileUrl:invUrl, mergedPdfUrl:mergedUrl,
+                      grFilePath:grUrl, invoiceFilePath:invUrl, mergedPdfPath:"",
                       emailSentAt:nowTs(), partyEmail:toEmail,
+                      receiptFilePath:"", receiptUploadedAt:"",
                       createdBy:user.username, createdAt:nowTs(),
                     });
                     setTrips(p=>[t,...(p||[])]);
@@ -2080,7 +2246,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                     setF(blankForm());
                     setOrderTypeStep(null);setPartyStep("docs");setEmailSent(false);
                     grFileRef.current=null; invoiceFileRef.current=null;
-                    alert(`✓ Party trip saved!\nLR: ${t.lrNo}\nConfirmation doc downloaded for portal submission.`);
+                    alert(`✓ Party trip saved!\nLR: ${t.lrNo}\nOnce the party replies confirming receipt, tap "📎 Upload Receipt" on the trip card to generate the merged PDF for portal submission.`);
                   } catch(e) {
                     alert("Error saving trip: "+e.message);
                   } finally {
