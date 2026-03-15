@@ -1161,13 +1161,19 @@ Rules:
 }
 
 // ─── PARTY TRIP STORAGE HELPERS ──────────────────────────────────────────────
+// IMPORTANT: This must exactly match the bucket name in Supabase Storage
 const PARTY_BUCKET = "party-trip-files";
 
 async function uploadPartyFile(tripId, role, file) {
   const ext  = (file.name||"file").split(".").pop() || "pdf";
   const path = `${tripId}/${role}.${ext}`;
   const { error } = await supabase.storage.from(PARTY_BUCKET).upload(path, file, {upsert:true});
-  if (error) throw new Error("Upload failed: " + error.message);
+  if (error) {
+    if(error.message?.includes("Bucket not found") || error.statusCode==="404"){
+      throw new Error(`Storage bucket "${PARTY_BUCKET}" not found. Go to Supabase → Storage and create a bucket named exactly: ${PARTY_BUCKET}`);
+    }
+    throw new Error("Upload failed: " + error.message);
+  }
   const { data } = supabase.storage.from(PARTY_BUCKET).getPublicUrl(path);
   return { path, url: data.publicUrl };
 }
@@ -1265,7 +1271,8 @@ function PartyDocUpload({ tripId, grFileRef, invoiceFileRef, onDone, onBack }) {
 
   const canProceed = grFile && invoiceFile;
 
-  const FileBox = ({label, file, preview, inputRef, onPick, color}) => (
+  // Inline file box renderer — avoids remount bug from defining component inside render
+  const renderFileBox = (label, file, preview, inputRef, onPick, clearFn, color) => (
     <div style={{background:C.bg,borderRadius:12,padding:14,border:`2px dashed ${file?color:C.border}`}}>
       <div style={{color:color,fontWeight:700,fontSize:12,marginBottom:8}}>{label}</div>
       {preview ? (
@@ -1277,7 +1284,7 @@ function PartyDocUpload({ tripId, grFileRef, invoiceFileRef, onDone, onBack }) {
               ✓ PDF loaded: {file.name}
             </div>
           )}
-          <button onClick={()=>{if(label.includes("GR")){grFileRef.current=null;setGrFile(null);setGrPreview(null);}else{invoiceFileRef.current=null;setInvoiceFile(null);setInvPreview(null);}}}
+          <button onClick={()=>{clearFn(); if(inputRef.current) inputRef.current.value="";}}
             style={{position:"absolute",top:4,right:4,background:C.red,border:"none",color:"#fff",
               borderRadius:"50%",width:24,height:24,fontSize:14,cursor:"pointer",
               display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
@@ -1291,7 +1298,12 @@ function PartyDocUpload({ tripId, grFileRef, invoiceFileRef, onDone, onBack }) {
         </button>
       )}
       <input ref={inputRef} type="file" accept="image/*,application/pdf"
-        style={{display:"none"}} onChange={e=>onPick(e.target.files?.[0])} />
+        style={{display:"none"}} onChange={e=>{
+          const f = e.target.files?.[0];
+          if(f) onPick(f);
+          // Reset so same file can be re-selected
+          e.target.value = "";
+        }} />
     </div>
   );
 
@@ -1301,10 +1313,10 @@ function PartyDocUpload({ tripId, grFileRef, invoiceFileRef, onDone, onBack }) {
         padding:"10px 14px",color:C.accent,fontSize:12,fontWeight:700}}>
         🤝 Party Order — Upload documents before filling trip details
       </div>
-      <FileBox label="GR Copy *"  file={grFile}      preview={grPreview}  inputRef={grRef}
-        onPick={pickGR}  color={C.green} />
-      <FileBox label="Invoice *"  file={invoiceFile} preview={invPreview} inputRef={invRef}
-        onPick={pickInv} color={C.blue} />
+      {renderFileBox("GR Copy *",  grFile,      grPreview,  grRef,  pickGR,
+        ()=>{grFileRef.current=null;setGrFile(null);setGrPreview(null);},   C.green)}
+      {renderFileBox("Invoice *",  invoiceFile, invPreview, invRef, pickInv,
+        ()=>{invoiceFileRef.current=null;setInvoiceFile(null);setInvPreview(null);}, C.blue)}
       {canProceed && (
         <div style={{background:C.green+"11",border:`1px solid ${C.green}33`,borderRadius:8,
           padding:"8px 12px",color:C.green,fontSize:12,fontWeight:700}}>
@@ -1327,39 +1339,22 @@ function PartyEmailModal({ trip, fromEmail, toEmail, onToEmailChange, onMarkSent
 
   const subject = `Delivery Confirmation Request — M Yantra Enterprises`;
 
-  // Plain text body for mailto — tab-separated table renders well in Gmail
-  const COL_W = 22; // pad each column to this width
-  const pad = (s, w) => String(s||"—").padEnd(w);
-  const tableHeader =
-    pad("Transport Name",     20) + "	" +
-    pad("Shipment Date",      16) + "	" +
-    pad("Bill of Lading",     18) + "	" +
-    pad("Delivery Number",    18) + "	" +
-    pad("Freight Qty.",       14) + "	" +
-    pad("Customer/Vendor",    24) + "	" +
-    pad("Vehicle Number",     16) + "	" +
-    pad("To Location",        24) + "	" +
-    pad("District",           18) + "	" +
-    "State";
-  const tableRow =
-    pad("M YANTRA ENTERPRISES",       20) + "	" +
-    pad(fmtD(trip.date),              16) + "	" +
-    pad(trip.lrNo||"—",               18) + "	" +
-    pad(trip.diNo||"—",               18) + "	" +
-    pad((trip.qty||0)+" MT",          14) + "	" +
-    pad(trip.consignee||"—",          24) + "	" +
-    pad(trip.truckNo||"—",            16) + "	" +
-    pad(trip.to||"—",                 24) + "	" +
-    pad(trip.district||"—",           18) + "	" +
-    (trip.state||"—");
-
+  // Plain text — label: value format works reliably in all mail clients
   const body =
 `Dear Sir,
 
 Please confirm receipt of cement for the following consignment(s) by return mail.
 
-${tableHeader}
-${tableRow}
+Transport Name    : M YANTRA ENTERPRISES
+Shipment Date     : ${fmtD(trip.date)}
+Bill of Lading    : ${trip.lrNo||"—"}
+Delivery Number   : ${trip.diNo||"—"}
+Freight Qty.      : ${trip.qty||0} MT
+Customer/Vendor   : ${trip.consignee||"—"}
+Vehicle Number    : ${trip.truckNo||"—"}
+To Location       : ${trip.to||"—"}
+District          : ${trip.district||"—"}
+State             : ${trip.state||"—"}
 
 Kindly reply to this email confirming receipt at the earliest.
 
@@ -1403,34 +1398,19 @@ M Yantra Enterprises
       <Field label="To Email *" value={localTo} onChange={setLocalTo}
         placeholder="party@example.com" />
 
-      {/* In-app preview — styled table */}
+      {/* In-app preview — matches exactly what will appear in the email */}
       <div style={{background:C.bg,borderRadius:10,padding:"12px 14px"}}>
         <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:8}}>EMAIL PREVIEW</div>
-        <div style={{color:C.muted,fontSize:12,marginBottom:8,lineHeight:1.5}}>
+        <div style={{color:C.muted,fontSize:12,marginBottom:10,lineHeight:1.6}}>
           Dear Sir,<br/>Please confirm receipt of cement for the following consignment(s) by return mail.
         </div>
-        <div style={{overflowX:"auto",WebkitOverflowScrolling:"touch"}}>
-          <table style={{borderCollapse:"collapse",fontSize:11,minWidth:600,width:"100%"}}>
-            <thead>
-              <tr>{previewRows.map(([h])=>(
-                <th key={h} style={{background:C.dim,color:C.muted,padding:"6px 8px",
-                  border:`1px solid ${C.border}`,fontWeight:700,
-                  textTransform:"uppercase",fontSize:9,letterSpacing:0.5,
-                  whiteSpace:"nowrap",textAlign:"left"}}>{h}</th>
-              ))}</tr>
-            </thead>
-            <tbody>
-              <tr>{previewRows.map(([h,v])=>(
-                <td key={h} style={{color:C.text,padding:"7px 8px",
-                  border:`1px solid ${C.border}`,fontSize:11,
-                  whiteSpace:"nowrap",fontWeight:h==="Customer/Vendor"||h==="Bill of Lading"?700:400}}>
-                  {v}
-                </td>
-              ))}</tr>
-            </tbody>
-          </table>
-        </div>
-        <div style={{color:C.muted,fontSize:12,marginTop:8,lineHeight:1.5}}>
+        {previewRows.map(([label,value])=>(
+          <div key={label} style={{display:"flex",borderBottom:`1px solid ${C.border}22`,padding:"5px 0",gap:8}}>
+            <span style={{color:C.muted,fontSize:12,minWidth:130,flexShrink:0}}>{label}</span>
+            <span style={{color:C.text,fontSize:12,fontWeight:600}}>: {value}</span>
+          </div>
+        ))}
+        <div style={{color:C.muted,fontSize:12,marginTop:10,lineHeight:1.6}}>
           Kindly reply to this email confirming receipt at the earliest.<br/>
           <br/>Regards,<br/><b style={{color:C.text}}>M Yantra Enterprises</b><br/>9606477257
         </div>
@@ -2208,12 +2188,10 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
         </div>
       )}
 
-      {/* LR Number - highlighted */}
+      {/* LR Number - always editable (LR is never on the GR copy, must be entered manually) */}
       <div style={{background:C.bg,borderRadius:10,padding:"12px 14px",border:`1.5px solid ${C.blue}44`}}>
         <div style={{color:C.blue,fontWeight:700,fontSize:12,marginBottom:6}}>📄 LR NUMBER (Lorry Receipt)</div>
-        {locked
-          ? <LockedField value={f.lrNo} />
-          : <Field value={f.lrNo||""} onChange={ff("lrNo")} placeholder="e.g. LR/MYE/001 — identifies this trip" />}
+        <Field value={f.lrNo||""} onChange={ff("lrNo")} placeholder="e.g. LR/MYE/001 — identifies this trip" />
       </div>
 
       <div style={{display:"flex",gap:10}}>
