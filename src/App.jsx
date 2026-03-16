@@ -1945,7 +1945,7 @@ function ReceiptUploadSheet({ trip, onMerge, onClose }) {
 }
 
 // ─── TRIPS ────────────────────────────────────────────────────────────────────
-function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripType, user, log, driverPays}) {
+function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripType, user, log, driverPays, employees}) {
   const isIn = tripType === "inbound";
   const ac   = isIn ? C.teal : C.accent;
 
@@ -1968,6 +1968,8 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
   const invoiceFileRef = useRef(null);
   // Party email batch sheet
   const [partyEmailSheet, setPartyEmailSheet] = useState(false);
+  // WhatsApp reminder sheet
+  const [waSheet, setWaSheet] = useState(false);
   // Batch receipt upload sheet
   const [batchReceiptSheet, setBatchReceiptSheet] = useState(null); // batchId string
 
@@ -2279,13 +2281,20 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
         return pending.length>5 ? (
           <div style={{background:C.red+"11",border:"1px solid "+C.red+"44",borderRadius:10,
             padding:"9px 14px",color:C.red,fontSize:12,fontWeight:700,
-            display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-            <span>⚠ {pending.length} party trips waiting for email — send now to avoid backlog</span>
-            <button onClick={()=>setPartyEmailSheet(true)}
-              style={{background:C.red,border:"none",color:"#fff",borderRadius:8,
-                padding:"4px 10px",fontSize:11,fontWeight:700,cursor:"pointer"}}>
-              Send Now
-            </button>
+            display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+            <span style={{flex:1}}>⚠ {pending.length} party trips waiting for email</span>
+            <div style={{display:"flex",gap:6,flexShrink:0}}>
+              <button onClick={()=>setWaSheet(true)}
+                style={{background:"#25D366",border:"none",color:"#fff",borderRadius:8,
+                  padding:"4px 10px",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+                📲 Remind
+              </button>
+              <button onClick={()=>setPartyEmailSheet(true)}
+                style={{background:C.red,border:"none",color:"#fff",borderRadius:8,
+                  padding:"4px 10px",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+                Send Now
+              </button>
+            </div>
           </div>
         ) : null;
       })()}
@@ -2484,6 +2493,73 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
         );
       })}
       {shown.length===0 && <div style={{textAlign:"center",color:C.muted,padding:40}}>No trips found</div>}
+
+      {/* ── WHATSAPP REMINDER SHEET ── */}
+      {waSheet && (()=>{
+        const pending = trips.filter(t=>t.orderType==="party"&&!t.emailSentAt);
+        // Build contacts from employees with phones
+        const contacts = (employees||[])
+          .filter(e=>e.phone&&e.phone.trim())
+          .map(e=>({name:e.name, phone:e.phone.replace(/\D/g,""), role:e.role||""}));
+        const msgText = "Dear {name},
+
+Reminder: "+pending.length+" party trip"+(pending.length>1?"s are":"is")+" pending email confirmation at M Yantra Enterprises.
+
+Please send the confirmation email at the earliest.
+
+- M Yantra System
+9606477257";
+        return (
+          <Sheet title="📲 WhatsApp Reminder" onClose={()=>setWaSheet(false)}>
+            <div style={{display:"flex",flexDirection:"column",gap:14}}>
+              <div style={{background:C.red+"11",border:"1px solid "+C.red+"44",borderRadius:10,
+                padding:"10px 14px",color:C.red,fontSize:12,fontWeight:700}}>
+                ⚠ {pending.length} party trip{pending.length>1?"s":""}  pending email confirmation
+              </div>
+
+              <div style={{background:C.bg,borderRadius:10,padding:"12px 14px"}}>
+                <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:6}}>MESSAGE PREVIEW</div>
+                <div style={{color:C.text,fontSize:12,lineHeight:1.7,whiteSpace:"pre-wrap"}}>
+                  {msgText.replace("{name}","[Name]")}
+                </div>
+              </div>
+
+              {contacts.length===0 ? (
+                <div style={{background:C.bg,borderRadius:10,padding:"12px 14px",
+                  color:C.muted,fontSize:12,textAlign:"center"}}>
+                  No employee phone numbers found.<br/>Add phone numbers to employees first.
+                </div>
+              ) : (
+                <>
+                  <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1}}>
+                    TAP TO SEND TO:
+                  </div>
+                  {contacts.map(c=>(
+                    <button key={c.phone} onClick={()=>{
+                      const msg = msgText.replace("{name}", c.name);
+                      window.open("https://wa.me/91"+c.phone+"?text="+encodeURIComponent(msg),"_blank");
+                    }} style={{background:C.card,border:"1px solid "+C.border,borderRadius:12,
+                      padding:"12px 14px",cursor:"pointer",
+                      display:"flex",justifyContent:"space-between",alignItems:"center",
+                      textAlign:"left"}}>
+                      <div>
+                        <div style={{color:C.text,fontWeight:700,fontSize:13}}>{c.name}</div>
+                        <div style={{color:C.muted,fontSize:11,marginTop:2}}>📞 {c.phone}{c.role?" · "+c.role:""}</div>
+                      </div>
+                      <div style={{background:"#25D366",borderRadius:10,padding:"6px 12px",
+                        color:"#fff",fontWeight:700,fontSize:12,flexShrink:0}}>
+                        📲 Send
+                      </div>
+                    </button>
+                  ))}
+                </>
+              )}
+
+              <Btn onClick={()=>setWaSheet(false)} full outline color={C.muted}>Close</Btn>
+            </div>
+          </Sheet>
+        );
+      })()}
 
       {/* ── PARTY BATCH EMAIL SHEET ── */}
       {partyEmailSheet && (
