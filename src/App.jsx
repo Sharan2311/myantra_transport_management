@@ -2501,14 +2501,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
         const contacts = (employees||[])
           .filter(e=>e.phone&&e.phone.trim())
           .map(e=>({name:e.name, phone:e.phone.replace(/\D/g,""), role:e.role||""}));
-        const msgText = "Dear {name},
-
-Reminder: "+pending.length+" party trip"+(pending.length>1?"s are":"is")+" pending email confirmation at M Yantra Enterprises.
-
-Please send the confirmation email at the earliest.
-
-- M Yantra System
-9606477257";
+        const msgText = "Dear {name},\n\nReminder: "+pending.length+" party trip"+(pending.length>1?"s are":"is")+" pending email confirmation at M Yantra Enterprises.\n\nPlease send the confirmation email at the earliest.\n\n- M Yantra System\n9606477257";
         return (
           <Sheet title="📲 WhatsApp Reminder" onClose={()=>setWaSheet(false)}>
             <div style={{display:"flex",flexDirection:"column",gap:14}}>
