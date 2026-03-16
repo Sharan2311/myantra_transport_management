@@ -39,6 +39,7 @@ const tripFromDB = r => ({
   state: r.state || '',
   emailSentAt: r.email_sent_at || '',
   partyEmail: r.party_email || '',
+  batchId: r.batch_id || '',
 })
 const tripToDB = t => ({
   id: t.id, type: t.type, lr_no: t.lrNo, di_no: t.diNo, truck_no: t.truckNo,
@@ -75,6 +76,7 @@ const tripToDB = t => ({
   state: t.state || '',
   email_sent_at: t.emailSentAt || '',
   party_email: t.partyEmail || '',
+  batch_id: t.batchId || '',
 })
 
 const vehicleFromDB = r => ({

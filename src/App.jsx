@@ -1451,6 +1451,357 @@ M Yantra Enterprises
   );
 }
 
+// ─── PARTY BATCH EMAIL SHEET ──────────────────────────────────────────────────
+function PartyBatchEmailSheet({ trips, setTrips, onClose, log }) {
+  const [selected, setSelected] = useState(new Set());
+  const [toEmail,  setToEmail]  = useState("");
+  const [step,     setStep]     = useState("select"); // "select" | "compose"
+  const [opened,   setOpened]   = useState(false);
+
+  const pending = trips.filter(t => t.orderType==="party" && !t.emailSentAt);
+  const fmtD = d => { if(!d) return "—"; const [y,m,dy]=d.split("-"); return dy+"-"+m+"-"+y; };
+
+  const toggle = id => setSelected(prev => {
+    const n = new Set(prev);
+    n.has(id) ? n.delete(id) : n.add(id);
+    return n;
+  });
+  const selTrips = pending.filter(t => selected.has(t.id));
+
+  // Build email body — one row per selected trip
+  const subject = "Delivery Confirmation Request — M Yantra Enterprises";
+  const body = selTrips.length===0 ? "" :
+"Dear Sir,
+
+Please confirm receipt of cement for the following consignment(s) by return mail.
+
+" +
+"Transport Name    : M YANTRA ENTERPRISES
+" +
+selTrips.map(t =>
+"--------------------------------------------------
+" +
+"Shipment Date     : "+fmtD(t.date)+"
+"+
+"Bill of Lading    : "+(t.lrNo||"—")+"
+"+
+"Delivery Number   : "+(t.diNo||"—")+"
+"+
+"Freight Qty.      : "+(t.qty||0)+" MT
+"+
+"Customer/Vendor   : "+(t.consignee||"—")+"
+"+
+"Vehicle Number    : "+(t.truckNo||"—")+"
+"+
+"To Location       : "+(t.to||"—")+"
+"+
+"District          : "+(t.district||"—")+"
+"+
+"State             : "+(t.state||"—")
+).join("
+") +
+"
+--------------------------------------------------
+
+" +
+"Kindly reply to this email confirming receipt at the earliest.
+
+Regards,
+M Yantra Enterprises
+9606477257";
+
+  const openMail = () => {
+    const mailto = "mailto:"+toEmail+"?subject="+encodeURIComponent(subject)+"&body="+encodeURIComponent(body);
+    window.open(mailto,"_blank");
+    setOpened(true);
+  };
+
+  const markSent = () => {
+    const batchId = "BATCH-"+Date.now();
+    const ts = nowTs();
+    setTrips(p => p.map(t => {
+      if(!selected.has(t.id)) return t;
+      const updated = {...t, emailSentAt:ts, partyEmail:toEmail, batchId};
+      DB.saveTrip(updated).catch(e=>console.error("saveTrip batch:",e));
+      return updated;
+    }));
+    log("PARTY EMAIL SENT", selTrips.length+" trips · batch:"+batchId+" → "+toEmail);
+    onClose();
+  };
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+
+      {step==="select" && (<>
+        <div style={{color:C.accent,fontWeight:700,fontSize:12}}>
+          Select party trips to include in this email batch
+        </div>
+
+        {pending.length===0 && (
+          <div style={{textAlign:"center",padding:"30px 0",color:C.muted}}>
+            <div style={{fontSize:32,marginBottom:8}}>✅</div>
+            <div style={{fontWeight:700}}>All party trips have been emailed</div>
+          </div>
+        )}
+
+        {/* Select All / Deselect All */}
+        {pending.length>0 && (
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={()=>setSelected(new Set(pending.map(t=>t.id)))}
+              style={{background:C.accent+"22",border:"1px solid "+C.accent+"44",color:C.accent,
+                borderRadius:8,padding:"5px 12px",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+              Select All ({pending.length})
+            </button>
+            <button onClick={()=>setSelected(new Set())}
+              style={{background:C.dim,border:"1px solid "+C.border,color:C.muted,
+                borderRadius:8,padding:"5px 12px",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+              Clear
+            </button>
+          </div>
+        )}
+
+        {pending.map(t => (
+          <div key={t.id} onClick={()=>toggle(t.id)}
+            style={{background:selected.has(t.id)?C.accent+"11":C.bg,
+              border:"2px solid "+(selected.has(t.id)?C.accent:C.border),
+              borderRadius:12,padding:"12px 14px",cursor:"pointer",
+              display:"flex",gap:12,alignItems:"flex-start"}}>
+            <div style={{width:20,height:20,borderRadius:4,flexShrink:0,marginTop:2,
+              background:selected.has(t.id)?C.accent:C.dim,
+              border:"2px solid "+(selected.has(t.id)?C.accent:C.border),
+              display:"flex",alignItems:"center",justifyContent:"center",color:"#000",fontSize:13,fontWeight:900}}>
+              {selected.has(t.id)?"✓":""}
+            </div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{display:"flex",justifyContent:"space-between"}}>
+                <span style={{fontWeight:800,fontSize:13}}>{t.truckNo}</span>
+                <span style={{color:C.orange,fontWeight:700}}>{t.qty} MT</span>
+              </div>
+              <div style={{color:C.blue,fontSize:12}}>LR: {t.lrNo||"—"} · DI: {t.diNo||"—"}</div>
+              <div style={{color:C.muted,fontSize:11}}>{t.consignee||"—"} · {t.to||"—"}</div>
+              <div style={{color:C.muted,fontSize:11}}>{t.district||"—"}, {t.state||"—"} · {t.date}</div>
+            </div>
+          </div>
+        ))}
+
+        <Btn onClick={()=>setStep("compose")} full color={C.accent}
+          disabled={selected.size===0}>
+          Compose Email → ({selected.size} trips selected)
+        </Btn>
+        <Btn onClick={onClose} full outline color={C.muted}>Cancel</Btn>
+      </>)}
+
+      {step==="compose" && (<>
+        <button onClick={()=>{setStep("select");setOpened(false);}}
+          style={{background:"none",border:"none",color:C.blue,fontSize:12,
+            cursor:"pointer",textAlign:"left",padding:"0 0 4px"}}>
+          ← Back to selection
+        </button>
+
+        <div style={{background:C.bg,borderRadius:10,padding:"10px 14px"}}>
+          <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:4}}>SELECTED TRIPS</div>
+          {selTrips.map(t=>(
+            <div key={t.id} style={{display:"flex",justifyContent:"space-between",
+              padding:"4px 0",borderBottom:"1px solid "+C.border+"22",fontSize:12}}>
+              <span style={{color:C.text}}>{t.lrNo||"—"} · {t.truckNo}</span>
+              <span style={{color:C.muted}}>{t.qty}MT · {t.consignee||"—"}</span>
+            </div>
+          ))}
+        </div>
+
+        <Field label="To Email *" value={toEmail} onChange={setToEmail}
+          placeholder="party@example.com" />
+
+        {/* Preview */}
+        <div style={{background:C.bg,borderRadius:10,padding:"12px 14px",
+          maxHeight:240,overflowY:"auto"}}>
+          <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:8}}>
+            EMAIL PREVIEW
+          </div>
+          <div style={{color:C.muted,fontSize:12,marginBottom:8,lineHeight:1.6}}>
+            Dear Sir,<br/>Please confirm receipt of cement for the following consignment(s).
+          </div>
+          {selTrips.map(t=>(
+            <div key={t.id} style={{background:C.card,borderRadius:8,padding:"8px 10px",
+              marginBottom:8,fontSize:11}}>
+              {[
+                ["Shipment Date",  fmtD(t.date)],
+                ["Bill of Lading", t.lrNo||"—"],
+                ["Delivery No.",   t.diNo||"—"],
+                ["Freight Qty.",   t.qty+" MT"],
+                ["Customer",       t.consignee||"—"],
+                ["Vehicle",        t.truckNo],
+                ["To Location",    t.to||"—"],
+                ["District",       t.district||"—"],
+                ["State",          t.state||"—"],
+              ].map(([l,v])=>(
+                <div key={l} style={{display:"flex",gap:6,padding:"2px 0"}}>
+                  <span style={{color:C.muted,minWidth:100,flexShrink:0}}>{l}</span>
+                  <span style={{color:C.text,fontWeight:600}}>: {v}</span>
+                </div>
+              ))}
+            </div>
+          ))}
+          <div style={{color:C.muted,fontSize:12,marginTop:6,lineHeight:1.6}}>
+            Kindly reply confirming receipt.<br/>
+            <b style={{color:C.text}}>M Yantra Enterprises</b> · 9606477257
+          </div>
+        </div>
+
+        <div style={{background:"#1a1000",border:"1px solid "+C.orange+"44",borderRadius:8,
+          padding:"9px 12px",color:C.orange,fontSize:11}}>
+          📱 On mobile: Gmail opens pre-filled. Attach GR Copies and Invoices before sending.<br/>
+          🖥 On desktop: Copy the preview above and paste into Gmail manually.
+        </div>
+
+        {!opened ? (
+          <Btn onClick={openMail} full color={C.blue} disabled={!toEmail.trim()}>
+            📧 Open Gmail / Mail App
+          </Btn>
+        ) : (<>
+          <div style={{background:C.green+"11",border:"1px solid "+C.green+"33",borderRadius:8,
+            padding:"9px 12px",color:C.green,fontSize:12,fontWeight:700}}>
+            ✓ Email app opened — send the email with attachments, then confirm below
+          </div>
+          <Btn onClick={markSent} full color={C.green} disabled={!toEmail.trim()}>
+            ✓ Email Sent — Mark {selected.size} Trips as Sent
+          </Btn>
+          <Btn onClick={openMail} full outline color={C.blue}>
+            Re-open Mail App
+          </Btn>
+        </>)}
+        <Btn onClick={onClose} full outline color={C.muted}>Cancel</Btn>
+      </>)}
+    </div>
+  );
+}
+
+// ─── BATCH RECEIPT UPLOAD SHEET ───────────────────────────────────────────────
+function BatchReceiptSheet({ batchId, trips, setTrips, onClose, log }) {
+  const batchTrips = trips.filter(t => t.batchId===batchId);
+  const [receiptFile, setReceiptFile] = useState(null);
+  const [preview,     setPreview]     = useState(null);
+  const [merging,     setMerging]     = useState(false);
+  const [error,       setError]       = useState("");
+  const inputRef = useRef(null);
+
+  const pick = f => {
+    setReceiptFile(f); setError("");
+    const r=new FileReader(); r.onload=e=>setPreview(e.target.result); r.readAsDataURL(f);
+    if(inputRef.current) inputRef.current.value="";
+  };
+
+  const handleMerge = async () => {
+    if(!receiptFile){setError("Please upload the reply email PDF.");return;}
+    const missing = batchTrips.filter(t=>!t.grFilePath||!t.invoiceFilePath);
+    if(missing.length>0){setError("Some trips are missing GR or Invoice files: "+missing.map(t=>t.lrNo||t.id).join(", "));return;}
+    setMerging(true); setError("");
+    try {
+      // Use first trip's id for the receipt file path (batch receipt)
+      const anchorId = batchTrips[0].id;
+      const receiptResult = await uploadPartyFile(anchorId, "batch_receipt_"+batchId, receiptFile);
+
+      // Fetch all PDFs: receipt first, then GR+Invoice per trip in order
+      const pdfBuffers = [];
+      pdfBuffers.push(await fetchStorageFile(receiptResult.path));
+      for(const t of batchTrips){
+        pdfBuffers.push(await fetchStorageFile(t.grFilePath));
+        pdfBuffers.push(await fetchStorageFile(t.invoiceFilePath));
+      }
+
+      const mergedBytes = await mergePDFs(pdfBuffers);
+      const mergedFile  = new File([mergedBytes],"batch_merged_"+batchId+".pdf",{type:"application/pdf"});
+      const mergedResult = await uploadPartyFile(anchorId, "batch_merged_"+batchId, mergedFile);
+
+      // Stamp all trips in batch
+      const ts = nowTs();
+      setTrips(p => p.map(t => {
+        if(t.batchId!==batchId) return t;
+        const updated = {
+          ...t,
+          receiptFilePath: receiptResult.path,
+          receiptUploadedAt: ts,
+          mergedPdfPath: mergedResult.path,
+        };
+        DB.saveTrip(updated).catch(e=>console.error("saveTrip batch receipt:",e));
+        return updated;
+      }));
+      log("BATCH RECEIPT UPLOADED","batch:"+batchId+" "+batchTrips.length+" trips merged");
+      onClose();
+      alert("✅ Batch PDF merged! Tap ⬇ Download PDF on any trip in this batch to download.");
+    } catch(e) {
+      setError("Merge failed: "+e.message);
+    } finally {
+      setMerging(false);
+    }
+  };
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+      <div style={{background:C.blue+"11",border:"1px solid "+C.blue+"33",borderRadius:10,
+        padding:"10px 14px",color:C.blue,fontSize:12,fontWeight:700}}>
+        📎 Upload reply email for this batch ({batchTrips.length} trips)
+      </div>
+      <div style={{background:C.bg,borderRadius:10,padding:"10px 14px"}}>
+        <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:6}}>TRIPS IN BATCH</div>
+        {batchTrips.map(t=>(
+          <div key={t.id} style={{display:"flex",justifyContent:"space-between",
+            padding:"4px 0",borderBottom:"1px solid "+C.border+"22",fontSize:12}}>
+            <span style={{color:C.text}}>{t.lrNo||"—"} · {t.truckNo}</span>
+            <span style={{color:C.muted}}>{t.qty}MT</span>
+          </div>
+        ))}
+      </div>
+      <div style={{background:C.bg,borderRadius:12,padding:14,
+        border:"2px dashed "+(receiptFile?C.green:C.border)}}>
+        <div style={{color:C.green,fontWeight:700,fontSize:12,marginBottom:8}}>
+          Reply Email PDF (receipt confirmation) *
+        </div>
+        {receiptFile ? (
+          <div style={{position:"relative"}}>
+            <div style={{background:C.card,borderRadius:8,padding:"12px",
+              textAlign:"center",color:C.green,fontWeight:700}}>✓ {receiptFile.name}</div>
+            <button onClick={()=>{setReceiptFile(null);setPreview(null);}}
+              style={{position:"absolute",top:4,right:4,background:C.red,border:"none",
+                color:"#fff",borderRadius:"50%",width:24,height:24,fontSize:14,
+                cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
+          </div>
+        ) : (
+          <button onClick={()=>inputRef.current?.click()}
+            style={{width:"100%",background:C.green+"11",border:"1.5px dashed "+C.green,
+              borderRadius:10,padding:"20px",color:C.green,fontWeight:700,
+              fontSize:13,cursor:"pointer",textAlign:"center"}}>
+            📎 Upload Reply Email PDF
+          </button>
+        )}
+        <input ref={inputRef} type="file" accept="application/pdf,image/*"
+          style={{display:"none"}} onChange={e=>{const f=e.target.files?.[0];if(f)pick(f);e.target.value="";}} />
+      </div>
+      <div style={{background:C.bg,borderRadius:10,padding:"10px 14px"}}>
+        <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:6}}>MERGE ORDER</div>
+        {[
+          {n:"1. Reply Email (receipt confirmation)", ok:!!receiptFile, c:C.green},
+          ...batchTrips.map((t,i)=>[
+            {n:(i+2)+". GR Copy — "+t.lrNo, ok:!!t.grFilePath, c:C.teal},
+            {n:"   Invoice — "+t.lrNo, ok:!!t.invoiceFilePath, c:C.blue},
+          ]).flat()
+        ].map((x,i)=>(
+          <div key={i} style={{display:"flex",gap:8,padding:"3px 0",fontSize:11}}>
+            <span style={{color:x.ok?x.c:C.red}}>{x.ok?"✓":"✗"}</span>
+            <span style={{color:x.ok?C.text:C.red}}>{x.n}</span>
+          </div>
+        ))}
+      </div>
+      {error&&<div style={{background:C.red+"11",border:"1px solid "+C.red+"33",
+        borderRadius:8,padding:"9px 12px",color:C.red,fontSize:12}}>{error}</div>}
+      <Btn onClick={handleMerge} full color={C.green} disabled={!receiptFile||merging} loading={merging}>
+        {merging?"Merging PDFs…":"🔀 Merge & Store Batch PDF"}
+      </Btn>
+      <Btn onClick={onClose} full outline color={C.muted}>Cancel</Btn>
+    </div>
+  );
+}
+
 // ─── RECEIPT CONFIRMATION UPLOAD SHEET ───────────────────────────────────────
 function ReceiptUploadSheet({ trip, onMerge, onClose }) {
   const [receiptFile, setReceiptFile] = useState(null);
@@ -1595,18 +1946,16 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
   const [dateFrom,    setDateFrom]    = useState("");
   const [dateTo,      setDateTo]      = useState("");
   // Party order flow state
-  const [orderTypeStep, setOrderTypeStep] = useState(null); // null | "selecting" | "godown" | "party"
-  const [partyStep,     setPartyStep]     = useState("docs"); // "docs" | "form" | "email"
-  const [partyToEmail,  setPartyToEmail]  = useState("");
-  const [showEmailModal,setShowEmailModal]= useState(false);
-  const [emailSent,     setEmailSent]     = useState(false);
+  const [orderTypeStep, setOrderTypeStep] = useState(null);
+  const [partyStep,     setPartyStep]     = useState("docs");
   const [uploadingFiles,setUploadingFiles]= useState(false);
   // Refs to hold file objects across re-renders without triggering state
   const grFileRef      = useRef(null);
   const invoiceFileRef = useRef(null);
-  // Receipt confirmation upload
-  const [receiptSheet, setReceiptSheet] = useState(null); // trip object
-  const [merging,      setMerging]      = useState(false);
+  // Party email batch sheet
+  const [partyEmailSheet, setPartyEmailSheet] = useState(false);
+  // Batch receipt upload sheet
+  const [batchReceiptSheet, setBatchReceiptSheet] = useState(null); // batchId string
 
   const blankForm = (isParty=false) => ({
     type:tripType, lrNo:"", diNo:"", truckNo:"", grNo:"", dieselIndentNo:"",
@@ -1621,9 +1970,8 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
     orderType: isParty ? "party" : "godown",
     district:"", state:"",
     grFilePath:"", invoiceFilePath:"", mergedPdfPath:"",
-    emailSentAt:"", partyEmail:"",
-    receiptFilePath:"",       // uploaded reply email PDF from party
-    receiptUploadedAt:"",
+    emailSentAt:"", partyEmail:"", batchId:"",
+    receiptFilePath:"", receiptUploadedAt:"",
   });
 
   const [f, setF] = useState(blankForm);
@@ -1895,6 +2243,15 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
         <div style={{color:ac,fontWeight:800,fontSize:16}}>{isIn?"🏭 Raw Material":"🚚 Cement Trips"}</div>
         <div style={{display:"flex",gap:8}}>
           <Btn onClick={()=>setShowDateFilter(v=>!v)} sm outline color={showDateFilter||(dateFrom||dateTo)?C.orange:C.muted}>📅</Btn>
+          {!isIn && (() => {
+            const pending = trips.filter(t=>t.orderType==="party"&&!t.emailSentAt);
+            return pending.length>0 ? (
+              <Btn onClick={()=>setPartyEmailSheet(true)} sm
+                color={pending.length>5?C.red:C.accent}>
+                📧 {pending.length}
+              </Btn>
+            ) : null;
+          })()}
           <Btn onClick={()=>{
             if(isIn){setOrderTypeStep("godown");setF(blankForm(false));}
             else{setOrderTypeStep("selecting");}
@@ -1902,6 +2259,22 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
           }} color={ac} sm>+ Add Trip</Btn>
         </div>
       </div>
+      {/* Warning: >5 pending party emails */}
+      {!isIn && (() => {
+        const pending = trips.filter(t=>t.orderType==="party"&&!t.emailSentAt);
+        return pending.length>5 ? (
+          <div style={{background:C.red+"11",border:"1px solid "+C.red+"44",borderRadius:10,
+            padding:"9px 14px",color:C.red,fontSize:12,fontWeight:700,
+            display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span>⚠ {pending.length} party trips waiting for email — send now to avoid backlog</span>
+            <button onClick={()=>setPartyEmailSheet(true)}
+              style={{background:C.red,border:"none",color:"#fff",borderRadius:8,
+                padding:"4px 10px",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+              Send Now
+            </button>
+          </div>
+        ) : null;
+      })()}
 
       {/* Date filter bar */}
       {showDateFilter && (
@@ -2037,13 +2410,13 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                 {t.orderType==="party" && t.emailSentAt && !t.receiptFilePath && <Badge label="📧 Awaiting Reply" color={C.blue} />}
                 {t.receiptFilePath && !t.mergedPdfPath && <Badge label="🔄 Receipt uploaded" color={C.teal} />}
                 {t.mergedPdfPath && <Badge label="✅ Merged PDF ready" color={C.green} />}
-                {(t.emailSentAt||t.grFilePath) && (
-                  <button onClick={()=>setReceiptSheet(t)} style={{
-                    background:t.receiptFilePath ? C.teal+"22" : C.accent+"22",
-                    color:t.receiptFilePath ? C.teal : C.accent,
-                    border:"1px solid "+(t.receiptFilePath ? C.teal : C.accent)+"44",
-                    borderRadius:20,padding:"4px 12px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
-                    {t.receiptFilePath ? "📎 Re-upload Receipt" : "📎 Upload Receipt"}
+                {t.emailSentAt && t.batchId && !t.mergedPdfPath && (
+                  <button onClick={()=>setBatchReceiptSheet(t.batchId)}
+                    style={{background:C.green+"22",color:C.green,
+                      border:"1px solid "+C.green+"44",borderRadius:20,
+                      padding:"4px 12px",fontSize:11,fontWeight:700,
+                      cursor:"pointer",whiteSpace:"nowrap"}}>
+                    📎 Upload Batch Receipt
                   </button>
                 )}
                 {t.mergedPdfPath && (
@@ -2067,48 +2440,28 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
       })}
       {shown.length===0 && <div style={{textAlign:"center",color:C.muted,padding:40}}>No trips found</div>}
 
-      {/* ── RECEIPT CONFIRMATION UPLOAD SHEET ── */}
-      {receiptSheet && (
-        <Sheet title={`📎 Receipt Confirmation — ${receiptSheet.lrNo||"—"}`}
-          onClose={()=>setReceiptSheet(null)}>
-          {merging && (
-            <div style={{textAlign:"center",padding:"30px 0"}}>
-              <div style={{fontSize:32,marginBottom:8}}>🔀</div>
-              <div style={{color:C.text,fontWeight:700}}>Merging PDFs…</div>
-              <div style={{color:C.muted,fontSize:12,marginTop:4}}>Please wait</div>
-            </div>
-          )}
-          {!merging && (
-            <ReceiptUploadSheet
-              trip={receiptSheet}
-              onMerge={async (tripId, receiptPath, mergedPath) => {
-                // Find the trip and build updated version
-                const tripToUpdate = trips.find(t=>t.id===tripId);
-                if(!tripToUpdate){alert("Trip not found");return;}
-                const updated = {
-                  ...tripToUpdate,
-                  receiptFilePath: receiptPath,
-                  receiptUploadedAt: nowTs(),
-                  mergedPdfPath: mergedPath,
-                  orderType: tripToUpdate.orderType||"party",
-                };
-                // SAVE TO DB FIRST — before any state update
-                // This ensures the 15s poll won't wipe the data
-                try {
-                  await DB.saveTrip(updated);
-                } catch(e) {
-                  alert("Failed to save to database: "+e.message);
-                  return;
-                }
-                // Now update local state
-                setTrips(p => p.map(t => t.id===tripId ? updated : t));
-                log("RECEIPT UPLOADED", `LR:${receiptSheet.lrNo} merged PDF stored`);
-                setReceiptSheet(null);
-                alert("✅ PDFs merged and saved!\nThe ⬇ Download PDF button is now on the trip card.");
-              }}
-              onClose={()=>setReceiptSheet(null)}
-            />
-          )}
+      {/* ── PARTY BATCH EMAIL SHEET ── */}
+      {partyEmailSheet && (
+        <Sheet title="📧 Party Confirmation Email" onClose={()=>setPartyEmailSheet(false)}>
+          <PartyBatchEmailSheet
+            trips={trips}
+            setTrips={setTrips}
+            log={log}
+            onClose={()=>setPartyEmailSheet(false)}
+          />
+        </Sheet>
+      )}
+
+      {/* ── BATCH RECEIPT UPLOAD SHEET ── */}
+      {batchReceiptSheet && (
+        <Sheet title="📎 Upload Batch Receipt" onClose={()=>setBatchReceiptSheet(null)}>
+          <BatchReceiptSheet
+            batchId={batchReceiptSheet}
+            trips={trips}
+            setTrips={setTrips}
+            log={log}
+            onClose={()=>setBatchReceiptSheet(null)}
+          />
         </Sheet>
       )}
 
@@ -2116,8 +2469,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
       {addSheet && (
         <Sheet title={isIn?"New Raw Material Trip":"New Cement Trip"} onClose={()=>{
           setAddSheet(false);setF(blankForm());setDiConflict(null);setWasScanned(false);
-          setOrderTypeStep(null);setPartyStep("docs");setEmailSent(false);setShowEmailModal(false);
-          setUploadingFiles(false);
+          setOrderTypeStep(null);setPartyStep("docs");setUploadingFiles(false);
           grFileRef.current=null; invoiceFileRef.current=null;
         }}>
 
@@ -2239,18 +2591,57 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                           if((indents||[]).some(i=>i.indentNo&&String(i.indentNo).trim()===f.dieselIndentNo.trim()))
                             {alert(`Indent No "${f.dieselIndentNo}" already exists in Diesel records.`);return;}
                         }
-                        // Duplicate LR check
                         if(f.lrNo&&f.lrNo.trim()&&trips.some(t=>t.lrNo===f.lrNo.trim()))
                           {alert(`LR "${f.lrNo}" already exists. Each LR must be unique.`);return;}
-                        // Net check
                         const _gross=(+f.qty||0)*(+f.givenRate||0);
                         const _net=_gross-(+f.advance||0)-(+f.tafal||0)-(+f.dieselEstimate||0)-(+f.shortageRecovery||0)-(+f.loanRecovery||0);
-                        if(_net<0){alert("Cannot save: Est. Net to Driver is negative. Please reduce deductions.");return;}
-                        // Party-specific checks
+                        if(_net<0){alert("Cannot save: Est. Net to Driver is negative.");return;}
                         if(!f.district||!f.state){alert("District and State are required for Party orders.");return;}
-                        setShowEmailModal(true);
+                        // Save directly — email sent separately via Party Email button
+                        setUploadingFiles(true);
+                        try {
+                          const tripId = uid();
+                          let grUrl="", invUrl="";
+                          if(grFileRef.current)  { const r=await uploadPartyFile(tripId,"gr",grFileRef.current);  grUrl=r.path; }
+                          if(invoiceFileRef.current) { const r=await uploadPartyFile(tripId,"invoice",invoiceFileRef.current); invUrl=r.path; }
+                          const t = mkTrip({
+                            ...f, id:tripId, type:tripType,
+                            qty:+f.qty, bags:+f.bags, frRate:+f.frRate, givenRate:+f.givenRate,
+                            advance:+f.advance, shortage:+f.shortage, tafal:+f.tafal,
+                            shortageRecovery:+f.shortageRecovery||0, loanRecovery:+f.loanRecovery||0,
+                            dieselEstimate:+f.dieselEstimate,
+                            dieselIndentNo:(f.dieselIndentNo||"").trim(),
+                            orderType:"party", district:f.district||"", state:f.state||"",
+                            grFilePath:grUrl, invoiceFilePath:invUrl, mergedPdfPath:"",
+                            emailSentAt:"", partyEmail:"", batchId:"",
+                            receiptFilePath:"", receiptUploadedAt:"",
+                            createdBy:user.username, createdAt:nowTs(),
+                          });
+                          setTrips(p=>[t,...(p||[])]);
+                          log("ADD PARTY TRIP",`LR:${t.lrNo} ${t.truckNo}`);
+                          const tn2=(t.truckNo||"").toUpperCase().trim();
+                          if(tn2&&!vehicles.find(v=>v.truckNo===tn2)){
+                            const nv={id:uid(),truckNo:tn2,ownerName:"",phone:"",driverName:"",driverPhone:"",
+                              driverLicense:"",accountNo:"",ifsc:"",loan:0,loanRecovered:0,deductPerTrip:0,
+                              tafalExempt:false,shortageOwed:0,shortageRecovered:0,shortageTxns:[],loanTxns:[],createdBy:user.username};
+                            setVehicles(p=>[...(p||[]),nv]);
+                          }
+                          if(tn2&&(t.loanRecovery>0||t.shortageRecovery>0)){
+                            setVehicles(prev=>prev.map(veh=>{
+                              if(veh.truckNo!==tn2) return veh;
+                              let upd={...veh};
+                              if(t.loanRecovery>0){const txn={id:uid(),type:"recovery",date:t.date,amount:t.loanRecovery,lrNo:t.lrNo,note:"Party trip"};upd={...upd,loanRecovered:(upd.loanRecovered||0)+t.loanRecovery,loanTxns:[...(upd.loanTxns||[]),txn]};}
+                              if(t.shortageRecovery>0){const txn={id:uid(),type:"recovery",date:t.date,qty:0,amount:t.shortageRecovery,lrNo:t.lrNo,note:"Party trip"};upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+t.shortageRecovery,shortageTxns:[...(upd.shortageTxns||[]),txn]};}
+                              return upd;
+                            }));
+                          }
+                          setAddSheet(false); setF(blankForm());
+                          setOrderTypeStep(null); setPartyStep("docs");
+                          grFileRef.current=null; invoiceFileRef.current=null;
+                        } catch(e){ alert("Error saving trip: "+e.message); }
+                        finally { setUploadingFiles(false); }
                       }}
-                      submitLabel="📧 Send Email & Save"
+                      submitLabel="💾 Save Party Trip"
                       user={user} wasScanned={wasScanned}
                       isParty={true} />
                   ) : (
@@ -2266,83 +2657,14 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
             </>
           )}
 
-          {/* STEP 3 (PARTY): Email modal */}
+          {/* Upload progress overlay */}
           {uploadingFiles && (
             <div style={{position:"fixed",inset:0,background:"#000a",zIndex:999,
               display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:12}}>
               <div style={{fontSize:36}}>⏳</div>
               <div style={{color:C.text,fontWeight:700,fontSize:16}}>Uploading documents…</div>
-              <div style={{color:C.muted,fontSize:13}}>Please wait, saving party trip files</div>
+              <div style={{color:C.muted,fontSize:13}}>Please wait</div>
             </div>
-          )}
-          {orderTypeStep==="party" && showEmailModal && (
-            <Sheet title="Send Confirmation Email" onClose={()=>setShowEmailModal(false)}>
-              <PartyEmailModal
-                trip={{...f, qty:+f.qty, diNo:f.diNo}}
-                fromEmail="myantraenterprises@gmail.com"
-                toEmail={partyToEmail}
-                onToEmailChange={setPartyToEmail}
-                onMarkSent={async (toEmail)=>{
-                  // Final duplicate LR check before saving
-                  if(f.lrNo&&f.lrNo.trim()&&trips.some(t=>t.lrNo===f.lrNo.trim())){
-                    alert(`LR "${f.lrNo}" already exists. Please go back and change the LR number.`);
-                    return;
-                  }
-                  setUploadingFiles(true);
-                  try {
-                    const tripId = uid();
-                    // Upload GR + Invoice to Supabase Storage
-                    let grUrl="", invUrl="";
-                    if(grFileRef.current)  { const r=await uploadPartyFile(tripId,"gr",grFileRef.current);  grUrl=r.path; }
-                    if(invoiceFileRef.current) { const r=await uploadPartyFile(tripId,"invoice",invoiceFileRef.current); invUrl=r.path; }
-                    // Save the trip
-                    const t = mkTrip({
-                      ...f, id:tripId, type:tripType,
-                      qty:+f.qty, bags:+f.bags, frRate:+f.frRate, givenRate:+f.givenRate,
-                      advance:+f.advance, shortage:+f.shortage, tafal:+f.tafal,
-                      shortageRecovery:+f.shortageRecovery||0, loanRecovery:+f.loanRecovery||0,
-                      dieselEstimate:+f.dieselEstimate,
-                      dieselIndentNo:(f.dieselIndentNo||"").trim(),
-                      orderType:"party", district:f.district||"", state:f.state||"",
-                      grFilePath:grUrl, invoiceFilePath:invUrl, mergedPdfPath:"",
-                      emailSentAt:nowTs(), partyEmail:toEmail,
-                      receiptFilePath:"", receiptUploadedAt:"",
-                      createdBy:user.username, createdAt:nowTs(),
-                    });
-                    setTrips(p=>[t,...(p||[])]);
-                    log("ADD PARTY TRIP",`LR:${t.lrNo} ${t.truckNo} email→${toEmail}`);
-                    // Vehicle ledger sync (same as godown)
-                    const tn2=(t.truckNo||"").toUpperCase().trim();
-                    if(tn2&&!vehicles.find(v=>v.truckNo===tn2)){
-                      const nv={id:uid(),truckNo:tn2,ownerName:"",phone:"",driverName:"",driverPhone:"",
-                        driverLicense:"",accountNo:"",ifsc:"",loan:0,loanRecovered:0,deductPerTrip:0,
-                        tafalExempt:false,shortageOwed:0,shortageRecovered:0,shortageTxns:[],loanTxns:[],createdBy:user.username};
-                      setVehicles(p=>[...(p||[]),nv]);
-                    }
-                    if(tn2&&(t.loanRecovery>0||t.shortageRecovery>0)){
-                      setVehicles(prev=>prev.map(veh=>{
-                        if(veh.truckNo!==tn2) return veh;
-                        let upd={...veh};
-                        if(t.loanRecovery>0){const txn={id:uid(),type:"recovery",date:t.date,amount:t.loanRecovery,lrNo:t.lrNo,note:"Party trip"};upd={...upd,loanRecovered:(upd.loanRecovered||0)+t.loanRecovery,loanTxns:[...(upd.loanTxns||[]),txn]};}
-                        if(t.shortageRecovery>0){const txn={id:uid(),type:"recovery",date:t.date,qty:0,amount:t.shortageRecovery,lrNo:t.lrNo,note:"Party trip"};upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+t.shortageRecovery,shortageTxns:[...(upd.shortageTxns||[]),txn]};}
-                        return upd;
-                      }));
-                    }
-                    setShowEmailModal(false);
-                    setAddSheet(false);
-                    setF(blankForm());
-                    setOrderTypeStep(null);setPartyStep("docs");setEmailSent(false);
-                    grFileRef.current=null; invoiceFileRef.current=null;
-                    alert(`✓ Party trip saved!\nLR: ${t.lrNo}\nOnce the party replies confirming receipt, tap "📎 Upload Receipt" on the trip card to generate the merged PDF for portal submission.`);
-                  } catch(e) {
-                    alert("Error saving trip: "+e.message);
-                  } finally {
-                    setUploadingFiles(false);
-                  }
-                }}
-                onClose={()=>setShowEmailModal(false)}
-              />
-            </Sheet>
           )}
         </Sheet>
       )}
