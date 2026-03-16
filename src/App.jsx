@@ -1626,10 +1626,46 @@ function PartyBatchEmailSheet({ trips, setTrips, onClose, log }) {
           </div>
         </div>
 
+        {/* Download GR + Invoice per trip for manual attachment */}
+        <div style={{background:C.bg,borderRadius:10,padding:"12px 14px"}}>
+          <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:8}}>
+            ATTACHMENTS — Download & attach to email
+          </div>
+          {selTrips.map(t=>(
+            <div key={t.id} style={{display:"flex",justifyContent:"space-between",
+              alignItems:"center",padding:"6px 0",borderBottom:"1px solid "+C.border+"22"}}>
+              <span style={{color:C.text,fontSize:12,fontWeight:600}}>{t.lrNo||"—"} · {t.truckNo}</span>
+              <div style={{display:"flex",gap:6}}>
+                {t.grFilePath && (
+                  <button onClick={async()=>{
+                    try{const url=await getSignedUrl(t.grFilePath,3600);const a=document.createElement("a");a.href=url;a.download="GR_"+(t.lrNo||t.id);a.target="_blank";document.body.appendChild(a);a.click();document.body.removeChild(a);}
+                    catch(e){alert("Failed: "+e.message);}
+                  }} style={{background:C.teal+"22",color:C.teal,border:"1px solid "+C.teal+"44",
+                    borderRadius:8,padding:"3px 8px",fontSize:10,fontWeight:700,cursor:"pointer"}}>
+                    ⬇ GR
+                  </button>
+                )}
+                {t.invoiceFilePath && (
+                  <button onClick={async()=>{
+                    try{const url=await getSignedUrl(t.invoiceFilePath,3600);const a=document.createElement("a");a.href=url;a.download="Invoice_"+(t.lrNo||t.id);a.target="_blank";document.body.appendChild(a);a.click();document.body.removeChild(a);}
+                    catch(e){alert("Failed: "+e.message);}
+                  }} style={{background:C.blue+"22",color:C.blue,border:"1px solid "+C.blue+"44",
+                    borderRadius:8,padding:"3px 8px",fontSize:10,fontWeight:700,cursor:"pointer"}}>
+                    ⬇ Invoice
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+          <div style={{color:C.muted,fontSize:10,marginTop:6}}>
+            Download each file above, then attach them in Gmail before sending.
+          </div>
+        </div>
+
         <div style={{background:"#1a1000",border:"1px solid "+C.orange+"44",borderRadius:8,
           padding:"9px 12px",color:C.orange,fontSize:11}}>
-          📱 On mobile: Gmail opens pre-filled. Attach GR Copies and Invoices before sending.<br/>
-          🖥 On desktop: Copy the preview above and paste into Gmail manually.
+          📱 On mobile: Open Gmail → attach files from Downloads → send.<br/>
+          🖥 On desktop: Paste the preview into Gmail → attach downloaded files → send.
         </div>
 
         {!opened ? (
@@ -2397,6 +2433,37 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                     📎 Upload Batch Receipt
                   </button>
                 )}
+                {/* GR Copy download */}
+                {t.grFilePath && (
+                  <button onClick={async()=>{
+                    try{
+                      const url=await getSignedUrl(t.grFilePath,3600);
+                      const a=document.createElement("a");a.href=url;
+                      a.download="GR_"+(t.lrNo||t.id);
+                      a.target="_blank";document.body.appendChild(a);a.click();document.body.removeChild(a);
+                    }catch(e){alert("GR download failed: "+e.message);}
+                  }} style={{background:C.teal+"22",color:C.teal,
+                    border:"1px solid "+C.teal+"44",borderRadius:20,
+                    padding:"4px 12px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+                    ⬇ GR
+                  </button>
+                )}
+                {/* Invoice download */}
+                {t.invoiceFilePath && (
+                  <button onClick={async()=>{
+                    try{
+                      const url=await getSignedUrl(t.invoiceFilePath,3600);
+                      const a=document.createElement("a");a.href=url;
+                      a.download="Invoice_"+(t.lrNo||t.id);
+                      a.target="_blank";document.body.appendChild(a);a.click();document.body.removeChild(a);
+                    }catch(e){alert("Invoice download failed: "+e.message);}
+                  }} style={{background:C.blue+"22",color:C.blue,
+                    border:"1px solid "+C.blue+"44",borderRadius:20,
+                    padding:"4px 12px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+                    ⬇ Invoice
+                  </button>
+                )}
+                {/* Merged PDF download */}
                 {t.mergedPdfPath && (
                   <button onClick={async()=>{
                     try{
@@ -2408,7 +2475,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                   }} style={{background:C.green+"22",color:C.green,
                     border:"1px solid "+C.green+"44",borderRadius:20,
                     padding:"4px 12px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
-                    ⬇ Download PDF
+                    ⬇ Merged PDF
                   </button>
                 )}
               </div>
