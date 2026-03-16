@@ -1471,44 +1471,22 @@ function PartyBatchEmailSheet({ trips, setTrips, onClose, log }) {
   // Build email body — one row per selected trip
   const subject = "Delivery Confirmation Request — M Yantra Enterprises";
   const body = selTrips.length===0 ? "" :
-"Dear Sir,
-
-Please confirm receipt of cement for the following consignment(s) by return mail.
-
-" +
-"Transport Name    : M YANTRA ENTERPRISES
-" +
-selTrips.map(t =>
-"--------------------------------------------------
-" +
-"Shipment Date     : "+fmtD(t.date)+"
-"+
-"Bill of Lading    : "+(t.lrNo||"—")+"
-"+
-"Delivery Number   : "+(t.diNo||"—")+"
-"+
-"Freight Qty.      : "+(t.qty||0)+" MT
-"+
-"Customer/Vendor   : "+(t.consignee||"—")+"
-"+
-"Vehicle Number    : "+(t.truckNo||"—")+"
-"+
-"To Location       : "+(t.to||"—")+"
-"+
-"District          : "+(t.district||"—")+"
-"+
-"State             : "+(t.state||"—")
-).join("
-") +
-"
---------------------------------------------------
-
-" +
-"Kindly reply to this email confirming receipt at the earliest.
-
-Regards,
-M Yantra Enterprises
-9606477257";
+    "Dear Sir,\n\nPlease confirm receipt of cement for the following consignment(s) by return mail.\n\n" +
+    "Transport Name    : M YANTRA ENTERPRISES\n" +
+    selTrips.map(t =>
+      "--------------------------------------------------\n" +
+      "Shipment Date     : "+fmtD(t.date)+"\n" +
+      "Bill of Lading    : "+(t.lrNo||"—")+"\n" +
+      "Delivery Number   : "+(t.diNo||"—")+"\n" +
+      "Freight Qty.      : "+(t.qty||0)+" MT\n" +
+      "Customer/Vendor   : "+(t.consignee||"—")+"\n" +
+      "Vehicle Number    : "+(t.truckNo||"—")+"\n" +
+      "To Location       : "+(t.to||"—")+"\n" +
+      "District          : "+(t.district||"—")+"\n" +
+      "State             : "+(t.state||"—")
+    ).join("\n") +
+    "\n--------------------------------------------------\n\n" +
+    "Kindly reply to this email confirming receipt at the earliest.\n\nRegards,\nM Yantra Enterprises\n9606477257";
 
   const openMail = () => {
     const mailto = "mailto:"+toEmail+"?subject="+encodeURIComponent(subject)+"&body="+encodeURIComponent(body);
