@@ -337,6 +337,11 @@ export const DB = {
   saveDriverPay:  p  => upsertOne('mye_driver_payments', driverPayToDB, p),
   deleteDriverPay: id => deleteOne('mye_driver_payments', id),
 
+  // Deletes
+  deleteVehicle:   id => deleteOne('mye_vehicles', id),
+  deletePayment:   id => deleteOne('mye_payments', id),
+  deleteEmployee:  id => deleteOne('mye_employees', id),
+
   // Expenses
   getExpenses:    () => fetchAll('mye_expenses', expenseFromDB),
   saveExpense:    e  => upsertOne('mye_expenses', expenseToDB, e),

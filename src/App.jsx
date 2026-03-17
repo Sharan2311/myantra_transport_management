@@ -5580,11 +5580,16 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
             }} full>{editId?"Save Changes":"Save Vehicle"}</Btn>
 
             {editId && isOwner && (
-              <Btn color={C.red} outline full onClick={()=>{
+              <Btn color={C.red} outline full onClick={async ()=>{
                 if(!window.confirm(`Delete vehicle ${f.truckNo}? This cannot be undone.`)) return;
                 setVehicles(p=>p.filter(v=>v.id!==editId));
                 log("DELETE VEHICLE",f.truckNo);
                 setSheet(false);setEditId(null);setF(blank);
+                try { await DB.deleteVehicle(editId); }
+                catch(e) {
+                  alert("Failed to delete from database: "+e.message);
+                  // Reload vehicles to restore if DB delete failed
+                }
               }}>🗑 Delete Vehicle</Btn>
             )}
           </div>
@@ -6434,17 +6439,30 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
   };
 
   // delete (owner only)
-  const deleteInvoice = (invoiceNo) => {
+  const deleteInvoice = async (invoiceNo) => {
     if(!window.confirm(`Delete invoice ${invoiceNo}? This will unmark all its trips.`)) return;
-    setTrips(prev=>prev.map(t=>t.invoiceNo===invoiceNo
-      ?{...t,invoiceNo:"",invoiceDate:"",shreeStatus:"pending"}:t));
+    const updated = (trips||[]).map(t=>t.invoiceNo===invoiceNo
+      ?{...t,invoiceNo:"",invoiceDate:"",billedToShree:0,shreeStatus:"pending"}:t);
+    setTrips(updated);
+    // Persist each reverted trip to DB
+    for(const t of updated.filter(t=>t.shreeStatus==="pending"&&!t.invoiceNo)){
+      try { await DB.saveTrip(t); } catch(e){ console.error("revert trip:",e); }
+    }
     log && log(`Invoice ${invoiceNo} deleted by ${user?.name}`);
   };
-  const deleteAdvice = (utr, id) => {
+  const deleteAdvice = async (utr, id) => {
     if(!window.confirm(`Delete payment advice UTR ${utr}? This will revert trips to Billed status.`)) return;
+    // Remove payment record from local state
     setPayments(prev=>prev.filter(p=>p.id!==id));
-    setTrips(prev=>prev.map(t=>t.utr===utr
-      ?{...t,paidAmount:0,paymentDate:"",utr:"",shreeStatus:"billed",shreeShortage:null}:t));
+    // Revert trips to Billed
+    const revertedTrips = (trips||[]).map(t=>t.utr===utr
+      ?{...t,paidAmount:0,paymentDate:"",utr:"",shreeStatus:"billed",shreeShortage:null}:t);
+    setTrips(revertedTrips);
+    // Persist to DB
+    try { await DB.deletePayment(id); } catch(e){ console.error("delete payment:",e); }
+    for(const t of revertedTrips.filter(t=>t.shreeStatus==="billed"&&!t.utr)){
+      try { await DB.saveTrip(t); } catch(e){ console.error("revert trip:",e); }
+    }
     log && log(`Payment advice UTR ${utr} deleted by ${user?.name}`);
   };
 
