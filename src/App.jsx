@@ -6443,12 +6443,16 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
         map[inv.invoiceNo].holdAmount += hold;
       });
     });
-    // Apply releases from gstReleases table
+    // Apply releases from gstReleases table (normalize invoice refs for matching)
+    const normInvKey = s => (s||"").replace(/\s+/g,"").toUpperCase().trim();
+    const mapNorm = {};
+    Object.keys(map).forEach(k=>{ mapNorm[normInvKey(k)]=k; });
     (gstReleases||[]).forEach(r => {
-      if(map[r.invoiceRef]) {
-        map[r.invoiceRef].released   += Number(r.amount||0);
-        map[r.invoiceRef].releaseUtr  = r.utr || map[r.invoiceRef].releaseUtr;
-        map[r.invoiceRef].releaseDate = r.date || map[r.invoiceRef].releaseDate;
+      const key = mapNorm[normInvKey(r.invoiceRef)] || r.invoiceRef;
+      if(map[key]) {
+        map[key].released   += Number(r.amount||0);
+        map[key].releaseUtr  = r.utr || map[key].releaseUtr;
+        map[key].releaseDate = r.date || map[key].releaseDate;
       }
     });
     return Object.values(map).map(g => ({
@@ -6583,18 +6587,27 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
           }
         });
       });
+      // Normalize invoice number — remove spaces, handle merged digits
+      const normInv = s => (s||"").replace(/\s+/g,"").toUpperCase().trim();
+      // Build normalized lookup of held invoices
+      const heldNormMap = {};
+      Object.keys(heldInvMap).forEach(k=>{ heldNormMap[normInv(k)]=k; });
+
       const gstReleasesToAdd = [];
       invList.forEach(inv => {
         const hold = Number(inv.hold||0);
         if(hold > 0) return; // new hold, not a release
-        if(!heldInvMap[inv.invoiceNo]) return; // never held
+        // Match using normalized invoice number
+        const norm = normInv(inv.invoiceNo);
+        const originalKey = heldNormMap[norm];
+        if(!originalKey) return; // never held
         const payAmt = Number(inv.paymentAmt||inv.totalAmt||0);
         if(payAmt <= 0) return;
-        const alreadyReleased = (gstReleases||[]).some(r=>r.invoiceRef===inv.invoiceNo&&r.utr===utr);
+        const alreadyReleased = (gstReleases||[]).some(r=>normInv(r.invoiceRef)===norm&&r.utr===utr);
         if(alreadyReleased) return;
         gstReleasesToAdd.push({
           id:"GST"+Date.now()+Math.random().toString(36).slice(2,5),
-          invoiceRef: inv.invoiceNo,
+          invoiceRef: originalKey, // use the original clean invoice number
           amount: payAmt,
           utr, date: pDate,
           notes:"Auto-detected GST release",
@@ -7267,6 +7280,76 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
               return null; // handled below via state
             })()}
 
+            {/* Re-detect releases button — for advices scanned before this feature existed */}
+            {isOwner && gstHoldPending > 0 && (() => {
+              // Check if any held invoice appears in ANY advice with paymentAmt > 0 and hold=0
+              const canAutoDetect = shreePayments.some(pa =>
+                (pa.invoices||[]).some(inv => {
+                  if(Number(inv.hold||0) > 0) return false;
+                  const payAmt = Number(inv.paymentAmt||inv.totalAmt||0);
+                  if(payAmt <= 0) return false;
+                  return gstHoldItems.some(g => g.invoiceNo===inv.invoiceNo && g.balance>0);
+                })
+              );
+              if(!canAutoDetect) return null;
+              return (
+                <div style={{background:"#1a2a1a",border:"1px solid #4caf5033",borderRadius:10,
+                  padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div>
+                    <div style={{color:"#4caf50",fontWeight:700,fontSize:12}}>🔍 Release data found in scanned advices</div>
+                    <div style={{color:"#555",fontSize:11,marginTop:2}}>Tap to mark held invoices as released</div>
+                  </div>
+                  <button onClick={()=>{
+                    // Build held map from all payment advices
+                    const heldInvMap = {};
+                    const seenKeys = new Set();
+                    shreePayments.forEach(pa => {
+                      (pa.invoices||[]).forEach(inv => {
+                        const h = Number(inv.hold||0);
+                        if(h <= 0) return;
+                        const k = inv.invoiceNo+"|"+(inv.sapDoc||"");
+                        if(seenKeys.has(k)) return;
+                        seenKeys.add(k);
+                        if(!heldInvMap[inv.invoiceNo]) heldInvMap[inv.invoiceNo] = 0;
+                        heldInvMap[inv.invoiceNo] += h;
+                      });
+                    });
+                    // Find releases from advices — invoice with no hold that was previously held
+                    const newReleases = [];
+                    shreePayments.forEach(pa => {
+                      (pa.invoices||[]).forEach(inv => {
+                        if(Number(inv.hold||0) > 0) return;
+                        if(!heldInvMap[inv.invoiceNo]) return;
+                        const payAmt = Number(inv.paymentAmt||inv.totalAmt||0);
+                        if(payAmt <= 0) return;
+                        const alreadyReleased = (gstReleases||[]).some(r=>r.invoiceRef===inv.invoiceNo&&r.utr===pa.utr);
+                        if(alreadyReleased) return;
+                        newReleases.push({
+                          id:"GST"+Date.now()+Math.random().toString(36).slice(2,5),
+                          invoiceRef: inv.invoiceNo,
+                          amount: payAmt,
+                          utr: pa.utr,
+                          date: pa.paymentDate||pa.date||"",
+                          notes:"Re-detected from advice scan",
+                          createdAt: new Date().toISOString(),
+                        });
+                      });
+                    });
+                    if(newReleases.length > 0) {
+                      setGstReleases(prev=>[...(prev||[]),...newReleases]);
+                      log && log("GST RE-DETECT: "+newReleases.length+" releases found");
+                      alert("✅ "+newReleases.length+" GST release(s) detected and marked!");
+                    } else {
+                      alert("No new releases found.");
+                    }
+                  }} style={{background:"#4caf50",border:"none",color:"#000",
+                    borderRadius:8,padding:"7px 14px",fontWeight:700,fontSize:12,cursor:"pointer",flexShrink:0}}>
+                    Auto-Detect
+                  </button>
+                </div>
+              );
+            })()}
+
             {/* Release recording section */}
             <GstReleaseForm
               gstHoldItems={gstHoldItems}
@@ -7404,9 +7487,9 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                       <div><span style={{color:"#555",display:"block"}}>Expenses</span>
                         <span style={{color:"#ccc",fontFamily:"monospace"}}>₹{fmtINR(tripExps(t.id))}</span></div>
                     </div>
-                    {((expenses||{})[t.id]||[]).length>0&&(
+                    {(Array.isArray(expenses)?expenses:[]).filter(e=>e.tripId===t.id).length>0&&(
                       <div style={{marginTop:6,fontSize:10,color:"#444"}}>
-                        {((expenses||{})[t.id]||[]).map(e=>`${e.label}: ₹${fmtINR(e.amount)}`).join(" · ")}
+                        {(Array.isArray(expenses)?expenses:[]).filter(e=>e.tripId===t.id).map(e=>`${e.label}: ₹${fmtINR(e.amount)}`).join(" · ")}
                       </div>
                     )}
                   </div>
@@ -7798,13 +7881,31 @@ function ExpensesLedger({expenses, setExpenses, payments, user, log}) {
   const ff = k => v => setF(p=>({...p,[k]:v}));
 
   const cats = ["Office","Shortage","Other Deduction","Diesel","Repairs","Salary","Government Fee","Other"];
-  const totalExp = (expenses||[]).reduce((s,e)=>s+(e.amount||0),0);
+
+  // Merge manual expenses (flat DB array) + Shree payment advice expenses
+  const shreeExps = (payments||[]).flatMap(pa =>
+    (pa.expenses||[]).map(e=>({
+      id: "shree-"+pa.utr+"-"+(e.ref||e.description||"").slice(0,8),
+      date: pa.paymentDate||pa.date||"",
+      label: e.description||e.ref||"Shree Expense",
+      amount: Math.abs(Number(e.amount||0)),
+      category: e.category||"other",
+      notes: "UTR:"+pa.utr,
+      createdBy: "shree_scan",
+      source: "shree",
+    }))
+  );
+  const manualExps = Array.isArray(expenses) ? expenses : [];
+  const allExps = [...manualExps, ...shreeExps].sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+
+  const totalExp = allExps.reduce((s,e)=>s+(e.amount||0),0);
 
   // Group by category
   const byCat = {};
-  (expenses||[]).forEach(e=>{
-    if(!byCat[e.category]) byCat[e.category]=0;
-    byCat[e.category]+=e.amount||0;
+  allExps.forEach(e=>{
+    const cat = e.category||"other";
+    if(!byCat[cat]) byCat[cat]=0;
+    byCat[cat]+=e.amount||0;
   });
 
   return (
@@ -7829,7 +7930,7 @@ function ExpensesLedger({expenses, setExpenses, payments, user, log}) {
 
       {/* All entries */}
       <div style={{display:"flex",flexDirection:"column",gap:8}}>
-        {(expenses||[]).map(e=>(
+        {allExps.map(e=>(
           <div key={e.id} style={{background:C.card,borderRadius:12,padding:"11px 14px",borderLeft:`4px solid ${C.red}`,display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
             <div>
               <div style={{fontWeight:700,fontSize:13}}>{e.label}</div>
@@ -7840,7 +7941,7 @@ function ExpensesLedger({expenses, setExpenses, payments, user, log}) {
             <div style={{color:C.red,fontWeight:800,fontSize:15}}>{fmt(e.amount)}</div>
           </div>
         ))}
-        {(expenses||[]).length===0&&<div style={{textAlign:"center",color:C.muted,padding:32}}>No expenses recorded yet</div>}
+        {allExps.length===0&&<div style={{textAlign:"center",color:C.muted,padding:32}}>No expenses recorded yet</div>}
       </div>
 
       {sheet&&(
