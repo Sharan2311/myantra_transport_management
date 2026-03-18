@@ -7320,14 +7320,16 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                       (pa.invoices||[]).forEach(inv => {
                         if(Number(inv.hold||0) > 0) return;
                         if(!heldInvMap[inv.invoiceNo]) return;
-                        const payAmt = Number(inv.paymentAmt||inv.totalAmt||0);
-                        if(payAmt <= 0) return;
+                        // Use the actual held amount from the GST hold ledger, not the payment amount
+                        const holdEntry = gstHoldItems.find(g => g.invoiceNo === inv.invoiceNo);
+                        const releaseAmt = holdEntry ? holdEntry.balance : heldInvMap[inv.invoiceNo];
+                        if(releaseAmt <= 0) return;
                         const alreadyReleased = (gstReleases||[]).some(r=>r.invoiceRef===inv.invoiceNo&&r.utr===pa.utr);
                         if(alreadyReleased) return;
                         newReleases.push({
                           id:"GST"+Date.now()+Math.random().toString(36).slice(2,5),
                           invoiceRef: inv.invoiceNo,
-                          amount: payAmt,
+                          amount: releaseAmt,
                           utr: pa.utr,
                           date: pa.paymentDate||pa.date||"",
                           notes:"Re-detected from advice scan",
@@ -7877,7 +7879,7 @@ function DriverPayments({trips, driverPays, setDriverPays, vehicles, user, log})
 // ─── EXPENSES LEDGER ──────────────────────────────────────────────────────────
 function ExpensesLedger({expenses, setExpenses, payments, user, log}) {
   const [sheet, setSheet] = useState(false);
-  const [f, setF] = useState({date:today(),label:"",amount:"",category:"Office",notes:""});
+  const [f, setF] = useState({date:today(),label:"",amount:"",category:"Office",notes:"",utr:""});
   const ff = k => v => setF(p=>({...p,[k]:v}));
 
   const cats = ["Office","Shortage","Other Deduction","Diesel","Repairs","Salary","Government Fee","Other"];
@@ -7935,6 +7937,7 @@ function ExpensesLedger({expenses, setExpenses, payments, user, log}) {
             <div>
               <div style={{fontWeight:700,fontSize:13}}>{e.label}</div>
               <div style={{color:C.muted,fontSize:11}}>{e.date} · {e.category}</div>
+              {e.utr&&<div style={{color:C.muted,fontSize:11}}>UTR: {e.utr}</div>}
               {e.notes&&<div style={{color:C.muted,fontSize:11}}>{e.notes}</div>}
               {e.createdBy&&<div style={{color:ROLES[e.createdBy]?.color||C.muted,fontSize:11}}>by {e.createdBy}</div>}
             </div>
@@ -7954,12 +7957,17 @@ function ExpensesLedger({expenses, setExpenses, payments, user, log}) {
             <Field label="Description" value={f.label} onChange={ff("label")} placeholder="e.g. Office electricity bill" />
             <Field label="Category" value={f.category} onChange={ff("category")} opts={cats.map(c=>({v:c,l:c}))} />
             <Field label="Notes" value={f.notes} onChange={ff("notes")} placeholder="Optional" />
+            <Field label="UTR / Ref No" value={f.utr} onChange={ff("utr")} placeholder="Optional — e.g. 1527531918" />
             <div style={{color:C.muted,fontSize:12}}>Recording as: <b style={{color:ROLES[user.role]?.color}}>{user.name}</b></div>
             <Btn onClick={()=>{
-              const e={...f,id:uid(),amount:+f.amount,createdBy:user.username,createdAt:nowTs()};
+              if(f.utr.trim()) {
+                const dupUTR = (Array.isArray(expenses)?expenses:[]).some(e => e.utr && e.utr.trim().toLowerCase() === f.utr.trim().toLowerCase());
+                if(dupUTR) { alert("⚠️ An expense with UTR \""+f.utr.trim()+"\" already exists. Duplicate not saved."); return; }
+              }
+              const e={...f,id:uid(),amount:+f.amount,utr:f.utr.trim(),createdBy:user.username,createdAt:nowTs()};
               setExpenses(prev=>[e,...(prev||[])]);
-              log("EXPENSE",`${e.label} — ${fmt(e.amount)}`);
-              setF({date:today(),label:"",amount:"",category:"Office",notes:""});
+              log("EXPENSE",`${e.label} — ${fmt(e.amount)}${e.utr?" · UTR:"+e.utr:""}`);
+              setF({date:today(),label:"",amount:"",category:"Office",notes:"",utr:""});
               setSheet(false);
             }} full color={C.red}>Save Expense</Btn>
           </div>
