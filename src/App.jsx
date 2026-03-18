@@ -6404,7 +6404,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
   const shreeTrips = (trips||[]).filter(t=>t.billedToShree)
     .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
 
-  const tripExps   = tid => ((expenses||{})[tid]||[]).reduce((s,e)=>s+Number(e.amount||0),0);
+  const tripExps   = tid => (Array.isArray(expenses)?expenses:[]).filter(e=>e.tripId===tid).reduce((s,e)=>s+Number(e.amount||0),0);
   const tripProfit = t => Number(t.paidAmount||t.billedToShree||0)
                         - (t.shreeShortage ? Number(t.shreeShortage.deduction||0) : 0)
                         - tripExps(t.id);
@@ -6563,6 +6563,50 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
       totalPaid:Number(scanResult.totalPaid||0), totalBilled:Number(scanResult.totalBilled||0),
       tdsDeducted:Number(scanResult.tdsDeducted||0), holdAmount:Number(scanResult.holdAmount||0),
       invoices:invList, shortages:shorts, penalties:scanResult.penalties||[], expenses:exps};
+
+    // Detect GST releases BEFORE adding pa to payments state
+    // Build held map from EXISTING payments only (not including pa yet)
+    if(setGstReleases) {
+      const heldInvMap = {};
+      (payments||[]).forEach(existingPa => {
+        (existingPa.invoices||[]).forEach(inv => {
+          const h = Number(inv.hold||0);
+          if(h > 0) {
+            const key = inv.invoiceNo+"|"+(inv.sapDoc||"");
+            if(!heldInvMap[inv.invoiceNo] || !heldInvMap[inv.invoiceNo].keys?.has(key)) {
+              if(!heldInvMap[inv.invoiceNo]) heldInvMap[inv.invoiceNo] = {total:0, keys:new Set()};
+              if(!heldInvMap[inv.invoiceNo].keys.has(key)) {
+                heldInvMap[inv.invoiceNo].total += h;
+                heldInvMap[inv.invoiceNo].keys.add(key);
+              }
+            }
+          }
+        });
+      });
+      const gstReleasesToAdd = [];
+      invList.forEach(inv => {
+        const hold = Number(inv.hold||0);
+        if(hold > 0) return; // new hold, not a release
+        if(!heldInvMap[inv.invoiceNo]) return; // never held
+        const payAmt = Number(inv.paymentAmt||inv.totalAmt||0);
+        if(payAmt <= 0) return;
+        const alreadyReleased = (gstReleases||[]).some(r=>r.invoiceRef===inv.invoiceNo&&r.utr===utr);
+        if(alreadyReleased) return;
+        gstReleasesToAdd.push({
+          id:"GST"+Date.now()+Math.random().toString(36).slice(2,5),
+          invoiceRef: inv.invoiceNo,
+          amount: payAmt,
+          utr, date: pDate,
+          notes:"Auto-detected GST release",
+          createdAt: new Date().toISOString(),
+        });
+      });
+      if(gstReleasesToAdd.length > 0) {
+        setGstReleases(prev=>[...(prev||[]),...gstReleasesToAdd]);
+        log && log("GST RELEASES: "+gstReleasesToAdd.length+" invoices · UTR:"+utr);
+      }
+    }
+
     setPayments(prev=>[...(prev||[]),pa]);
 
     // Save expenses — expenses is a flat array, add each as a new record
@@ -6607,50 +6651,6 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
       }));
     }
 
-    // Auto-detect GST hold releases:
-    // If an invoice in this advice was previously held (in existing payment records)
-    // and this advice pays it without a new hold → it's a GST release
-    if(setGstReleases) {
-      // Build map of all previously held invoices (from all payment records)
-      const heldInvMap = {};
-      (payments||[]).forEach(pa => {
-        (pa.invoices||[]).forEach(inv => {
-          if(Number(inv.hold||0) > 0) heldInvMap[inv.invoiceNo] = Number(inv.hold||0);
-        });
-      });
-      // Also check the payment we just added (pa object above)
-      (pa.invoices||[]).forEach(inv => {
-        if(Number(inv.hold||0) > 0) heldInvMap[inv.invoiceNo] = Number(inv.hold||0);
-      });
-
-      // For each invoice in this advice that has NO hold and was previously held → GST release
-      const gstReleasesToAdd = [];
-      invList.forEach(inv => {
-        const hold = Number(inv.hold||0);
-        if(hold > 0) return; // this is a new hold, not a release
-        const previousHold = heldInvMap[inv.invoiceNo];
-        if(!previousHold) return; // not previously held, skip
-        const payAmt = Number(inv.paymentAmt||inv.totalAmt||0);
-        if(payAmt <= 0) return;
-        // Check not already released
-        const alreadyReleased = (gstReleases||[]).some(r=>r.invoiceRef===inv.invoiceNo&&r.utr===utr);
-        if(alreadyReleased) return;
-        gstReleasesToAdd.push({
-          id:"GST"+Date.now()+Math.random().toString(36).slice(2,5),
-          invoiceRef: inv.invoiceNo,
-          amount: payAmt,
-          utr: utr,
-          date: pDate,
-          notes:"Auto-detected GST release from payment advice",
-          createdAt: new Date().toISOString(),
-        });
-      });
-      if(gstReleasesToAdd.length > 0) {
-        setGstReleases(prev=>[...(prev||[]),...gstReleasesToAdd]);
-        log && log("GST RELEASES AUTO-DETECTED: "+gstReleasesToAdd.length+" invoices · UTR:"+utr);
-      }
-    }
-
     log && log("Payment advice UTR "+utr+" applied — "+shorts.length+" shortage(s), "+exps.length+" expense(s), hold ₹"+Number(scanResult.holdAmount||0).toLocaleString("en-IN"));
     setScanResult(null);
   };
@@ -6679,6 +6679,16 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
     try { await DB.deletePayment(id); } catch(e){ console.error("delete payment:",e); }
     for(const t of revertedTrips.filter(t=>t.shreeStatus==="billed"&&!t.utr)){
       try { await DB.saveTrip(t); } catch(e){ console.error("revert trip:",e); }
+    }
+    // Also remove any gstReleases recorded for this UTR
+    if(setGstReleases) {
+      const toDelete = (gstReleases||[]).filter(r=>r.utr===utr);
+      if(toDelete.length>0) {
+        setGstReleases(prev=>(prev||[]).filter(r=>r.utr!==utr));
+        for(const r of toDelete) {
+          try { await DB.deleteGstRelease(r.id); } catch(e){ console.error("delete gstRelease:",e); }
+        }
+      }
     }
     log && log(`Payment advice UTR ${utr} deleted by ${user?.name}`);
   };

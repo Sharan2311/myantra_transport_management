@@ -341,6 +341,7 @@ export const DB = {
   deleteVehicle:   id => deleteOne('mye_vehicles', id),
   deletePayment:   id => deleteOne('mye_payments', id),
   deleteEmployee:  id => deleteOne('mye_employees', id),
+  deleteGstRelease:id => deleteOne('mye_gst_releases', id),
 
   // Expenses
   getExpenses:    () => fetchAll('mye_expenses', expenseFromDB),
