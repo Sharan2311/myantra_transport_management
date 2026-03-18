@@ -6418,11 +6418,17 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
   // Build per-invoice hold ledger from all payment advices
   const gstHoldItems = useMemo(() => {
     const map = {};
-    // Collect all invoices that have hold > 0 from payment advices
+    // Deduplicate by invoiceNo+sapDoc — same invoice can appear in multiple advices
+    // Only count hold once per unique invoiceNo+sapDoc combination
+    const seen = new Set();
     shreePayments.forEach(pa => {
       (pa.invoices||[]).forEach(inv => {
         const hold = Number(inv.hold||0);
         if(hold <= 0) return;
+        // Use invoiceNo+sapDoc as unique key to avoid double-counting
+        const dedupeKey = (inv.invoiceNo||"") + "|" + (inv.sapDoc||"");
+        if(seen.has(dedupeKey)) return;
+        seen.add(dedupeKey);
         if(!map[inv.invoiceNo]) {
           map[inv.invoiceNo] = {
             invoiceNo: inv.invoiceNo,
@@ -6559,16 +6565,19 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
       invoices:invList, shortages:shorts, penalties:scanResult.penalties||[], expenses:exps};
     setPayments(prev=>[...(prev||[]),pa]);
 
-    // Save expenses
+    // Save expenses — expenses is a flat array, add each as a new record
     if(exps.length>0&&setExpenses){
-      exps.forEach(exp=>{
-        const rec={id:"EXP"+Date.now()+Math.random().toString(36).slice(2,6),
-          date:pDate||new Date().toISOString().slice(0,10),
-          label:exp.description||exp.ref, amount:Number(exp.amount||0),
-          category:exp.category||"other",
-          notes:`UTR:${utr}`, createdBy:user?.name||"", createdAt:new Date().toISOString()};
-        setExpenses(prev=>({...prev,shree:[...(prev?.shree||[]),rec]}));
-      });
+      const newExps = exps.map(exp=>({
+        id:"EXP"+Date.now()+Math.random().toString(36).slice(2,6),
+        date:pDate||new Date().toISOString().slice(0,10),
+        label:exp.description||exp.ref||"Shree Expense",
+        amount:Math.abs(Number(exp.amount||0)),  // abs() handles negative amounts like "590.00-"
+        category:exp.category||"other",
+        notes:"UTR:"+utr,
+        createdBy:user?.name||"",
+        createdAt:new Date().toISOString()
+      }));
+      setExpenses(prev=>[...(Array.isArray(prev)?prev:[]),...newExps]);
     }
 
     // Push shortages to vehicle shortage ledger (linked to LR)
@@ -6598,12 +6607,51 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
       }));
     }
 
-    // Auto-record GST holds from invoices with hold > 0
-    // These are tracked in gstReleases as "held" records (amount=0 means not yet released)
-    // The hold is tracked via the payment record's invoices array — no separate save needed
-    // gstHoldItems computed in real-time from shreePayments invoices + gstReleases
+    // Auto-detect GST hold releases:
+    // If an invoice in this advice was previously held (in existing payment records)
+    // and this advice pays it without a new hold → it's a GST release
+    if(setGstReleases) {
+      // Build map of all previously held invoices (from all payment records)
+      const heldInvMap = {};
+      (payments||[]).forEach(pa => {
+        (pa.invoices||[]).forEach(inv => {
+          if(Number(inv.hold||0) > 0) heldInvMap[inv.invoiceNo] = Number(inv.hold||0);
+        });
+      });
+      // Also check the payment we just added (pa object above)
+      (pa.invoices||[]).forEach(inv => {
+        if(Number(inv.hold||0) > 0) heldInvMap[inv.invoiceNo] = Number(inv.hold||0);
+      });
 
-    log && log(`Payment advice UTR ${utr} applied — ${shorts.length} shortage(s), ${exps.length} expense(s), hold ₹${Number(scanResult.holdAmount||0).toLocaleString("en-IN")}`);
+      // For each invoice in this advice that has NO hold and was previously held → GST release
+      const gstReleasesToAdd = [];
+      invList.forEach(inv => {
+        const hold = Number(inv.hold||0);
+        if(hold > 0) return; // this is a new hold, not a release
+        const previousHold = heldInvMap[inv.invoiceNo];
+        if(!previousHold) return; // not previously held, skip
+        const payAmt = Number(inv.paymentAmt||inv.totalAmt||0);
+        if(payAmt <= 0) return;
+        // Check not already released
+        const alreadyReleased = (gstReleases||[]).some(r=>r.invoiceRef===inv.invoiceNo&&r.utr===utr);
+        if(alreadyReleased) return;
+        gstReleasesToAdd.push({
+          id:"GST"+Date.now()+Math.random().toString(36).slice(2,5),
+          invoiceRef: inv.invoiceNo,
+          amount: payAmt,
+          utr: utr,
+          date: pDate,
+          notes:"Auto-detected GST release from payment advice",
+          createdAt: new Date().toISOString(),
+        });
+      });
+      if(gstReleasesToAdd.length > 0) {
+        setGstReleases(prev=>[...(prev||[]),...gstReleasesToAdd]);
+        log && log("GST RELEASES AUTO-DETECTED: "+gstReleasesToAdd.length+" invoices · UTR:"+utr);
+      }
+    }
+
+    log && log("Payment advice UTR "+utr+" applied — "+shorts.length+" shortage(s), "+exps.length+" expense(s), hold ₹"+Number(scanResult.holdAmount||0).toLocaleString("en-IN"));
     setScanResult(null);
   };
 
