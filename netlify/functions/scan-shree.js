@@ -20,58 +20,111 @@ Respond ONLY with JSON (no markdown, no backticks):
   "trips": [{ "lrNo": "e.g. 1070/MYE/3513", "truckNo": "e.g. KA28D7176", "qty": numeric, "frtRate": numeric, "frtAmt": numeric }]
 }`;
 
-    const paymentPrompt = `Extract data from this Shree Cement payment advice / bank remittance.
+    const paymentPrompt = `Extract data from this Shree Cement payment advice / bank remittance PDF.
+This document may have MANY rows (30+ invoices) — extract ALL of them without skipping any.
 
-Every row in the table has a Document Description. Classify EACH row carefully:
+Every row in the table has a Document Description. Classify EACH row:
 - "Invoice" rows with narration like "PRIMARY FREIGHT CEMENT TPT" → goes into "invoices" array
-- "Debit Note" rows where narration contains "SHORTAGE" → goes into "shortages" array  
-- "Debit Note" rows where narration does NOT contain "SHORTAGE" (e.g. "ELECTRICITY CHARGES RECOVERY", "PENALTY IMPOSED NOT USING SAFETY PPE", "WATER CHARGES") → goes into "expenses" array
+- "Debit Note" rows where narration contains "SHORTAGE" → goes into "shortages" array
+- "Debit Note" rows where narration does NOT contain "SHORTAGE" (e.g. "ELECTRICITY CHARGES", "PENALTY", "WATER CHARGES") → goes into "expenses" array
 
-Respond ONLY with JSON (no markdown, no backticks):
+IMPORTANT: For each invoice row, extract ALL columns including Hold Amount and TDS Deducted even if they are zero.
+Hold Amount = the GST portion withheld by Shree, to be released later separately.
+
+Respond ONLY with valid JSON (no markdown, no backticks, no trailing commas):
 {
-  "utr": "UTR number from intro text",
+  "utr": "UTR number from intro text e.g. 1527531918",
   "paymentDate": "DD.MM.YYYY",
-  "totalPaid": numeric (net amount paid from intro e.g. 'fund transfer for Rs. 338202.12'),
+  "totalPaid": numeric (net amount transferred e.g. 1909642.08),
   "totalBilled": numeric (Total Bill Amount column sum),
   "tdsDeducted": numeric (TDS Deducted column sum),
   "holdAmount": numeric (Hold Amount column sum),
   "invoices": [
-    { "invoiceNo": "e.g. SMYE107026100311", "sapDoc": "SAP Doc No", "totalAmt": numeric, "paymentAmt": numeric, "tds": numeric, "hold": numeric }
+    {
+      "invoiceNo": "e.g. SMYE107026100275",
+      "invDate": "DD.MM.YYYY",
+      "sapDoc": "SAP Doc No e.g. 5100452866",
+      "totalAmt": numeric (Total Bill Amount column, use paymentAmt if blank),
+      "paymentAmt": numeric (Payment Amount column),
+      "tds": numeric (TDS Deducted column, 0 if blank),
+      "hold": numeric (Hold Amount column, 0 if blank)
+    }
   ],
   "shortages": [
-    { "ref": "Inv/Ref Number value", "lrNo": "LR number from narration e.g. 1070/MYE/3544", "tonnes": numeric (look for 'X.XX TO' in narration), "deduction": numeric (Total Bill Amount for this row) }
+    { "ref": "Inv/Ref Number", "lrNo": "LR number from narration", "tonnes": numeric, "deduction": numeric }
   ],
   "expenses": [
-    { "ref": "Inv/Ref Number value e.g. KR2513001067", "description": "full narration text exactly as written", "amount": numeric (Total Bill Amount for this row), "month": "month/year from narration e.g. FEB'26", "category": "electricity|water|penalty|safety|other" }
+    { "ref": "Inv/Ref Number e.g. KR2513001067", "description": "full narration text", "amount": numeric, "month": "month/year e.g. FEB'26", "category": "electricity|water|penalty|safety|other" }
   ]
 }
 
 Rules:
-- EVERY Debit Note row must appear in either shortages or expenses — do not skip any
+- Extract EVERY row — do not truncate or summarise
+- EVERY Debit Note row must appear in either shortages or expenses
 - For expenses category: electricity→'electricity', water→'water', PENALTY/PPE/SAFETY→'safety', otherwise 'other'
+- If Hold Amount cell is blank/empty for a row, use 0
+- If TDS cell is blank/empty for a row, use 0
 - Use empty arrays [] if nothing found`;
 
     const prompt = scanType === "invoice" ? invoicePrompt : paymentPrompt;
+
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-beta": "pdfs-2024-09-25" },
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "pdfs-2024-09-25"
+      },
       body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001", max_tokens: 2000,
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 8000,   // increased from 2000 — needed for 30+ invoice rows
         messages: [{ role: "user", content: [contentBlock, { type: "text", text: prompt }] }],
       }),
     });
 
     const data = await response.json();
-    if (!response.ok) return { statusCode: response.status, body: JSON.stringify({ error: `Anthropic ${response.status}: ${data.error?.message}` }) };
+    if (!response.ok) return {
+      statusCode: response.status,
+      body: JSON.stringify({ error: `Anthropic ${response.status}: ${data.error?.message}` })
+    };
 
-    const rawText = (data.content||[]).find(b=>b.type==="text")?.text || "";
-    const cleaned = rawText.replace(/```json\n?/g,"").replace(/```\n?/g,"").trim();
+    const rawText = (data.content || []).find(b => b.type === "text")?.text || "";
+    const cleaned = rawText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+
     try {
-      return { statusCode: 200, headers: { "Content-Type": "application/json" }, body: JSON.stringify(JSON.parse(cleaned)) };
-    } catch(e) {
-      return { statusCode: 200, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: "Failed to parse AI response", raw: rawText }) };
+      const parsed = JSON.parse(cleaned);
+      return {
+        statusCode: 200,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsed)
+      };
+    } catch (e) {
+      // Try to extract partial JSON if truncated
+      const partialMatch = cleaned.match(/^\{[\s\S]*/);
+      if (partialMatch) {
+        try {
+          // Attempt to close unclosed JSON
+          const partial = partialMatch[0];
+          // Count unclosed braces/brackets to give a better error
+          return {
+            statusCode: 200,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              error: "AI response was truncated — PDF may be too large. Try splitting into fewer pages.",
+              parseError: e.message,
+              raw: rawText.slice(0, 500)
+            })
+          };
+        } catch (_) {}
+      }
+      return {
+        statusCode: 200,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ error: "Failed to parse AI response", raw: rawText.slice(0, 500) })
+      };
     }
-  } catch(err) {
+  } catch (err) {
     return { statusCode: 500, body: JSON.stringify({ error: err.message }) };
   }
 };

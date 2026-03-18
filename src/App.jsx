@@ -6221,6 +6221,128 @@ function Employees({employees, setEmployees, user, log}) {
 
 
 // ─── SHREE PAYMENTS & BILLING ──────────────────────────────────────────────────
+// ─── GST RELEASE FORM ────────────────────────────────────────────────────────
+function GstReleaseForm({ gstHoldItems, gstReleases, setGstReleases, isOwner, log }) {
+  const [inv,   setInv]   = useState("");
+  const [amt,   setAmt]   = useState("");
+  const [utr,   setUtr]   = useState("");
+  const [date,  setDate]  = useState(new Date().toISOString().slice(0,10));
+  const [notes, setNotes] = useState("");
+  const [open,  setOpen]  = useState(false);
+
+  const pendingItems = gstHoldItems.filter(g => g.balance > 0);
+
+  if(!isOwner) return null;
+  if(pendingItems.length === 0) return (
+    <div style={{background:"#0d2618",border:"1px solid #4caf5033",borderRadius:10,
+      padding:"10px 14px",color:"#4caf50",fontSize:12,fontWeight:700,textAlign:"center"}}>
+      ✅ All GST holds have been released
+    </div>
+  );
+
+  const selectedItem = gstHoldItems.find(g => g.invoiceNo === inv);
+
+  const save = () => {
+    if(!inv) { alert("Select an invoice"); return; }
+    if(!amt || +amt <= 0) { alert("Enter release amount"); return; }
+    if(!utr.trim()) { alert("Enter UTR number"); return; }
+    const rec = {
+      id: "GST"+Date.now(),
+      invoiceRef: inv,
+      amount: +amt,
+      utr: utr.trim(),
+      date: date,
+      notes: notes.trim(),
+      createdAt: new Date().toISOString(),
+    };
+    setGstReleases(prev => [...(prev||[]), rec]);
+    log && log("GST RELEASE", inv+" ₹"+amt+" UTR:"+utr);
+    setInv(""); setAmt(""); setUtr(""); setNotes(""); setOpen(false);
+  };
+
+  return (
+    <div style={{background:"#161b22",border:"1px solid #21262d",borderRadius:12,overflow:"hidden"}}>
+      <button onClick={()=>setOpen(o=>!o)} style={{
+        width:"100%",background:"none",border:"none",
+        padding:"12px 14px",cursor:"pointer",
+        display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <span style={{color:"#4caf50",fontWeight:700,fontSize:13}}>
+          ➕ Record GST Release
+        </span>
+        <span style={{color:"#555",fontSize:12}}>{open?"▲":"▼"}</span>
+      </button>
+      {open && (
+        <div style={{padding:"0 14px 14px",display:"flex",flexDirection:"column",gap:10}}>
+          {/* Invoice selector */}
+          <div>
+            <label style={{color:"#666",fontSize:11,fontWeight:700,textTransform:"uppercase",
+              letterSpacing:1,display:"block",marginBottom:4}}>Invoice *</label>
+            <select value={inv} onChange={e=>{ setInv(e.target.value);
+              const g=gstHoldItems.find(x=>x.invoiceNo===e.target.value);
+              if(g) setAmt(String(g.balance)); }}
+              style={{width:"100%",background:"#0d1117",border:"1px solid #30363d",
+                borderRadius:8,color:"#e6edf3",padding:"10px 12px",fontSize:13,outline:"none"}}>
+              <option value="">— Select Invoice —</option>
+              {pendingItems.map(g=>(
+                <option key={g.invoiceNo} value={g.invoiceNo}>
+                  {g.invoiceNo} · Pending ₹{Number(g.balance).toLocaleString("en-IN",{maximumFractionDigits:2})}
+                </option>
+              ))}
+            </select>
+          </div>
+          {selectedItem && (
+            <div style={{background:"#0d1117",borderRadius:8,padding:"8px 12px",fontSize:12}}>
+              <div style={{display:"flex",justifyContent:"space-between"}}>
+                <span style={{color:"#666"}}>Total Held</span>
+                <span style={{color:"#ff9800",fontWeight:700}}>₹{Number(selectedItem.holdAmount).toLocaleString("en-IN",{maximumFractionDigits:2})}</span>
+              </div>
+              <div style={{display:"flex",justifyContent:"space-between",marginTop:4}}>
+                <span style={{color:"#666"}}>Balance</span>
+                <span style={{color:"#ff6b6b",fontWeight:700}}>₹{Number(selectedItem.balance).toLocaleString("en-IN",{maximumFractionDigits:2})}</span>
+              </div>
+            </div>
+          )}
+          <div style={{display:"flex",gap:10}}>
+            <div style={{flex:1}}>
+              <label style={{color:"#666",fontSize:11,fontWeight:700,textTransform:"uppercase",
+                letterSpacing:1,display:"block",marginBottom:4}}>Release Amount ₹ *</label>
+              <input type="number" value={amt} onChange={e=>setAmt(e.target.value)}
+                style={{width:"100%",boxSizing:"border-box",background:"#0d1117",border:"1px solid #30363d",
+                  borderRadius:8,color:"#e6edf3",padding:"10px 12px",fontSize:13,outline:"none"}} />
+            </div>
+            <div style={{flex:1}}>
+              <label style={{color:"#666",fontSize:11,fontWeight:700,textTransform:"uppercase",
+                letterSpacing:1,display:"block",marginBottom:4}}>Date *</label>
+              <input type="date" value={date} onChange={e=>setDate(e.target.value)}
+                onClick={e=>e.target.showPicker?.()}
+                style={{width:"100%",boxSizing:"border-box",background:"#0d1117",border:"1px solid #30363d",
+                  borderRadius:8,color:"#e6edf3",padding:"10px 12px",fontSize:13,outline:"none",colorScheme:"dark"}} />
+            </div>
+          </div>
+          <div>
+            <label style={{color:"#666",fontSize:11,fontWeight:700,textTransform:"uppercase",
+              letterSpacing:1,display:"block",marginBottom:4}}>UTR Number *</label>
+            <input value={utr} onChange={e=>setUtr(e.target.value)} placeholder="e.g. 1527531918"
+              style={{width:"100%",boxSizing:"border-box",background:"#0d1117",border:"1px solid #30363d",
+                borderRadius:8,color:"#e6edf3",padding:"10px 12px",fontSize:13,outline:"none"}} />
+          </div>
+          <div>
+            <label style={{color:"#666",fontSize:11,fontWeight:700,textTransform:"uppercase",
+              letterSpacing:1,display:"block",marginBottom:4}}>Notes</label>
+            <input value={notes} onChange={e=>setNotes(e.target.value)} placeholder="Optional notes"
+              style={{width:"100%",boxSizing:"border-box",background:"#0d1117",border:"1px solid #30363d",
+                borderRadius:8,color:"#e6edf3",padding:"10px 12px",fontSize:13,outline:"none"}} />
+          </div>
+          <button onClick={save} style={{background:"#4caf50",border:"none",borderRadius:10,
+            color:"#000",padding:"12px",fontWeight:800,fontSize:14,cursor:"pointer",width:"100%"}}>
+            ✅ Record GST Release
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles, gstReleases, setGstReleases, expenses, setExpenses, user, log}) {
 
   const [activeTab,   setActiveTab]   = useState("overview");
@@ -6291,6 +6413,48 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
   const totalReceived = shreePayments.reduce((s,p)=>s+Number(p.totalPaid||0),0);
   const totalHold     = shreePayments.reduce((s,p)=>s+Number(p.holdAmount||0),0);
   const totalShortage = allShortages.reduce((s,sh)=>s+Number(sh.deduction||0),0);
+
+  // ── GST Hold tracking ────────────────────────────────────────────────────────
+  // Build per-invoice hold ledger from all payment advices
+  const gstHoldItems = useMemo(() => {
+    const map = {};
+    // Collect all invoices that have hold > 0 from payment advices
+    shreePayments.forEach(pa => {
+      (pa.invoices||[]).forEach(inv => {
+        const hold = Number(inv.hold||0);
+        if(hold <= 0) return;
+        if(!map[inv.invoiceNo]) {
+          map[inv.invoiceNo] = {
+            invoiceNo: inv.invoiceNo,
+            invDate: inv.invDate || "",
+            holdAmount: 0,
+            released: 0,
+            releaseUtr: "",
+            releaseDate: "",
+            sapDoc: inv.sapDoc || "",
+          };
+        }
+        map[inv.invoiceNo].holdAmount += hold;
+      });
+    });
+    // Apply releases from gstReleases table
+    (gstReleases||[]).forEach(r => {
+      if(map[r.invoiceRef]) {
+        map[r.invoiceRef].released   += Number(r.amount||0);
+        map[r.invoiceRef].releaseUtr  = r.utr || map[r.invoiceRef].releaseUtr;
+        map[r.invoiceRef].releaseDate = r.date || map[r.invoiceRef].releaseDate;
+      }
+    });
+    return Object.values(map).map(g => ({
+      ...g,
+      balance: Math.max(0, g.holdAmount - g.released),
+      status: g.released >= g.holdAmount ? "released" : g.released > 0 ? "partial" : "pending",
+    })).sort((a,b) => (b.invDate||"").localeCompare(a.invDate||""));
+  }, [shreePayments, gstReleases]);
+
+  const gstTotalHeld     = gstHoldItems.reduce((s,g)=>s+g.holdAmount,0);
+  const gstTotalReleased = gstHoldItems.reduce((s,g)=>s+g.released,0);
+  const gstHoldPending   = gstHoldItems.reduce((s,g)=>s+g.balance,0);
 
   // filtered lists
   const filteredInvoices = shreeInvoices.filter(inv => {
@@ -6434,7 +6598,12 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
       }));
     }
 
-    log && log(`Payment advice UTR ${utr} applied — ${shorts.length} shortage(s), ${exps.length} expense(s)`);
+    // Auto-record GST holds from invoices with hold > 0
+    // These are tracked in gstReleases as "held" records (amount=0 means not yet released)
+    // The hold is tracked via the payment record's invoices array — no separate save needed
+    // gstHoldItems computed in real-time from shreePayments invoices + gstReleases
+
+    log && log(`Payment advice UTR ${utr} applied — ${shorts.length} shortage(s), ${exps.length} expense(s), hold ₹${Number(scanResult.holdAmount||0).toLocaleString("en-IN")}`);
     setScanResult(null);
   };
 
@@ -6542,6 +6711,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
           {id:"invoices",  label:"Invoices",  badge:shreeInvoices.length||null},
           {id:"payments",  label:"Advice",    badge:shreePayments.length||null},
           {id:"shortages", label:"Shortages", badge:allShortages.length||null},
+          {id:"gst",       label:"GST Hold",  badge:gstHoldPending>0?gstHoldItems.filter(g=>g.balance>0).length:null},
           {id:"profit",    label:"Profit",    badge:null},
         ].map(t=>(
           <button key={t.id} onClick={()=>setActiveTab(t.id)} style={{
@@ -7014,6 +7184,90 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
         )}
 
         {/* ══ PROFIT ════════════════════════════════════════════════ */}
+        {/* ══ GST HOLD ══════════════════════════════════════════════ */}
+        {activeTab==="gst"&&(
+          <div style={{display:"flex",flexDirection:"column",gap:14}}>
+
+            {/* KPI row */}
+            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10}}>
+              {[
+                {label:"Total Held",    val:fmtINR(gstTotalHeld),     col:"#ff9800"},
+                {label:"Released",      val:fmtINR(gstTotalReleased),  col:"#4caf50"},
+                {label:"Pending",       val:fmtINR(gstHoldPending),    col:"#ff6b6b"},
+              ].map(k=>(
+                <div key={k.label} style={{background:"#161b22",border:"1px solid #21262d",
+                  borderRadius:10,padding:"12px 10px",textAlign:"center"}}>
+                  <div style={{color:k.col,fontWeight:800,fontSize:15}}>{k.val}</div>
+                  <div style={{color:"#666",fontSize:10,marginTop:3,textTransform:"uppercase",letterSpacing:0.5}}>{k.label}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Manual release entry */}
+            {isOwner && (()=>{
+              const [rInv,setRInv] = [window._gstRInv||"", v=>{ window._gstRInv=v; }];
+              return null; // handled below via state
+            })()}
+
+            {/* Release recording section */}
+            <GstReleaseForm
+              gstHoldItems={gstHoldItems}
+              gstReleases={gstReleases}
+              setGstReleases={setGstReleases}
+              isOwner={isOwner}
+              log={log}
+            />
+
+            {/* Hold ledger table */}
+            {gstHoldItems.length===0 ? (
+              <div style={{textAlign:"center",padding:"30px 0",color:"#555"}}>
+                <div style={{fontSize:28,marginBottom:8}}>🔒</div>
+                <div>No GST hold recorded yet.</div>
+                <div style={{fontSize:12,marginTop:4,color:"#444"}}>Hold amounts are captured automatically when you scan a payment advice.</div>
+              </div>
+            ) : (
+              gstHoldItems.map(g=>(
+                <div key={g.invoiceNo} style={{background:"#161b22",border:"1px solid "+
+                  (g.status==="released"?"#4caf5044":g.status==="partial"?"#ff980044":"#ff6b6b44"),
+                  borderRadius:12,padding:"12px 14px",borderLeft:"4px solid "+
+                  (g.status==="released"?"#4caf50":g.status==="partial"?"#ff9800":"#ff6b6b")}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                    <div>
+                      <div style={{fontWeight:700,fontSize:13,color:"#e6edf3"}}>{g.invoiceNo}</div>
+                      {g.invDate&&<div style={{color:"#666",fontSize:11,marginTop:1}}>{fmtDate(parseDD(g.invDate))}</div>}
+                      {g.sapDoc&&<div style={{color:"#666",fontSize:11}}>SAP: {g.sapDoc}</div>}
+                    </div>
+                    <span style={{background:g.status==="released"?"#4caf5022":g.status==="partial"?"#ff980022":"#ff6b6b22",
+                      color:g.status==="released"?"#4caf50":g.status==="partial"?"#ff9800":"#ff6b6b",
+                      border:"1px solid "+(g.status==="released"?"#4caf5044":g.status==="partial"?"#ff980044":"#ff6b6b44"),
+                      borderRadius:20,padding:"3px 10px",fontSize:10,fontWeight:700}}>
+                      {g.status==="released"?"✅ Released":g.status==="partial"?"🔄 Partial":"🔴 Pending"}
+                    </span>
+                  </div>
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginTop:10}}>
+                    {[
+                      {l:"Held",     v:fmtINR(g.holdAmount), c:"#ff9800"},
+                      {l:"Released", v:fmtINR(g.released),   c:"#4caf50"},
+                      {l:"Balance",  v:fmtINR(g.balance),    c:g.balance>0?"#ff6b6b":"#4caf50"},
+                    ].map(x=>(
+                      <div key={x.l} style={{background:"#0d1117",borderRadius:8,padding:"8px",textAlign:"center"}}>
+                        <div style={{color:x.c,fontWeight:700,fontSize:12}}>{x.v}</div>
+                        <div style={{color:"#555",fontSize:9,textTransform:"uppercase",letterSpacing:0.5}}>{x.l}</div>
+                      </div>
+                    ))}
+                  </div>
+                  {g.releaseUtr&&(
+                    <div style={{marginTop:8,color:"#666",fontSize:11}}>
+                      Released via UTR: <b style={{color:"#4caf50"}}>{g.releaseUtr}</b>
+                      {g.releaseDate&&" on "+fmtDate(g.releaseDate)}
+                    </div>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        )}
+
         {activeTab==="profit"&&(
           <div>
             {shreeTrips.length>0&&(
