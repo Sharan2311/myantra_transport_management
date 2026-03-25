@@ -2149,6 +2149,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
         note:`Advance — LR ${t.lrNo||"—"} · ${t.truckNo}`,lrNo:t.lrNo||"",tripId:t.id,
         createdBy:user.username,createdAt:nowTs()};
       setCashTransfers(prev=>[wxn,...(Array.isArray(prev)?prev:[])]);
+      DB.saveCashTransfer(wxn).catch(e=>console.error("saveCashTransfer:",e));
       log("WALLET ADVANCE",`${empName} −₹${fmt(+f.advance)} LR:${t.lrNo}`);
     }
     const tn2 = (t.truckNo||"").toUpperCase().trim();
@@ -2262,6 +2263,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
         note:`Advance edit — LR ${editSheet.lrNo||"—"} · ${editSheet.truckNo}`,lrNo:editSheet.lrNo||"",tripId:editSheet.id,
         createdBy:user.username,createdAt:nowTs()};
       setCashTransfers(prev=>[wxn,...(Array.isArray(prev)?prev:[])]);
+      DB.saveCashTransfer(wxn).catch(e=>console.error("saveCashTransfer:",e));
       log("WALLET ADV EDIT",`${empName} delta ₹${deltaAdv} LR:${editSheet.lrNo}`);
     } else if(!prevEmpId && newEmpId && newAdv>0) {
       // newly linked
@@ -2270,6 +2272,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
         note:`Advance — LR ${editSheet.lrNo||"—"} · ${editSheet.truckNo}`,lrNo:editSheet.lrNo||"",tripId:editSheet.id,
         createdBy:user.username,createdAt:nowTs()};
       setCashTransfers(prev=>[wxn,...(Array.isArray(prev)?prev:[])]);
+      DB.saveCashTransfer(wxn).catch(e=>console.error("saveCashTransfer:",e));
       log("WALLET ADVANCE",`${empName} −₹${fmt(newAdv)} LR:${editSheet.lrNo}`);
     }
     log("EDIT TRIP", `LR:${editSheet.lrNo} ${editSheet.truckNo}`);
