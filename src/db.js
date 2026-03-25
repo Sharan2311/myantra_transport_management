@@ -1,8 +1,6 @@
 // ─── db.js — all Supabase read/write operations ────────────────────────────
 import { supabase } from './supabase.js'
 
-// ── field mappers (DB snake_case ↔ App camelCase) ──────────────────────────
-
 const tripFromDB = r => ({
   id: r.id, type: r.type, lrNo: r.lr_no, diNo: r.di_no, truckNo: r.truck_no,
   grNo: r.gr_no, consignee: r.consignee, from: r.from, to: r.to, grade: r.grade,
@@ -16,7 +14,6 @@ const tripFromDB = r => ({
   createdBy: r.created_by, createdAt: r.created_at,
   diLines: r.di_lines || [],
   dieselIndentNo: r.diesel_indent_no || "",
-  // Shree Cement billing fields
   lr: r.lr || r.lr_no || "",
   truck: r.truck || r.truck_no || "",
   billedToShree: +(r.billed_to_shree||0),
@@ -26,9 +23,7 @@ const tripFromDB = r => ({
   utr: r.utr_shree || "",
   shreeStatus: r.shree_status || "pending",
   shreeShortage: r.shree_shortage || null,
-
   frtRate: +(r.fr_rate||0),
-  // Party order fields
   orderType: r.order_type || 'godown',
   grFilePath: r.gr_file_path || '',
   invoiceFilePath: r.invoice_file_path || '',
@@ -40,6 +35,7 @@ const tripFromDB = r => ({
   emailSentAt: r.email_sent_at || '',
   partyEmail: r.party_email || '',
   batchId: r.batch_id || '',
+  cashEmpId: r.cash_emp_id || '',
 })
 const tripToDB = t => ({
   id: t.id, type: t.type, lr_no: t.lrNo, di_no: t.diNo, truck_no: t.truckNo,
@@ -54,7 +50,6 @@ const tripToDB = t => ({
   created_by: t.createdBy, created_at: t.createdAt,
   di_lines: t.diLines || [],
   diesel_indent_no: t.dieselIndentNo || "",
-  // Shree Cement billing fields
   lr: t.lr || t.lrNo || "",
   truck: t.truck || t.truckNo || "",
   billed_to_shree: t.billedToShree || 0,
@@ -65,7 +60,6 @@ const tripToDB = t => ({
   utr_shree: t.utr || "",
   shree_status: t.shreeStatus || t.status || "pending",
   shree_shortage: t.shortage && typeof t.shortage === 'object' ? t.shortage : null,
-  // Party order fields
   order_type: t.orderType || 'godown',
   gr_file_path: t.grFilePath || '',
   invoice_file_path: t.invoiceFilePath || '',
@@ -77,6 +71,7 @@ const tripToDB = t => ({
   email_sent_at: t.emailSentAt || '',
   party_email: t.partyEmail || '',
   batch_id: t.batchId || '',
+  cash_emp_id: t.cashEmpId || '',
 })
 
 const vehicleFromDB = r => ({
@@ -115,15 +110,13 @@ const paymentFromDB = r => ({
   shortageTotal: +(r.shortage_total||0), shortageLines: r.shortage_lines||[],
   otherDeduct: +(r.other_deduct||0), otherDeductLabel: r.other_deduct_label||'',
   paid: +r.paid, utr: r.utr, createdBy: r.created_by, createdAt: r.created_at,
-  // Shree payment advice fields
   totalPaid: +(r.total_paid||r.paid||0),
   totalBilled: +(r.total_billed||r.total_bill||0),
   tdsDeducted: +(r.tds_deducted||r.tds||0),
   holdAmount: +(r.hold_amount||r.gst_hold||r.hold||0),
   paymentDate: r.payment_date||r.date||"",
-  invoices: r.invoices||[],
-  shortages: r.shortages||[],
-  penalties: r.penalties||[],
+  invoices: r.invoices||[], shortages: r.shortages||[], penalties: r.penalties||[],
+  expenses: r.expenses||[],
 })
 const paymentToDB = p => ({
   id: p.id, invoice_no: p.invoiceNo, date: p.date||p.paymentDate, total_bill: p.totalBill||p.totalBilled||0,
@@ -131,15 +124,11 @@ const paymentToDB = p => ({
   shortage_total: p.shortageTotal||0, shortage_lines: p.shortageLines||[],
   other_deduct: p.otherDeduct||0, other_deduct_label: p.otherDeductLabel||'',
   paid: p.paid||p.totalPaid||0, utr: p.utr, created_by: p.createdBy, created_at: p.createdAt,
-  // Shree payment advice fields
-  total_paid: p.totalPaid||p.paid||0,
-  total_billed: p.totalBilled||p.totalBill||0,
-  tds_deducted: p.tdsDeducted||p.tds||0,
-  hold_amount: p.holdAmount||p.gstHold||0,
+  total_paid: p.totalPaid||p.paid||0, total_billed: p.totalBilled||p.totalBill||0,
+  tds_deducted: p.tdsDeducted||p.tds||0, hold_amount: p.holdAmount||p.gstHold||0,
   payment_date: p.paymentDate||p.date||"",
-  invoices: p.invoices||[],
-  shortages: p.shortages||[],
-  penalties: p.penalties||[],
+  invoices: p.invoices||[], shortages: p.shortages||[], penalties: p.penalties||[],
+  expenses: p.expenses||[],
 })
 
 const settlementFromDB = r => ({
@@ -174,16 +163,11 @@ const indentFromDB = r => ({
   ratePerLitre: +r.rate_per_litre, amount: +r.amount,
   confirmed: r.confirmed, paid: r.paid, paidDate: r.paid_date,
   paidRef: r.paid_ref, createdBy: r.created_by, createdAt: r.created_at,
-  unmatched: r.unmatched || false,
-  truckMismatch: r.truck_mismatch || false,
-  amountMismatch: r.amount_mismatch || false,
-  indentMismatch: r.indent_mismatch || false,
-  pumpTotal: +(r.pump_total||0),
-  estDiesel: +(r.est_diesel||0),
-  alertDismissed: r.alert_dismissed || false,
-  dismissReason: r.dismiss_reason || "",
-  dismissedBy: r.dismissed_by || "",
-  dismissedAt: r.dismissed_at || "",
+  unmatched: r.unmatched||false, truckMismatch: r.truck_mismatch||false,
+  amountMismatch: r.amount_mismatch||false, indentMismatch: r.indent_mismatch||false,
+  pumpTotal: +(r.pump_total||0), estDiesel: +(r.est_diesel||0),
+  alertDismissed: r.alert_dismissed||false, dismissReason: r.dismiss_reason||"",
+  dismissedBy: r.dismissed_by||"", dismissedAt: r.dismissed_at||"",
 })
 const indentToDB = i => ({
   id: i.id, pump_id: i.pumpId, truck_no: i.truckNo, trip_id: i.tripId||null,
@@ -191,16 +175,11 @@ const indentToDB = i => ({
   rate_per_litre: i.ratePerLitre, amount: i.amount,
   confirmed: i.confirmed, paid: i.paid, paid_date: i.paidDate||'',
   paid_ref: i.paidRef||'', created_by: i.createdBy, created_at: i.createdAt,
-  unmatched: i.unmatched || false,
-  truck_mismatch: i.truckMismatch || false,
-  amount_mismatch: i.amountMismatch || false,
-  indent_mismatch: i.indentMismatch || false,
-  pump_total: i.pumpTotal || 0,
-  est_diesel: i.estDiesel || 0,
-  alert_dismissed: i.alertDismissed || false,
-  dismiss_reason: i.dismissReason || "",
-  dismissed_by: i.dismissedBy || "",
-  dismissed_at: i.dismissedAt || "",
+  unmatched: i.unmatched||false, truck_mismatch: i.truckMismatch||false,
+  amount_mismatch: i.amountMismatch||false, indent_mismatch: i.indentMismatch||false,
+  pump_total: i.pumpTotal||0, est_diesel: i.estDiesel||0,
+  alert_dismissed: i.alertDismissed||false, dismiss_reason: i.dismissReason||"",
+  dismissed_by: i.dismissedBy||"", dismissed_at: i.dismissedAt||"",
 })
 
 const driverPayFromDB = r => ({
@@ -234,16 +213,16 @@ const gstToDB = g => ({
   utr: g.utr, notes: g.notes||'', created_by: g.createdBy, created_at: g.createdAt,
 })
 
-// ── Cash Transfers (employee wallet) ────────────────────────────────────────
+// ── Cash Transfers (employee wallet) ─────────────────────────────────────────
 const cashTransferFromDB = r => ({
   id: r.id, empId: r.emp_id, amount: +r.amount,
-  date: r.date, note: r.note||'',
-  createdBy: r.created_by, createdAt: r.created_at,
+  date: r.date, note: r.note||'', lrNo: r.lr_no||'', tripId: r.trip_id||'',
+  utr: r.utr||'', createdBy: r.created_by, createdAt: r.created_at,
 })
 const cashTransferToDB = t => ({
   id: t.id, emp_id: t.empId, amount: t.amount,
-  date: t.date, note: t.note||'',
-  created_by: t.createdBy, created_at: t.createdAt,
+  date: t.date, note: t.note||'', lr_no: t.lrNo||'', trip_id: t.tripId||null,
+  utr: t.utr||'', created_by: t.createdBy, created_at: t.createdAt,
 })
 
 const activityFromDB = r => ({
@@ -264,8 +243,6 @@ const userToDB = u => ({
   role: u.role, active: u.active, created_at: u.createdAt,
 })
 
-// ── Generic helpers ──────────────────────────────────────────────────────────
-
 const pumpPaymentFromDB = r => ({
   id: r.id, pumpId: r.pump_id, amount: +(r.amount||0),
   utr: r.utr||"", date: r.date||"", note: r.note||"",
@@ -276,29 +253,25 @@ const pumpPaymentToDB = p => ({
   utr: p.utr||"", date: p.date||"", note: p.note||"",
   created_by: p.createdBy, created_at: p.createdAt,
 })
+
 const fetchAll = async (table, fromDB) => {
   const { data, error } = await supabase.from(table).select('*').order('id')
   if (error) throw error
   return (data||[]).map(fromDB)
 }
-
 const upsertOne = async (table, toDB, record) => {
   const { error } = await supabase.from(table).upsert(toDB(record))
   if (error) throw error
 }
-
 const deleteOne = async (table, id) => {
   const { error } = await supabase.from(table).delete().eq('id', id)
   if (error) throw error
 }
 
-// ── Exported API ─────────────────────────────────────────────────────────────
 export const DB = {
-  // Users
   getUsers:       () => fetchAll('mye_users', userFromDB),
   saveUser:       u  => upsertOne('mye_users', userToDB, u),
 
-  // Trips
   getTrips:       () => fetchAll('mye_trips', tripFromDB),
   saveTrip:       t  => upsertOne('mye_trips', tripToDB, t),
   deleteTrip:     id => deleteOne('mye_trips', id),
@@ -307,88 +280,73 @@ export const DB = {
     if (error) throw error
   },
 
-  // Vehicles
   getVehicles:    () => fetchAll('mye_vehicles', vehicleFromDB),
   saveVehicle:    v  => upsertOne('mye_vehicles', vehicleToDB, v),
+  deleteVehicle:  id => deleteOne('mye_vehicles', id),
 
-  // Employees
   getEmployees:   () => fetchAll('mye_employees', employeeFromDB),
   saveEmployee:   e  => upsertOne('mye_employees', employeeToDB, e),
+  deleteEmployee: id => deleteOne('mye_employees', id),
 
-  // Payments
   getPayments:    () => fetchAll('mye_payments', paymentFromDB),
   savePayment:    p  => upsertOne('mye_payments', paymentToDB, p),
+  deletePayment:  id => deleteOne('mye_payments', id),
 
-  // Settlements
   getSettlements: () => fetchAll('mye_settlements', settlementFromDB),
   saveSettlement: s  => upsertOne('mye_settlements', settlementToDB, s),
 
-  // Pumps
   getPumps:          () => fetchAll('mye_pumps', pumpFromDB),
   savePump:          p  => upsertOne('mye_pumps', pumpToDB, p),
 
-  // Pump Payments
-  getPumpPayments:   async () => {
+  getPumpPayments: async () => {
     try { return await fetchAll('mye_pump_payments', pumpPaymentFromDB); }
     catch(e) { console.warn('mye_pump_payments not ready:', e.message); return []; }
   },
   savePumpPayment:   p  => upsertOne('mye_pump_payments', pumpPaymentToDB, p),
   deletePumpPayment: id => deleteOne('mye_pump_payments', id),
 
-  // Indents
-  getIndents:     () => fetchAll('mye_indents', indentFromDB),
-  saveIndent:     i  => upsertOne('mye_indents', indentToDB, i),
-  deleteIndent:   id => deleteOne('mye_indents', id),
-  saveManyIndents:async (indents) => {
+  getIndents:      () => fetchAll('mye_indents', indentFromDB),
+  saveIndent:      i  => upsertOne('mye_indents', indentToDB, i),
+  deleteIndent:    id => deleteOne('mye_indents', id),
+  saveManyIndents: async (indents) => {
     const { error } = await supabase.from('mye_indents').upsert(indents.map(indentToDB))
     if (error) throw error
   },
 
-  // Driver Payments
-  getDriverPays:  () => fetchAll('mye_driver_payments', driverPayFromDB),
-  saveDriverPay:  p  => upsertOne('mye_driver_payments', driverPayToDB, p),
+  getDriverPays:   () => fetchAll('mye_driver_payments', driverPayFromDB),
+  saveDriverPay:   p  => upsertOne('mye_driver_payments', driverPayToDB, p),
   deleteDriverPay: id => deleteOne('mye_driver_payments', id),
 
-  // Deletes
-  deleteVehicle:   id => deleteOne('mye_vehicles', id),
-  deletePayment:   id => deleteOne('mye_payments', id),
-  deleteEmployee:  id => deleteOne('mye_employees', id),
+  getExpenses:     () => fetchAll('mye_expenses', expenseFromDB),
+  saveExpense:     e  => upsertOne('mye_expenses', expenseToDB, e),
+
+  getGstReleases:  () => fetchAll('mye_gst_releases', gstFromDB),
+  saveGstRelease:  g  => upsertOne('mye_gst_releases', gstToDB, g),
   deleteGstRelease:id => deleteOne('mye_gst_releases', id),
 
-  // Expenses
-  getExpenses:    () => fetchAll('mye_expenses', expenseFromDB),
-  saveExpense:    e  => upsertOne('mye_expenses', expenseToDB, e),
-
-  // GST Releases
-  getGstReleases: () => fetchAll('mye_gst_releases', gstFromDB),
-  saveGstRelease: g  => upsertOne('mye_gst_releases', gstToDB, g),
-
-  // Cash Transfers (employee wallet)
+  // Cash Transfers — employee wallet (credits + advance deductions)
   getCashTransfers: async () => {
     try { return await fetchAll('mye_cash_transfers', cashTransferFromDB); }
     catch(e) { console.warn('mye_cash_transfers not ready:', e.message); return []; }
   },
-  saveCashTransfer: t => upsertOne('mye_cash_transfers', cashTransferToDB, t),
+  saveCashTransfer:   t  => upsertOne('mye_cash_transfers', cashTransferToDB, t),
   deleteCashTransfer: id => deleteOne('mye_cash_transfers', id),
 
-  // Activity
-  getActivity:    async () => {
+  getActivity: async () => {
     const { data, error } = await supabase
       .from('mye_activity').select('*')
       .order('time', { ascending: false }).limit(200)
     if (error) throw error
     return (data||[]).map(activityFromDB)
   },
-  logActivity:    a  => upsertOne('mye_activity', activityToDB, a),
+  logActivity: a => upsertOne('mye_activity', activityToDB, a),
 
-  // Settings
   getSettings: async () => {
     const { data } = await supabase.from('mye_settings').select('*').eq('key','app_settings').single()
     return data?.value || { tafalPerTrip: 300 }
   },
   saveSettings: async (val) => {
-    const { error } = await supabase.from('mye_settings')
-      .upsert({ key: 'app_settings', value: val })
+    const { error } = await supabase.from('mye_settings').upsert({ key: 'app_settings', value: val })
     if (error) throw error
   },
 }
