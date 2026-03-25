@@ -2143,14 +2143,15 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
     setTrips(p => [t, ...(p||[])]);
     log("ADD TRIP", `LR:${t.lrNo} ${t.truckNo}→${t.to} ${t.qty}MT`);
     // If advance linked to an employee wallet, record the deduction
-    if(f.cashEmpId && +f.advance>0) {
-      const empName = (employees||[]).find(e=>e.id===f.cashEmpId)?.name||f.cashEmpId;
-      const wxn={id:uid(),empId:f.cashEmpId,amount:-(+f.advance),date:t.date||today(),
-        note:`Advance — LR ${t.lrNo||"—"} · ${t.truckNo}`,lrNo:t.lrNo||"",tripId:t.id,
-        createdBy:user.username,createdAt:nowTs()};
+    // Use t.advance (numeric, from the built trip) not f.advance (string from form state)
+    if(t.cashEmpId && t.advance>0) {
+      const empName = (employees||[]).find(e=>e.id===t.cashEmpId)?.name||t.cashEmpId;
+      const wxn={id:"WX-"+t.id, empId:t.cashEmpId, amount:-t.advance, date:t.date||today(),
+        note:`Advance — LR ${t.lrNo||"—"} · ${t.truckNo}`, lrNo:t.lrNo||"", tripId:t.id,
+        createdBy:user.username, createdAt:nowTs()};
       setCashTransfers(prev=>[wxn,...(Array.isArray(prev)?prev:[])]);
       DB.saveCashTransfer(wxn).catch(e=>console.error("saveCashTransfer:",e));
-      log("WALLET ADVANCE",`${empName} −₹${fmt(+f.advance)} LR:${t.lrNo}`);
+      log("WALLET ADVANCE",`${empName} −₹${fmt(t.advance)} LR:${t.lrNo}`);
     }
     const tn2 = (t.truckNo||"").toUpperCase().trim();
     // Auto-create vehicle FIRST if not yet registered — so ledger update below finds it
@@ -2248,32 +2249,24 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
         return upd;
       }));
     }
-    // Wallet advance delta: if cashEmpId set and advance changed, record delta
-    const prevTrip2 = trips.find(t=>t.id===editSheet.id);
-    const prevAdv = prevTrip2?.advance||0;
-    const newAdv  = +editSheet.advance||0;
-    const deltaAdv = newAdv - prevAdv;
-    const prevEmpId = prevTrip2?.cashEmpId||"";
-    const newEmpId  = editSheet.cashEmpId||"";
-    // If cashEmpId changed or advance amount changed — reverse old, apply new
-    if(prevEmpId && deltaAdv!==0) {
-      // reverse old deduction (add back)
-      const empName = (employees||[]).find(e=>e.id===prevEmpId)?.name||prevEmpId;
-      const wxn={id:uid(),empId:prevEmpId,amount:-deltaAdv,date:editSheet.date||today(),
-        note:`Advance edit — LR ${editSheet.lrNo||"—"} · ${editSheet.truckNo}`,lrNo:editSheet.lrNo||"",tripId:editSheet.id,
-        createdBy:user.username,createdAt:nowTs()};
-      setCashTransfers(prev=>[wxn,...(Array.isArray(prev)?prev:[])]);
-      DB.saveCashTransfer(wxn).catch(e=>console.error("saveCashTransfer:",e));
-      log("WALLET ADV EDIT",`${empName} delta ₹${deltaAdv} LR:${editSheet.lrNo}`);
-    } else if(!prevEmpId && newEmpId && newAdv>0) {
-      // newly linked
+    // Wallet advance: upsert a single record per trip using stable id "WX-"+tripId
+    // This prevents duplicate entries — editing just overwrites the same record
+    const newAdv   = +editSheet.advance||0;
+    const newEmpId = editSheet.cashEmpId||"";
+    const stableId = "WX-"+editSheet.id;
+    if(newEmpId && newAdv>0) {
+      // Upsert: replace existing wallet record for this trip
       const empName = (employees||[]).find(e=>e.id===newEmpId)?.name||newEmpId;
-      const wxn={id:uid(),empId:newEmpId,amount:-newAdv,date:editSheet.date||today(),
-        note:`Advance — LR ${editSheet.lrNo||"—"} · ${editSheet.truckNo}`,lrNo:editSheet.lrNo||"",tripId:editSheet.id,
-        createdBy:user.username,createdAt:nowTs()};
-      setCashTransfers(prev=>[wxn,...(Array.isArray(prev)?prev:[])]);
+      const wxn={id:stableId, empId:newEmpId, amount:-newAdv, date:editSheet.date||today(),
+        note:`Advance — LR ${editSheet.lrNo||"—"} · ${editSheet.truckNo}`, lrNo:editSheet.lrNo||"", tripId:editSheet.id,
+        createdBy:user.username, createdAt:nowTs()};
+      setCashTransfers(prev=>[wxn,...(Array.isArray(prev)?prev:[]).filter(x=>x.id!==stableId)]);
       DB.saveCashTransfer(wxn).catch(e=>console.error("saveCashTransfer:",e));
       log("WALLET ADVANCE",`${empName} −₹${fmt(newAdv)} LR:${editSheet.lrNo}`);
+    } else if(!newEmpId || newAdv<=0) {
+      // Employee unlinked or advance cleared — remove the wallet record
+      setCashTransfers(prev=>(prev||[]).filter(x=>x.id!==stableId));
+      DB.deleteCashTransfer(stableId).catch(()=>{});
     }
     log("EDIT TRIP", `LR:${editSheet.lrNo} ${editSheet.truckNo}`);
     setEditSheet(null);
