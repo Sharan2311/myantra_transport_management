@@ -3983,11 +3983,25 @@ function ScanPaymentBtn({ onResult }) {
 
 // ─── SPLIT PAYMENT SHEET ──────────────────────────────────────────────────────
 // Shown when a scanned payment contains multiple LR numbers
-function SplitPaymentSheet({ scanData, trips, tripWithBalance, onSave, onCancel }) {
+function SplitPaymentSheet({ scanData, trips, tripWithBalance, employees, setCashTransfers, user, log, onSave, onCancel }) {
   const totalAmount = +(scanData.amount||0);
   const utr = scanData.referenceNo||"";
   const date = scanData.date||today();
   const paidTo = scanData.paidTo||"";
+
+  // ── Detect if this is a cash transfer to an employee ──────────────────────
+  // Match paidTo or note against employee names (case-insensitive, partial)
+  const detectEmployee = () => {
+    if(!(employees||[]).length) return null;
+    const haystack = (paidTo + " " + (scanData.note||"") + " " + (scanData.narration||"")).toLowerCase();
+    return (employees||[]).find(e => {
+      const nameParts = e.name.toLowerCase().split(/\s+/);
+      return nameParts.some(part => part.length >= 3 && haystack.includes(part));
+    }) || null;
+  };
+  const detectedEmp = detectEmployee();
+  const [mode, setMode] = useState(detectedEmp ? "wallet" : "trips"); // "wallet" | "trips"
+  const [selectedEmpId, setSelectedEmpId] = useState(detectedEmp?.id||"");
 
   // Try to match scanned LR numbers to actual trips
   const scannedLRs = (scanData.lrNumbers||[]).map(lr => String(lr).trim());
@@ -4050,6 +4064,82 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance, onSave, onCancel 
           {paidTo && <div style={{color:C.muted,fontSize:11}}>Paid to: {paidTo}</div>}
           {scannedLRs.length > 0 && <div style={{color:C.muted,fontSize:11,marginTop:2}}>Detected LRs: <b style={{color:C.orange}}>{scannedLRs.join(", ")}</b></div>}
         </div>
+
+        {/* ── Mode selector — trip payment vs employee wallet ── */}
+        {(employees||[]).length > 0 && (
+          <div style={{display:"flex",gap:8}}>
+            {[{id:"trips",label:"🚛 Trip Payment"},{id:"wallet",label:"💵 Employee Wallet"}].map(m=>(
+              <button key={m.id} onClick={()=>setMode(m.id)} style={{
+                flex:1,padding:"9px 0",borderRadius:8,fontWeight:700,fontSize:12,cursor:"pointer",border:"none",
+                background: mode===m.id ? (m.id==="wallet"?C.green:C.purple) : C.card,
+                color: mode===m.id ? "#fff" : C.muted,
+              }}>{m.label}</button>
+            ))}
+          </div>
+        )}
+
+        {/* ── WALLET MODE ── */}
+        {mode==="wallet" && (()=>{
+          const selEmp = (employees||[]).find(e=>e.id===selectedEmpId);
+          return (
+            <div style={{display:"flex",flexDirection:"column",gap:12}}>
+              {detectedEmp && (
+                <div style={{background:"#0d1a0d",border:"1px solid #2ea04355",borderRadius:8,padding:"9px 12px",
+                  color:C.green,fontSize:12,fontWeight:600}}>
+                  ✅ Detected employee: <b>{detectedEmp.name}</b> from "{paidTo}"
+                </div>
+              )}
+              <div>
+                <div style={{color:C.muted,fontSize:11,marginBottom:4,fontWeight:700}}>SELECT EMPLOYEE</div>
+                <select value={selectedEmpId} onChange={e=>setSelectedEmpId(e.target.value)}
+                  style={{width:"100%",background:C.bg,border:`1.5px solid ${selectedEmpId?C.green:C.border}`,
+                    borderRadius:8,color:C.text,padding:"9px 12px",fontSize:13,outline:"none"}}>
+                  <option value="">— Choose employee —</option>
+                  {(employees||[]).map(e=><option key={e.id} value={e.id}>{e.name} · {e.role}</option>)}
+                </select>
+              </div>
+              <div style={{display:"flex",gap:8}}>
+                <div style={{flex:1}}>
+                  <div style={{color:C.muted,fontSize:11,marginBottom:3}}>AMOUNT ₹</div>
+                  <div style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,
+                    color:C.text,padding:"9px 12px",fontSize:14,fontWeight:700}}>{fmt(totalAmount)}</div>
+                </div>
+                <div style={{flex:1}}>
+                  <div style={{color:C.muted,fontSize:11,marginBottom:3}}>DATE</div>
+                  <input type="date" value={sharedDate} onChange={e=>setSharedDate(e.target.value)}
+                    onClick={e=>e.target.showPicker?.()}
+                    style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,color:C.text,
+                      padding:"8px 10px",fontSize:13,width:"100%",colorScheme:"dark",
+                      WebkitAppearance:"none",boxSizing:"border-box"}} />
+                </div>
+              </div>
+              <div>
+                <div style={{color:C.muted,fontSize:11,marginBottom:3}}>NOTE</div>
+                <input value={sharedNote} onChange={e=>setSharedNote(e.target.value)}
+                  placeholder="e.g. UPI / NEFT / Cash"
+                  style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,color:C.text,
+                    padding:"9px 12px",fontSize:13,width:"100%",boxSizing:"border-box",outline:"none"}} />
+              </div>
+              {utr && <div style={{color:C.muted,fontSize:12}}>UTR: <b style={{color:C.text}}>{utr}</b></div>}
+              <Btn onClick={()=>{
+                if(!selectedEmpId){alert("Select an employee");return;}
+                const tx={id:uid(),empId:selectedEmpId,amount:totalAmount,date:sharedDate,
+                  note:(sharedNote||paidTo||"Cash Transfer").trim(),utr,
+                  createdBy:user.username,createdAt:nowTs()};
+                setCashTransfers(prev=>[tx,...(Array.isArray(prev)?prev:[])]);
+                log&&log("CASH TRANSFER",`${selEmp?.name||selectedEmpId} ₹${fmt(totalAmount)} UTR:${utr}`);
+                alert(`✅ ₹${fmt(totalAmount)} added to ${selEmp?.name}'s wallet`);
+                onCancel();
+              }} full color={C.green}
+                disabled={!selectedEmpId||totalAmount<=0}>
+                💵 Save to {selEmp?selEmp.name+"'s":"Employee"} Wallet
+              </Btn>
+            </div>
+          );
+        })()}
+
+        {/* ── TRIP PAYMENT MODE ── */}
+        {mode==="trips" && (<>
 
         {/* Shared date + paid to + notes */}
         <div style={{display:"flex",gap:8}}>
@@ -4196,6 +4286,8 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance, onSave, onCancel 
             ⚠ ₹{remaining.toLocaleString("en-IN")} still unallocated — add more rows or adjust amounts
           </div>
         )}
+
+        </>)}
         <Btn onClick={onCancel} full outline color={C.muted}>Cancel</Btn>
       </div>
     </Sheet>
@@ -6242,7 +6334,6 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
         return (
           <Sheet title={`💵 Cash Wallet — ${e.name}`} onClose={()=>{setWSheet(null);setTxAmt("");setTxNote("");setTxDate(today());}}>
             <div style={{display:"flex",flexDirection:"column",gap:14}}>
-
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
                 {[{l:"Transferred",v:fmt(xfrd),c:C.green},{l:"Advances",v:fmt(adv),c:C.red},{l:"Balance",v:fmt(bal),c:bal>=0?C.accent:C.red}].map(x=>(
                   <div key={x.l} style={{background:C.bg,borderRadius:10,padding:10,textAlign:"center"}}>
@@ -6251,9 +6342,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                   </div>
                 ))}
               </div>
-
               {bal<0&&<div style={{background:"#2a0a0a",border:"1px solid "+C.red,borderRadius:8,padding:"8px 12px",color:C.red,fontSize:12,fontWeight:600}}>⚠️ Advance exceeds transfers by {fmt(Math.abs(bal))}</div>}
-
               <div style={{background:C.card,borderRadius:10,padding:"12px 14px"}}>
                 <div style={{color:C.green,fontWeight:700,fontSize:12,marginBottom:10}}>➕ Record Cash Transfer to {e.name}</div>
                 <div style={{display:"flex",gap:8,marginBottom:8}}>
@@ -6271,7 +6360,6 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                   }} full color={C.green}>Save Transfer</Btn>
                 </div>
               </div>
-
               {hist.length>0&&(
                 <div>
                   <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>💳 Transfers IN</div>
@@ -6286,7 +6374,6 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                   ))}
                 </div>
               )}
-
               {aTrips.length>0&&(
                 <div>
                   <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>📋 Advances OUT (from Trips)</div>
@@ -6301,7 +6388,6 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                   ))}
                 </div>
               )}
-
               {hist.length===0&&aTrips.length===0&&<div style={{textAlign:"center",color:C.muted,padding:"20px 0",fontSize:13}}>No transactions yet</div>}
             </div>
           </Sheet>
@@ -6345,7 +6431,6 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
     </div>
   );
 }
-
 
 // ─── SHREE PAYMENTS & BILLING ──────────────────────────────────────────────────
 // ─── GST RELEASE FORM ────────────────────────────────────────────────────────
@@ -7659,7 +7744,7 @@ function ShortageRecoverBtn({v, setVehicles, log}) {
 // ─── DRIVER PAYMENTS ──────────────────────────────────────────────────────────
 // Driver payment is separate from settlement.
 // Record bank transfers against a trip. "Balance due" auto-updates.
-function DriverPayments({trips, driverPays, setDriverPays, vehicles, user, log}) {
+function DriverPayments({trips, driverPays, setDriverPays, vehicles, employees, cashTransfers, setCashTransfers, user, log}) {
   const [filter,    setFilter]    = useState("unpaid");
   const [paySheet,  setPaySheet]  = useState(null);
   const [splitSheet, setSplitSheet] = useState(null); // scanned multi-LR data
@@ -7995,6 +8080,10 @@ function DriverPayments({trips, driverPays, setDriverPays, vehicles, user, log})
           scanData={splitSheet}
           trips={trips}
           tripWithBalance={tripWithBalance}
+          employees={employees||[]}
+          setCashTransfers={setCashTransfers}
+          user={user}
+          log={log}
           onSave={saveMultiPayment}
           onCancel={()=>setSplitSheet(null)}
         />
