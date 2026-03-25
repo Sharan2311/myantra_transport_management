@@ -216,12 +216,12 @@ const driverPayToDB = p => ({
 
 const expenseFromDB = r => ({
   id: r.id, date: r.date, label: r.label, amount: +r.amount,
-  category: r.category, notes: r.notes,
+  category: r.category, notes: r.notes, utr: r.utr||'',
   createdBy: r.created_by, createdAt: r.created_at,
 })
 const expenseToDB = e => ({
   id: e.id, date: e.date, label: e.label, amount: e.amount,
-  category: e.category, notes: e.notes||'',
+  category: e.category, notes: e.notes||'', utr: e.utr||'',
   created_by: e.createdBy, created_at: e.createdAt,
 })
 
@@ -232,6 +232,18 @@ const gstFromDB = r => ({
 const gstToDB = g => ({
   id: g.id, date: g.date, invoice_ref: g.invoiceRef, amount: g.amount,
   utr: g.utr, notes: g.notes||'', created_by: g.createdBy, created_at: g.createdAt,
+})
+
+// ── Cash Transfers (employee wallet) ────────────────────────────────────────
+const cashTransferFromDB = r => ({
+  id: r.id, empId: r.emp_id, amount: +r.amount,
+  date: r.date, note: r.note||'',
+  createdBy: r.created_by, createdAt: r.created_at,
+})
+const cashTransferToDB = t => ({
+  id: t.id, emp_id: t.empId, amount: t.amount,
+  date: t.date, note: t.note||'',
+  created_by: t.createdBy, created_at: t.createdAt,
 })
 
 const activityFromDB = r => ({
@@ -350,6 +362,14 @@ export const DB = {
   // GST Releases
   getGstReleases: () => fetchAll('mye_gst_releases', gstFromDB),
   saveGstRelease: g  => upsertOne('mye_gst_releases', gstToDB, g),
+
+  // Cash Transfers (employee wallet)
+  getCashTransfers: async () => {
+    try { return await fetchAll('mye_cash_transfers', cashTransferFromDB); }
+    catch(e) { console.warn('mye_cash_transfers not ready:', e.message); return []; }
+  },
+  saveCashTransfer: t => upsertOne('mye_cash_transfers', cashTransferToDB, t),
+  deleteCashTransfer: id => deleteOne('mye_cash_transfers', id),
 
   // Activity
   getActivity:    async () => {
