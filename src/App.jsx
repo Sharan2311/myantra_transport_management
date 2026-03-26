@@ -2332,12 +2332,19 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
       }
     }
     // Validate: Est. Net to Driver cannot be negative
+    // For multi-DI trips, diesel covers all DIs so first DI may show negative — allow with warning
     {
       const _gross = (+f.qty||0)*(+f.givenRate||0);
       const _net = _gross - (+f.advance||0) - (+f.tafal||0) - (+f.dieselEstimate||0) - (+f.shortageRecovery||0) - (+f.loanRecovery||0);
       if(_net < 0){
-        alert(`Cannot save: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\nPlease reduce Advance, Loan Recovery, or Shortage Recovery so the driver's net is ≥ ₹0.`);
-        return;
+        const isOnlyDiesel = (+f.dieselEstimate||0) > 0 && (+f.advance||0)===0 && (+f.shortageRecovery||0)===0 && (+f.loanRecovery||0)===0;
+        if(isOnlyDiesel) {
+          // Likely a multi-DI trip where diesel spans multiple DIs — allow with warning
+          if(!window.confirm(`Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative) — likely because diesel covers multiple DIs.\n\nSave anyway? You can merge the second DI after saving.`)) return;
+        } else {
+          alert(`Cannot save: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\nPlease reduce Advance, Loan Recovery, or Shortage Recovery so the driver's net is ≥ ₹0.`);
+          return;
+        }
       }
     }
     const t = mkTrip({
@@ -2414,8 +2421,13 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
         : (+editSheet.qty||0)*(+editSheet.givenRate||0);
       const _net = _gross - (+editSheet.advance||0) - (+editSheet.tafal||0) - (+editSheet.dieselEstimate||0) - (+editSheet.shortageRecovery||0) - (+editSheet.loanRecovery||0);
       if(_net < 0){
-        alert(`Cannot save: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\nPlease reduce Advance, Loan Recovery, or Shortage Recovery so the driver's net is ≥ ₹0.`);
-        return;
+        const isOnlyDiesel = (+editSheet.dieselEstimate||0) > 0 && (+editSheet.advance||0)===0 && (+editSheet.shortageRecovery||0)===0 && (+editSheet.loanRecovery||0)===0;
+        if(isOnlyDiesel) {
+          if(!window.confirm(`Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative) — likely because diesel covers multiple DIs.\n\nSave anyway?`)) return;
+        } else {
+          alert(`Cannot save: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\nPlease reduce Advance, Loan Recovery, or Shortage Recovery so the driver's net is ≥ ₹0.`);
+          return;
+        }
       }
     }
     setTrips(p => p.map(t => t.id===editSheet.id ? {
@@ -2963,7 +2975,11 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                           {alert(`LR "${f.lrNo}" already exists. Each LR must be unique.`);return;}
                         const _gross=(+f.qty||0)*(+f.givenRate||0);
                         const _net=_gross-(+f.advance||0)-(+f.tafal||0)-(+f.dieselEstimate||0)-(+f.shortageRecovery||0)-(+f.loanRecovery||0);
-                        if(_net<0){alert("Cannot save: Est. Net to Driver is negative.");return;}
+                        if(_net<0){
+                          const isOnlyDiesel=(+f.dieselEstimate||0)>0&&(+f.advance||0)===0&&(+f.shortageRecovery||0)===0&&(+f.loanRecovery||0)===0;
+                          if(isOnlyDiesel){if(!window.confirm(`Est. Net to Driver is negative (likely diesel spans multiple DIs). Save anyway?`))return;}
+                          else{alert("Cannot save: Est. Net to Driver is negative.");return;}
+                        }
                         if(!f.district||!f.state){alert("District and State are required for Party orders.");return;}
                         // Save directly — email sent separately via Party Email button
                         setUploadingFiles(true);
