@@ -1005,6 +1005,171 @@ function MergeDISheet({ conflict, onMerge, onSeparate, onCancel, isOwner=false }
 
 // ─── DI / GR COPY UPLOADER ───────────────────────────────────────────────────
 // Sends photo or PDF to Claude AI → extracts all trip fields automatically
+
+// ─── GOOGLE DRIVE HELPER ──────────────────────────────────────────────────────
+// Converts any Google Drive share link → direct download URL
+function driveUrlToDownload(url) {
+  // Formats:
+  // https://drive.google.com/file/d/FILE_ID/view?...
+  // https://drive.google.com/open?id=FILE_ID
+  // https://docs.google.com/...
+  let id = null;
+  const m1 = url.match(/\/d\/([a-zA-Z0-9_-]{20,})/);
+  const m2 = url.match(/[?&]id=([a-zA-Z0-9_-]{20,})/);
+  if(m1) id = m1[1];
+  else if(m2) id = m2[1];
+  if(!id) throw new Error("Could not extract file ID from this link. Make sure it is a Google Drive file link.");
+  return `https://drive.google.com/uc?export=download&id=${id}`;
+}
+
+// Shows a small modal asking user to paste a Drive link, then fetches the file
+// onFile(File) is called when done
+function openGoogleDrivePicker(onFile) {
+  return new Promise((resolve, reject) => {
+    // Create modal overlay
+    const overlay = document.createElement("div");
+    overlay.style.cssText = `position:fixed;inset:0;background:#000a;z-index:99999;display:flex;align-items:center;justify-content:center;`;
+
+    const box = document.createElement("div");
+    box.style.cssText = `background:#141920;border:1.5px solid #252e3d;border-radius:16px;padding:24px;width:min(400px,90vw);display:flex;flex-direction:column;gap:14px;`;
+
+    box.innerHTML = `
+      <div style="color:#e2e8f0;font-weight:800;font-size:15px;">🔵 Import from Google Drive</div>
+      <div style="color:#64748b;font-size:12px;line-height:1.5;">
+        1. Open the file in Google Drive<br>
+        2. Click <b style="color:#e2e8f0">Share → Copy link</b> (set to "Anyone with the link")<br>
+        3. Paste the link below
+      </div>
+      <input id="gd-url-input" placeholder="https://drive.google.com/file/d/..." 
+        style="background:#0a0e14;border:1.5px solid #252e3d;border-radius:8px;color:#e2e8f0;padding:10px 12px;font-size:13px;outline:none;width:100%;box-sizing:border-box;" />
+      <div id="gd-error" style="color:#da3633;font-size:12px;display:none;"></div>
+      <div style="display:flex;gap:8px;">
+        <button id="gd-cancel" style="flex:1;background:none;border:1.5px solid #252e3d;border-radius:8px;color:#64748b;padding:10px;font-size:13px;cursor:pointer;font-weight:600;">Cancel</button>
+        <button id="gd-fetch" style="flex:2;background:#1a73e8;border:none;border-radius:8px;color:#fff;padding:10px;font-size:13px;cursor:pointer;font-weight:700;">📥 Import File</button>
+      </div>
+    `;
+
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    const input   = box.querySelector("#gd-url-input");
+    const errDiv  = box.querySelector("#gd-error");
+    const fetchBtn= box.querySelector("#gd-fetch");
+    const cancelBtn=box.querySelector("#gd-cancel");
+
+    const close = () => { document.body.removeChild(overlay); };
+
+    cancelBtn.onclick = () => { close(); reject(new Error("cancelled")); };
+    overlay.onclick   = (e) => { if(e.target===overlay){ close(); reject(new Error("cancelled")); }};
+
+    fetchBtn.onclick = async () => {
+      const url = input.value.trim();
+      if(!url){ errDiv.textContent="Please paste a Google Drive link."; errDiv.style.display="block"; return; }
+      try {
+        fetchBtn.textContent = "⏳ Fetching…";
+        fetchBtn.disabled = true;
+        errDiv.style.display = "none";
+
+        const dlUrl = driveUrlToDownload(url);
+        // Fetch via Netlify proxy to avoid CORS
+        const res = await fetch("/.netlify/functions/proxy-drive", {
+          method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({ url: dlUrl })
+        });
+        if(!res.ok) throw new Error("Download failed (status "+res.status+"). Make sure the file is shared as 'Anyone with the link'.");
+        const data = await res.json();
+        // data.base64, data.mimeType, data.filename
+        const byteStr = atob(data.base64);
+        const ab = new ArrayBuffer(byteStr.length);
+        const ia = new Uint8Array(ab);
+        for(let i=0;i<byteStr.length;i++) ia[i]=byteStr.charCodeAt(i);
+        const blob = new Blob([ab], {type: data.mimeType||"application/octet-stream"});
+        const file = new File([blob], data.filename||"drive-file", {type: data.mimeType||"application/octet-stream"});
+        close();
+        onFile(file);
+        resolve();
+      } catch(e) {
+        errDiv.textContent = e.message||"Could not fetch file. Check the link and sharing settings.";
+        errDiv.style.display = "block";
+        fetchBtn.textContent = "📥 Import File";
+        fetchBtn.disabled = false;
+      }
+    };
+
+    // Auto-focus
+    setTimeout(() => input.focus(), 100);
+  });
+}
+
+
+// ─── FILE SOURCE PICKER — reusable Local + Google Drive button pair ───────────
+// Usage: <FileSourcePicker onFile={fn} accept="image/*,application/pdf" label="Upload" color={C.blue} />
+function FileSourcePicker({ onFile, accept="image/*,application/pdf", label="Upload", color, icon="📎", compact=false }) {
+  const inputRef = useRef();
+  const [gdLoading, setGdLoading] = useState(false);
+
+  const handleDrive = async () => {
+    setGdLoading(true);
+    try { await openGoogleDrivePicker(onFile); }
+    catch(e) { alert("Google Drive: " + (e.message||"Could not open. Check popup blocker.")); }
+    finally { setGdLoading(false); }
+  };
+
+  const col = color || C.blue;
+
+  if(compact) {
+    // Small inline button pair (for scan buttons in headers etc)
+    return (
+      <div style={{display:"flex",gap:6}}>
+        <button onClick={()=>inputRef.current?.click()}
+          style={{background:col+"22",border:`1.5px solid ${col}66`,borderRadius:8,
+            color:col,fontWeight:700,fontSize:12,padding:"7px 12px",cursor:"pointer",
+            display:"flex",alignItems:"center",gap:4}}>
+          📁 {label}
+        </button>
+        <button onClick={handleDrive} disabled={gdLoading}
+          style={{background:"#1a73e822",border:"1.5px solid #1a73e866",borderRadius:8,
+            color:"#4285f4",fontWeight:700,fontSize:12,padding:"7px 10px",cursor:"pointer",
+            opacity:gdLoading?0.6:1}}>
+          {gdLoading?"⏳":"🔵"}
+        </button>
+        <input ref={inputRef} type="file" accept={accept} style={{display:"none"}}
+          onChange={e=>{if(e.target.files?.[0])onFile(e.target.files[0]);e.target.value="";}} />
+      </div>
+    );
+  }
+
+  // Full dashed-box style
+  return (
+    <div>
+      <div style={{display:"flex",gap:8}}>
+        <button onClick={()=>inputRef.current?.click()}
+          style={{flex:1,background:col+"11",border:`1.5px dashed ${col}`,
+            borderRadius:10,padding:"18px 8px",color:col,fontWeight:700,
+            fontSize:13,cursor:"pointer",textAlign:"center",
+            display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
+          <span style={{fontSize:26}}>{icon}</span>
+          <span>📁 Local / Camera</span>
+          <span style={{color:C.muted,fontSize:11,fontWeight:400}}>{label}</span>
+        </button>
+        <button onClick={handleDrive} disabled={gdLoading}
+          style={{flex:1,background:"#1a73e811",border:"1.5px dashed #1a73e8",
+            borderRadius:10,padding:"18px 8px",color:"#4285f4",fontWeight:700,
+            fontSize:13,cursor:"pointer",textAlign:"center",
+            display:"flex",flexDirection:"column",alignItems:"center",gap:6,
+            opacity:gdLoading?0.6:1}}>
+          <span style={{fontSize:26}}>🔵</span>
+          <span>{gdLoading?"Opening…":"Google Drive"}</span>
+          <span style={{color:C.muted,fontSize:11,fontWeight:400}}>Pick from Drive</span>
+        </button>
+      </div>
+      <input ref={inputRef} type="file" accept={accept} style={{display:"none"}}
+        onChange={e=>{if(e.target.files?.[0])onFile(e.target.files[0]);e.target.value="";}} />
+    </div>
+  );
+}
+
 function DIUploader({ onExtracted, trips, settings, isIn }) {
   const [state,   setState]   = useState("idle"); // idle | reading | scanning | done | error
   const [preview, setPreview] = useState(null);   // base64 for image preview
@@ -1111,14 +1276,13 @@ Rules:
       {/* Upload zone */}
       {(state === "idle" || state === "error") && (
         <div
-          onClick={() => inputRef.current?.click()}
           onDrop={onDrop}
           onDragOver={e => e.preventDefault()}
           style={{
             border: `2px dashed ${state==="error" ? C.red : C.blue}`,
             borderRadius: 14, padding: "20px 16px", textAlign: "center",
-            cursor: "pointer", background: C.bg,
-            display: "flex", flexDirection: "column", alignItems: "center", gap: 8,
+            background: C.bg,
+            display: "flex", flexDirection: "column", alignItems: "center", gap: 10,
           }}
         >
           <div style={{fontSize: 32}}>📄</div>
@@ -1128,6 +1292,8 @@ Rules:
           <div style={{color: C.muted, fontSize: 12}}>
             Take a photo or upload PDF — AI will fill all fields
           </div>
+          <FileSourcePicker onFile={handleFile} accept="image/*,application/pdf"
+            label="Take photo or upload PDF" color={C.blue} icon="📄" />
           {error && <div style={{color:C.red, fontSize:12, marginTop:4}}>{error}</div>}
         </div>
       )}
@@ -1178,8 +1344,7 @@ Rules:
         </div>
       )}
 
-      <input ref={inputRef} type="file" accept="image/*,application/pdf"
-        style={{display:"none"}} onChange={e => handleFile(e.target.files?.[0])} />
+
 
       <style>{`
         @keyframes bounce {
@@ -1307,20 +1472,9 @@ function PartyDocUpload({ tripId, grFileRef, invoiceFileRef, onDone, onBack }) {
               display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
         </div>
       ) : (
-        <button onClick={()=>inputRef.current?.click()}
-          style={{width:"100%",background:color+"11",border:`1.5px dashed ${color}`,
-            borderRadius:10,padding:"20px",color:color,fontWeight:700,
-            fontSize:13,cursor:"pointer",textAlign:"center"}}>
-          📎 Tap to upload {label}
-        </button>
+        <FileSourcePicker onFile={onPick} accept="image/*,application/pdf"
+          label={"Upload "+label} color={color} icon="📎" />
       )}
-      <input ref={inputRef} type="file" accept="image/*,application/pdf"
-        style={{display:"none"}} onChange={e=>{
-          const f = e.target.files?.[0];
-          if(f) onPick(f);
-          // Reset so same file can be re-selected
-          e.target.value = "";
-        }} />
     </div>
   );
 
@@ -1792,15 +1946,9 @@ function BatchReceiptSheet({ batchId, trips, setTrips, onClose, log }) {
                 cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
           </div>
         ) : (
-          <button onClick={()=>inputRef.current?.click()}
-            style={{width:"100%",background:C.green+"11",border:"1.5px dashed "+C.green,
-              borderRadius:10,padding:"20px",color:C.green,fontWeight:700,
-              fontSize:13,cursor:"pointer",textAlign:"center"}}>
-            📎 Upload Reply Email PDF
-          </button>
+          <FileSourcePicker onFile={pick} accept="application/pdf,image/*"
+            label="Upload Reply Email PDF" color={C.green} icon="📧" />
         )}
-        <input ref={inputRef} type="file" accept="application/pdf,image/*"
-          style={{display:"none"}} onChange={e=>{const f=e.target.files?.[0];if(f)pick(f);e.target.value="";}} />
       </div>
       <div style={{background:C.bg,borderRadius:10,padding:"10px 14px"}}>
         <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:6}}>MERGE ORDER</div>
@@ -1912,15 +2060,9 @@ function ReceiptUploadSheet({ trip, onMerge, onClose }) {
                 cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
           </div>
         ) : (
-          <button onClick={()=>inputRef.current?.click()}
-            style={{width:"100%",background:C.green+"11",border:`1.5px dashed ${C.green}`,
-              borderRadius:10,padding:"20px",color:C.green,fontWeight:700,
-              fontSize:13,cursor:"pointer",textAlign:"center"}}>
-            📎 Tap to upload Reply Email PDF
-          </button>
+          <FileSourcePicker onFile={pick} accept="application/pdf,image/*"
+            label="Tap to upload Reply Email PDF" color={C.green} icon="📧" />
         )}
-        <input ref={inputRef} type="file" accept="application/pdf,image/*"
-          style={{display:"none"}} onChange={e=>{const f=e.target.files?.[0];if(f)pick(f);e.target.value="";}} />
       </div>
 
       {/* Merge summary */}
@@ -3959,27 +4101,27 @@ function PumpSlipScanner({ pumps, trips, user, onResults }) {
 
   return (
     <div>
-      <div
-        onClick={() => inputRef.current?.click()}
-        onDrop={e=>{e.preventDefault();handleFile(e.dataTransfer?.files?.[0]);}}
-        onDragOver={e=>e.preventDefault()}
-        style={{border:`2px dashed ${state==="error"?C.red:C.blue}`,borderRadius:14,
-          padding:"20px 16px",textAlign:"center",cursor:"pointer",background:C.bg,
-          display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
-        <div style={{fontSize:32}}>📷</div>
-        <div style={{color:C.blue,fontWeight:800,fontSize:14}}>
-          {state==="scanning" ? "🤖 Reading pump slip…" :
-           state==="done"    ? "✓ Slip scanned — review below" :
-           state==="reading" ? "📖 Loading image…" :
-           "Upload Pump WhatsApp Slip"}
+      {(state==="idle"||state==="error") && (
+        <FileSourcePicker onFile={handleFile} accept="image/*"
+          label="Save image from WhatsApp → upload here"
+          color={C.blue} icon="📷" />
+      )}
+      {(state==="reading"||state==="scanning") && (
+        <div style={{border:`2px solid ${C.blue}44`,borderRadius:14,padding:"20px 16px",
+          textAlign:"center",background:C.bg,display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
+          <div style={{color:C.blue,fontWeight:800,fontSize:14}}>
+            {state==="reading"?"📖 Loading image…":"🤖 Reading pump slip…"}
+          </div>
+          <div style={{color:C.muted,fontSize:12}}>AI extracting truck numbers and amounts…</div>
         </div>
-        <div style={{color:C.muted,fontSize:12}}>
-          {state==="idle"||state==="error" ? "Save image from WhatsApp → upload here" : "AI extracting truck numbers and amounts…"}
+      )}
+      {state==="done" && (
+        <div style={{border:`2px solid ${C.green}44`,borderRadius:14,padding:"12px 16px",
+          background:C.green+"11",textAlign:"center",color:C.green,fontWeight:700}}>
+          ✓ Slip scanned — review below
         </div>
-        {error && <div style={{color:C.red,fontSize:12}}>{error}</div>}
-      </div>
-      <input ref={inputRef} type="file" accept="image/*" style={{display:"none"}}
-        onChange={e=>{ if(e.target.files[0]) handleFile(e.target.files[0]); e.target.value=""; }} />
+      )}
+      {error && <div style={{color:C.red,fontSize:12,marginTop:4}}>{error}</div>}
     </div>
   );
 }
@@ -4016,16 +4158,9 @@ function ScanPaymentBtn({ onResult }) {
   };
 
   return (
-    <>
-      <input ref={inputRef} type="file" accept="image/*,application/pdf"
-        style={{display:"none"}} onChange={e=>scan(e.target.files[0])} />
-      <button onClick={()=>inputRef.current.click()} disabled={scanning}
-        style={{background:scanning?"#333":C.purple||"#7c3aed",border:"none",borderRadius:8,
-          color:"#fff",fontSize:12,fontWeight:700,padding:"8px 14px",cursor:"pointer",
-          display:"flex",alignItems:"center",gap:6,opacity:scanning?0.7:1}}>
-        {scanning ? "⏳ Reading…" : "📷 Scan Payment"}
-      </button>
-    </>
+    <FileSourcePicker onFile={scan} accept="image/*,application/pdf"
+      label={scanning?"Reading…":"Scan Payment"}
+      color={C.purple||"#7c3aed"} icon="📷" compact={true} />
   );
 }
 
@@ -7161,14 +7296,14 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                   {icon:"📄",label:"Upload Invoice PDF",      sub:"Extracts LR-wise FRT amounts → marks trips Billed",   type:"invoice"},
                   {icon:"💳",label:"Upload Payment Advice",   sub:"Marks trips Paid + saves electricity/penalty expenses",type:"payment"},
                 ].map(btn=>(
-                  <label key={btn.type} style={{border:"1.5px dashed #2a2a2a",borderRadius:8,
-                    padding:"14px",cursor:"pointer",textAlign:"center",display:"block",background:"#0d0d0d"}}>
-                    <input type="file" accept=".pdf,image/*" style={{display:"none"}}
-                      onChange={e=>{if(e.target.files[0])handleScan(e.target.files[0],btn.type);e.target.value="";}}/>
+                  <div key={btn.type} style={{border:"1.5px dashed #2a2a2a",borderRadius:8,
+                    padding:"14px",textAlign:"center",background:"#0d0d0d"}}>
                     <div style={{fontSize:24,marginBottom:4}}>{btn.icon}</div>
-                    <div style={{color:"#ccc",fontWeight:600,fontSize:13}}>{btn.label}</div>
-                    <div style={{fontSize:11,color:"#555",marginTop:3}}>{btn.sub}</div>
-                  </label>
+                    <div style={{color:"#ccc",fontWeight:600,fontSize:13,marginBottom:4}}>{btn.label}</div>
+                    <div style={{fontSize:11,color:"#555",marginBottom:10}}>{btn.sub}</div>
+                    <FileSourcePicker onFile={f=>handleScan(f,btn.type)} accept=".pdf,image/*"
+                      label={btn.label} color={"#5b8dee"} compact={true} />
+                  </div>
                 ))}
               </div>
 
@@ -7986,15 +8121,9 @@ function DriverPayments({trips, driverPays, setDriverPays, vehicles, employees, 
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div style={{color:C.blue,fontWeight:800,fontSize:16}}>🏧 Driver Payments</div>
         {/* Global scan button */}
-        <div>
-          <input ref={scanInputRef} type="file" accept="image/*,application/pdf"
-            style={{display:"none"}} onChange={e=>scanGlobal(e.target.files[0])} />
-          <button onClick={()=>scanInputRef.current.click()} disabled={scanningGlobal}
-            style={{background:scanningGlobal?"#333":C.purple||"#7c3aed",border:"none",borderRadius:8,
-              color:"#fff",fontSize:12,fontWeight:700,padding:"8px 14px",cursor:"pointer",opacity:scanningGlobal?0.7:1}}>
-            {scanningGlobal?"⏳ Reading…":"📷 Scan Payment"}
-          </button>
-        </div>
+        <FileSourcePicker onFile={scanGlobal} accept="image/*,application/pdf"
+          label={scanningGlobal?"Reading…":"Scan Payment"}
+          color={C.purple||"#7c3aed"} icon="📷" compact={true} />
       </div>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
         <KPI icon="⏳" label="Balance Due"  value={fmt(totalBalance)}    color={C.accent} sub={`${unpaidTrips.length} trips`} />
