@@ -1238,7 +1238,7 @@ function FileSourcePicker({ onFile, accept="image/*,application/pdf", label="Upl
   );
 }
 
-function DIUploader({ onExtracted, trips, settings, isIn }) {
+function DIUploader({ onExtracted, trips, settings, isIn, onFile=null }) {
   const [state,   setState]   = useState("idle"); // idle | reading | scanning | done | error
   const [preview, setPreview] = useState(null);   // base64 for image preview
   const [error,   setError]   = useState("");
@@ -1316,6 +1316,8 @@ Rules:
       const existingTrip = lrNo ? trips.find(t => t.lrNo === lrNo) : null;
 
       setState("done");
+      // If caller wants the raw file (e.g. to auto-populate GR ref), pass it back
+      if(onFile) onFile(file);
       onExtracted({
         ...extracted,
         qty:    String(extracted.qty    || ""),
@@ -3050,34 +3052,87 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
             </>
           )}
 
-          {/* STEP 1 (PARTY): Upload GR + Invoice */}
-          {orderTypeStep==="party" && partyStep==="docs" && (
-            <PartyDocUpload
-              tripId={f.id||"new"}
-              grFileRef={grFileRef}
-              invoiceFileRef={invoiceFileRef}
-              onDone={()=>setPartyStep("form")}
-              onBack={()=>setOrderTypeStep("selecting")}
-            />
-          )}
+          {/* STEP 1 (PARTY): Upload GR + Invoice — skippable if files already present */}
+          {orderTypeStep==="party" && partyStep==="docs" && (() => {
+            const hasGR  = Array.isArray(grFileRef.current)  ? grFileRef.current.length>0  : !!grFileRef.current;
+            const hasInv = Array.isArray(invoiceFileRef.current) ? invoiceFileRef.current.length>0 : !!invoiceFileRef.current;
+            return (
+              <div style={{display:"flex",flexDirection:"column",gap:12}}>
+                {/* If files already loaded (e.g. from prior scan), show skip option */}
+                {hasGR && hasInv && (
+                  <div style={{background:C.green+"11",border:`1px solid ${C.green}33`,borderRadius:10,
+                    padding:"12px 14px"}}>
+                    <div style={{color:C.green,fontWeight:700,fontSize:13,marginBottom:6}}>
+                      ✓ Files already uploaded from scan
+                    </div>
+                    <div style={{color:C.muted,fontSize:12,marginBottom:10}}>
+                      GR: {Array.isArray(grFileRef.current)?grFileRef.current.length:1} file(s) &nbsp;·&nbsp;
+                      Invoice: {Array.isArray(invoiceFileRef.current)?invoiceFileRef.current.length:1} file(s)
+                    </div>
+                    <div style={{display:"flex",gap:8}}>
+                      <Btn onClick={()=>setPartyStep("form")} full color={C.green}>
+                        Continue with these files →
+                      </Btn>
+                    </div>
+                    <div style={{marginTop:8,textAlign:"center"}}>
+                      <button onClick={()=>{grFileRef.current=[];invoiceFileRef.current=[];}}
+                        style={{background:"none",border:"none",color:C.muted,fontSize:12,
+                          cursor:"pointer",textDecoration:"underline"}}>
+                        Replace files instead
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {/* Show upload form if no files yet, or if replacing */}
+                {(!hasGR || !hasInv) && (
+                  <>
+                    <PartyDocUpload
+                      tripId={f.id||"new"}
+                      grFileRef={grFileRef}
+                      invoiceFileRef={invoiceFileRef}
+                      onDone={()=>setPartyStep("form")}
+                      onBack={()=>setOrderTypeStep("selecting")}
+                    />
+                    <div style={{textAlign:"center",marginTop:4}}>
+                      <button onClick={()=>setPartyStep("form")}
+                        style={{background:"none",border:"none",color:C.muted,fontSize:12,
+                          cursor:"pointer",textDecoration:"underline"}}>
+                        Skip — scan DI first, upload files after
+                      </button>
+                    </div>
+                  </>
+                )}
+                {/* Back button when files exist but user wants to replace */}
+                {hasGR && hasInv && (
+                  <Btn onClick={()=>setOrderTypeStep("selecting")} full outline color={C.muted}>← Back</Btn>
+                )}
+              </div>
+            );
+          })()}
 
           {/* STEP 2 (PARTY): Fill trip form — same scan/conflict flow as godown */}
           {orderTypeStep==="party" && partyStep==="form" && (
             <>
               {/* Attached docs indicator */}
               <div style={{display:"flex",gap:8,marginBottom:4,flexWrap:"wrap"}}>
-                <div style={{background:C.green+"22",border:`1px solid ${C.green}44`,borderRadius:8,
-                  padding:"5px 10px",fontSize:11,color:C.green,fontWeight:700}}>
-                  ✓ GR: {(Array.isArray(grFileRef.current)?grFileRef.current.length:grFileRef.current?1:0)} file(s)
-                </div>
-                <div style={{background:C.blue+"22",border:`1px solid ${C.blue}44`,borderRadius:8,
-                  padding:"5px 10px",fontSize:11,color:C.blue,fontWeight:700}}>
-                  ✓ Inv: {(Array.isArray(invoiceFileRef.current)?invoiceFileRef.current.length:invoiceFileRef.current?1:0)} file(s)
-                </div>
-                <button onClick={()=>{setPartyStep("docs");setDiConflict(null);setWasScanned(false);}}
-                  style={{background:"none",border:"none",color:C.muted,fontSize:11,cursor:"pointer"}}>
-                  ✏ Change
-                </button>
+                {(()=>{
+                  const grCount  = Array.isArray(grFileRef.current)?grFileRef.current.length:(grFileRef.current?1:0);
+                  const invCount = Array.isArray(invoiceFileRef.current)?invoiceFileRef.current.length:(invoiceFileRef.current?1:0);
+                  return (<>
+                    <div style={{background:C.green+"22",border:`1px solid ${C.green}44`,borderRadius:8,
+                      padding:"5px 10px",fontSize:11,color:grCount>0?C.green:C.red,fontWeight:700}}>
+                      {grCount>0?`✓ GR: ${grCount} file(s)`:"⚠ No GR file"}
+                    </div>
+                    <div style={{background:C.blue+"22",border:`1px solid ${C.blue}44`,borderRadius:8,
+                      padding:"5px 10px",fontSize:11,color:invCount>0?C.blue:C.orange,fontWeight:700}}>
+                      {invCount>0?`✓ Inv: ${invCount} file(s)`:"⚠ No Invoice — add after scan"}
+                    </div>
+                    <button onClick={()=>{setPartyStep("docs");setDiConflict(null);setWasScanned(false);}}
+                      style={{background:"none",border:"none",color:C.muted,fontSize:11,cursor:"pointer"}}>
+                      ✏ Add/Change files
+                    </button>
+                  </>);
+                })()}
               </div>
 
               {/* Same DI conflict flow as godown — handles duplicate DI, LR entry, merge */}
@@ -3106,7 +3161,15 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                       district:e.district||p.district||"",
                       state:e.state||p.state||""}));
                     onDIExtracted(e);
-                  }} trips={trips} settings={settings} isIn={false} />
+                  }} trips={trips} settings={settings} isIn={false}
+                  onFile={file=>{
+                    // Auto-capture scanned file into GR ref so user doesn't need to upload twice
+                    const cur = Array.isArray(grFileRef.current)?grFileRef.current:[];
+                    // Only add if not already present (avoid duplicates on re-scan)
+                    if(!cur.some(f=>f.name===file.name&&f.size===file.size)){
+                      grFileRef.current=[...cur, file];
+                    }
+                  }} />
 
                   {/* Show form only after scan + LR confirmed (wasScanned) or owner */}
                   {(wasScanned || user.role==="owner") ? (
