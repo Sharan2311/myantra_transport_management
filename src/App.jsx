@@ -38,7 +38,7 @@ function useDB(fetcher, initial = []) {
       // (receiptFilePath, mergedPdfPath, orderType, grFilePath, invoiceFilePath)
       const PARTY_FIELDS = ["receiptFilePath","receiptUploadedAt","mergedPdfPath",
         "orderType","grFilePath","invoiceFilePath","emailSentAt","partyEmail",
-        "district","state"];
+        "district","state","sealedInvoicePath"];
       setData(prev => {
         if(!Array.isArray(result)||!Array.isArray(prev)) return result;
         const prevMap = {};
@@ -1502,47 +1502,37 @@ function OrderTypeSelector({ onSelect }) {
 
 // ─── PARTY DOC UPLOAD ─────────────────────────────────────────────────────────
 function PartyDocUpload({ tripId, grFileRef, invoiceFileRef, onDone, onBack }) {
-  const [grFile,      setGrFile]      = useState(grFileRef.current);
-  const [invoiceFile, setInvoiceFile] = useState(invoiceFileRef.current);
-  const [grPreview,   setGrPreview]   = useState(null);
-  const [invPreview,  setInvPreview]  = useState(null);
-  const grRef  = useRef(null);
-  const invRef = useRef(null);
+  // grFileRef.current and invoiceFileRef.current are now arrays of File objects
+  const [grFiles,  setGrFiles]  = useState(Array.isArray(grFileRef.current) ? grFileRef.current : []);
+  const [invFiles, setInvFiles] = useState(Array.isArray(invoiceFileRef.current) ? invoiceFileRef.current : []);
 
-  const readPreview = (file, setter) => {
-    if (!file) return;
-    const r = new FileReader();
-    r.onload = e => setter(e.target.result);
-    r.readAsDataURL(file);
-  };
+  const addGR  = f => { const next=[...grFiles,f];  grFileRef.current=next;  setGrFiles(next); };
+  const addInv = f => { const next=[...invFiles,f]; invoiceFileRef.current=next; setInvFiles(next); };
+  const removeGR  = i => { const next=grFiles.filter((_,idx)=>idx!==i);  grFileRef.current=next;  setGrFiles(next); };
+  const removeInv = i => { const next=invFiles.filter((_,idx)=>idx!==i); invoiceFileRef.current=next; setInvFiles(next); };
 
-  const pickGR = f => { grFileRef.current=f; setGrFile(f); readPreview(f, setGrPreview); };
-  const pickInv = f => { invoiceFileRef.current=f; setInvoiceFile(f); readPreview(f, setInvPreview); };
+  const canProceed = grFiles.length > 0 && invFiles.length > 0;
 
-  const canProceed = grFile && invoiceFile;
-
-  // Inline file box renderer — avoids remount bug from defining component inside render
-  const renderFileBox = (label, file, preview, inputRef, onPick, clearFn, color) => (
-    <div style={{background:C.bg,borderRadius:12,padding:14,border:`2px dashed ${file?color:C.border}`}}>
-      <div style={{color:color,fontWeight:700,fontSize:12,marginBottom:8}}>{label}</div>
-      {preview ? (
-        <div style={{position:"relative"}}>
-          {preview.startsWith("data:image") ? (
-            <img src={preview} style={{width:"100%",maxHeight:160,objectFit:"contain",borderRadius:8}} />
-          ) : (
-            <div style={{background:C.card,borderRadius:8,padding:"12px",textAlign:"center",color:C.green,fontWeight:700}}>
-              ✓ PDF loaded: {file.name}
-            </div>
-          )}
-          <button onClick={()=>{clearFn(); if(inputRef.current) inputRef.current.value="";}}
-            style={{position:"absolute",top:4,right:4,background:C.red,border:"none",color:"#fff",
-              borderRadius:"50%",width:24,height:24,fontSize:14,cursor:"pointer",
-              display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
+  const FileList = ({files, onAdd, onRemove, label, color}) => (
+    <div style={{background:C.bg,borderRadius:12,padding:14,border:`2px dashed ${files.length>0?color:C.border}`}}>
+      <div style={{color:color,fontWeight:700,fontSize:12,marginBottom:8}}>
+        {label} {files.length>0 && <span style={{color:C.muted,fontWeight:400}}>({files.length} file{files.length>1?"s":""})</span>}
+      </div>
+      {files.map((f,i)=>(
+        <div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+          background:C.card,borderRadius:8,padding:"8px 10px",marginBottom:6}}>
+          <span style={{color:C.text,fontSize:12,overflow:"hidden",textOverflow:"ellipsis",
+            whiteSpace:"nowrap",flex:1}}>{f.name}</span>
+          <button onClick={()=>onRemove(i)}
+            style={{background:"none",border:"none",color:C.red,fontSize:16,cursor:"pointer",
+              marginLeft:8,flexShrink:0}}>×</button>
         </div>
-      ) : (
-        <FileSourcePicker onFile={onPick} accept="image/*,application/pdf"
-          label={"Upload "+label} color={color} icon="📎" />
-      )}
+      ))}
+      <div style={{marginTop:files.length>0?8:0}}>
+        <FileSourcePicker onFile={onAdd} accept="image/*,application/pdf"
+          label={files.length>0?`+ Add another ${label}`:`Upload ${label}`}
+          color={color} icon="📎" />
+      </div>
     </div>
   );
 
@@ -1551,15 +1541,17 @@ function PartyDocUpload({ tripId, grFileRef, invoiceFileRef, onDone, onBack }) {
       <div style={{background:C.accent+"11",border:`1px solid ${C.accent}33`,borderRadius:10,
         padding:"10px 14px",color:C.accent,fontSize:12,fontWeight:700}}>
         🤝 Party Order — Upload documents before filling trip details
+        <div style={{color:C.muted,fontWeight:400,marginTop:3}}>For multi-DI trips, upload each GR copy and invoice separately — they will be merged into one file.</div>
       </div>
-      {renderFileBox("GR Copy *",  grFile,      grPreview,  grRef,  pickGR,
-        ()=>{grFileRef.current=null;setGrFile(null);setGrPreview(null);},   C.green)}
-      {renderFileBox("Invoice *",  invoiceFile, invPreview, invRef, pickInv,
-        ()=>{invoiceFileRef.current=null;setInvoiceFile(null);setInvPreview(null);}, C.blue)}
+      <FileList files={grFiles}  onAdd={addGR}  onRemove={removeGR}
+        label="GR Copy *" color={C.green} />
+      <FileList files={invFiles} onAdd={addInv} onRemove={removeInv}
+        label="Invoice *" color={C.blue} />
       {canProceed && (
         <div style={{background:C.green+"11",border:`1px solid ${C.green}33`,borderRadius:8,
           padding:"8px 12px",color:C.green,fontSize:12,fontWeight:700}}>
-          ✓ Both documents uploaded — proceed to fill trip details
+          ✓ {grFiles.length} GR + {invFiles.length} Invoice file{invFiles.length>1?"s":""} ready
+          {(grFiles.length>1||invFiles.length>1)&&" — will be auto-merged on save"}
         </div>
       )}
       <Btn onClick={onDone} full color={C.accent} disabled={!canProceed}>
@@ -2165,6 +2157,135 @@ function ReceiptUploadSheet({ trip, onMerge, onClose }) {
   );
 }
 
+
+// ─── SEALED INVOICE UPLOAD SHEET ─────────────────────────────────────────────
+// For party trips that receive a physically sealed/stamped invoice instead of email
+// Merges: Sealed Invoice → GR Copy → Original Invoice into one final PDF
+function SealedInvoiceSheet({ trip, onMerge, onClose }) {
+  const [files,   setFiles]   = useState([]);
+  const [merging, setMerging] = useState(false);
+  const [error,   setError]   = useState("");
+
+  const addFile = f => { setFiles(prev=>[...prev, f]); setError(""); };
+  const removeFile = i => setFiles(prev=>prev.filter((_,idx)=>idx!==i));
+
+  const handleMerge = async () => {
+    if(files.length===0){setError("Please upload at least one sealed invoice file.");return;}
+    if(!trip.grFilePath||!trip.invoiceFilePath){
+      setError("GR Copy or Invoice missing on this trip.");return;
+    }
+    setMerging(true); setError("");
+    try {
+      // Upload sealed invoice(s) — merge if multiple
+      const { PDFDocument } = await import("pdf-lib");
+      const sealedMerged = await PDFDocument.create();
+      for(const f of files) {
+        const buf = await f.arrayBuffer();
+        try {
+          if(f.type==="application/pdf"||f.name?.endsWith(".pdf")) {
+            const doc = await PDFDocument.load(buf, {ignoreEncryption:true});
+            const pages = await sealedMerged.copyPages(doc, doc.getPageIndices());
+            pages.forEach(p=>sealedMerged.addPage(p));
+          } else {
+            const img = f.type==="image/png" ? await sealedMerged.embedPng(buf) : await sealedMerged.embedJpg(buf);
+            const page = sealedMerged.addPage([img.width, img.height]);
+            page.drawImage(img, {x:0,y:0,width:img.width,height:img.height});
+          }
+        } catch(e){ console.warn("Could not add file:", f.name, e.message); }
+      }
+      const sealedBytes = await sealedMerged.save();
+      const sealedFile  = new File([sealedBytes], "sealed_invoice.pdf", {type:"application/pdf"});
+
+      // Upload sealed invoice PDF
+      const sealedResult = await uploadPartyFile(trip.id, "sealed_invoice", sealedFile);
+
+      // Fetch GR + original invoice from storage
+      const [grBuf, invBuf] = await Promise.all([
+        fetchStorageFile(trip.grFilePath),
+        fetchStorageFile(trip.invoiceFilePath),
+      ]);
+
+      // Final merge: Sealed Invoice → GR Copy → Original Invoice
+      const finalBytes = await mergePDFs([sealedBytes, grBuf, invBuf]);
+      const finalFile  = new File([finalBytes], "merged_confirmation.pdf", {type:"application/pdf"});
+      const mergedResult = await uploadPartyFile(trip.id, "merged_confirmation", finalFile);
+
+      onMerge(trip.id, sealedResult.path, mergedResult.path);
+    } catch(e) {
+      setError("Merge failed: " + e.message);
+    } finally {
+      setMerging(false);
+    }
+  };
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+      {/* Trip summary */}
+      <div style={{background:C.bg,borderRadius:10,padding:"12px 14px"}}>
+        <div style={{color:C.accent,fontWeight:800,fontSize:13,marginBottom:4}}>🤝 {trip.consignee||"—"}</div>
+        <div style={{color:C.muted,fontSize:12}}>LR: <b style={{color:C.text}}>{trip.lrNo||"—"}</b> · {trip.truckNo} · {trip.date}</div>
+        <div style={{color:C.muted,fontSize:12,marginTop:2}}>DI: {trip.diNo||"—"} · {trip.qty}MT → {trip.to}</div>
+      </div>
+
+      {/* Info */}
+      <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,borderRadius:10,
+        padding:"10px 14px",color:C.orange,fontSize:12}}>
+        <div style={{fontWeight:700,marginBottom:4}}>🏷️ Upload Sealed / Stamped Invoice</div>
+        <div style={{color:C.muted}}>Upload the party's physically sealed invoice (image or PDF). The app will merge: <b style={{color:C.text}}>Sealed Invoice → GR Copy → Original Invoice</b> into one PDF.</div>
+      </div>
+
+      {/* File list */}
+      <div style={{background:C.bg,borderRadius:12,padding:14,
+        border:`2px dashed ${files.length>0?C.orange:C.border}`}}>
+        <div style={{color:C.orange,fontWeight:700,fontSize:12,marginBottom:8}}>
+          Sealed Invoice {files.length>0&&`(${files.length} file${files.length>1?"s":""})`}
+        </div>
+        {files.map((f,i)=>(
+          <div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+            background:C.card,borderRadius:8,padding:"8px 10px",marginBottom:6}}>
+            <span style={{color:C.text,fontSize:12,overflow:"hidden",textOverflow:"ellipsis",
+              whiteSpace:"nowrap",flex:1}}>{f.name}</span>
+            <button onClick={()=>removeFile(i)}
+              style={{background:"none",border:"none",color:C.red,fontSize:16,cursor:"pointer",marginLeft:8}}>×</button>
+          </div>
+        ))}
+        <FileSourcePicker onFile={addFile} accept="image/*,application/pdf"
+          label={files.length>0?"+ Add another page":"Upload sealed invoice"}
+          color={C.orange} icon="🏷️" />
+      </div>
+
+      {/* Merge order preview */}
+      {files.length>0 && (
+        <div style={{background:C.bg,borderRadius:10,padding:"12px 14px"}}>
+          <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:8}}>FINAL PDF ORDER</div>
+          {[
+            {n:`1. Sealed Invoice (${files.length} page${files.length>1?"s":""})`, c:C.orange, ok:true},
+            {n:"2. GR Copy",             c:C.teal,  ok:!!trip.grFilePath},
+            {n:"3. Original Invoice",    c:C.blue,  ok:!!trip.invoiceFilePath},
+          ].map(x=>(
+            <div key={x.n} style={{display:"flex",alignItems:"center",gap:8,padding:"4px 0",
+              borderBottom:`1px solid ${C.border}22`}}>
+              <span style={{color:x.ok?x.c:C.red,fontSize:14}}>{x.ok?"✓":"✗"}</span>
+              <span style={{color:x.ok?C.text:C.red,fontSize:12}}>{x.n}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {error && (
+        <div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,
+          padding:"9px 12px",color:C.red,fontSize:12}}>{error}</div>
+      )}
+
+      <Btn onClick={handleMerge} full color={C.orange}
+        disabled={files.length===0||merging}>
+        {merging ? "Merging PDFs…" : "🔀 Merge & Store PDF"}
+      </Btn>
+      <Btn onClick={onClose} full outline color={C.muted}>Cancel</Btn>
+    </div>
+  );
+}
+
 // ─── TRIPS ────────────────────────────────────────────────────────────────────
 function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripType, user, log, driverPays, employees, cashTransfers, setCashTransfers}) {
   const isIn = tripType === "inbound";
@@ -2185,14 +2306,16 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
   const [partyStep,     setPartyStep]     = useState("docs");
   const [uploadingFiles,setUploadingFiles]= useState(false);
   // Refs to hold file objects across re-renders without triggering state
-  const grFileRef      = useRef(null);
-  const invoiceFileRef = useRef(null);
+  const grFileRef      = useRef([]); // array — supports multiple GR copies for multi-DI
+  const invoiceFileRef = useRef([]); // array — supports multiple invoices for multi-DI
   // Party email batch sheet
   const [partyEmailSheet, setPartyEmailSheet] = useState(false);
   // WhatsApp reminder sheet
   const [waSheet, setWaSheet] = useState(false);
   // Batch receipt upload sheet
   const [batchReceiptSheet, setBatchReceiptSheet] = useState(null); // batchId string
+  // Sealed invoice upload sheet
+  const [sealedSheet, setSealedSheet] = useState(null); // trip object
 
   const blankForm = (isParty=false) => ({
     type:tripType, lrNo:"", diNo:"", truckNo:"", grNo:"", dieselIndentNo:"",
@@ -2695,9 +2818,10 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
               <div style={{padding:"5px 12px 8px",display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",
                 borderTop:"1px solid "+C.border+"33"}}>
                 <Badge label="🤝 Party" color={C.accent} />
-                {t.orderType==="party" && !t.emailSentAt && <Badge label="⚠ Email Pending" color={C.red} />}
-                {t.orderType==="party" && t.emailSentAt && !t.receiptFilePath && <Badge label="📧 Awaiting Reply" color={C.blue} />}
+                {t.orderType==="party" && !t.emailSentAt && !t.sealedInvoicePath && !t.mergedPdfPath && <Badge label="⚠ Confirmation Pending" color={C.red} />}
+                {t.orderType==="party" && t.emailSentAt && !t.receiptFilePath && !t.mergedPdfPath && <Badge label="📧 Awaiting Reply" color={C.blue} />}
                 {t.receiptFilePath && !t.mergedPdfPath && <Badge label="🔄 Receipt uploaded" color={C.teal} />}
+                {t.sealedInvoicePath && !t.mergedPdfPath && <Badge label="🏷️ Sealed uploaded" color={C.orange} />}
                 {t.mergedPdfPath && <Badge label="✅ Merged PDF ready" color={C.green} />}
                 {t.emailSentAt && t.batchId && !t.mergedPdfPath && (
                   <button onClick={()=>setBatchReceiptSheet(t.batchId)}
@@ -2706,6 +2830,15 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                       padding:"4px 12px",fontSize:11,fontWeight:700,
                       cursor:"pointer",whiteSpace:"nowrap"}}>
                     📎 Upload Batch Receipt
+                  </button>
+                )}
+                {/* Upload Sealed Invoice button — for trips that get physically stamped invoice */}
+                {t.grFilePath && !t.mergedPdfPath && (
+                  <button onClick={()=>setSealedSheet(t)}
+                    style={{background:C.orange+"22",color:C.orange,
+                      border:"1px solid "+C.orange+"44",borderRadius:20,
+                      padding:"4px 12px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+                    🏷️ Upload Sealed Invoice
                   </button>
                 )}
                 {/* GR Copy download */}
@@ -2845,12 +2978,30 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
         </Sheet>
       )}
 
+      {/* ── SEALED INVOICE SHEET ── */}
+      {sealedSheet && (
+        <Sheet title="🏷️ Upload Sealed Invoice" onClose={()=>setSealedSheet(null)}>
+          <SealedInvoiceSheet
+            trip={sealedSheet}
+            onMerge={(tripId, sealedPath, mergedPath) => {
+              setTrips(prev=>prev.map(t=>t.id===tripId
+                ? {...t, sealedInvoicePath:sealedPath, mergedPdfPath:mergedPath,
+                    receiptFilePath:sealedPath, receiptUploadedAt:nowTs()}
+                : t));
+              log("SEALED INVOICE", `LR:${sealedSheet.lrNo} merged`);
+              setSealedSheet(null);
+            }}
+            onClose={()=>setSealedSheet(null)}
+          />
+        </Sheet>
+      )}
+
       {/* ── ADD SHEET ── */}
       {addSheet && (
         <Sheet title={isIn?"New Raw Material Trip":"New Cement Trip"} onClose={()=>{
           setAddSheet(false);setF(blankForm());setDiConflict(null);setWasScanned(false);
           setOrderTypeStep(null);setPartyStep("docs");setUploadingFiles(false);
-          grFileRef.current=null; invoiceFileRef.current=null;
+          grFileRef.current=[]; invoiceFileRef.current=[];
         }}>
 
           {/* STEP 0: Order type selection */}
@@ -2917,11 +3068,11 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
               <div style={{display:"flex",gap:8,marginBottom:4,flexWrap:"wrap"}}>
                 <div style={{background:C.green+"22",border:`1px solid ${C.green}44`,borderRadius:8,
                   padding:"5px 10px",fontSize:11,color:C.green,fontWeight:700}}>
-                  ✓ GR: {grFileRef.current?.name||"uploaded"}
+                  ✓ GR: {(Array.isArray(grFileRef.current)?grFileRef.current.length:grFileRef.current?1:0)} file(s)
                 </div>
                 <div style={{background:C.blue+"22",border:`1px solid ${C.blue}44`,borderRadius:8,
                   padding:"5px 10px",fontSize:11,color:C.blue,fontWeight:700}}>
-                  ✓ Inv: {invoiceFileRef.current?.name||"uploaded"}
+                  ✓ Inv: {(Array.isArray(invoiceFileRef.current)?invoiceFileRef.current.length:invoiceFileRef.current?1:0)} file(s)
                 </div>
                 <button onClick={()=>{setPartyStep("docs");setDiConflict(null);setWasScanned(false);}}
                   style={{background:"none",border:"none",color:C.muted,fontSize:11,cursor:"pointer"}}>
@@ -2986,8 +3137,39 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                         try {
                           const tripId = uid();
                           let grUrl="", invUrl="";
-                          if(grFileRef.current)  { const r=await uploadPartyFile(tripId,"gr",grFileRef.current);  grUrl=r.path; }
-                          if(invoiceFileRef.current) { const r=await uploadPartyFile(tripId,"invoice",invoiceFileRef.current); invUrl=r.path; }
+                          // Helper: merge array of Files into one PDF blob (or return single file as-is)
+                          const prepareFile = async (files, role) => {
+                            if(!files||files.length===0) return null;
+                            if(files.length===1) return files[0];
+                            // Multiple files — convert each to ArrayBuffer then merge via pdf-lib
+                            const { PDFDocument } = await import("pdf-lib");
+                            const merged = await PDFDocument.create();
+                            for(const f of files) {
+                              const buf = await f.arrayBuffer();
+                              try {
+                                if(f.type==="application/pdf"||f.name?.endsWith(".pdf")) {
+                                  const doc = await PDFDocument.load(buf, {ignoreEncryption:true});
+                                  const pages = await merged.copyPages(doc, doc.getPageIndices());
+                                  pages.forEach(p=>merged.addPage(p));
+                                } else {
+                                  // Image — embed as full page
+                                  const img = f.type==="image/png"
+                                    ? await merged.embedPng(buf)
+                                    : await merged.embedJpg(buf);
+                                  const page = merged.addPage([img.width, img.height]);
+                                  page.drawImage(img, {x:0,y:0,width:img.width,height:img.height});
+                                }
+                              } catch(e) { console.warn("Could not merge file:", f.name, e.message); }
+                            }
+                            const bytes = await merged.save();
+                            return new File([bytes], role+"_merged.pdf", {type:"application/pdf"});
+                          };
+                          const grFiles  = Array.isArray(grFileRef.current)  ? grFileRef.current  : (grFileRef.current  ? [grFileRef.current]  : []);
+                          const invFiles = Array.isArray(invoiceFileRef.current) ? invoiceFileRef.current : (invoiceFileRef.current ? [invoiceFileRef.current] : []);
+                          const grReady  = await prepareFile(grFiles,  "gr");
+                          const invReady = await prepareFile(invFiles, "invoice");
+                          if(grReady)  { const r=await uploadPartyFile(tripId,"gr",grReady);  grUrl=r.path; }
+                          if(invReady) { const r=await uploadPartyFile(tripId,"invoice",invReady); invUrl=r.path; }
                           const t = mkTrip({
                             ...f, id:tripId, type:tripType,
                             qty:+f.qty, bags:+f.bags, frRate:+f.frRate, givenRate:+f.givenRate,
@@ -2997,7 +3179,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                             dieselIndentNo:(f.dieselIndentNo||"").trim(),
                             orderType:"party", district:f.district||"", state:f.state||"",
                             grFilePath:grUrl, invoiceFilePath:invUrl, mergedPdfPath:"",
-                            emailSentAt:"", partyEmail:"", batchId:"",
+                            emailSentAt:"", partyEmail:"", batchId:"", sealedInvoicePath:"",
                             receiptFilePath:"", receiptUploadedAt:"",
                             createdBy:user.username, createdAt:nowTs(),
                           });
@@ -3021,7 +3203,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                           }
                           setAddSheet(false); setF(blankForm());
                           setOrderTypeStep(null); setPartyStep("docs");
-                          grFileRef.current=null; invoiceFileRef.current=null;
+                          grFileRef.current=[]; invoiceFileRef.current=[];
                         } catch(e){ alert("Error saving trip: "+e.message); }
                         finally { setUploadingFiles(false); }
                       }}

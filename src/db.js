@@ -35,6 +35,7 @@ const tripFromDB = r => ({
   emailSentAt: r.email_sent_at || '',
   partyEmail: r.party_email || '',
   batchId: r.batch_id || '',
+  sealedInvoicePath: r.sealed_invoice_path || '',
   cashEmpId: r.cash_emp_id || '',
 })
 const tripToDB = t => ({
@@ -71,6 +72,7 @@ const tripToDB = t => ({
   email_sent_at: t.emailSentAt || '',
   party_email: t.partyEmail || '',
   batch_id: t.batchId || '',
+  sealed_invoice_path: t.sealedInvoicePath || '',
   cash_emp_id: t.cashEmpId || '',
 })
 
