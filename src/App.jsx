@@ -1006,99 +1006,167 @@ function MergeDISheet({ conflict, onMerge, onSeparate, onCancel, isOwner=false }
 // ─── DI / GR COPY UPLOADER ───────────────────────────────────────────────────
 // Sends photo or PDF to Claude AI → extracts all trip fields automatically
 
-// ─── GOOGLE DRIVE HELPER ──────────────────────────────────────────────────────
-// Converts any Google Drive share link → direct download URL
-function driveUrlToDownload(url) {
-  // Formats:
-  // https://drive.google.com/file/d/FILE_ID/view?...
-  // https://drive.google.com/open?id=FILE_ID
-  // https://docs.google.com/...
-  let id = null;
-  const m1 = url.match(/\/d\/([a-zA-Z0-9_-]{20,})/);
-  const m2 = url.match(/[?&]id=([a-zA-Z0-9_-]{20,})/);
-  if(m1) id = m1[1];
-  else if(m2) id = m2[1];
-  if(!id) throw new Error("Could not extract file ID from this link. Make sure it is a Google Drive file link.");
-  return `https://drive.google.com/uc?export=download&id=${id}`;
+// ─── GOOGLE DRIVE BROWSER ────────────────────────────────────────────────────
+// Root folder ID — your M Yantra Drive folder
+const GDRIVE_ROOT_ID = "1xa6W-u-Q91u5QDS_AFPhrXzmwdjc2QEf";
+
+function extractDriveId(url) {
+  const m1 = url.match(/\/folders\/([a-zA-Z0-9_-]{20,})/);
+  const m2 = url.match(/\/d\/([a-zA-Z0-9_-]{20,})/);
+  const m3 = url.match(/[?&]id=([a-zA-Z0-9_-]{20,})/);
+  return (m1||m2||m3)?.[1] || null;
 }
 
-// Shows a small modal asking user to paste a Drive link, then fetches the file
-// onFile(File) is called when done
+// Opens a full folder-browser modal. User navigates folders, clicks a file to import.
 function openGoogleDrivePicker(onFile) {
   return new Promise((resolve, reject) => {
-    // Create modal overlay
-    const overlay = document.createElement("div");
-    overlay.style.cssText = `position:fixed;inset:0;background:#000a;z-index:99999;display:flex;align-items:center;justify-content:center;`;
+    // ── Build modal DOM ──────────────────────────────────────────────────────
+    const S = {
+      overlay: "position:fixed;inset:0;background:#000c;z-index:99999;display:flex;align-items:center;justify-content:center;padding:12px;",
+      box:     "background:#141920;border:1.5px solid #252e3d;border-radius:16px;width:min(480px,96vw);max-height:85vh;display:flex;flex-direction:column;overflow:hidden;",
+      header:  "display:flex;justify-content:space-between;align-items:center;padding:16px 18px;border-bottom:1px solid #252e3d;flex-shrink:0;",
+      breadcrumb: "padding:8px 18px;background:#0d1117;font-size:11px;color:#64748b;display:flex;align-items:center;gap:4px;flex-wrap:wrap;flex-shrink:0;border-bottom:1px solid #1a2030;",
+      list:    "overflow-y:auto;flex:1;padding:8px;",
+      row:     "display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:8px;cursor:pointer;border:none;background:none;width:100%;text-align:left;",
+      footer:  "padding:12px 16px;border-top:1px solid #252e3d;flex-shrink:0;",
+    };
 
-    const box = document.createElement("div");
-    box.style.cssText = `background:#141920;border:1.5px solid #252e3d;border-radius:16px;padding:24px;width:min(400px,90vw);display:flex;flex-direction:column;gap:14px;`;
+    const overlay = document.createElement("div"); overlay.style.cssText = S.overlay;
+    const box     = document.createElement("div"); box.style.cssText = S.box;
 
-    box.innerHTML = `
-      <div style="color:#e2e8f0;font-weight:800;font-size:15px;">🔵 Import from Google Drive</div>
-      <div style="color:#64748b;font-size:12px;line-height:1.5;">
-        1. Open the file in Google Drive<br>
-        2. Click <b style="color:#e2e8f0">Share → Copy link</b> (set to "Anyone with the link")<br>
-        3. Paste the link below
-      </div>
-      <input id="gd-url-input" placeholder="https://drive.google.com/file/d/..." 
-        style="background:#0a0e14;border:1.5px solid #252e3d;border-radius:8px;color:#e2e8f0;padding:10px 12px;font-size:13px;outline:none;width:100%;box-sizing:border-box;" />
-      <div id="gd-error" style="color:#da3633;font-size:12px;display:none;"></div>
-      <div style="display:flex;gap:8px;">
-        <button id="gd-cancel" style="flex:1;background:none;border:1.5px solid #252e3d;border-radius:8px;color:#64748b;padding:10px;font-size:13px;cursor:pointer;font-weight:600;">Cancel</button>
-        <button id="gd-fetch" style="flex:2;background:#1a73e8;border:none;border-radius:8px;color:#fff;padding:10px;font-size:13px;cursor:pointer;font-weight:700;">📥 Import File</button>
-      </div>
+    // Header
+    const hdr = document.createElement("div"); hdr.style.cssText = S.header;
+    hdr.innerHTML = `
+      <div style="color:#e2e8f0;font-weight:800;font-size:15px;">🔵 Google Drive</div>
+      <button id="gd-close" style="background:#da363322;border:none;color:#da3633;border-radius:50%;width:28px;height:28px;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;">×</button>
     `;
 
+    // Breadcrumb
+    const bc = document.createElement("div"); bc.style.cssText = S.breadcrumb;
+
+    // List area
+    const list = document.createElement("div"); list.style.cssText = S.list;
+
+    // Footer — status + error
+    const footer = document.createElement("div"); footer.style.cssText = S.footer;
+    footer.innerHTML = `<div id="gd-status" style="color:#64748b;font-size:12px;text-align:center;"></div>`;
+
+    box.appendChild(hdr); box.appendChild(bc); box.appendChild(list); box.appendChild(footer);
     overlay.appendChild(box);
     document.body.appendChild(overlay);
 
-    const input   = box.querySelector("#gd-url-input");
-    const errDiv  = box.querySelector("#gd-error");
-    const fetchBtn= box.querySelector("#gd-fetch");
-    const cancelBtn=box.querySelector("#gd-cancel");
-
+    const statusEl = footer.querySelector("#gd-status");
+    const closeBtn = hdr.querySelector("#gd-close");
     const close = () => { document.body.removeChild(overlay); };
+    closeBtn.onclick = () => { close(); reject(new Error("cancelled")); };
 
-    cancelBtn.onclick = () => { close(); reject(new Error("cancelled")); };
-    overlay.onclick   = (e) => { if(e.target===overlay){ close(); reject(new Error("cancelled")); }};
+    // ── State ────────────────────────────────────────────────────────────────
+    const stack = [{ id: GDRIVE_ROOT_ID, name: "M Yantra Drive" }];
 
-    fetchBtn.onclick = async () => {
-      const url = input.value.trim();
-      if(!url){ errDiv.textContent="Please paste a Google Drive link."; errDiv.style.display="block"; return; }
+    // ── Render breadcrumb ────────────────────────────────────────────────────
+    const renderBc = () => {
+      bc.innerHTML = "";
+      stack.forEach((f, i) => {
+        const span = document.createElement("span");
+        span.textContent = f.name;
+        span.style.cssText = i === stack.length-1
+          ? "color:#e2e8f0;font-weight:700;"
+          : "color:#1a73e8;cursor:pointer;text-decoration:underline;";
+        if(i < stack.length-1) {
+          span.onclick = () => { stack.splice(i+1); loadFolder(f.id); };
+        }
+        bc.appendChild(span);
+        if(i < stack.length-1) {
+          const sep = document.createElement("span");
+          sep.textContent = " › ";
+          bc.appendChild(sep);
+        }
+      });
+    };
+
+    // ── Load folder via Netlify function ─────────────────────────────────────
+    const loadFolder = async (folderId) => {
+      list.innerHTML = `<div style="text-align:center;padding:30px;color:#64748b;font-size:13px;">⏳ Loading…</div>`;
+      statusEl.textContent = "";
+      renderBc();
       try {
-        fetchBtn.textContent = "⏳ Fetching…";
-        fetchBtn.disabled = true;
-        errDiv.style.display = "none";
-
-        const dlUrl = driveUrlToDownload(url);
-        // Fetch via Netlify proxy to avoid CORS
         const res = await fetch("/.netlify/functions/proxy-drive", {
-          method:"POST",
-          headers:{"Content-Type":"application/json"},
-          body: JSON.stringify({ url: dlUrl })
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "list", folderId }),
         });
-        if(!res.ok) throw new Error("Download failed (status "+res.status+"). Make sure the file is shared as 'Anyone with the link'.");
         const data = await res.json();
-        // data.base64, data.mimeType, data.filename
-        const byteStr = atob(data.base64);
-        const ab = new ArrayBuffer(byteStr.length);
-        const ia = new Uint8Array(ab);
-        for(let i=0;i<byteStr.length;i++) ia[i]=byteStr.charCodeAt(i);
-        const blob = new Blob([ab], {type: data.mimeType||"application/octet-stream"});
-        const file = new File([blob], data.filename||"drive-file", {type: data.mimeType||"application/octet-stream"});
-        close();
-        onFile(file);
-        resolve();
+        if(data.error) throw new Error(data.error);
+        renderItems(data.items || []);
       } catch(e) {
-        errDiv.textContent = e.message||"Could not fetch file. Check the link and sharing settings.";
-        errDiv.style.display = "block";
-        fetchBtn.textContent = "📥 Import File";
-        fetchBtn.disabled = false;
+        list.innerHTML = `<div style="color:#da3633;padding:20px;font-size:12px;text-align:center;">❌ ${e.message}</div>`;
       }
     };
 
-    // Auto-focus
-    setTimeout(() => input.focus(), 100);
+    // ── Render file/folder list ───────────────────────────────────────────────
+    const renderItems = (items) => {
+      list.innerHTML = "";
+      if(items.length === 0) {
+        list.innerHTML = `<div style="color:#64748b;padding:30px;text-align:center;font-size:13px;">📂 Empty folder</div>`;
+        return;
+      }
+      // Folders first, then files
+      const sorted = [...items].sort((a,b) => {
+        if(a.isFolder && !b.isFolder) return -1;
+        if(!a.isFolder && b.isFolder) return 1;
+        return a.name.localeCompare(b.name);
+      });
+      sorted.forEach(item => {
+        const row = document.createElement("button");
+        row.style.cssText = S.row;
+        const icon = item.isFolder ? "📁" : (item.mimeType?.includes("pdf") ? "📄" : "🖼️");
+        row.innerHTML = `
+          <span style="font-size:20px;flex-shrink:0;">${icon}</span>
+          <span style="color:#e2e8f0;font-size:13px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${item.name}</span>
+          ${item.isFolder ? '<span style="color:#64748b;font-size:12px;">›</span>' : '<span style="color:#1a73e8;font-size:11px;font-weight:700;">SELECT</span>'}
+        `;
+        row.onmouseover = () => row.style.background = "#1c2535";
+        row.onmouseout  = () => row.style.background = "none";
+
+        if(item.isFolder) {
+          row.onclick = () => {
+            stack.push({ id: item.id, name: item.name });
+            loadFolder(item.id);
+          };
+        } else {
+          row.onclick = async () => {
+            statusEl.textContent = "⏳ Downloading " + item.name + "…";
+            row.disabled = true;
+            try {
+              const res = await fetch("/.netlify/functions/proxy-drive", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "download", fileId: item.id, fileName: item.name, mimeType: item.mimeType }),
+              });
+              const data = await res.json();
+              if(data.error) throw new Error(data.error);
+              const byteStr = atob(data.base64);
+              const ab = new ArrayBuffer(byteStr.length);
+              const ia = new Uint8Array(ab);
+              for(let i=0;i<byteStr.length;i++) ia[i]=byteStr.charCodeAt(i);
+              const blob = new Blob([ab], {type: item.mimeType||"application/octet-stream"});
+              const file = new File([blob], item.name, {type: item.mimeType||"application/octet-stream"});
+              close();
+              onFile(file);
+              resolve();
+            } catch(e) {
+              statusEl.textContent = "❌ " + e.message;
+              row.disabled = false;
+            }
+          };
+        }
+        list.appendChild(row);
+      });
+      statusEl.textContent = `${items.length} item${items.length!==1?"s":""}`;
+    };
+
+    // ── Start at root ─────────────────────────────────────────────────────────
+    loadFolder(GDRIVE_ROOT_ID);
   });
 }
 
