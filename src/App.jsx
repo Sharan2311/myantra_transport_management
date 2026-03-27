@@ -2440,6 +2440,18 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
       alert("Driver Rate ₹/MT is mandatory.\nPlease enter the rate before saving.");
       return;
     }
+    // Validate: minimum margin between Shree Rate and Driver Rate
+    {
+      const _diLines = f.diLines||[];
+      const _isMulti = _diLines.length > 1;
+      const _minMargin = _isMulti
+        ? Math.min(..._diLines.map(d => (+(d.frRate||f.frRate)||0) - (+(d.givenRate)||0)))
+        : (+(f.frRate)||0) - (+(f.givenRate)||0);
+      if(_minMargin < 30) {
+        alert(`Cannot save: Margin is ₹${_minMargin.toLocaleString("en-IN")}/MT (Shree Rate − Driver Rate).\nMinimum margin required is ₹30/MT.\nPlease adjust the rates.`);
+        return;
+      }
+    }
     // Validate: if diesel estimate entered, indent number is mandatory
     if ((+f.dieselEstimate||0) > 0 && !f.dieselIndentNo?.trim()) {
       alert("Diesel Indent No is mandatory when Diesel Estimate is entered.\nPlease enter the indent number from the pump slip.");
@@ -2538,6 +2550,17 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
     const savedLines = isMultiDI ? diLines.map(d=>({...d, frRate:d.frRate||+editSheet.frRate||0})) : diLines;
 
     // ── Validate FIRST before any state mutation ──────────────────────────────
+    {
+      const _diLines = editSheet.diLines||[];
+      const _isMulti = _diLines.length > 1;
+      const _minMargin = _isMulti
+        ? Math.min(..._diLines.map(d => (+(d.frRate||editSheet.frRate)||0) - (+(d.givenRate)||0)))
+        : (+(editSheet.frRate)||0) - (+(editSheet.givenRate)||0);
+      if(_minMargin < 30) {
+        alert(`Cannot save: Margin is ₹${_minMargin.toLocaleString("en-IN")}/MT (Shree Rate − Driver Rate).\nMinimum margin required is ₹30/MT.\nPlease adjust the rates.`);
+        return;
+      }
+    }
     {
       const _diLines = editSheet.diLines||[];
       const _isMulti = _diLines.length > 1;
@@ -3178,6 +3201,17 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                       onSubmit={async ()=>{
                         // All same validations as godown saveNew
                         if(!f.givenRate||+f.givenRate<=0){alert("Driver Rate ₹/MT is mandatory.");return;}
+                        {
+                          const _diLines = f.diLines||[];
+                          const _isMulti = _diLines.length > 1;
+                          const _minMargin = _isMulti
+                            ? Math.min(..._diLines.map(d=>(+(d.frRate||f.frRate)||0)-(+(d.givenRate)||0)))
+                            : (+(f.frRate)||0)-(+(f.givenRate)||0);
+                          if(_minMargin < 30){
+                            alert(`Cannot save: Margin is ₹${_minMargin.toLocaleString("en-IN")}/MT (Shree Rate − Driver Rate).\nMinimum margin required is ₹30/MT.`);
+                            return;
+                          }
+                        }
                         if((+f.dieselEstimate||0)>0&&!f.dieselIndentNo?.trim()){alert("Diesel Indent No is mandatory when Diesel Estimate is entered.");return;}
                         if(f.dieselIndentNo&&f.dieselIndentNo.trim()){
                           if(trips.some(t=>t.dieselIndentNo&&t.dieselIndentNo.trim()===f.dieselIndentNo.trim()))
@@ -3377,6 +3411,11 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
     ? normalizedDiLines.reduce((s,d) => s + (d.qty||0)*(d.givenRate||0), 0)
     : (+f.qty||0)*(+f.givenRate||0);
   const margin = billedToShree - gross;
+  // Per-MT margin check (minimum ₹30 required)
+  const perMTMargin = isMultiDI && (+f.qty||0)>0
+    ? margin / (+f.qty||0)
+    : (+(f.frRate)||0) - (+(f.givenRate)||0);
+  const marginOk = perMTMargin >= 30;
   const tafalAmt = +f.tafal||0;
   const net      = gross - (+f.advance||0) - tafalAmt - (+f.dieselEstimate||0);
   const veh      = vehicles.find(x => x.truckNo===(f.truckNo||"").toUpperCase().trim());
@@ -3613,7 +3652,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
             {l:"(−) Diesel (estimate)",       v:fmt(+f.dieselEstimate||0),              c:C.orange},
             {l:"(−) Shortage Recovery",       v:fmt(+f.shortageRecovery||0),            c:(+f.shortageRecovery||0)>0?C.red:C.muted},
             {l:"(−) Loan Recovery",           v:fmt(+f.loanRecovery||0),               c:(+f.loanRecovery||0)>0?C.red:C.muted},
-            {l:"My Margin",                   v:fmt(margin),                             c:C.green},
+            {l:"My Margin",                   v:`${fmt(margin)} (₹${perMTMargin.toFixed(0)}/MT)`, c:marginOk?C.green:C.red},
             {l:"Est. Net to Driver",          v:fmt(net-(+f.shortageRecovery||0)-(+f.loanRecovery||0)),  c:(net-(+f.shortageRecovery||0)-(+f.loanRecovery||0))>=0?C.green:C.red},
           ].map(x => (
             <div key={x.l} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:`1px solid ${C.border}22`}}>
@@ -3621,6 +3660,12 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
               <span style={{color:x.c,fontWeight:700,fontSize:13}}>{x.v}</span>
             </div>
           ))}
+          {!marginOk && (+(f.frRate)||0)>0 && (+(f.givenRate)||0)>0 && (
+            <div style={{background:C.red+"22",border:`1px solid ${C.red}44`,borderRadius:8,
+              padding:"8px 10px",marginTop:8,color:C.red,fontSize:12,fontWeight:700}}>
+              ⚠ Margin ₹{perMTMargin.toFixed(0)}/MT is below minimum ₹30/MT — cannot save
+            </div>
+          )}
           <div style={{color:C.muted,fontSize:11,marginTop:8}}>Note: Loan deduction & confirmed diesel will apply at settlement</div>
         </div>
       )}
