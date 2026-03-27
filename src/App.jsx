@@ -598,6 +598,32 @@ export default function App() {
     user, log,
   };
 
+  // ── Retroactive auto-settle: runs whenever trips or driverPays change ─────────
+  // Catches trips that reached balance=0 before auto-settle was deployed,
+  // or trips paid via external means without going through savePayment.
+  React.useEffect(() => {
+    if(!trips?.length || !vehicles) return;
+    const toSettle = trips.filter(t => {
+      if(t.driverSettled) return false;                    // already settled
+      const veh = vehicles.find(v=>v.truckNo===t.truckNo);
+      const gross   = (t.qty||0)*(t.givenRate||0);
+      const deducts = (t.advance||0)+(t.tafal||0)+(veh?.deductPerTrip||0)+(t.dieselEstimate||0)+((t.shortage||0)*(t.givenRate||0));
+      const netDue  = Math.max(0, gross - deducts);
+      if(netDue <= 0) return false;                        // nothing due — not a real trip payment
+      const paid = (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
+      return paid >= netDue;                               // fully paid but not marked settled
+    });
+    if(toSettle.length === 0) return;
+    dbSetTrips(prev => prev.map(t => {
+      if(!toSettle.find(s=>s.id===t.id)) return t;
+      const veh = vehicles.find(v=>v.truckNo===t.truckNo);
+      const gross   = (t.qty||0)*(t.givenRate||0);
+      const deducts = (t.advance||0)+(t.tafal||0)+(veh?.deductPerTrip||0)+(t.dieselEstimate||0)+((t.shortage||0)*(t.givenRate||0));
+      const netDue  = Math.max(0, gross - deducts);
+      return {...t, driverSettled:true, settledBy:"auto", netPaid:netDue};
+    }));
+  }, [trips, driverPays, vehicles]);
+
   if (!user) {
     if (loading) return (
       <div style={{minHeight:"100vh",background:C.bg,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:12,fontFamily:"system-ui"}}>
