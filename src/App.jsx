@@ -2437,7 +2437,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
   const saveNew = async () => {
     // Validate: driver rate is mandatory
     if (!f.givenRate || +f.givenRate <= 0) {
-      alert("Driver Rate ₹/MT is mandatory.\nPlease enter the rate before saving.");
+      alert("Driver Rate ₹/MT is mandatory.\nPlease enter the rate before saving.\n\nಡ್ರೈವರ್ ರೇಟ್ ₹/MT ಕಡ್ಡಾಯ.\nಸೇವ್ ಮಾಡುವ ಮೊದಲು ದರ ನಮೂದಿಸಿ.");
       return;
     }
     // Validate: minimum margin between Shree Rate and Driver Rate
@@ -2448,23 +2448,23 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
         ? Math.min(..._diLines.map(d => (+(d.frRate||f.frRate)||0) - (+(d.givenRate)||0)))
         : (+(f.frRate)||0) - (+(f.givenRate)||0);
       if(_minMargin < 30) {
-        alert(`Cannot save: Margin is ₹${_minMargin.toLocaleString("en-IN")}/MT (Shree Rate − Driver Rate).\nMinimum margin required is ₹30/MT.\nPlease adjust the rates.`);
+        alert(`Cannot save: Margin is ₹${_minMargin.toLocaleString("en-IN")}/MT (Shree Rate − Driver Rate).\nMinimum margin required is ₹30/MT. Please adjust the rates.\n\nಉಳಿತಾಯ ಮಾಡಲು ಸಾಧ್ಯವಿಲ್ಲ: ಮಾರ್ಜಿನ್ ₹${_minMargin.toLocaleString("en-IN")}/MT ಇದೆ.\nಕನಿಷ್ಠ ₹30/MT ಮಾರ್ಜಿನ್ ಇರಬೇಕು. ದರ ಸರಿಪಡಿಸಿ.`);
         return;
       }
     }
     // Validate: if diesel estimate entered, indent number is mandatory
     if ((+f.dieselEstimate||0) > 0 && !f.dieselIndentNo?.trim()) {
-      alert("Diesel Indent No is mandatory when Diesel Estimate is entered.\nPlease enter the indent number from the pump slip.");
+      alert("Diesel Indent No is mandatory when Diesel Estimate is entered.\nPlease enter the indent number from the pump slip.\n\nಡೀಸೆಲ್ ಅಂದಾಜು ನಮೂದಿಸಿದಾಗ Indent No ಕಡ್ಡಾಯ.\nಪಂಪ್ ಸ್ಲಿಪ್‌ನಿಂದ ಇಂಡೆಂಟ್ ನಂಬರ್ ನಮೂದಿಸಿ.");
       return;
     }
     // Validate: diesel indent no must be unique across trips AND diesel indents
     if (f.dieselIndentNo && f.dieselIndentNo.trim()) {
       if (trips.some(t => t.dieselIndentNo && t.dieselIndentNo.trim() === f.dieselIndentNo.trim())) {
-        alert(`Indent No "${f.dieselIndentNo}" already exists on another trip. Each indent number must be unique.`);
+        alert(`Indent No "${f.dieselIndentNo}" already exists on another trip. Each indent number must be unique.\n\nIndent No "${f.dieselIndentNo}" ಬೇರೆ ಟ್ರಿಪ್‌ನಲ್ಲಿ ಇದೆ. ಪ್ರತಿ Indent No ಅನನ್ಯವಾಗಿರಬೇಕು.`);
         return;
       }
       if ((indents||[]).some(i => i.indentNo && String(i.indentNo).trim() === f.dieselIndentNo.trim())) {
-        alert(`Indent No "${f.dieselIndentNo}" already exists in Diesel records. Each indent number must be unique.`);
+        alert(`Indent No "${f.dieselIndentNo}" already exists in Diesel records. Each indent number must be unique.\n\nIndent No "${f.dieselIndentNo}" ಡೀಸೆಲ್ ರೆಕಾರ್ಡ್‌ನಲ್ಲಿ ಇದೆ. ಪ್ರತಿ Indent No ಅನನ್ಯವಾಗಿರಬೇಕು.`);
         return;
       }
     }
@@ -2479,7 +2479,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
           // Likely a multi-DI trip where diesel spans multiple DIs — allow with warning
           if(!window.confirm(`Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative) — likely because diesel covers multiple DIs.\n\nSave anyway? You can merge the second DI after saving.`)) return;
         } else {
-          alert(`Cannot save: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\nPlease reduce Advance, Loan Recovery, or Shortage Recovery so the driver's net is ≥ ₹0.`);
+          alert(`Cannot save: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative). Please reduce Advance/Loan/Shortage Recovery.\n\nಡ್ರೈವರ್‌ಗೆ ನಿವ್ವಳ ₹${_net.toLocaleString("en-IN")} (ಋಣಾತ್ಮಕ). Advance/Loan/Shortage ಕಡಿಮೆ ಮಾಡಿ.`);
           return;
         }
       }
@@ -2538,6 +2538,13 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
   };
 
   const saveEdit = () => {
+    // Freeze check — settled trips cannot be edited (except by owner)
+    const origTrip = trips.find(t=>t.id===editSheet.id);
+    if(origTrip?.driverSettled && user.role !== "owner") {
+      alert("This trip is frozen — driver payment is complete and cannot be edited.\n\nಈ ಟ್ರಿಪ್ ಫ್ರೀಜ್ ಆಗಿದೆ — ಡ್ರೈವರ್ ಪಾವತಿ ಪೂರ್ಣಗೊಂಡಿದೆ, ಬದಲಾಯಿಸಲು ಸಾಧ್ಯವಿಲ್ಲ.");
+      setEditSheet(null);
+      return;
+    }
     // For multi-DI trips, recalculate blended rates from diLines
     const diLines = editSheet.diLines || [];
     const isMultiDI = diLines.length > 1;
@@ -2557,7 +2564,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
         ? Math.min(..._diLines.map(d => (+(d.frRate||editSheet.frRate)||0) - (+(d.givenRate)||0)))
         : (+(editSheet.frRate)||0) - (+(editSheet.givenRate)||0);
       if(_minMargin < 30) {
-        alert(`Cannot save: Margin is ₹${_minMargin.toLocaleString("en-IN")}/MT (Shree Rate − Driver Rate).\nMinimum margin required is ₹30/MT.\nPlease adjust the rates.`);
+        alert(`Cannot save: Margin is ₹${_minMargin.toLocaleString("en-IN")}/MT (Shree Rate − Driver Rate).\nMinimum margin required is ₹30/MT. Please adjust the rates.\n\nಉಳಿತಾಯ ಮಾಡಲು ಸಾಧ್ಯವಿಲ್ಲ: ಮಾರ್ಜಿನ್ ₹${_minMargin.toLocaleString("en-IN")}/MT ಇದೆ.\nಕನಿಷ್ಠ ₹30/MT ಮಾರ್ಜಿನ್ ಇರಬೇಕು. ದರ ಸರಿಪಡಿಸಿ.`);
         return;
       }
     }
@@ -2573,7 +2580,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
         if(isOnlyDiesel) {
           if(!window.confirm(`Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative) — likely because diesel covers multiple DIs.\n\nSave anyway?`)) return;
         } else {
-          alert(`Cannot save: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\nPlease reduce Advance, Loan Recovery, or Shortage Recovery so the driver's net is ≥ ₹0.`);
+          alert(`Cannot save: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative). Please reduce Advance/Loan/Shortage Recovery.\n\nಡ್ರೈವರ್‌ಗೆ ನಿವ್ವಳ ₹${_net.toLocaleString("en-IN")} (ಋಣಾತ್ಮಕ). Advance/Loan/Shortage ಕಡಿಮೆ ಮಾಡಿ.`);
           return;
         }
       }
@@ -2793,12 +2800,20 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                 </div>
                 <div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0}}>
                   <Badge label={t.status} color={SC(t.status)} />
-                  {/* ✏ EDIT ICON */}
-                  <button onClick={()=>{
-                    // Normalize diLines — ensure each line has frRate populated
-                    const normalized = {...t, diLines: (t.diLines||[]).map(d=>({...d, frRate: d.frRate||t.frRate||0}))};
-                    setEditSheet(normalized);
-                  }} style={{background:C.dim,border:"none",borderRadius:8,color:C.muted,padding:"5px 8px",cursor:"pointer",fontSize:14}}>✏</button>
+                  {/* ✏ EDIT ICON — disabled if driver settled */}
+                  {t.driverSettled ? (
+                    <div title="Trip is frozen — driver payment completed. Only Owner can edit."
+                      style={{background:C.dim,borderRadius:8,color:C.muted+"66",padding:"5px 8px",
+                        fontSize:14,cursor:"not-allowed",opacity:0.4,display:"flex",alignItems:"center"}}>
+                      🔒
+                    </div>
+                  ) : (
+                    <button onClick={()=>{
+                      // Normalize diLines — ensure each line has frRate populated
+                      const normalized = {...t, diLines: (t.diLines||[]).map(d=>({...d, frRate: d.frRate||t.frRate||0}))};
+                      setEditSheet(normalized);
+                    }} style={{background:C.dim,border:"none",borderRadius:8,color:C.muted,padding:"5px 8px",cursor:"pointer",fontSize:14}}>✏</button>
+                  )}
                   {/* 🗑 DELETE (owner only) */}
                   {user.role==="owner" && (
                     <button onClick={()=>setConfirmDel(t)}
@@ -3200,7 +3215,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                       onTruckChange={onTruckChange}
                       onSubmit={async ()=>{
                         // All same validations as godown saveNew
-                        if(!f.givenRate||+f.givenRate<=0){alert("Driver Rate ₹/MT is mandatory.");return;}
+                        if(!f.givenRate||+f.givenRate<=0){alert("Driver Rate ₹/MT is mandatory.\nಡ್ರೈವರ್ ರೇಟ್ ₹/MT ಕಡ್ಡಾಯ.");return;}
                         {
                           const _diLines = f.diLines||[];
                           const _isMulti = _diLines.length > 1;
@@ -3208,27 +3223,27 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                             ? Math.min(..._diLines.map(d=>(+(d.frRate||f.frRate)||0)-(+(d.givenRate)||0)))
                             : (+(f.frRate)||0)-(+(f.givenRate)||0);
                           if(_minMargin < 30){
-                            alert(`Cannot save: Margin is ₹${_minMargin.toLocaleString("en-IN")}/MT (Shree Rate − Driver Rate).\nMinimum margin required is ₹30/MT.`);
+                            alert(`Cannot save: Margin is ₹${_minMargin.toLocaleString("en-IN")}/MT (Shree Rate − Driver Rate). Minimum margin required is ₹30/MT.\n\nಮಾರ್ಜಿನ್ ₹${_minMargin.toLocaleString("en-IN")}/MT — ಕನಿಷ್ಠ ₹30/MT ಬೇಕು. ದರ ಸರಿಪಡಿಸಿ.`);
                             return;
                           }
                         }
-                        if((+f.dieselEstimate||0)>0&&!f.dieselIndentNo?.trim()){alert("Diesel Indent No is mandatory when Diesel Estimate is entered.");return;}
+                        if((+f.dieselEstimate||0)>0&&!f.dieselIndentNo?.trim()){alert("Diesel Indent No is mandatory when Diesel Estimate is entered.\nಡೀಸೆಲ್ ಅಂದಾಜು ನಮೂದಿಸಿದಾಗ Indent No ಕಡ್ಡಾಯ.");return;}
                         if(f.dieselIndentNo&&f.dieselIndentNo.trim()){
                           if(trips.some(t=>t.dieselIndentNo&&t.dieselIndentNo.trim()===f.dieselIndentNo.trim()))
-                            {alert(`Indent No "${f.dieselIndentNo}" already exists on another trip.`);return;}
+                            {alert(`Indent No "${f.dieselIndentNo}" already exists on another trip.\nIndent No ಬೇರೆ ಟ್ರಿಪ್‌ನಲ್ಲಿ ಇದೆ.`);return;}
                           if((indents||[]).some(i=>i.indentNo&&String(i.indentNo).trim()===f.dieselIndentNo.trim()))
-                            {alert(`Indent No "${f.dieselIndentNo}" already exists in Diesel records.`);return;}
+                            {alert(`Indent No "${f.dieselIndentNo}" already exists in Diesel records.\nIndent No ಡೀಸೆಲ್ ರೆಕಾರ್ಡ್‌ನಲ್ಲಿ ಇದೆ.`);return;}
                         }
                         if(f.lrNo&&f.lrNo.trim()&&trips.some(t=>t.lrNo===f.lrNo.trim()))
-                          {alert(`LR "${f.lrNo}" already exists. Each LR must be unique.`);return;}
+                          {alert(`LR "${f.lrNo}" already exists. Each LR must be unique.\nLR "${f.lrNo}" ಈಗಾಗಲೇ ಇದೆ. ಪ್ರತಿ LR ಅನನ್ಯವಾಗಿರಬೇಕು.`);return;}
                         const _gross=(+f.qty||0)*(+f.givenRate||0);
                         const _net=_gross-(+f.advance||0)-(+f.tafal||0)-(+f.dieselEstimate||0)-(+f.shortageRecovery||0)-(+f.loanRecovery||0);
                         if(_net<0){
                           const isOnlyDiesel=(+f.dieselEstimate||0)>0&&(+f.advance||0)===0&&(+f.shortageRecovery||0)===0&&(+f.loanRecovery||0)===0;
                           if(isOnlyDiesel){if(!window.confirm(`Est. Net to Driver is negative (likely diesel spans multiple DIs). Save anyway?`))return;}
-                          else{alert("Cannot save: Est. Net to Driver is negative.");return;}
+                          else{alert("Cannot save: Est. Net to Driver is negative.\nಡ್ರೈವರ್‌ಗೆ ನಿವ್ವಳ ಮೊತ್ತ ಋಣಾತ್ಮಕ — ಸೇವ್ ಸಾಧ್ಯವಿಲ್ಲ.");return;}
                         }
-                        if(!f.district||!f.state){alert("District and State are required for Party orders.");return;}
+                        if(!f.district||!f.state){alert("District and State are required for Party orders.\nಪಾರ್ಟಿ ಆರ್ಡರ್‌ಗೆ ಜಿಲ್ಲೆ ಮತ್ತು ರಾಜ್ಯ ಕಡ್ಡಾಯ.");return;}
                         // Save directly — email sent separately via Party Email button
                         setUploadingFiles(true);
                         try {
@@ -3362,8 +3377,18 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
       {/* ── EDIT SHEET ── */}
       {editSheet && (
         <Sheet title="Edit Trip" onClose={()=>setEditSheet(null)}>
-          <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,borderRadius:10,padding:"9px 12px",color:C.orange,fontSize:12,fontWeight:700,marginBottom:14}}>
-            Editing trip · LR: {editSheet.lrNo||"—"} · {editSheet.truckNo}
+          <div style={{background:editSheet.driverSettled?C.red+"22":C.orange+"11",
+            border:`1px solid ${editSheet.driverSettled?C.red:C.orange}33`,
+            borderRadius:10,padding:"9px 12px",
+            color:editSheet.driverSettled?C.red:C.orange,fontSize:12,fontWeight:700,marginBottom:14}}>
+            {editSheet.driverSettled
+              ? "🔒 FROZEN TRIP — Driver payment complete · LR: "+(editSheet.lrNo||"—")+" · "+editSheet.truckNo
+              : "Editing trip · LR: "+(editSheet.lrNo||"—")+" · "+editSheet.truckNo}
+            {editSheet.driverSettled && user.role==="owner" && (
+              <div style={{color:C.muted,fontSize:11,fontWeight:400,marginTop:4}}>
+                ⚠ Owner override: changes will update settled amounts
+              </div>
+            )}
           </div>
           {/* Order type toggle in edit — owner can fix godown↔party */}
           {user.role==="owner" && (
@@ -5131,12 +5156,12 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
     if (f.indentNo && f.indentNo.trim()) {
       const dupIndent = (indents||[]).find(i => i.indentNo && String(i.indentNo).trim() === f.indentNo.trim());
       if (dupIndent) {
-        alert(`Indent No "${f.indentNo}" already exists in Diesel records (Truck: ${dupIndent.truckNo}, Date: ${dupIndent.date}).\nEach indent number must be unique.`);
+        alert(`Indent No "${f.indentNo}" already exists in Diesel records (Truck: ${dupIndent.truckNo}, Date: ${dupIndent.date}). Each indent number must be unique.\n\nIndent No "${f.indentNo}" ಡೀಸೆಲ್ ರೆಕಾರ್ಡ್‌ನಲ್ಲಿ ಇದೆ. ಅನನ್ಯ ನಂಬರ್ ಬಳಸಿ.`);
         return;
       }
       const dupTrip = (trips||[]).find(t => t.dieselIndentNo && t.dieselIndentNo.trim() === f.indentNo.trim());
       if (dupTrip) {
-        alert(`Indent No "${f.indentNo}" is already linked to Trip LR: ${dupTrip.lrNo||"—"} (Truck: ${dupTrip.truckNo}).\nEach indent number must be unique.`);
+        alert(`Indent No "${f.indentNo}" is already linked to Trip LR: ${dupTrip.lrNo||"—"} (Truck: ${dupTrip.truckNo}). Each indent number must be unique.\n\nIndent No ಟ್ರಿಪ್ LR ${dupTrip.lrNo||"—"}ಗೆ ಲಿಂಕ್ ಆಗಿದೆ. ಅನನ್ಯ ನಂಬರ್ ಬಳಸಿ.`);
         return;
       }
     }
@@ -6211,11 +6236,11 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
             )}
 
             <Btn onClick={()=>{
-              if(!f.truckNo.trim()){alert("Truck No is required");return;}
-              if(!f.driverName.trim()){alert("Driver Name is mandatory");return;}
+              if(!f.truckNo.trim()){alert("Truck No is required.\nಟ್ರಕ್ ನಂಬರ್ ಕಡ್ಡಾಯ.");return;}
+              if(!f.driverName.trim()){alert("Driver Name is mandatory.\nಡ್ರೈವರ್ ಹೆಸರು ಕಡ್ಡಾಯ.");return;}
               const rawPhone = (f.driverPhone||"").replace(/\\D/g,"");
-              if(!rawPhone){alert("Driver Phone is mandatory");return;}
-              if(rawPhone.length!==10){alert(`Driver Phone must be 10 digits (entered ${rawPhone.length})`);return;}
+              if(!rawPhone){alert("Driver Phone is mandatory.\nಡ್ರೈವರ್ ಫೋನ್ ಕಡ್ಡಾಯ.");return;}
+              if(rawPhone.length!==10){alert(`Driver Phone must be 10 digits (entered ${rawPhone.length}).\nಡ್ರೈವರ್ ಫೋನ್ 10 ಅಂಕಿಗಳಾಗಿರಬೇಕು (${rawPhone.length} ನಮೂದಿಸಲಾಗಿದೆ).`);return;}
               if(!/^[6-9]/.test(rawPhone)){alert("Driver Phone must start with 6, 7, 8 or 9");return;}
               if(editId) {
                 setVehicles(p=>p.map(v=>v.id===editId?{...v,...f,
@@ -6290,7 +6315,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
                   <Field label="Account Name"           value={lAcct} onChange={setLAcct} half />
                 </div>
                 <Btn onClick={()=>{
-                  if(!lAmt||+lAmt<=0){alert("Enter loan amount");return;}
+                  if(!lAmt||+lAmt<=0){alert("Enter loan amount.\nಸಾಲದ ಮೊತ್ತ ನಮೂದಿಸಿ.");return;}
                   const txn={id:uid(),type:"given",date:lDate,amount:+lAmt,ref:lRef,accountName:lAcct,note:""};
                   setVehicles(p=>p.map(x=>x.id===lSheet?{...x,
                     loan:(x.loan||0)+ +lAmt,
@@ -6316,7 +6341,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
                   <Field label="Reference" value={rRef} onChange={setRRef} half />
                 </div>
                 <Btn onClick={()=>{
-                  if(!rAmt||+rAmt<=0){alert("Enter recovery amount");return;}
+                  if(!rAmt||+rAmt<=0){alert("Enter recovery amount.\nವಸೂಲಾತಿ ಮೊತ್ತ ನಮೂದಿಸಿ.");return;}
                   // Validate 1: cannot recover more than outstanding loan balance
                   if(+rAmt > bal){alert(`Recovery ₹${fmt(+rAmt)} exceeds loan balance ₹${fmt(bal)}.\nMax recoverable: ₹${fmt(bal)}`);return;}
                   // Validate 2: if linked to an LR, cannot exceed that trip's Est. Net to Driver
@@ -6452,8 +6477,8 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
                     half placeholder={`Search LR… (${vtrips.length} available)`} />
                 </div>
                 <Btn onClick={()=>{
-                  if(!shAmt||+shAmt<=0){alert("Enter shortage MT");return;}
-                  if(!shTrip){alert("Link to an LR");return;}
+                  if(!shAmt||+shAmt<=0){alert("Enter shortage MT.\nಕೊರತೆ MT ನಮೂದಿಸಿ.");return;}
+                  if(!shTrip){alert("Link to an LR.\nLR ಗೆ ಲಿಂಕ್ ಮಾಡಿ.");return;}
                   const trip = vtrips.find(t=>t.id===shTrip);
                   const lrNo = trip?.lrNo||"";
                   const rate = trip?.givenRate||0;
@@ -6966,7 +6991,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                 <Field label="Note (optional)" value={txNote} onChange={setTxNote} placeholder="UPI / NEFT / Cash" />
                 <div style={{marginTop:10}}>
                   <Btn onClick={()=>{
-                    if(!txAmt||+txAmt<=0){alert("Enter transfer amount");return;}
+                    if(!txAmt||+txAmt<=0){alert("Enter transfer amount.\nವರ್ಗಾವಣೆ ಮೊತ್ತ ನಮೂದಿಸಿ.");return;}
                     const tx={id:uid(),empId:wSheet,amount:+txAmt,date:txDate,lrNo:"",
                       note:txNote.trim(),createdBy:user.username,createdAt:nowTs()};
                     setCashTransfers(prev=>[tx,...(Array.isArray(prev)?prev:[])]);
@@ -7084,9 +7109,9 @@ function GstReleaseForm({ gstHoldItems, gstReleases, setGstReleases, isOwner, lo
   const selectedItem = gstHoldItems.find(g => g.invoiceNo === inv);
 
   const save = () => {
-    if(!inv) { alert("Select an invoice"); return; }
-    if(!amt || +amt <= 0) { alert("Enter release amount"); return; }
-    if(!utr.trim()) { alert("Enter UTR number"); return; }
+    if(!inv) { alert("Select an invoice.\nಇನ್‌ವಾಯ್ಸ್ ಆಯ್ಕೆ ಮಾಡಿ."); return; }
+    if(!amt || +amt <= 0) { alert("Enter release amount.\nಬಿಡುಗಡೆ ಮೊತ್ತ ನಮೂದಿಸಿ."); return; }
+    if(!utr.trim()) { alert("Enter UTR number.\nUTR ನಂಬರ್ ನಮೂದಿಸಿ."); return; }
     const rec = {
       id: "GST"+Date.now(),
       invoiceRef: inv,
@@ -8801,7 +8826,7 @@ function ExpensesLedger({expenses, setExpenses, payments, user, log}) {
             <Btn onClick={()=>{
               if(f.utr.trim()) {
                 const dupUTR = (Array.isArray(expenses)?expenses:[]).some(e => e.utr && e.utr.trim().toLowerCase() === f.utr.trim().toLowerCase());
-                if(dupUTR) { alert("⚠️ An expense with UTR \""+f.utr.trim()+"\" already exists. Duplicate not saved."); return; }
+                if(dupUTR) { alert("⚠️ An expense with UTR \""+f.utr.trim()+"\" already exists. Duplicate not saved.\n\nUTR \""+f.utr.trim()+"\" ಹೊಂದಿರುವ ವೆಚ್ಚ ಈಗಾಗಲೇ ಇದೆ. ನಕಲು ಸೇರಿಸಲಾಗಿಲ್ಲ."); return; }
               }
               const e={...f,id:uid(),amount:+f.amount,utr:f.utr.trim(),createdBy:user.username,createdAt:nowTs()};
               setExpenses(prev=>[e,...(prev||[])]);
