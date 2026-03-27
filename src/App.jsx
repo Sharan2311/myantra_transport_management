@@ -2541,7 +2541,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
     // Freeze check — settled trips cannot be edited (except by owner)
     const origTrip = trips.find(t=>t.id===editSheet.id);
     if(origTrip?.driverSettled && user.role !== "owner") {
-      alert("This trip is frozen — driver payment is complete and cannot be edited.\n\nಈ ಟ್ರಿಪ್ ಫ್ರೀಜ್ ಆಗಿದೆ — ಡ್ರೈವರ್ ಪಾವತಿ ಪೂರ್ಣಗೊಂಡಿದೆ, ಬದಲಾಯಿಸಲು ಸಾಧ್ಯವಿಲ್ಲ.");
+      alert("This trip is frozen — driver payment is complete. Only Owner can edit.\n\nಈ ಟ್ರಿಪ್ ಫ್ರೀಜ್ ಆಗಿದೆ — ಡ್ರೈವರ್ ಪಾವತಿ ಪೂರ್ಣಗೊಂಡಿದೆ. ಓನರ್ ಮಾತ್ರ ಬದಲಾಯಿಸಬಹುದು.");
       setEditSheet(null);
       return;
     }
@@ -2800,9 +2800,9 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                 </div>
                 <div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0}}>
                   <Badge label={t.status} color={SC(t.status)} />
-                  {/* ✏ EDIT ICON — disabled if driver settled */}
-                  {t.driverSettled ? (
-                    <div title="Trip is frozen — driver payment completed. Only Owner can edit."
+                  {/* ✏ EDIT ICON — locked for non-owners on settled trips */}
+                  {t.driverSettled && user.role!=="owner" ? (
+                    <div title="Trip is frozen — driver payment complete. Only Owner can edit."
                       style={{background:C.dim,borderRadius:8,color:C.muted+"66",padding:"5px 8px",
                         fontSize:14,cursor:"not-allowed",opacity:0.4,display:"flex",alignItems:"center"}}>
                       🔒
@@ -2812,7 +2812,9 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                       // Normalize diLines — ensure each line has frRate populated
                       const normalized = {...t, diLines: (t.diLines||[]).map(d=>({...d, frRate: d.frRate||t.frRate||0}))};
                       setEditSheet(normalized);
-                    }} style={{background:C.dim,border:"none",borderRadius:8,color:C.muted,padding:"5px 8px",cursor:"pointer",fontSize:14}}>✏</button>
+                    }} style={{background:C.dim,border:"none",borderRadius:8,color:t.driverSettled?C.orange:C.muted,padding:"5px 8px",cursor:"pointer",fontSize:14}}>
+                      {t.driverSettled?"🔓":"✏"}
+                    </button>
                   )}
                   {/* 🗑 DELETE (owner only) */}
                   {user.role==="owner" && (
@@ -8398,7 +8400,7 @@ function ShortageRecoverBtn({v, setVehicles, log}) {
 // ─── DRIVER PAYMENTS ──────────────────────────────────────────────────────────
 // Driver payment is separate from settlement.
 // Record bank transfers against a trip. "Balance due" auto-updates.
-function DriverPayments({trips, driverPays, setDriverPays, vehicles, employees, cashTransfers, setCashTransfers, user, log}) {
+function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, employees, cashTransfers, setCashTransfers, user, log}) {
   const [filter,    setFilter]    = useState("unpaid");
   const [paySheet,  setPaySheet]  = useState(null);
   const [splitSheet, setSplitSheet] = useState(null); // scanned multi-LR data
@@ -8427,12 +8429,26 @@ function DriverPayments({trips, driverPays, setDriverPays, vehicles, employees, 
   const paidTrips    = tripWithBalance.filter(t=>t.balance<=0 && t.netDue>0);
   const totalBalance = unpaidTrips.reduce((s,t)=>s+t.balance,0);
 
+  // Auto-settle: called after any payment save — marks trip settled if balance reaches 0
+  const autoSettle = (tripId, extraAmount) => {
+    const tw = tripWithBalance.find(t=>t.id===tripId);
+    if(!tw) return;
+    const newBalance = Math.max(0, tw.balance - extraAmount);
+    if(newBalance === 0 && !tw.driverSettled) {
+      setTrips(prev => prev.map(t => t.id===tripId
+        ? {...t, driverSettled:true, settledBy:user.username, netPaid:tw.netDue}
+        : t));
+      log("AUTO SETTLED", `LR:${tw.lrNo} ${tw.truckNo} — balance reached ₹0`);
+    }
+  };
+
   const savePayment = (t) => {
     const p = {id:uid(), tripId:t.id, truckNo:t.truckNo, lrNo:t.lrNo,
       amount:+pf.amount, utr:pf.utr, date:pf.date, paidTo:pf.paidTo, notes:pf.notes,
       createdBy:user.username, createdAt:nowTs()};
     setDriverPays(prev=>[...(prev||[]),p]);
     log("DRIVER PAYMENT",`LR:${t.lrNo} ${t.truckNo} — ${fmt(+pf.amount)} UTR:${pf.utr}`);
+    autoSettle(t.id, +pf.amount);
     setPaySheet(null); setPf({amount:"",utr:"",date:today(),paidTo:"",notes:""});
   };
 
@@ -8442,6 +8458,7 @@ function DriverPayments({trips, driverPays, setDriverPays, vehicles, employees, 
     for (const p of withMeta) {
       log("DRIVER PAYMENT",`LR:${p.lrNo} ${p.truckNo} — ${fmt(p.amount)} UTR:${p.utr}`);
       await DB.saveDriverPay(p);
+      autoSettle(p.tripId, p.amount);
     }
     setSplitSheet(null);
   };
