@@ -310,7 +310,7 @@ const ErrBanner = ({msg}) => msg ? (
 
 // ─── BOTTOM NAV ───────────────────────────────────────────────────────────────
 const MAIN_IDS = ["dashboard","trips","billing","diesel","more"];
-function BottomNav({tab, setTab, user}) {
+function BottomNav({tab, setTab, user, trips, driverPays, vehicles}) {
   const items = [
     {id:"dashboard",icon:"⊞",label:"Home",    perm:null},
     {id:"trips",    icon:"🚚",label:"Trips",   perm:"trips"},
@@ -318,13 +318,31 @@ function BottomNav({tab, setTab, user}) {
     {id:"diesel",   icon:"⛽",label:"Diesel",  perm:"diesel"},
     {id:"more",     icon:"⋯", label:"More",    perm:null},
   ].filter(n => !n.perm || can(user, n.perm));
+
+  // Badge counts
+  const pendingBills = (trips||[]).filter(t=>t.status==="Pending Bill").length;
+  const unsettledDrivers = (trips||[]).filter(t=>{
+    if(t.driverSettled) return false;
+    const veh = (vehicles||[]).find(v=>v.truckNo===t.truckNo);
+    const gross = (t.qty||0)*(t.givenRate||0);
+    const deducts = (t.advance||0)+(t.tafal||0)+(veh?.deductPerTrip||0)+(t.dieselEstimate||0);
+    const netDue = Math.max(0, gross-deducts);
+    const paid = (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
+    return netDue>0 && paid<netDue;
+  }).length;
+  const badges = {trips:pendingBills||null, billing:pendingBills||null, more:unsettledDrivers||null};
+
   return (
     <nav style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:600,background:C.card,borderTop:`1px solid ${C.border}`,display:"flex",zIndex:100,paddingBottom:"env(safe-area-inset-bottom,6px)"}}>
       {items.map(n => {
         const active = tab===n.id || (n.id==="more" && !MAIN_IDS.includes(tab));
+        const badge = badges[n.id];
         return (
-          <button key={n.id} onClick={()=>setTab(n.id)} style={{flex:1,background:"none",border:"none",padding:"10px 4px 5px",display:"flex",flexDirection:"column",alignItems:"center",gap:3,cursor:"pointer",color:active?C.accent:C.muted}}>
-            <span style={{fontSize:20,lineHeight:1}}>{n.icon}</span>
+          <button key={n.id} onClick={()=>setTab(n.id)} style={{flex:1,background:"none",border:"none",padding:"10px 4px 5px",display:"flex",flexDirection:"column",alignItems:"center",gap:3,cursor:"pointer",color:active?C.accent:C.muted,position:"relative"}}>
+            <span style={{fontSize:20,lineHeight:1,position:"relative"}}>
+              {n.icon}
+              {badge ? <span style={{position:"absolute",top:-4,right:-8,background:C.red,color:"#fff",fontSize:9,fontWeight:800,borderRadius:10,padding:"1px 4px",minWidth:14,textAlign:"center",lineHeight:"14px"}}>{badge>9?"9+":badge}</span> : null}
+            </span>
             <span style={{fontSize:10,fontWeight:700}}>{n.label}</span>
             {active && <div style={{width:18,height:3,background:C.accent,borderRadius:2}} />}
           </button>
@@ -335,31 +353,63 @@ function BottomNav({tab, setTab, user}) {
 }
 
 const MORE_TABS = [
-  {id:"inbound",   icon:"🏭",label:"Raw Material",   perm:"trips"},
-  {id:"settlement",icon:"💵",label:"Settlement",     perm:"settlement"},
-  {id:"driverPay", icon:"🏧",label:"Driver Payments",perm:"settlement"},
-  {id:"tafal",     icon:"🤝",label:"TAFAL",          perm:"tafal"},
-  {id:"vehicles",  icon:"🚛",label:"Vehicles",       perm:"vehicles"},
-  {id:"employees", icon:"👥",label:"Employees",      perm:"employees"},
-  {id:"payments",  icon:"💰",label:"Shree Payments", perm:"payments"},
-  {id:"expenses",  icon:"🧮",label:"Expenses",       perm:"payments"},
-  {id:"reports",   icon:"📤",label:"Reports",        perm:"reports"},
-  {id:"reminders", icon:"📲",label:"Reminders",      perm:"reminders"},
-  {id:"activity",  icon:"📋",label:"Activity Log",   perm:"reports"},
-  {id:"admin",     icon:"⚙", label:"User Admin",     perm:"admin"},
+  {id:"inbound",   icon:"🏭",label:"Raw Material",   perm:"trips",      group:"ops"},
+  {id:"driverPay", icon:"🏧",label:"Driver Pay",     perm:"settlement", group:"money"},
+  {id:"settlement",icon:"💵",label:"Settlement",     perm:"settlement", group:"money"},
+  {id:"tafal",     icon:"🤝",label:"TAFAL",          perm:"tafal",      group:"money"},
+  {id:"vehicles",  icon:"🚛",label:"Vehicles",       perm:"vehicles",   group:"fleet"},
+  {id:"employees", icon:"👥",label:"Employees",      perm:"employees",  group:"fleet"},
+  {id:"payments",  icon:"💰",label:"Shree Payments", perm:"payments",   group:"finance"},
+  {id:"expenses",  icon:"🧮",label:"Expenses",       perm:"payments",   group:"finance"},
+  {id:"reports",   icon:"📤",label:"Reports",        perm:"reports",    group:"info"},
+  {id:"reminders", icon:"📲",label:"Reminders",      perm:"reminders",  group:"info"},
+  {id:"activity",  icon:"📋",label:"Activity Log",   perm:"reports",    group:"info"},
+  {id:"admin",     icon:"⚙", label:"User Admin",     perm:"admin",      group:"info"},
 ];
-function MoreMenu({user, setTab}) {
+const MORE_GROUPS = [
+  {id:"ops",     label:"Operations"},
+  {id:"money",   label:"Payments & Settlement"},
+  {id:"fleet",   label:"Fleet & People"},
+  {id:"finance", label:"Finance"},
+  {id:"info",    label:"Reports & Admin"},
+];
+function MoreMenu({user, setTab, trips, driverPays, vehicles}) {
+  // Compute badges for more menu items
+  const pendingBills = (trips||[]).filter(t=>t.status==="Pending Bill").length;
+  const unsettled = (trips||[]).filter(t=>{
+    if(t.driverSettled) return false;
+    const veh=(vehicles||[]).find(v=>v.truckNo===t.truckNo);
+    const netDue=Math.max(0,(t.qty||0)*(t.givenRate||0)-(t.advance||0)-(t.tafal||0)-(veh?.deductPerTrip||0)-(t.dieselEstimate||0));
+    return netDue>0 && (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0)<netDue;
+  }).length;
+  const tabBadge = {driverPay:unsettled||null, settlement:unsettled||null};
+
   return (
-    <div>
-      <div style={{color:C.muted,fontSize:12,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:12}}>All Modules</div>
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-        {MORE_TABS.filter(t=>can(user,t.perm)).map(t => (
-          <button key={t.id} onClick={()=>setTab(t.id)} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:"18px 14px",display:"flex",flexDirection:"column",gap:8,cursor:"pointer",textAlign:"left"}}>
-            <span style={{fontSize:24}}>{t.icon}</span>
-            <span style={{color:C.text,fontWeight:700,fontSize:14}}>{t.label}</span>
-          </button>
-        ))}
-      </div>
+    <div style={{display:"flex",flexDirection:"column",gap:18}}>
+      {MORE_GROUPS.map(g => {
+        const tabs = MORE_TABS.filter(t=>t.group===g.id&&can(user,t.perm));
+        if(!tabs.length) return null;
+        return (
+          <div key={g.id}>
+            <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>{g.label}</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+              {tabs.map(t => {
+                const badge = tabBadge[t.id];
+                return (
+                  <button key={t.id} onClick={()=>setTab(t.id)}
+                    style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:"14px 12px",
+                      display:"flex",flexDirection:"column",gap:6,cursor:"pointer",textAlign:"left",position:"relative"}}>
+                    <span style={{fontSize:22}}>{t.icon}</span>
+                    <span style={{color:C.text,fontWeight:700,fontSize:13}}>{t.label}</span>
+                    {badge ? <span style={{position:"absolute",top:8,right:10,background:C.red,color:"#fff",
+                      fontSize:10,fontWeight:800,borderRadius:10,padding:"2px 6px"}}>{badge}</span> : null}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -679,65 +729,98 @@ export default function App() {
         {tab==="reminders"  && can(user,"reminders")  && <Reminders  {...sp} />}
         {tab==="activity"   && can(user,"reports")    && <ActivityLog activity={activity} />}
         {tab==="admin"      && can(user,"admin")      && <UserAdmin  users={users} setUsers={dbSetUsers} user={user} log={log} />}
-        {tab==="more"       && <MoreMenu user={user} setTab={setTab} />}
+        {tab==="more"       && <MoreMenu user={user} setTab={setTab} trips={trips} driverPays={driverPays} vehicles={vehicles} />}
       </div>
-      <BottomNav tab={tab} setTab={setTab} user={user} />
+      <BottomNav tab={tab} setTab={setTab} user={user} trips={trips} driverPays={driverPays} vehicles={vehicles} />
     </div>
   );
 }
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
-function Dashboard({trips, vehicles, employees, indents, pumps, pumpPayments, activity, settings, setTab, user}) {
+function Dashboard({trips, vehicles, employees, indents, pumps, pumpPayments, driverPays, activity, settings, setTab, user}) {
+  const todayStr    = today();
+  const todayTrips  = trips.filter(t => t.date===todayStr);
   const pending     = trips.filter(t => t.status==="Pending Bill");
+  const weekAgo     = new Date(); weekAgo.setDate(weekAgo.getDate()-7);
+  const weekAgoStr  = weekAgo.toISOString().split("T")[0];
+  const oldUnsettled = trips.filter(t => !t.driverSettled && t.date < weekAgoStr && (t.qty||0)*(t.givenRate||0)>0);
   const margin      = trips.reduce((s,t) => s + t.qty*(t.frRate-t.givenRate), 0);
-  const vLoan       = vehicles.reduce((s,v) => s + Math.max(0, v.loan-v.loanRecovered), 0);
-  // Diesel pending = total confirmed indents - total pump payments made
+  const todayMargin = todayTrips.reduce((s,t) => s + t.qty*(t.frRate-t.givenRate), 0);
   const confirmedIndents = indents.filter(i => i.confirmed);
   const totalDieselOwed = confirmedIndents.reduce((s,i) => s+(+(i.amount)||0), 0);
   const totalDieselPaid = (pumpPayments||[]).reduce((s,p) => s+(+(p.amount)||0), 0);
   const unpaidDiesel = Math.max(0, totalDieselOwed - totalDieselPaid);
   const tafalPool   = trips.reduce((s,t) => s+(t.tafal||0), 0);
+  const vLoan       = vehicles.reduce((s,v) => s + Math.max(0, v.loan-v.loanRecovered), 0);
+
+  // Actionable alerts
+  const alerts = [
+    pending.length>0 && {color:C.accent, icon:"🧾", text:`${pending.length} trip${pending.length>1?"s":""} pending bill — ₹${(pending.reduce((s,t)=>s+t.qty*t.frRate,0)).toLocaleString("en-IN")}`, tab:"billing"},
+    oldUnsettled.length>0 && {color:C.red, icon:"⏰", text:`${oldUnsettled.length} trip${oldUnsettled.length>1?"s":""} unsettled >7 days`, tab:"driverPay"},
+    unpaidDiesel>0 && {color:C.orange, icon:"⛽", text:`Diesel payment pending — ${fmt(unpaidDiesel)}`, tab:"diesel"},
+  ].filter(Boolean);
+
+  const hour = new Date().getHours();
+  const greeting = hour<12?"Good morning":"hour"<17?"Good afternoon":"Good evening";
 
   return (
-    <div style={{display:"flex",flexDirection:"column",gap:14}}>
-      <div style={{color:C.text,fontSize:18,fontWeight:800}}>Good day, {user.name.split(" ")[0]} 👋</div>
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-        <KPI icon="⚠"  label="Pending Bills"   value={pending.length}   color={C.accent} sub={fmt(pending.reduce((s,t)=>s+t.qty*t.frRate,0))} />
-        <KPI icon="📈" label="My Margin"        value={fmt(margin)}      color={C.green} />
-        <KPI icon="🚚" label="Total Trips"      value={trips.length}     color={C.blue}  sub={`${trips.filter(t=>t.type==="outbound").length} out · ${trips.filter(t=>t.type==="inbound").length} in`} />
-        <KPI icon="⛽" label="Diesel Pending"   value={fmt(unpaidDiesel)}color={C.orange}sub={`${confirmedIndents.length} indents`} />
-        <KPI icon="🔴" label="Vehicle Loans"    value={fmt(vLoan)}       color={C.red} />
-        <KPI icon="🤝" label="TAFAL Pool"       value={fmt(tafalPool)}   color={C.purple}sub={`₹${settings?.tafalPerTrip||300}/trip`} />
+    <div style={{display:"flex",flexDirection:"column",gap:16}}>
+      {/* Greeting */}
+      <div>
+        <div style={{color:C.text,fontSize:18,fontWeight:800}}>{greeting}, {user.name.split(" ")[0]} 👋</div>
+        <div style={{color:C.muted,fontSize:12,marginTop:2}}>{new Date().toLocaleDateString("en-IN",{weekday:"long",day:"numeric",month:"long"})}</div>
       </div>
 
+      {/* Quick Actions */}
       {can(user,"trips") && (
-        <div>
-          <div style={{color:C.muted,fontSize:12,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Quick Actions</div>
-          <div style={{display:"flex",gap:8}}>
-            <button onClick={()=>setTab("trips")}   style={{flex:1,background:C.accent+"22",border:`1.5px solid ${C.accent}`,color:C.accent,borderRadius:12,padding:"12px 6px",fontSize:13,fontWeight:700,cursor:"pointer"}}>+ Cement</button>
-            <button onClick={()=>setTab("inbound")} style={{flex:1,background:C.teal+"22",  border:`1.5px solid ${C.teal}`,  color:C.teal,  borderRadius:12,padding:"12px 6px",fontSize:13,fontWeight:700,cursor:"pointer"}}>+ RM Trip</button>
-            {can(user,"diesel") && <button onClick={()=>setTab("diesel")} style={{flex:1,background:C.orange+"22",border:`1.5px solid ${C.orange}`,color:C.orange,borderRadius:12,padding:"12px 6px",fontSize:13,fontWeight:700,cursor:"pointer"}}>⛽ Indent</button>}
-          </div>
+        <div style={{display:"flex",gap:8}}>
+          <button onClick={()=>setTab("trips")}   style={{flex:1,background:C.accent+"22",border:`1.5px solid ${C.accent}`,color:C.accent,borderRadius:12,padding:"12px 6px",fontSize:13,fontWeight:700,cursor:"pointer"}}>🚚 + Cement</button>
+          <button onClick={()=>setTab("inbound")} style={{flex:1,background:C.teal+"22",  border:`1.5px solid ${C.teal}`,  color:C.teal,  borderRadius:12,padding:"12px 6px",fontSize:13,fontWeight:700,cursor:"pointer"}}>🏭 + RM Trip</button>
+          {can(user,"diesel") && <button onClick={()=>setTab("diesel")} style={{flex:1,background:C.orange+"22",border:`1.5px solid ${C.orange}`,color:C.orange,borderRadius:12,padding:"12px 6px",fontSize:13,fontWeight:700,cursor:"pointer"}}>⛽ Indent</button>}
         </div>
       )}
 
-      {pending.length > 0 && (
-        <div>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-            <div style={{color:C.accent,fontWeight:700,fontSize:13}}>⚠ Pending Bills ({pending.length})</div>
-            <button onClick={()=>setTab("billing")} style={{background:"none",border:"none",color:C.blue,fontSize:12,cursor:"pointer"}}>Bill now →</button>
-          </div>
-          {pending.slice(0,3).map(t => (
-            <div key={t.id} style={{background:C.card,borderRadius:12,padding:"11px 14px",marginBottom:8,borderLeft:`4px solid ${C.accent}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <div>
-                <div style={{fontWeight:700}}>{t.truckNo} <span style={{color:C.blue,fontSize:12,fontWeight:600}}>LR:{t.lrNo||"—"}</span></div>
-                <div style={{color:C.muted,fontSize:12}}>{t.to} · {t.qty}MT · {t.date}</div>
-              </div>
-              <div style={{color:C.accent,fontWeight:800}}>{fmt(t.qty*t.frRate)}</div>
+      {/* Today's summary */}
+      <div style={{background:C.card,borderRadius:14,padding:"14px 16px"}}>
+        <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Today — {todayStr}</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+          {[
+            {l:"Trips Added",  v:todayTrips.length,       c:C.blue},
+            {l:"Today Margin", v:fmt(todayMargin),         c:C.green},
+            {l:"Pending Bills",v:pending.length,           c:pending.length>0?C.accent:C.muted},
+          ].map(x=>(
+            <div key={x.l} style={{background:C.bg,borderRadius:8,padding:"8px",textAlign:"center"}}>
+              <div style={{color:x.c,fontWeight:800,fontSize:14}}>{x.v}</div>
+              <div style={{color:C.muted,fontSize:9,textTransform:"uppercase",marginTop:2}}>{x.l}</div>
             </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Actionable alerts */}
+      {alerts.length>0 && (
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Needs Attention</div>
+          {alerts.map((a,i)=>(
+            <button key={i} onClick={()=>setTab(a.tab)}
+              style={{background:a.color+"15",border:`1px solid ${a.color}44`,borderRadius:12,
+                padding:"11px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",
+                cursor:"pointer",width:"100%",textAlign:"left"}}>
+              <span style={{color:a.color,fontSize:13,fontWeight:600}}>{a.icon} {a.text}</span>
+              <span style={{color:a.color,fontSize:16,opacity:0.7}}>›</span>
+            </button>
           ))}
         </div>
       )}
 
+      {/* KPI grid */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+        <KPI icon="📈" label="Total Margin"    value={fmt(margin)}      color={C.green} sub="all time" />
+        <KPI icon="🚚" label="Total Trips"     value={trips.length}     color={C.blue}  sub={`${trips.filter(t=>t.type==="outbound").length} out · ${trips.filter(t=>t.type==="inbound").length} in`} />
+        <KPI icon="🔴" label="Vehicle Loans"   value={fmt(vLoan)}       color={C.red} />
+        <KPI icon="🤝" label="TAFAL Pool"      value={fmt(tafalPool)}   color={C.purple}sub={`₹${settings?.tafalPerTrip||300}/trip`} />
+      </div>
+
+      {/* Recent Activity */}
       <div>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
           <div style={{color:C.blue,fontWeight:700,fontSize:13}}>📋 Recent Activity</div>
@@ -2329,6 +2412,12 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
   const [showDateFilter, setShowDateFilter] = useState(false);
   const [dateFrom,    setDateFrom]    = useState("");
   const [dateTo,      setDateTo]      = useState("");
+  const [expandedIds, setExpandedIds] = useState(new Set()); // collapsed by default
+  const toggleExpand = id => setExpandedIds(prev => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
   // Party order flow state
   const [orderTypeStep, setOrderTypeStep] = useState(null);
   const [partyStep,     setPartyStep]     = useState("docs");
@@ -2373,9 +2462,24 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
 
   // When truck number changes, check if tafalExempt
   const onTruckChange = v => {
-    const veh = vehicles.find(x => x.truckNo===v.toUpperCase().trim());
-    setF(p => ({...p, truckNo:v, tafal: veh?.tafalExempt ? "0" : String(settings?.tafalPerTrip||300)}));
+    const tn  = v.toUpperCase().trim();
+    const veh = vehicles.find(x => x.truckNo===tn);
+    // Find last trip with this truck to pre-fill rate and destination
+    const lastTrip = [...trips].filter(t=>t.truckNo===tn&&t.type===tripType).sort((a,b)=>b.date.localeCompare(a.date))[0];
+    setF(p => ({
+      ...p,
+      truckNo: v,
+      tafal: veh?.tafalExempt ? "0" : String(settings?.tafalPerTrip||300),
+      // Auto-fill from last trip with this truck (only if fields currently empty)
+      givenRate: p.givenRate||"" ? p.givenRate : String(lastTrip?.givenRate||""),
+      frRate:    p.frRate||""    ? p.frRate    : String(lastTrip?.frRate||""),
+      to:        p.to            ? p.to        : (lastTrip?.to||""),
+    }));
   };
+
+  // Recent destinations and grades for quick-fill suggestions
+  const recentDestinations = [...new Set(trips.filter(t=>t.type===tripType&&t.to).map(t=>t.to))].slice(0,6);
+  const recentGrades       = [...new Set(trips.filter(t=>t.grade).map(t=>t.grade))].slice(0,5);
 
   // Called when AI extracts fields from DI/GR copy
   // LR is always manual — so we show LR-ask screen first, then check for duplicates
@@ -2797,12 +2901,20 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
         </div>
       )}
 
-      <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search truck, LR, destination…"
-        style={{background:C.card,border:`1.5px solid ${C.border}`,borderRadius:10,color:C.text,padding:"11px 14px",fontSize:14,outline:"none",width:"100%",boxSizing:"border-box"}} />
+      <div style={{display:"flex",gap:8,alignItems:"center"}}>
+        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search truck, LR, destination…"
+          style={{flex:1,background:C.card,border:`1.5px solid ${search?C.accent:C.border}`,borderRadius:10,
+            color:C.text,padding:"10px 14px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
+        {search && <button onClick={()=>setSearch("")}
+          style={{background:"none",border:"none",color:C.muted,fontSize:18,cursor:"pointer",padding:"0 4px"}}>✕</button>}
+      </div>
 
       <PillBar items={["All","Pending Bill","Billed","Paid"].map(s=>({id:s,label:s+(s!=="All"?` (${list.filter(t=>t.status===s).length})`:""  ),color:SC(s)}))} active={filter} onSelect={setFilter} />
 
-      <div style={{color:C.muted,fontSize:12}}>{shown.length} trips</div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div style={{color:C.muted,fontSize:12}}>{shown.length} trips {(dateFrom||dateTo)?`· ${dateFrom||"all"} → ${dateTo||"all"}`:""}</div>
+        {(dateFrom||dateTo) && <button onClick={()=>{setDateFrom("");setDateTo("");}} style={{background:"none",border:"none",color:C.red,fontSize:11,cursor:"pointer"}}>✕ Clear dates</button>}
+      </div>
 
       {/* TRIP CARDS */}
       {shown.map(t => {
@@ -2812,9 +2924,31 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
         const calc = calcNet(t, v, confirmedDiesel > 0 ? confirmedDiesel : null);
         const paidSoFar = (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
         const remaining = Math.max(0, calc.net - paidSoFar);
+        const isExpanded = expandedIds.has(t.id);
         return (
           <div key={t.id} style={{background:C.card,borderRadius:14,overflow:"hidden",borderLeft:`4px solid ${SC(t.status)}`,marginBottom:6}}>
-            <div style={{padding:"13px 14px 10px"}}>
+            {/* ── Collapsed header — always visible, tap to expand ── */}
+            <div onClick={()=>toggleExpand(t.id)}
+              style={{padding:"11px 14px",cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                  <span style={{fontWeight:800,fontSize:14}}>{t.truckNo}</span>
+                  <span style={{color:C.blue,fontWeight:700,fontSize:12}}>LR:{t.lrNo||"—"}</span>
+                  {t.driverSettled && <span style={{fontSize:11,color:C.green}}>✓ Settled</span>}
+                  {remaining>0 && <span style={{fontSize:11,color:C.orange}}>₹{remaining.toLocaleString("en-IN")} due</span>}
+                </div>
+                <div style={{color:C.muted,fontSize:11,marginTop:2}}>{t.to} · {t.qty}MT · {t.date}</div>
+              </div>
+              <div style={{display:"flex",gap:6,alignItems:"center",flexShrink:0}}>
+                <Badge label={t.status} color={SC(t.status)} />
+                <span style={{color:C.muted,fontSize:14,transition:"transform 0.2s",
+                  display:"inline-block",transform:isExpanded?"rotate(180deg)":"rotate(0deg)"}}>⌄</span>
+              </div>
+            </div>
+            {/* ── Expanded content ── */}
+            {isExpanded && (
+            <div style={{borderTop:`1px solid ${C.border}33`}}>
+            <div style={{padding:"10px 14px 10px"}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
                 <div style={{flex:1,minWidth:0}}>
                   <div style={{fontWeight:800,fontSize:15}}>{t.truckNo}</div>
@@ -2955,6 +3089,8 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                   </button>
                 )}
               </div>
+            )}
+            </div>
             )}
           </div>
         );
@@ -3109,7 +3245,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                       <div style={{color:C.muted,fontSize:12}}>Scan the document above — fields will be filled automatically</div>
                     </div>
                   ) : (
-                    <TripForm f={f} ff={ff} isIn={isIn} ac={ac} vehicles={vehicles} settings={settings} employees={employees||[]} cashTransfers={cashTransfers||[]}
+                    <TripForm f={f} ff={ff} isIn={isIn} ac={ac} vehicles={vehicles} settings={settings} employees={employees||[]} cashTransfers={cashTransfers||[]} recentDestinations={recentDestinations} recentGrades={recentGrades}
                       onTruckChange={onTruckChange} onSubmit={saveNew} submitLabel="Save Trip"
                       user={user} wasScanned={wasScanned} />
                   )}
@@ -3239,7 +3375,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
 
                   {/* Show form only after scan + LR confirmed (wasScanned) or owner */}
                   {(wasScanned || user.role==="owner") ? (
-                    <TripForm f={f} ff={ff} isIn={false} ac={C.accent} vehicles={vehicles} settings={settings} employees={employees||[]} cashTransfers={cashTransfers||[]}
+                    <TripForm f={f} ff={ff} isIn={false} ac={C.accent} vehicles={vehicles} settings={settings} employees={employees||[]} cashTransfers={cashTransfers||[]} recentDestinations={recentDestinations} recentGrades={recentGrades}
                       onTruckChange={onTruckChange}
                       onSubmit={async ()=>{
                         // All same validations as godown saveNew
@@ -3450,7 +3586,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
 }
 
 // Shared form for add + edit
-function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit, submitLabel, user, showStatus=false, wasScanned=false, isParty=false, employees=[], cashTransfers=[]}) {
+function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit, submitLabel, user, showStatus=false, wasScanned=false, isParty=false, employees=[], cashTransfers=[], recentDestinations=[], recentGrades=[]}) {
   // Ensure each diLine has frRate — migrate from trip-level frRate if missing
   const normalizedDiLines = (f.diLines||[]).map(d => ({...d, frRate: d.frRate || +f.frRate || 0}));
   const fWithLines = normalizedDiLines.length > 1 ? {...f, diLines: normalizedDiLines} : f;
@@ -3540,14 +3676,42 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
           : <><Field label="From" value={f.from||""} onChange={ff("from")} half />
               <Field label="To"   value={f.to||""}   onChange={ff("to")}   half /></>}
       </div>
+      {/* Recent destination chips */}
+      {!locked && !f.to && recentDestinations.length>0 && (
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:-6}}>
+          <span style={{color:C.muted,fontSize:11,alignSelf:"center"}}>Recent:</span>
+          {recentDestinations.map(d=>(
+            <button key={d} onClick={()=>ff("to")(d)}
+              style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:20,
+                padding:"3px 10px",fontSize:11,color:C.text,cursor:"pointer"}}>
+              {d}
+            </button>
+          ))}
+        </div>
+      )}
       {locked
         ? <LockedField label="Consignee" value={f.consignee} />
         : <Field label="Consignee" value={f.consignee||""} onChange={ff("consignee")} />}
       {locked
         ? <LockedField label="Grade" value={f.grade} />
-        : <Field label="Grade" value={f.grade||""} onChange={ff("grade")}
-            opts={isIn ? ["Limestone","Coal","Gypsum","Fly Ash","Slag","Other"].map(x=>({v:x,l:x}))
-                       : ["Cement Packed","Cement Bulk","Clinker"].map(x=>({v:x,l:x}))} />}
+        : <>
+            <Field label="Grade" value={f.grade||""} onChange={ff("grade")}
+              opts={isIn ? ["Limestone","Coal","Gypsum","Fly Ash","Slag","Other"].map(x=>({v:x,l:x}))
+                         : ["Cement Packed","Cement Bulk","Clinker"].map(x=>({v:x,l:x}))} />
+            {/* Recent grade chips */}
+            {!f.grade && recentGrades.length>0 && (
+              <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:-6}}>
+                <span style={{color:C.muted,fontSize:11,alignSelf:"center"}}>Recent:</span>
+                {recentGrades.map(g=>(
+                  <button key={g} onClick={()=>ff("grade")(g)}
+                    style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:20,
+                      padding:"3px 10px",fontSize:11,color:C.text,cursor:"pointer"}}>
+                    {g}
+                  </button>
+                ))}
+              </div>
+            )}
+          </>}
       <div style={{display:"flex",gap:10}}>
         {locked
           ? <><LockedField label="Qty (MT)" value={f.qty} half /><LockedField label="Bags" value={f.bags} half /></>
@@ -3705,7 +3869,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
             {l:"(−) Diesel (estimate)",       v:fmt(+f.dieselEstimate||0),              c:C.orange},
             {l:"(−) Shortage Recovery",       v:fmt(+f.shortageRecovery||0),            c:(+f.shortageRecovery||0)>0?C.red:C.muted},
             {l:"(−) Loan Recovery",           v:fmt(+f.loanRecovery||0),               c:(+f.loanRecovery||0)>0?C.red:C.muted},
-            {l:"My Margin",                   v:`${fmt(margin)} (₹${perMTMargin.toFixed(0)}/MT)`, c:marginOk?C.green:C.red},
+            {l:marginOk?"My Margin ✓":"⚠ Margin", v:`${fmt(margin)} (₹${perMTMargin.toFixed(0)}/MT)`, c:marginOk?C.green:C.red},
             {l:"Est. Net to Driver",          v:fmt(net-(+f.shortageRecovery||0)-(+f.loanRecovery||0)),  c:(net-(+f.shortageRecovery||0)-(+f.loanRecovery||0))>=0?C.green:C.red},
           ].map(x => (
             <div key={x.l} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:`1px solid ${C.border}22`}}>
@@ -3714,9 +3878,13 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
             </div>
           ))}
           {!marginOk && (+(f.frRate)||0)>0 && (+(f.givenRate)||0)>0 && (
-            <div style={{background:C.red+"22",border:`1px solid ${C.red}44`,borderRadius:8,
-              padding:"8px 10px",marginTop:8,color:C.red,fontSize:12,fontWeight:700}}>
-              ⚠ Margin ₹{perMTMargin.toFixed(0)}/MT is below minimum ₹30/MT — cannot save
+            <div style={{background:C.red+"22",border:`1.5px solid ${C.red}`,borderRadius:8,
+              padding:"10px 12px",marginTop:8,color:C.red,fontSize:13,fontWeight:700,
+              display:"flex",alignItems:"center",gap:8}}>
+              <span style={{fontSize:18}}>⛔</span>
+              <span>Margin ₹{perMTMargin.toFixed(0)}/MT — minimum ₹30/MT required<br/>
+                <span style={{fontSize:11,fontWeight:400,color:C.red,opacity:0.8}}>ಮಾರ್ಜಿನ್ ₹{perMTMargin.toFixed(0)}/MT — ಕನಿಷ್ಠ ₹30/MT ಬೇಕು</span>
+              </span>
             </div>
           )}
           <div style={{color:C.muted,fontSize:11,marginTop:8}}>Note: Loan deduction & confirmed diesel will apply at settlement</div>
@@ -7036,7 +7204,17 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                   <Field label="From" value={wFrom} onChange={setWFrom} type="date" half />
                   <Field label="To"   value={wTo}   onChange={setWTo}   type="date" half />
                 </div>
-                <Btn onClick={()=>printWalletPDF(e)} full outline color={C.blue}>🖨️ Print / Save PDF</Btn>
+                <div style={{display:"flex",gap:8}}>
+                  <Btn onClick={()=>printWalletPDF(e)} full outline color={C.blue}>🖨️ Print / Save PDF</Btn>
+                  <button onClick={()=>{
+                    const bal = xfrd - adv;
+                    const text = `M.Yantra Cash Wallet — ${e.name}\nTransferred: ${fmt(xfrd)}\nAdvances: ${fmt(adv)}\nBalance: ${fmt(bal)}`;
+                    window.open("https://wa.me/91"+e.phone.replace(/[^0-9]/g,"")+"?text="+encodeURIComponent(text),"_blank");
+                  }} style={{background:"#25D36622",border:"1px solid #25D36688",borderRadius:8,
+                    color:"#25D366",fontSize:13,fontWeight:700,padding:"8px 14px",cursor:"pointer",flexShrink:0}}>
+                    📲
+                  </button>
+                </div>
               </div>
 
               {/* Transaction history */}
@@ -8531,6 +8709,12 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, e
   });
   const histTotal = filteredPays.reduce((s,p)=>s+(p.amount||0),0);
 
+  const shareViaWhatsApp = (phone, text) => {
+    const clean = (phone||"").replace(/\D/g,"");
+    if(clean.length!==10){alert("Enter a valid 10-digit phone number.");return;}
+    window.open(`https://wa.me/91${clean}?text=${encodeURIComponent(text)}`,"_blank");
+  };
+
   const exportHistoryPDF = () => {
     const rows = filteredPays.map(p => {
       const t = trips.find(x=>x.id===p.tripId);
@@ -8624,11 +8808,22 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, e
                 <span style={{color:C.muted,fontSize:12}}>{filteredPays.length} payments · </span>
                 <span style={{color:C.green,fontWeight:800,fontSize:14}}>{fmt(histTotal)}</span>
               </div>
-              <button onClick={exportHistoryPDF}
-                style={{background:C.orange,border:"none",borderRadius:8,color:"#000",
-                  fontSize:12,fontWeight:700,padding:"7px 14px",cursor:"pointer"}}>
-                🖨 Export PDF
-              </button>
+              <div style={{display:"flex",gap:8}}>
+                <button onClick={exportHistoryPDF}
+                  style={{background:C.orange,border:"none",borderRadius:8,color:"#000",
+                    fontSize:12,fontWeight:700,padding:"7px 14px",cursor:"pointer"}}>
+                  🖨 Export PDF
+                </button>
+                <button onClick={()=>{
+                  const summary = filteredPays.slice(0,10).map(p=>`LR:${p.lrNo||"—"} ${p.truckNo} ₹${fmt(p.amount)} ${p.date}`).join("\n");
+                  const text = `M.Yantra Driver Payments\nTotal: ${fmt(histTotal)} (${filteredPays.length} payments)\n${histFrom||"all"} → ${histTo||"all"}\n\n${summary}`;
+                  const num = window.prompt("Driver/owner phone (10 digits):");
+                  if(num) window.open("https://wa.me/91"+num.replace(/[^0-9]/g,"")+"?text="+encodeURIComponent(text),"_blank");
+                }} style={{background:"#25D36622",border:"1px solid #25D36688",borderRadius:8,
+                  color:"#25D366",fontSize:12,fontWeight:700,padding:"7px 12px",cursor:"pointer"}}>
+                  📲 Share
+                </button>
+              </div>
             </div>
           </div>
 
