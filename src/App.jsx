@@ -2916,185 +2916,211 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
         {(dateFrom||dateTo) && <button onClick={()=>{setDateFrom("");setDateTo("");}} style={{background:"none",border:"none",color:C.red,fontSize:11,cursor:"pointer"}}>✕ Clear dates</button>}
       </div>
 
-      {/* TRIP CARDS */}
-      {shown.map(t => {
-        const v    = vehicles.find(x => x.truckNo===t.truckNo);
-        const tripIndents = indents.filter(i => i.tripId===t.id && i.confirmed);
-        const confirmedDiesel = tripIndents.reduce((s,i) => s+(i.amount||0), 0);
-        const calc = calcNet(t, v, confirmedDiesel > 0 ? confirmedDiesel : null);
-        const paidSoFar = (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
-        const remaining = Math.max(0, calc.net - paidSoFar);
-        const isExpanded = expandedIds.has(t.id);
-        return (
-          <div key={t.id} style={{background:C.card,borderRadius:14,overflow:"hidden",borderLeft:`4px solid ${SC(t.status)}`,marginBottom:6}}>
-            {/* ── Collapsed header — always visible, tap to expand ── */}
-            <div onClick={()=>toggleExpand(t.id)}
-              style={{padding:"11px 14px",cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <div style={{flex:1,minWidth:0}}>
-                <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-                  <span style={{fontWeight:800,fontSize:14}}>{t.truckNo}</span>
-                  <span style={{color:C.blue,fontWeight:700,fontSize:12}}>LR:{t.lrNo||"—"}</span>
-                  {t.driverSettled && <span style={{fontSize:11,color:C.green}}>✓ Settled</span>}
-                  {remaining>0 && <span style={{fontSize:11,color:C.orange}}>₹{remaining.toLocaleString("en-IN")} due</span>}
-                </div>
-                <div style={{color:C.muted,fontSize:11,marginTop:2}}>{t.to} · {t.qty}MT · {t.date}</div>
+      {/* TRIP CARDS — date-grouped, LR-prominent, sorted newest first */}
+      {(() => {
+        // Sort shown by date desc, then LR desc within same date
+        const sorted = [...shown].sort((a,b) => {
+          const dc = (b.date||"").localeCompare(a.date||"");
+          if(dc!==0) return dc;
+          return (+b.lrNo||0) - (+a.lrNo||0);
+        });
+
+        // Group by date
+        const groups = [];
+        sorted.forEach(t => {
+          const d = t.date||"";
+          if(!groups.length || groups[groups.length-1].date!==d)
+            groups.push({date:d, trips:[]});
+          groups[groups.length-1].trips.push(t);
+        });
+
+        const todayStr = today();
+        const yesterStr = new Date(Date.now()-864e5).toISOString().split("T")[0];
+        const fmtDateHdr = d => {
+          if(d===todayStr) return "Today — "+new Date(d).toLocaleDateString("en-IN",{day:"numeric",month:"short",year:"numeric"});
+          if(d===yesterStr) return "Yesterday — "+new Date(d).toLocaleDateString("en-IN",{day:"numeric",month:"short"});
+          return new Date(d).toLocaleDateString("en-IN",{weekday:"short",day:"numeric",month:"short",year:"numeric"});
+        };
+
+        return groups.map(({date:grpDate, trips:grpTrips}) => (
+          <div key={grpDate}>
+            {/* Date group header */}
+            <div style={{display:"flex",alignItems:"center",gap:10,margin:"14px 0 6px",paddingLeft:2}}>
+              <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:0.8,whiteSpace:"nowrap"}}>
+                {fmtDateHdr(grpDate)}
               </div>
-              <div style={{display:"flex",gap:6,alignItems:"center",flexShrink:0}}>
-                <Badge label={t.status} color={SC(t.status)} />
-                <span style={{color:C.muted,fontSize:14,transition:"transform 0.2s",
-                  display:"inline-block",transform:isExpanded?"rotate(180deg)":"rotate(0deg)"}}>⌄</span>
-              </div>
+              <div style={{flex:1,height:1,background:C.border+"55"}} />
+              <div style={{color:C.muted,fontSize:11}}>{grpTrips.length} trip{grpTrips.length>1?"s":""}</div>
             </div>
-            {/* ── Expanded content ── */}
-            {isExpanded && (
-            <div style={{borderTop:`1px solid ${C.border}33`}}>
-            <div style={{padding:"10px 14px 10px"}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
-                <div style={{flex:1,minWidth:0}}>
-                  <div style={{fontWeight:800,fontSize:15}}>{t.truckNo}</div>
-                  <div style={{fontSize:12,marginTop:2}}>
-                    <span style={{color:C.blue,fontWeight:700}}>LR: {t.lrNo||"—"}</span>
-                    {t.grNo && <span style={{color:C.muted}}> · GR: {t.grNo}</span>}
-                  </div>
-                  <div style={{color:C.muted,fontSize:11,marginTop:1}}>{t.from}→{t.to} · {t.date}</div>
-                </div>
-                <div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0}}>
-                  <Badge label={t.status} color={SC(t.status)} />
-                  {/* ✏ EDIT ICON — locked for non-owners on settled trips */}
-                  {t.driverSettled && user.role!=="owner" ? (
-                    <div title="Trip is frozen — driver payment complete. Only Owner can edit."
-                      style={{background:C.dim,borderRadius:8,color:C.muted+"66",padding:"5px 8px",
-                        fontSize:14,cursor:"not-allowed",opacity:0.4,display:"flex",alignItems:"center"}}>
-                      🔒
+
+            {grpTrips.map(t => {
+              const v    = vehicles.find(x => x.truckNo===t.truckNo);
+              const tripIndents = indents.filter(i => i.tripId===t.id && i.confirmed);
+              const confirmedDiesel = tripIndents.reduce((s,i) => s+(i.amount||0), 0);
+              const calc = calcNet(t, v, confirmedDiesel > 0 ? confirmedDiesel : null);
+              const paidSoFar = (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
+              const remaining = Math.max(0, calc.net - paidSoFar);
+              const isExpanded = expandedIds.has(t.id);
+              return (
+                <div key={t.id} style={{background:C.card,borderRadius:14,overflow:"hidden",
+                  borderLeft:`4px solid ${SC(t.status)}`,marginBottom:6}}>
+
+                  {/* ── Collapsed row — LR prominent (Option A+C combo) ── */}
+                  <div onClick={()=>toggleExpand(t.id)}
+                    style={{padding:"10px 12px",cursor:"pointer",display:"flex",alignItems:"center",gap:12}}>
+
+                    {/* LR number — big and prominent on the left */}
+                    <div style={{textAlign:"center",minWidth:44,flexShrink:0}}>
+                      <div style={{fontSize:18,fontWeight:800,color:C.blue,lineHeight:1}}>{t.lrNo||"—"}</div>
+                      <div style={{fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:0.5}}>LR</div>
                     </div>
-                  ) : (
-                    <button onClick={()=>{
-                      // Normalize diLines — ensure each line has frRate populated
-                      const normalized = {...t, diLines: (t.diLines||[]).map(d=>({...d, frRate: d.frRate||t.frRate||0}))};
-                      setEditSheet(normalized);
-                    }} style={{background:C.dim,border:"none",borderRadius:8,color:t.driverSettled?C.orange:C.muted,padding:"5px 8px",cursor:"pointer",fontSize:14}}>
-                      {t.driverSettled?"🔓":"✏"}
-                    </button>
+
+                    {/* Divider */}
+                    <div style={{width:1,height:36,background:C.border+"66",flexShrink:0}} />
+
+                    {/* Main info */}
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                        <span style={{fontWeight:700,fontSize:13}}>{t.truckNo}</span>
+                        {t.driverSettled && <span style={{fontSize:10,color:C.green,fontWeight:600}}>✓ Settled</span>}
+                        {t.diLines&&t.diLines.length>1 && <span style={{fontSize:10,color:C.teal,fontWeight:600}}>{t.diLines.length} DIs</span>}
+                        {t.orderType==="party" && <span style={{fontSize:10,color:C.accent,fontWeight:600}}>🤝</span>}
+                      </div>
+                      <div style={{color:C.muted,fontSize:11,marginTop:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                        {t.to} · {t.qty}MT
+                        {remaining>0 && <span style={{color:C.orange,fontWeight:600}}> · ₹{remaining.toLocaleString("en-IN")} due</span>}
+                      </div>
+                    </div>
+
+                    {/* Status + chevron */}
+                    <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:4,flexShrink:0}}>
+                      <Badge label={t.status} color={SC(t.status)} />
+                      <span style={{color:C.muted,fontSize:12,transition:"transform 0.2s",
+                        display:"inline-block",transform:isExpanded?"rotate(180deg)":"rotate(0deg)"}}>⌄</span>
+                    </div>
+                  </div>
+
+                  {/* ── Expanded content ── */}
+                  {isExpanded && (
+                  <div style={{borderTop:`1px solid ${C.border}33`}}>
+                  <div style={{padding:"10px 14px 10px"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontWeight:800,fontSize:15}}>{t.truckNo}</div>
+                        <div style={{fontSize:12,marginTop:2}}>
+                          <span style={{color:C.blue,fontWeight:700}}>LR: {t.lrNo||"—"}</span>
+                          {t.grNo && <span style={{color:C.muted}}> · GR: {t.grNo}</span>}
+                        </div>
+                        <div style={{color:C.muted,fontSize:11,marginTop:1}}>{t.from}→{t.to} · {t.date}</div>
+                      </div>
+                      <div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0}}>
+                        <Badge label={t.status} color={SC(t.status)} />
+                        {t.driverSettled && user.role!=="owner" ? (
+                          <div title="Trip is frozen — driver payment complete. Only Owner can edit."
+                            style={{background:C.dim,borderRadius:8,color:C.muted+"66",padding:"5px 8px",
+                              fontSize:14,cursor:"not-allowed",opacity:0.4,display:"flex",alignItems:"center"}}>
+                            🔒
+                          </div>
+                        ) : (
+                          <button onClick={()=>{
+                            const normalized = {...t, diLines: (t.diLines||[]).map(d=>({...d, frRate: d.frRate||t.frRate||0}))};
+                            setEditSheet(normalized);
+                          }} style={{background:C.dim,border:"none",borderRadius:8,color:t.driverSettled?C.orange:C.muted,padding:"5px 8px",cursor:"pointer",fontSize:14}}>
+                            {t.driverSettled?"🔓":"✏"}
+                          </button>
+                        )}
+                        {user.role==="owner" && (
+                          <button onClick={()=>setConfirmDel(t)}
+                            style={{background:C.red+"22",border:"none",borderRadius:8,color:C.red,padding:"5px 8px",cursor:"pointer",fontSize:14}}>🗑</button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",borderTop:`1px solid ${C.border}`,background:C.card2}}>
+                    {[
+                      {l:"MT",     v:t.qty,                            c:C.text},
+                      {l:"Billed", v:fmt(calc.billed||t.qty*t.frRate), c:C.blue},
+                      {l:"Owed",   v:fmt(calc.gross),                  c:C.orange},
+                      {l: paidSoFar>0 ? "Remaining" : "Net Pay",
+                       v: fmt(paidSoFar>0 ? remaining : calc.net),
+                       c: paidSoFar>0 ? (remaining===0 ? C.green : C.accent) : (calc.net>=0?C.green:C.red),
+                       sub: paidSoFar>0 ? `paid ${fmt(paidSoFar)}` : null},
+                    ].map(x => (
+                      <div key={x.l} style={{padding:"8px 0",textAlign:"center",borderRight:`1px solid ${C.border}`}}>
+                        <div style={{color:x.c,fontWeight:700,fontSize:12}}>{x.v}</div>
+                        <div style={{color:C.muted,fontSize:9}}>{x.l}</div>
+                        {x.sub && <div style={{color:C.muted,fontSize:9}}>{x.sub}</div>}
+                      </div>
+                    ))}
+                  </div>
+
+                  <div style={{padding:"7px 12px 4px",display:"flex",gap:5,flexWrap:"wrap",alignItems:"center",justifyContent:"space-between"}}>
+                    <span style={{color:ROLES[t.createdBy]?.color||C.muted,fontSize:11}}>by {t.createdBy} · {t.createdAt}</span>
+                    <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}}>
+                      {t.tafal>0     && <Badge label={"TAFAL ₹"+t.tafal}     color={C.purple} />}
+                      {t.shortage>0  && <Badge label={"⚠ "+t.shortage+"MT"}  color={C.red} />}
+                      {t.advance>0   && <Badge label={"Adv "+fmt(t.advance)}  color={C.orange} />}
+                      {confirmedDiesel>0 && <Badge label={"⛽ "+fmt(confirmedDiesel)} color={C.orange} />}
+                      {t.driverSettled   && <Badge label="✓ Settled"          color={C.green} />}
+                      {t.diLines && t.diLines.length > 1 && <Badge label={t.diLines.length+" DIs"} color={C.teal} />}
+                    </div>
+                  </div>
+
+                  {(t.orderType==="party"||t.grFilePath) && (
+                    <div style={{padding:"5px 12px 8px",display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",
+                      borderTop:"1px solid "+C.border+"33"}}>
+                      <Badge label="🤝 Party" color={C.accent} />
+                      {t.orderType==="party" && !t.emailSentAt && !t.sealedInvoicePath && !t.mergedPdfPath && <Badge label="⚠ Confirmation Pending" color={C.red} />}
+                      {t.orderType==="party" && t.emailSentAt && !t.receiptFilePath && !t.mergedPdfPath && <Badge label="📧 Awaiting Reply" color={C.blue} />}
+                      {t.receiptFilePath && !t.mergedPdfPath && <Badge label="🔄 Receipt uploaded" color={C.teal} />}
+                      {t.sealedInvoicePath && !t.mergedPdfPath && <Badge label="🏷️ Sealed uploaded" color={C.orange} />}
+                      {t.mergedPdfPath && <Badge label="✅ Merged PDF ready" color={C.green} />}
+                      {t.emailSentAt && t.batchId && !t.mergedPdfPath && (
+                        <button onClick={()=>setBatchReceiptSheet(t.batchId)}
+                          style={{background:C.green+"22",color:C.green,border:"1px solid "+C.green+"44",borderRadius:20,
+                            padding:"4px 12px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+                          📎 Upload Batch Receipt
+                        </button>
+                      )}
+                      {t.grFilePath && !t.mergedPdfPath && (
+                        <button onClick={()=>setSealedSheet(t)}
+                          style={{background:C.orange+"22",color:C.orange,border:"1px solid "+C.orange+"44",borderRadius:20,
+                            padding:"4px 12px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+                          🏷️ Upload Sealed Invoice
+                        </button>
+                      )}
+                      {t.grFilePath && (
+                        <button onClick={async()=>{try{const url=await getSignedUrl(t.grFilePath,3600);const a=document.createElement("a");a.href=url;a.download="GR_"+(t.lrNo||t.id);a.target="_blank";document.body.appendChild(a);a.click();document.body.removeChild(a);}catch(e){alert("GR download failed: "+e.message);}}}
+                          style={{background:C.teal+"22",color:C.teal,border:"1px solid "+C.teal+"44",borderRadius:20,
+                            padding:"4px 12px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+                          ⬇ GR
+                        </button>
+                      )}
+                      {t.invoiceFilePath && (
+                        <button onClick={async()=>{try{const url=await getSignedUrl(t.invoiceFilePath,3600);const a=document.createElement("a");a.href=url;a.download="Invoice_"+(t.lrNo||t.id);a.target="_blank";document.body.appendChild(a);a.click();document.body.removeChild(a);}catch(e){alert("Invoice download failed: "+e.message);}}}
+                          style={{background:C.blue+"22",color:C.blue,border:"1px solid "+C.blue+"44",borderRadius:20,
+                            padding:"4px 12px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+                          ⬇ Invoice
+                        </button>
+                      )}
+                      {t.mergedPdfPath && (
+                        <button onClick={async()=>{try{const url=await getSignedUrl(t.mergedPdfPath,3600);const a=document.createElement("a");a.href=url;a.download="MergedConfirmation_"+(t.lrNo||t.id)+".pdf";a.target="_blank";document.body.appendChild(a);a.click();document.body.removeChild(a);}catch(e){alert("Download failed: "+e.message);}}}
+                          style={{background:C.green+"22",color:C.green,border:"1px solid "+C.green+"44",borderRadius:20,
+                            padding:"4px 12px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+                          ⬇ Merged PDF
+                        </button>
+                      )}
+                    </div>
                   )}
-                  {/* 🗑 DELETE (owner only) */}
-                  {user.role==="owner" && (
-                    <button onClick={()=>setConfirmDel(t)}
-                      style={{background:C.red+"22",border:"none",borderRadius:8,color:C.red,padding:"5px 8px",cursor:"pointer",fontSize:14}}>🗑</button>
+                  </div>
                   )}
                 </div>
-              </div>
-            </div>
-
-            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",borderTop:`1px solid ${C.border}`,background:C.card2}}>
-              {[
-                {l:"MT",     v:t.qty,                           c:C.text},
-                {l:"Billed", v:fmt(calc.billed||t.qty*t.frRate),c:C.blue},
-                {l:"Owed",   v:fmt(calc.gross),                 c:C.orange},
-                {l: paidSoFar>0 ? "Remaining" : "Net Pay",
-                 v: fmt(paidSoFar>0 ? remaining : calc.net),
-                 c: paidSoFar>0 ? (remaining===0 ? C.green : C.accent) : (calc.net>=0?C.green:C.red),
-                 sub: paidSoFar>0 ? `paid ${fmt(paidSoFar)}` : null},
-              ].map(x => (
-                <div key={x.l} style={{padding:"8px 0",textAlign:"center",borderRight:`1px solid ${C.border}`}}>
-                  <div style={{color:x.c,fontWeight:700,fontSize:12}}>{x.v}</div>
-                  <div style={{color:C.muted,fontSize:9}}>{x.l}</div>
-                  {x.sub && <div style={{color:C.muted,fontSize:9}}>{x.sub}</div>}
-                </div>
-              ))}
-            </div>
-
-            {/* Footer — Row 1: meta + standard badges */}
-            <div style={{padding:"7px 12px 4px",display:"flex",gap:5,flexWrap:"wrap",alignItems:"center",justifyContent:"space-between"}}>
-              <span style={{color:ROLES[t.createdBy]?.color||C.muted,fontSize:11}}>by {t.createdBy} · {t.createdAt}</span>
-              <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}}>
-                {t.tafal>0     && <Badge label={"TAFAL ₹"+t.tafal} color={C.purple} />}
-                {t.shortage>0  && <Badge label={"⚠ "+t.shortage+"MT"} color={C.red} />}
-                {t.advance>0   && <Badge label={"Adv "+fmt(t.advance)} color={C.orange} />}
-                {confirmedDiesel>0 && <Badge label={"⛽ "+fmt(confirmedDiesel)} color={C.orange} />}
-                {t.driverSettled   && <Badge label="✓ Settled" color={C.green} />}
-                {t.diLines && t.diLines.length > 1 && <Badge label={t.diLines.length+" DIs"} color={C.teal} />}
-              </div>
-            </div>
-            {/* Footer — Row 2: party actions (own row, always visible) */}
-            {(t.orderType==="party"||t.grFilePath) && (
-              <div style={{padding:"5px 12px 8px",display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",
-                borderTop:"1px solid "+C.border+"33"}}>
-                <Badge label="🤝 Party" color={C.accent} />
-                {t.orderType==="party" && !t.emailSentAt && !t.sealedInvoicePath && !t.mergedPdfPath && <Badge label="⚠ Confirmation Pending" color={C.red} />}
-                {t.orderType==="party" && t.emailSentAt && !t.receiptFilePath && !t.mergedPdfPath && <Badge label="📧 Awaiting Reply" color={C.blue} />}
-                {t.receiptFilePath && !t.mergedPdfPath && <Badge label="🔄 Receipt uploaded" color={C.teal} />}
-                {t.sealedInvoicePath && !t.mergedPdfPath && <Badge label="🏷️ Sealed uploaded" color={C.orange} />}
-                {t.mergedPdfPath && <Badge label="✅ Merged PDF ready" color={C.green} />}
-                {t.emailSentAt && t.batchId && !t.mergedPdfPath && (
-                  <button onClick={()=>setBatchReceiptSheet(t.batchId)}
-                    style={{background:C.green+"22",color:C.green,
-                      border:"1px solid "+C.green+"44",borderRadius:20,
-                      padding:"4px 12px",fontSize:11,fontWeight:700,
-                      cursor:"pointer",whiteSpace:"nowrap"}}>
-                    📎 Upload Batch Receipt
-                  </button>
-                )}
-                {/* Upload Sealed Invoice button — for trips that get physically stamped invoice */}
-                {t.grFilePath && !t.mergedPdfPath && (
-                  <button onClick={()=>setSealedSheet(t)}
-                    style={{background:C.orange+"22",color:C.orange,
-                      border:"1px solid "+C.orange+"44",borderRadius:20,
-                      padding:"4px 12px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
-                    🏷️ Upload Sealed Invoice
-                  </button>
-                )}
-                {/* GR Copy download */}
-                {t.grFilePath && (
-                  <button onClick={async()=>{
-                    try{
-                      const url=await getSignedUrl(t.grFilePath,3600);
-                      const a=document.createElement("a");a.href=url;
-                      a.download="GR_"+(t.lrNo||t.id);
-                      a.target="_blank";document.body.appendChild(a);a.click();document.body.removeChild(a);
-                    }catch(e){alert("GR download failed: "+e.message);}
-                  }} style={{background:C.teal+"22",color:C.teal,
-                    border:"1px solid "+C.teal+"44",borderRadius:20,
-                    padding:"4px 12px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
-                    ⬇ GR
-                  </button>
-                )}
-                {/* Invoice download */}
-                {t.invoiceFilePath && (
-                  <button onClick={async()=>{
-                    try{
-                      const url=await getSignedUrl(t.invoiceFilePath,3600);
-                      const a=document.createElement("a");a.href=url;
-                      a.download="Invoice_"+(t.lrNo||t.id);
-                      a.target="_blank";document.body.appendChild(a);a.click();document.body.removeChild(a);
-                    }catch(e){alert("Invoice download failed: "+e.message);}
-                  }} style={{background:C.blue+"22",color:C.blue,
-                    border:"1px solid "+C.blue+"44",borderRadius:20,
-                    padding:"4px 12px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
-                    ⬇ Invoice
-                  </button>
-                )}
-                {/* Merged PDF download */}
-                {t.mergedPdfPath && (
-                  <button onClick={async()=>{
-                    try{
-                      const url=await getSignedUrl(t.mergedPdfPath,3600);
-                      const a=document.createElement("a");a.href=url;
-                      a.download="MergedConfirmation_"+(t.lrNo||t.id)+".pdf";
-                      a.target="_blank";document.body.appendChild(a);a.click();document.body.removeChild(a);
-                    }catch(e){alert("Download failed: "+e.message);}
-                  }} style={{background:C.green+"22",color:C.green,
-                    border:"1px solid "+C.green+"44",borderRadius:20,
-                    padding:"4px 12px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
-                    ⬇ Merged PDF
-                  </button>
-                )}
-              </div>
-            )}
-            </div>
-            )}
+              );
+            })}
           </div>
-        );
-      })}
+        ));
+      })()}
       {shown.length===0 && <div style={{textAlign:"center",color:C.muted,padding:40}}>No trips found</div>}
 
       {/* ── WHATSAPP REMINDER SHEET ── */}
