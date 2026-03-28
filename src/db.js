@@ -274,7 +274,22 @@ export const DB = {
   getUsers:       () => fetchAll('mye_users', userFromDB),
   saveUser:       u  => upsertOne('mye_users', userToDB, u),
 
-  getTrips:       () => fetchAll('mye_trips', tripFromDB),
+  // By default loads last 90 days only — pass fromDate=null to load all
+  getTrips: async (fromDate) => {
+    const cutoff = fromDate !== null
+      ? fromDate
+      : new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    let q = supabase.from('mye_trips').select('*').order('date', {ascending: false}).order('id');
+    if (cutoff) q = q.gte('date', cutoff);
+    const { data, error } = await q;
+    if (error) throw error;
+    return (data||[]).map(tripFromDB);
+  },
+  getTripsAll: async () => {
+    const { data, error } = await supabase.from('mye_trips').select('*').order('date', {ascending: false}).order('id');
+    if (error) throw error;
+    return (data||[]).map(tripFromDB);
+  },
   saveTrip:       t  => upsertOne('mye_trips', tripToDB, t),
   deleteTrip:     id => deleteOne('mye_trips', id),
   saveManyTrips:  async (trips) => {

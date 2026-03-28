@@ -482,6 +482,21 @@ export default function App() {
 
   const [users,       setUsers,       rU, reloadUsers]       = useDB(DB.getUsers,       []);
   const [trips,       setTrips,       rT, reloadTrips]       = useDB(DB.getTrips,       []);
+  const [allTripsLoaded, setAllTripsLoaded] = useState(false);
+  const [loadingAllTrips, setLoadingAllTrips] = useState(false);
+  // Load all trips (beyond 90-day default) — called explicitly by user
+  const loadAllTrips = async () => {
+    setLoadingAllTrips(true);
+    try {
+      const all = await DB.getTripsAll();
+      setTrips(() => all);
+      setAllTripsLoaded(true);
+    } catch(e) {
+      alert("Could not load older trips: " + e.message);
+    } finally {
+      setLoadingAllTrips(false);
+    }
+  };
   const [vehicles,    setVehicles,    rV, reloadVehicles]    = useDB(DB.getVehicles,    []);
   const [employees,   setEmployees,   rE, reloadEmployees]   = useDB(DB.getEmployees,   []);
   const [payments,    setPayments,    rP, reloadPayments]    = useDB(DB.getPayments,    []);
@@ -646,6 +661,7 @@ export default function App() {
     gstReleases, setGstReleases:dbSetGstReleases,
     cashTransfers, setCashTransfers:dbSetCashTransfers,
     user, log,
+    allTripsLoaded, loadingAllTrips, loadAllTrips,
   };
 
   // ── Retroactive auto-settle: runs whenever trips or driverPays change ─────────
@@ -672,7 +688,7 @@ export default function App() {
       const netDue  = Math.max(0, gross - deducts);
       return {...t, driverSettled:true, settledBy:"auto", netPaid:netDue};
     }));
-  }, [trips, driverPays, vehicles]);
+  }, [trips, driverPays, vehicles, allTripsLoaded]);
 
   if (!user) {
     if (loading) return (
@@ -2398,7 +2414,7 @@ function SealedInvoiceSheet({ trip, onMerge, onClose }) {
 }
 
 // ─── TRIPS ────────────────────────────────────────────────────────────────────
-function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripType, user, log, driverPays, employees, cashTransfers, setCashTransfers}) {
+function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripType, user, log, driverPays, employees, cashTransfers, setCashTransfers, allTripsLoaded, loadingAllTrips, loadAllTrips}) {
   const isIn = tripType === "inbound";
   const ac   = isIn ? C.teal : C.accent;
 
@@ -2915,6 +2931,31 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
         <div style={{color:C.muted,fontSize:12}}>{shown.length} trips {(dateFrom||dateTo)?`· ${dateFrom||"all"} → ${dateTo||"all"}`:""}</div>
         {(dateFrom||dateTo) && <button onClick={()=>{setDateFrom("");setDateTo("");}} style={{background:"none",border:"none",color:C.red,fontSize:11,cursor:"pointer"}}>✕ Clear dates</button>}
       </div>
+
+      {/* ── Load older trips banner ── */}
+      {!allTripsLoaded && (
+        <div style={{background:C.card,borderRadius:12,padding:"11px 14px",
+          display:"flex",justifyContent:"space-between",alignItems:"center",
+          border:`1px solid ${C.border}`}}>
+          <div>
+            <div style={{fontSize:13,fontWeight:600,color:C.text}}>Showing last 90 days</div>
+            <div style={{fontSize:11,color:C.muted,marginTop:2}}>
+              {trips.length} trips loaded · Older records not shown
+            </div>
+          </div>
+          <button onClick={loadAllTrips} disabled={loadingAllTrips}
+            style={{background:C.blue+"22",border:`1px solid ${C.blue}44`,borderRadius:10,
+              color:C.blue,fontSize:12,fontWeight:700,padding:"7px 14px",
+              cursor:loadingAllTrips?"wait":"pointer",whiteSpace:"nowrap",flexShrink:0}}>
+            {loadingAllTrips ? "Loading…" : "Load all trips"}
+          </button>
+        </div>
+      )}
+      {allTripsLoaded && (
+        <div style={{textAlign:"center",color:C.muted,fontSize:11,padding:"4px 0"}}>
+          All trips loaded ({trips.length} total)
+        </div>
+      )}
 
       {/* TRIP CARDS — date-grouped, LR-prominent, sorted newest first */}
       {(() => {
