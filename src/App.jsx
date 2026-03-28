@@ -828,6 +828,35 @@ function Dashboard({trips, vehicles, employees, indents, pumps, pumpPayments, dr
         </div>
       )}
 
+      {/* Per-client summary */}
+      {(()=>{
+        const clientData = CLIENTS.map(c=>({
+          name: c,
+          trips: trips.filter(t=>(t.client||DEFAULT_CLIENT)===c&&t.type==="outbound"),
+          color: c.includes("Ultratech")?C.orange:c.includes("Guntur")?C.purple:C.blue,
+          short: c.replace("Shree Cement ","SC ").replace("Ultratech ","UT "),
+        })).filter(cd=>cd.trips.length>0);
+        if(clientData.length<2) return null;
+        return (
+          <div>
+            <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>By Plant</div>
+            <div style={{display:"grid",gridTemplateColumns:`repeat(${clientData.length},1fr)`,gap:8}}>
+              {clientData.map(cd=>(
+                <div key={cd.name} style={{background:C.card,borderRadius:12,padding:"10px 12px",borderTop:`3px solid ${cd.color}`}}>
+                  <div style={{color:cd.color,fontWeight:700,fontSize:11,marginBottom:4}}>{cd.short}</div>
+                  <div style={{color:C.text,fontWeight:800,fontSize:16}}>{cd.trips.length}</div>
+                  <div style={{color:C.muted,fontSize:10}}>trips</div>
+                  <div style={{color:C.green,fontWeight:700,fontSize:12,marginTop:4}}>
+                    {fmt(cd.trips.reduce((s,t)=>s+t.qty*(t.frRate-t.givenRate),0))}
+                  </div>
+                  <div style={{color:C.muted,fontSize:9}}>margin</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
+
       {/* KPI grid */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
         <KPI icon="📈" label="Total Margin"    value={fmt(margin)}      color={C.green} sub="all time" />
@@ -1552,6 +1581,12 @@ Rules:
 
 // ─── PARTY TRIP STORAGE HELPERS ──────────────────────────────────────────────
 // IMPORTANT: Must match bucket name exactly in Supabase Storage
+// ─── CLIENT / PLANT LIST ─────────────────────────────────────────────────────
+const CLIENTS = ["Shree Cement Kodla","Shree Cement Guntur","Ultratech Malkhed"];
+const DEFAULT_CLIENT = "Shree Cement Kodla";
+// Shree Cement plants (used to decide if Shree Payments tab is relevant)
+const SHREE_CLIENTS = ["Shree Cement Kodla","Shree Cement Guntur"];
+
 const PARTY_BUCKET = "party-trip-files";
 
 async function uploadPartyFile(tripId, role, file) {
@@ -2422,6 +2457,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
   const [editSheet,   setEditSheet]   = useState(null);
   const [filter,      setFilter]      = useState("All");
   const [search,      setSearch]      = useState("");
+  const [clientFilter, setClientFilter] = useState(""); // "" = All clients
   const [diConflict,  setDiConflict]  = useState(null);
   const [wasScanned,  setWasScanned]  = useState(false);
   const [confirmDel,  setConfirmDel]  = useState(null);
@@ -2452,6 +2488,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
 
   const blankForm = (isParty=false) => ({
     type:tripType, lrNo:"", diNo:"", truckNo:"", grNo:"", dieselIndentNo:"",
+    client: isIn ? DEFAULT_CLIENT : DEFAULT_CLIENT,
     consignee: isIn ? "Shree Cement Ltd" : "",
     from: isIn ? "" : "Kodla", to: isIn ? "Kodla" : "",
     grade: isIn ? "Limestone" : "Cement Packed",
@@ -2472,8 +2509,9 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
   const ff = k => v => setF(p => ({...p, [k]:v}));
 
   const list   = trips.filter(t => t.type===tripType);
-  const dlist  = (dateFrom||dateTo) ? list.filter(t => t.date>=(dateFrom||"2000-01-01") && t.date<=(dateTo||"2099-12-31")) : list;
-  const slist  = search ? dlist.filter(t => (t.truckNo+t.lrNo+t.grNo+t.diNo+t.to+t.consignee).toLowerCase().includes(search.toLowerCase())) : dlist;
+  const clist  = clientFilter ? list.filter(t => (t.client||DEFAULT_CLIENT)===clientFilter) : list;
+  const dlist  = (dateFrom||dateTo) ? clist.filter(t => t.date>=(dateFrom||"2000-01-01") && t.date<=(dateTo||"2099-12-31")) : clist;
+  const slist  = search ? dlist.filter(t => (t.truckNo+t.lrNo+t.grNo+t.diNo+t.to+t.consignee+(t.client||"")).toLowerCase().includes(search.toLowerCase())) : dlist;
   const shown  = filter==="All" ? slist : slist.filter(t => t.status===filter);
 
   // When truck number changes, check if tafalExempt
@@ -2499,11 +2537,22 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
 
   // Called when AI extracts fields from DI/GR copy
   // LR is always manual — so we show LR-ask screen first, then check for duplicates
+  // Detect client from scanned consignee/from field
+  const detectClient = (extracted) => {
+    const haystack = ((extracted.consignee||"")+" "+(extracted.from||"")).toLowerCase();
+    if(haystack.includes("ultratech")) return "Ultratech Malkhed";
+    if(haystack.includes("guntur"))    return "Shree Cement Guntur";
+    return DEFAULT_CLIENT; // default to Shree Kodla
+  };
+
   const onDIExtracted = (extracted, _ignored) => {
     // Carry district+state into form if present (party orders)
     if(extracted.district || extracted.state){
       setF(p=>({...p, district:extracted.district||p.district||"", state:extracted.state||p.state||""}));
     }
+    // Auto-detect client from scanned document
+    const detectedClient = detectClient(extracted);
+    setF(p=>({...p, client: detectedClient}));
     // Always ask for LR number — it's never on the GR copy
     setDiConflict({ extracted, existingTrip: null, askLR: true, lrInput: "" });
   };
@@ -2894,7 +2943,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                   const v = vehicles?.find(x=>x.truckNo===t.truckNo);
                   const diesel = t.dieselEstimate||0;
                   const net = (t.qty*(t.givenRate||0)) - (t.advance||0) - (t.tafal||0) - diesel;
-                  return "<tr><td>"+t.date+"</td><td>"+t.truckNo+"</td><td>"+(t.lrNo||"—")+"</td><td>"+(t.to||"—")+"</td><td>"+t.qty+"</td><td style='text-align:right'>"+fmt(t.qty*(t.frRate||0))+"</td><td style='text-align:right'>"+fmt(t.advance||0)+"</td><td style='text-align:right'>"+fmt(diesel)+"</td><td style='text-align:right'>"+fmt(net)+"</td><td>"+(t.status||"—")+"</td></tr>";
+                  return "<tr><td>"+t.date+"</td><td>"+t.truckNo+"</td><td>"+(t.lrNo||"—")+"</td><td>"+(t.client||DEFAULT_CLIENT).replace("Shree Cement ","SC ").replace("Ultratech ","UT ")+"</td><td>"+(t.to||"—")+"</td><td>"+t.qty+"</td><td style='text-align:right'>"+fmt(t.qty*(t.frRate||0))+"</td><td style='text-align:right'>"+fmt(t.advance||0)+"</td><td style='text-align:right'>"+fmt(diesel)+"</td><td style='text-align:right'>"+fmt(net)+"</td><td>"+(t.status||"—")+"</td></tr>";
                 }).join("");
                 const totalFreight = shown.reduce((s,t)=>s+t.qty*(t.frRate||0),0);
                 const totalQty = shown.reduce((s,t)=>s+t.qty,0);
@@ -2926,6 +2975,32 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
       </div>
 
       <PillBar items={["All","Pending Bill","Billed","Paid"].map(s=>({id:s,label:s+(s!=="All"?` (${list.filter(t=>t.status===s).length})`:""  ),color:SC(s)}))} active={filter} onSelect={setFilter} />
+
+      {/* Client / Plant filter — only shows when multiple clients present */}
+      {(()=>{
+        const cc={};
+        list.forEach(t=>{const c=t.client||DEFAULT_CLIENT;cc[c]=(cc[c]||0)+1;});
+        if(Object.keys(cc).length<2) return null;
+        return (
+          <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+            <span style={{color:C.muted,fontSize:11,fontWeight:700}}>Plant:</span>
+            {["All",...CLIENTS].map(c=>{
+              const cnt=c==="All"?list.length:(cc[c]||0);
+              if(c!=="All"&&!cc[c]) return null;
+              const active=(clientFilter||"")===(c==="All"?"":c);
+              return (
+                <button key={c} onClick={()=>setClientFilter(c==="All"?"":c)}
+                  style={{padding:"4px 10px",borderRadius:16,fontSize:11,fontWeight:700,cursor:"pointer",
+                    border:`1.5px solid ${active?C.teal:C.border}`,
+                    background:active?C.teal+"22":"none",
+                    color:active?C.teal:C.muted}}>
+                  {c==="All"?"All":c.replace("Shree Cement ","SC·").replace("Ultratech ","UT·")} ({cnt})
+                </button>
+              );
+            })}
+          </div>
+        );
+      })()}
 
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div style={{color:C.muted,fontSize:12}}>{shown.length} trips {(dateFrom||dateTo)?`· ${dateFrom||"all"} → ${dateTo||"all"}`:""}</div>
@@ -3026,6 +3101,12 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                         {t.driverSettled && <span style={{fontSize:10,color:C.green,fontWeight:600}}>✓ Settled</span>}
                         {t.diLines&&t.diLines.length>1 && <span style={{fontSize:10,color:C.teal,fontWeight:600}}>{t.diLines.length} DIs</span>}
                         {t.orderType==="party" && <span style={{fontSize:10,color:C.accent,fontWeight:600}}>🤝</span>}
+                        {(()=>{
+                          const c=t.client||DEFAULT_CLIENT;
+                          const col=c.includes("Ultratech")?C.orange:c.includes("Guntur")?C.purple:C.blue;
+                          const lbl=c.replace("Shree Cement ","").replace("Ultratech ","UT·");
+                          return <span style={{fontSize:9,color:col,fontWeight:700,background:col+"18",borderRadius:8,padding:"1px 6px"}}>{lbl}</span>;
+                        })()}
                       </div>
                       <div style={{color:C.muted,fontSize:11,marginTop:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
                         {t.to} · {t.qty}MT
@@ -3047,7 +3128,11 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                   <div style={{padding:"10px 14px 10px"}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
                       <div style={{flex:1,minWidth:0}}>
-                        <div style={{fontWeight:800,fontSize:15}}>{t.truckNo}</div>
+                        <div style={{fontWeight:800,fontSize:15}}>{t.truckNo}
+                        <span style={{fontSize:11,fontWeight:400,color:(t.client||DEFAULT_CLIENT).includes("Ultratech")?C.orange:(t.client||DEFAULT_CLIENT).includes("Guntur")?C.purple:C.blue,marginLeft:8}}>
+                          {(t.client||DEFAULT_CLIENT)}
+                        </span>
+                      </div>
                         <div style={{fontSize:12,marginTop:2}}>
                           <span style={{color:C.blue,fontWeight:700}}>LR: {t.lrNo||"—"}</span>
                           {t.grNo && <span style={{color:C.muted}}> · GR: {t.grNo}</span>}
@@ -3412,6 +3497,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                       // Carry party fields through LR confirm
                       onLRConfirmed(lrNo, driverPhone);
                       setF(p=>({...p, orderType:"party",
+                        client: detectClient(diConflict.extracted)||p.client||DEFAULT_CLIENT,
                         district:diConflict.extracted.district||p.district||"",
                         state:diConflict.extracted.state||p.state||""}));
                     }}
@@ -3426,7 +3512,8 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                   {/* Scan uploader — goes through same onDIExtracted → AskLRSheet flow */}
                   <DIUploader onExtracted={e=>{
                     // Preserve party orderType and district/state through the scan flow
-                    setF(p=>({...p, orderType:"party",
+                    const dc = detectClient(e);
+                    setF(p=>({...p, orderType:"party", client:dc,
                       district:e.district||p.district||"",
                       state:e.state||p.state||""}));
                     onDIExtracted(e);
@@ -3521,6 +3608,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                             dieselEstimate:+f.dieselEstimate,
                             dieselIndentNo:(f.dieselIndentNo||"").trim(),
                             orderType:"party", district:f.district||"", state:f.state||"",
+                            client: f.client||DEFAULT_CLIENT,
                             grFilePath:grUrl, invoiceFilePath:invUrl, mergedPdfPath:"",
                             emailSentAt:"", partyEmail:"", batchId:"", sealedInvoicePath:"",
                             receiptFilePath:"", receiptUploadedAt:"",
@@ -3737,6 +3825,28 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
               <Field label="GR No" value={f.grNo||""} onChange={ff("grNo")} placeholder="1070/MYE/2670" half /></>}
       </div>
 
+      {/* Client / Plant selector */}
+      {!locked && (
+        <div style={{marginBottom:4}}>
+          <div style={{fontSize:11,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>
+            Client / Plant *
+          </div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            {CLIENTS.map(c => (
+              <button key={c} onClick={()=>ff("client")(c)}
+                style={{padding:"8px 14px",borderRadius:20,fontSize:12,fontWeight:700,cursor:"pointer",
+                  border:`2px solid ${(f.client||DEFAULT_CLIENT)===c?ac:C.border}`,
+                  background:(f.client||DEFAULT_CLIENT)===c?ac+"22":"none",
+                  color:(f.client||DEFAULT_CLIENT)===c?ac:C.muted}}>
+                {c}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      {locked && (
+        <LockedField label="Client / Plant" value={f.client||DEFAULT_CLIENT} />
+      )}
       <div style={{display:"flex",gap:10}}>
         {locked
           ? <><LockedField label="From" value={f.from} half /><LockedField label="To" value={f.to} half /></>
@@ -7527,9 +7637,13 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
     (p.shortages||[]).map(s=>({...s, utr:p.utr, paymentDate:p.paymentDate||p.date}))
   );
 
+  // Client selector for Payments tab — default to first Shree client
+  const [payClient, setPayClient] = useState(DEFAULT_CLIENT);
+  const payTrips = (trips||[]).filter(t=>(t.client||DEFAULT_CLIENT)===payClient);
+
   const shreeInvoices = useMemo(() => {
     const map = {};
-    (trips||[]).filter(t=>t.billedToShree&&t.invoiceNo).forEach(t => {
+    payTrips.filter(t=>t.billedToShree&&t.invoiceNo).forEach(t => {
       if(!map[t.invoiceNo]) map[t.invoiceNo] = {
         invoiceNo:t.invoiceNo, invoiceDate:t.invoiceDate, totalAmt:0, trips:[], status:"billed"
       };
@@ -7538,9 +7652,9 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
       if(t.paymentDate) map[t.invoiceNo].status = "paid";
     });
     return Object.values(map).sort((a,b)=>(b.invoiceDate||"").localeCompare(a.invoiceDate||""));
-  }, [trips]);
+  }, [trips, payClient]);
 
-  const shreeTrips = (trips||[]).filter(t=>t.billedToShree)
+  const shreeTrips = payTrips.filter(t=>t.billedToShree)
     .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
 
   const tripExps   = tid => (Array.isArray(expenses)?expenses:[]).filter(e=>e.tripId===tid).reduce((s,e)=>s+Number(e.amount||0),0);
@@ -7912,6 +8026,22 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
             style={{marginLeft:"auto",background:"none",border:"none",color:"#555",cursor:"pointer",fontSize:16}}>✕</button>
         </div>
       )}
+
+      {/* Client / Plant switcher */}
+      <div style={{display:"flex",gap:8,padding:"10px 14px 0",flexWrap:"wrap"}}>
+        {CLIENTS.map(c=>(
+          <button key={c} onClick={()=>setPayClient(c)}
+            style={{padding:"6px 14px",borderRadius:20,fontSize:12,fontWeight:700,cursor:"pointer",
+              border:`2px solid ${payClient===c?"#5b8dee":"#333"}`,
+              background:payClient===c?"#5b8dee22":"none",
+              color:payClient===c?"#5b8dee":"#666"}}>
+            {c.replace("Shree Cement ","SC ").replace("Ultratech ","Ultratech ")}
+            <span style={{fontSize:10,opacity:0.7,marginLeft:4}}>
+              ({(trips||[]).filter(t=>(t.client||DEFAULT_CLIENT)===c&&t.billedToShree).length})
+            </span>
+          </button>
+        ))}
+      </div>
 
       {/* tabs with badges */}
       <div style={{background:"#111",borderBottom:"1px solid #1e1e1e",
@@ -9432,7 +9562,7 @@ function Reports({trips, vehicles, employees, payments, settlements, indents}) {
       <div style={{background:C.card,borderRadius:14,padding:"14px 16px"}}>
         <div style={{color:C.muted,fontWeight:700,fontSize:12,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>CSV Exports</div>
         {[
-          {l:"🚚 Trip Report CSV",  c:C.blue,   fn:()=>exportCSV(cementFiltered.map(t=>({Date:t.date,LR:t.lrNo,DI:t.diNo,Truck:t.truckNo,To:t.to,State:getState(t),Grade:t.grade,MT:t.qty,OrderType:t.orderType||"godown",FR:t.frRate,Driver:t.givenRate,Margin:t.qty*(t.frRate-t.givenRate),Status:t.status,By:t.createdBy})),"cement_dispatch.csv")},
+          {l:"🚚 Trip Report CSV",  c:C.blue,   fn:()=>exportCSV(cementFiltered.map(t=>({Date:t.date,LR:t.lrNo,DI:t.diNo,Truck:t.truckNo,Client:t.client||DEFAULT_CLIENT,To:t.to,State:getState(t),Grade:t.grade,MT:t.qty,OrderType:t.orderType||"godown",FR:t.frRate,Driver:t.givenRate,Margin:t.qty*(t.frRate-t.givenRate),Status:t.status,By:t.createdBy})),"cement_dispatch.csv")},
           {l:"🏗 Clinker CSV",      c:C.orange, fn:()=>exportCSV(clinkerTrips.map(t=>({Date:t.date,LR:t.lrNo,DI:t.diNo,Truck:t.truckNo,To:t.to,Consignee:t.consignee,MT:t.qty,Status:t.status,By:t.createdBy})),"clinker_dispatch.csv")},
           {l:"🚛 Vehicle Loan CSV", c:C.red,    fn:()=>exportCSV(vehicles.map(v=>({Truck:v.truckNo,Owner:v.ownerName,Loan:v.loan,Recovered:v.loanRecovered,Balance:v.loan-v.loanRecovered})),"loans.csv")},
           {l:"💵 Settlements CSV",  c:C.green,  fn:()=>exportCSV(settlements,"settlements.csv")},

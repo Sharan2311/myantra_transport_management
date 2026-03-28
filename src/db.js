@@ -4,6 +4,7 @@ import { supabase } from './supabase.js'
 const tripFromDB = r => ({
   id: r.id, type: r.type, lrNo: r.lr_no, diNo: r.di_no, truckNo: r.truck_no,
   grNo: r.gr_no, consignee: r.consignee, from: r.from, to: r.to, grade: r.grade,
+  client: r.client || 'Shree Cement Kodla',
   qty: +r.qty, bags: +r.bags, frRate: +r.fr_rate, givenRate: +r.given_rate,
   date: r.date, advance: +r.advance, shortage: +r.shortage, tafal: +r.tafal,
   shortageRecovery: +(r.shortage_recovery||0), loanRecovery: +(r.loan_recovery||0),
@@ -41,6 +42,7 @@ const tripFromDB = r => ({
 const tripToDB = t => ({
   id: t.id, type: t.type, lr_no: t.lrNo, di_no: t.diNo, truck_no: t.truckNo,
   gr_no: t.grNo, consignee: t.consignee, from: t.from, to: t.to, grade: t.grade,
+  client: t.client || 'Shree Cement Kodla',
   qty: t.qty, bags: t.bags, fr_rate: t.frRate, given_rate: t.givenRate,
   date: t.date, advance: t.advance, shortage: t.shortage, tafal: t.tafal,
   shortage_recovery: t.shortageRecovery||0, loan_recovery: t.loanRecovery||0,
