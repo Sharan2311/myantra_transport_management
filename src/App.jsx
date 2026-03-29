@@ -7935,29 +7935,47 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
   const applyInvoiceScan = () => {
     if(!scanResult || scanResult.type!=="invoice") return;
     const invNo = scanResult.invoiceNo;
+
+    // Block if invoice already saved
     if((trips||[]).some(t=>t.invoiceNo===invNo)) {
-      setScanError(`Invoice ${invNo} is already uploaded. Discard this scan.`); return;
+      setScanError("Invoice "+invNo+" is already scanned and saved. No changes made.");
+      return;
     }
 
-    // Check for amount mismatches — block if any line has a significant mismatch
     const scTrips = scanResult.trips||[];
     const allTrips = trips||[];
+
+    // ALL lines must match a trip — block if any are unmatched
+    const unmatched = scTrips.filter(st => !matchInvoiceLine(st, allTrips));
+    if(unmatched.length > 0) {
+      const details = unmatched.map(st =>
+        "DI: "+(st.diNo||"—")+" · GR: "+(st.grNo||"—")+" · ₹"+Number(st.frtAmt||0).toLocaleString("en-IN")
+      ).join("\n");
+      setScanError(
+        unmatched.length+" trip"+(unmatched.length>1?"s":"")+" in this invoice not found in your Trips:\n\n"+
+        details+
+        "\n\nGo to Trips tab, add all missing trips first, then scan invoice again."
+      );
+      return;
+    }
+
+    // Block if any amount mismatches
     const mismatches = scTrips.filter(st=>{
       const m = matchInvoiceLine(st, allTrips);
       if(!m) return false;
-      const {ok} = checkAmount(st, m.trip);
-      return !ok;
+      return !checkAmount(st, m.trip).ok;
     });
     if(mismatches.length > 0) {
       const details = mismatches.map(st=>{
         const m = matchInvoiceLine(st, allTrips);
         const {invoiceAmt, expectedAmt} = checkAmount(st, m.trip);
-        return `DI ${st.diNo||st.grNo}: invoice ₹${invoiceAmt.toLocaleString("en-IN")} vs trip ₹${expectedAmt.toLocaleString("en-IN")}`;
+        return "DI "+( st.diNo||st.grNo)+": invoice ₹"+invoiceAmt.toLocaleString("en-IN")+" vs trip ₹"+expectedAmt.toLocaleString("en-IN");
       }).join("\n");
-      setScanError("Amount mismatch on "+mismatches.length+" line(s):\n"+details+"\n\nCheck the trip frRate or billedToShree before applying.");
+      setScanError("Amount mismatch on "+mismatches.length+" line(s):\n\n"+details+"\n\nFix the trip freight rate first, then scan again.");
       return;
     }
 
+    // All matched and amounts OK — apply
     const invDate = parseDD(scanResult.invoiceDate);
     let matched = 0;
     setTrips(prev=>prev.map(t=>{
@@ -7973,9 +7991,8 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
       }
       return t;
     }));
-    log && log(`Invoice ${invNo} scanned — ${matched} trip(s) marked Billed`);
-    if(matched===0) setScanError("No trips were matched. Check that the trips are saved in Trips tab first.");
-    else setScanResult(null);
+    log && log("Invoice "+invNo+" scanned — "+matched+" trip(s) marked Billed");
+    setScanResult(null);
   };
 
   const applyPaymentScan = () => {
@@ -8376,29 +8393,46 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                           </div>
                         );
                       })}
-                      {/* Summary bar */}
+                      {/* Summary bar + Apply button */}
                       {(()=>{
                         const lines = scanResult.trips||[];
                         const identityOk  = lines.filter(st=>matchInvoiceLine(st,trips||[])).length;
                         const amtOk       = lines.filter(st=>{const m=matchInvoiceLine(st,trips||[]);return m&&checkAmount(st,m.trip).ok;}).length;
                         const noTrip      = lines.length - identityOk;
                         const amtMismatch = identityOk - amtOk;
-                        return (
-                          <div style={{marginTop:8,padding:"8px 0",display:"flex",gap:12,flexWrap:"wrap",fontSize:11,borderTop:"1px solid #1a2a1a"}}>
-                            <span style={{color:"#4caf50"}}>{amtOk} fully matched</span>
-                            {amtMismatch>0 && <span style={{color:"#ff9800"}}>{amtMismatch} amount mismatch</span>}
-                            {noTrip>0      && <span style={{color:"#ff6b6b"}}>{noTrip} trip not found</span>}
+                        const allOk       = noTrip===0 && amtMismatch===0 && identityOk===lines.length;
+                        const alreadySaved = (trips||[]).some(t=>t.invoiceNo===scanResult.invoiceNo);
+                        return (<>
+                          <div style={{marginTop:8,padding:"8px 0",display:"flex",gap:12,flexWrap:"wrap",
+                            fontSize:11,borderTop:"1px solid #1a2a1a"}}>
+                            {allOk
+                              ? <span style={{color:"#4caf50",fontWeight:700}}>✓ All {lines.length} trips matched — ready to apply</span>
+                              : <>
+                                  <span style={{color:"#4caf50"}}>{amtOk} matched</span>
+                                  {amtMismatch>0 && <span style={{color:"#ff9800"}}>⚠ {amtMismatch} amount mismatch</span>}
+                                  {noTrip>0 && <span style={{color:"#ff6b6b"}}>✗ {noTrip} trip not in system — add to Trips tab first</span>}
+                                </>}
                           </div>
-                        );
+                          {alreadySaved && (
+                            <div style={{background:"#ff6b6b22",border:"1px solid #ff6b6b44",borderRadius:8,
+                              padding:"8px 12px",color:"#ff6b6b",fontSize:12,fontWeight:700}}>
+                              ⚠ Invoice {scanResult.invoiceNo} is already saved. Scanning again will not change anything.
+                            </div>
+                          )}
+                          <div style={{display:"flex",gap:8,marginTop:8}}>
+                            <button onClick={applyInvoiceScan} disabled={!allOk||alreadySaved}
+                              style={{flex:1,background:allOk&&!alreadySaved?"#4caf50":"#333",
+                                color:allOk&&!alreadySaved?"#000":"#666",border:"none",borderRadius:6,
+                                padding:"10px",fontWeight:700,
+                                cursor:allOk&&!alreadySaved?"pointer":"not-allowed",fontSize:13}}>
+                              {alreadySaved ? "Already Saved" : allOk ? "✓ Apply — Mark Billed" : "Fix issues above first"}
+                            </button>
+                            <button onClick={()=>setScanResult(null)}
+                              style={{background:"#222",color:"#888",border:"1px solid #333",borderRadius:6,
+                                padding:"10px 14px",cursor:"pointer",fontSize:12}}>Discard</button>
+                          </div>
+                        </>);
                       })()}
-                      <div style={{display:"flex",gap:8,marginTop:8}}>
-                        <button onClick={applyInvoiceScan}
-                          style={{flex:1,background:"#4caf50",color:"#000",border:"none",borderRadius:6,
-                            padding:"10px",fontWeight:700,cursor:"pointer",fontSize:13}}>✓ Apply — Mark Billed</button>
-                        <button onClick={()=>setScanResult(null)}
-                          style={{background:"#222",color:"#888",border:"1px solid #333",borderRadius:6,
-                            padding:"10px 14px",cursor:"pointer",fontSize:12}}>Discard</button>
-                      </div>
                     </>
                   )}
 
