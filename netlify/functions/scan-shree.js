@@ -1,130 +1,135 @@
 // netlify/functions/scan-shree.js
 exports.handler = async (event) => {
-  if (event.httpMethod !== "POST") return { statusCode: 405, body: "Method Not Allowed" };
+  if (event.httpMethod !== "POST") {
+    return { statusCode: 405, body: "Method Not Allowed" };
+  }
+
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return { statusCode: 500, body: JSON.stringify({ error: "ANTHROPIC_API_KEY not set" }) };
+  if (!apiKey) {
+    return { statusCode: 500, body: JSON.stringify({ error: "ANTHROPIC_API_KEY not set" }) };
+  }
 
-  try {
-    const { base64, mediaType, scanType } = JSON.parse(event.body);
-    const isImage = mediaType && mediaType.startsWith("image/");
-    const contentBlock = isImage
-      ? { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } }
-      : { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } };
+  let body;
+  try { body = JSON.parse(event.body); } catch(e) {
+    return { statusCode: 400, body: JSON.stringify({ error: "Invalid JSON" }) };
+  }
 
-    const invoicePrompt = `Extract data from this M Yantra Enterprises freight invoice to Shree Cement.
-Respond ONLY with JSON (no markdown, no backticks):
+  const { base64, mediaType, scanType } = body;
+
+  const INVOICE_PROMPT = `You are reading a freight invoice / tax invoice from M Yantra Enterprises to Shree Cement or Ultratech.
+Extract the following and return ONLY a valid JSON object:
 {
-  "invoiceNo": "e.g. SMYE107026100308",
-  "invoiceDate": "DD.MM.YYYY",
-  "totalAmount": numeric,
-  "trips": [{ "lrNo": "e.g. 1070/MYE/3513", "truckNo": "e.g. KA28D7176", "qty": numeric, "frtRate": numeric, "frtAmt": numeric }]
-}`;
-
-    const paymentPrompt = `Extract data from this Shree Cement payment advice / bank remittance PDF.
-This document may have MANY rows (30+ invoices) — extract ALL of them without skipping any.
-
-Every row in the table has a Document Description. Classify EACH row:
-- "Invoice" rows with narration like "PRIMARY FREIGHT CEMENT TPT" → goes into "invoices" array
-- "Debit Note" rows where narration contains "SHORTAGE" → goes into "shortages" array
-- "Debit Note" rows where narration does NOT contain "SHORTAGE" (e.g. "ELECTRICITY CHARGES", "PENALTY", "WATER CHARGES") → goes into "expenses" array
-
-IMPORTANT: For each invoice row, extract ALL columns including Hold Amount and TDS Deducted even if they are zero.
-Hold Amount = the GST portion withheld by Shree, to be released later separately.
-
-Respond ONLY with valid JSON (no markdown, no backticks, no trailing commas):
-{
-  "utr": "UTR number from intro text e.g. 1527531918",
-  "paymentDate": "DD.MM.YYYY",
-  "totalPaid": numeric (net amount transferred e.g. 1909642.08),
-  "totalBilled": numeric (Total Bill Amount column sum),
-  "tdsDeducted": numeric (TDS Deducted column sum),
-  "holdAmount": numeric (Hold Amount column sum),
-  "invoices": [
+  "invoiceNo": "Invoice number e.g. SMYE107026100318",
+  "invoiceDate": "Date in DD.MM.YYYY or DD-MM-YYYY format",
+  "totalAmount": 351227.00,
+  "trips": [
     {
-      "invoiceNo": "e.g. SMYE107026100275",
-      "invDate": "DD.MM.YYYY",
-      "sapDoc": "SAP Doc No e.g. 5100452866",
-      "totalAmt": numeric (Total Bill Amount column, use paymentAmt if blank),
-      "paymentAmt": numeric (Payment Amount column),
-      "tds": numeric (TDS Deducted column, 0 if blank),
-      "hold": numeric (Hold Amount column, 0 if blank)
+      "diNo": "DI number from the DI NO column e.g. 9003299367",
+      "grNo": "GR number from the GR NO column e.g. 1070/MYE/3818",
+      "truckNo": "Truck/vehicle registration number",
+      "qty": 35.0,
+      "frtAmt": 53200.00
     }
-  ],
-  "shortages": [
-    { "ref": "Inv/Ref Number", "lrNo": "LR number from narration", "tonnes": numeric, "deduction": numeric }
-  ],
-  "expenses": [
-    { "ref": "Inv/Ref Number e.g. KR2513001067", "description": "full narration text", "amount": numeric, "month": "month/year e.g. FEB'26", "category": "electricity|water|penalty|safety|other" }
   ]
 }
 
 Rules:
-- Extract EVERY row — do not truncate or summarise
-- EVERY Debit Note row must appear in either shortages or expenses
-- For expenses category: electricity→'electricity', water→'water', PENALTY/PPE/SAFETY→'safety', otherwise 'other'
-- If Hold Amount cell is blank/empty for a row, use 0
-- If TDS cell is blank/empty for a row, use 0
-- Use empty arrays [] if nothing found`;
+- Return ONLY the JSON object, no explanation, no markdown, no backticks
+- trips array must have one entry per line item in the invoice table
+- diNo: extract the DI number column — it looks like 9003299367 or 9003487470
+- grNo: extract the GR number column — it looks like 1070/MYE/3818 or 1070/MYE/3969
+- truckNo: vehicle registration e.g. KA28AA9261
+- qty: quantity in MT as a decimal number
+- frtAmt: freight amount in rupees as a decimal number
+- If a field is not found, use empty string for text or 0 for numbers`;
 
-    const prompt = scanType === "invoice" ? invoicePrompt : paymentPrompt;
+  const PAYMENT_PROMPT = `You are reading a payment advice / remittance advice from Shree Cement or Ultratech to M Yantra Enterprises.
+Extract the following and return ONLY a valid JSON object:
+{
+  "utr": "UTR/transaction reference number",
+  "paymentDate": "Payment date in DD.MM.YYYY or YYYY-MM-DD format",
+  "totalPaid": 0.00,
+  "totalBilled": 0.00,
+  "tdsDeducted": 0.00,
+  "holdAmount": 0.00,
+  "invoices": [
+    {
+      "invoiceNo": "Invoice reference number",
+      "invDate": "Invoice date",
+      "sapDoc": "SAP document number if present",
+      "totalAmt": 0.00,
+      "paymentAmt": 0.00,
+      "hold": 0.00
+    }
+  ],
+  "shortages": [
+    {
+      "lrNo": "LR number",
+      "description": "Shortage description",
+      "deduction": 0.00
+    }
+  ],
+  "expenses": [
+    {
+      "description": "Expense description",
+      "amount": 0.00
+    }
+  ],
+  "penalties": []
+}
 
+Rules:
+- Return ONLY the JSON object, no markdown, no backticks
+- utr: the NEFT/RTGS/IMPS transaction reference number
+- holdAmount: GST hold / retention amount
+- tdsDeducted: TDS amount deducted
+- shortages: any shortage deductions with LR reference
+- If a field is not found, use empty string for text or 0 for numbers`;
+
+  const prompt = scanType === "invoice" ? INVOICE_PROMPT : PAYMENT_PROMPT;
+  const isImage = mediaType && mediaType.startsWith("image/");
+
+  const contentBlock = isImage
+    ? { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } }
+    : { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } };
+
+  try {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
-        "anthropic-beta": "pdfs-2024-09-25"
+        "anthropic-beta": "pdfs-2024-09-25",
       },
       body: JSON.stringify({
         model: "claude-haiku-4-5-20251001",
-        max_tokens: 8000,   // increased from 2000 — needed for 30+ invoice rows
+        max_tokens: 2000,
         messages: [{ role: "user", content: [contentBlock, { type: "text", text: prompt }] }],
       }),
     });
 
     const data = await response.json();
-    if (!response.ok) return {
-      statusCode: response.status,
-      body: JSON.stringify({ error: `Anthropic ${response.status}: ${data.error?.message}` })
-    };
-
-    const rawText = (data.content || []).find(b => b.type === "text")?.text || "";
-    const cleaned = rawText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-
-    try {
-      const parsed = JSON.parse(cleaned);
+    if (!response.ok) {
       return {
-        statusCode: 200,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(parsed)
-      };
-    } catch (e) {
-      // Try to extract partial JSON if truncated
-      const partialMatch = cleaned.match(/^\{[\s\S]*/);
-      if (partialMatch) {
-        try {
-          // Attempt to close unclosed JSON
-          const partial = partialMatch[0];
-          // Count unclosed braces/brackets to give a better error
-          return {
-            statusCode: 200,
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              error: "AI response was truncated — PDF may be too large. Try splitting into fewer pages.",
-              parseError: e.message,
-              raw: rawText.slice(0, 500)
-            })
-          };
-        } catch (_) {}
-      }
-      return {
-        statusCode: 200,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ error: "Failed to parse AI response", raw: rawText.slice(0, 500) })
+        statusCode: response.status,
+        body: JSON.stringify({ error: `Anthropic ${response.status}: ${data.error?.message || JSON.stringify(data.error)}` }),
       };
     }
-  } catch (err) {
-    return { statusCode: 500, body: JSON.stringify({ error: err.message }) };
+
+    const text = (data.content || []).find(b => b.type === "text")?.text || "";
+    const clean = text.replace(/```json|```/g, "").trim();
+    let parsed;
+    try { parsed = JSON.parse(clean); } catch(e) {
+      return { statusCode: 500, body: JSON.stringify({ error: "Could not parse AI response: " + text.slice(0, 200) }) };
+    }
+
+    return {
+      statusCode: 200,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(parsed),
+    };
+  } catch(e) {
+    return { statusCode: 500, body: JSON.stringify({ error: "Function error: " + e.message }) };
   }
 };
