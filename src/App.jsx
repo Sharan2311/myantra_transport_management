@@ -4,10 +4,10 @@ import { supabase } from "./supabase.js";
 
 // ─── THEME ────────────────────────────────────────────────────────────────────
 const C = {
-  bg:"#0a0e14", card:"#141920", card2:"#1c2330", border:"#252e3d",
-  accent:"#f0a500", green:"#2ea043", red:"#da3633", blue:"#388bfd",
-  purple:"#8b5cf6", teal:"#2dd4bf", orange:"#f97316",
-  text:"#e2e8f0", muted:"#64748b", dim:"#334155",
+  bg:"#f0f6fc", card:"#ffffff", card2:"#e8f0fa", border:"#ccddf0",
+  accent:"#1565c0", green:"#1b6e3a", red:"#b91c1c", blue:"#1565c0",
+  purple:"#6d28d9", teal:"#0e7490", orange:"#c67c00",
+  text:"#0a1f3a", muted:"#4a7090", dim:"#dce8f4",
 };
 const fmt   = n => "₹"+Number(n||0).toLocaleString("en-IN",{maximumFractionDigits:2});
 const today = () => new Date().toISOString().split("T")[0];
@@ -148,7 +148,7 @@ const Field = ({label, value, onChange, type="text", placeholder="", opts=null, 
             style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,color:C.text,
               padding:"13px 12px",fontSize:15,outline:"none",width:"100%",boxSizing:"border-box",
               WebkitAppearance:"none",MozAppearance:"textfield",
-              ...(type==="date"?{colorScheme:"dark"}:{})}} />
+              ...(type==="date"?{colorScheme:"light"}:{})}} />
       }
       {note && <div style={{color:C.muted,fontSize:11}}>{note}</div>}
     </div>
@@ -253,9 +253,9 @@ class ErrBound extends React.Component {
   static getDerivedStateFromError(e){return {err:e};}
   render(){
     if(this.state.err) return (
-      <div style={{background:"#1a0808",border:"1px solid #da3633",borderRadius:12,padding:16,margin:8}}>
+      <div style={{background:"#fef2f2",border:"1px solid #b91c1c",borderRadius:12,padding:16,margin:8}}>
         <div style={{color:"#da3633",fontWeight:800,marginBottom:6}}>⚠ Something went wrong</div>
-        <div style={{color:"#888",fontSize:12}}>{this.state.err?.message||"Unknown error"}</div>
+        <div style={{color:"#6b7280",fontSize:12}}>{this.state.err?.message||"Unknown error"}</div>
         <button onClick={()=>this.setState({err:null})}
           style={{marginTop:10,background:"#da3633",border:"none",color:"#fff",
             borderRadius:8,padding:"8px 16px",cursor:"pointer",fontWeight:700}}>
@@ -736,7 +736,7 @@ export default function App() {
           width:300,height:300,pointerEvents:"none",zIndex:0,
           backgroundImage:`url(${LOGO_B64})`,backgroundSize:"contain",
           backgroundRepeat:"no-repeat",backgroundPosition:"center",
-          opacity:0.05}} />
+          opacity:0.07}} />
       {/* TOP BAR */}
       <div style={{position:"sticky",top:0,zIndex:50,background:C.card,borderBottom:`1px solid ${C.border}`,padding:"11px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div>
@@ -980,7 +980,7 @@ function AskLRSheet({ extracted, trips, vehicles, onConfirm, onCancel }) {
         const shortBal = (existingVehicle.shortageOwed||0)-(existingVehicle.shortageRecovered||0);
         if (loanBal<=0 && shortBal<=0) return null;
         return (
-          <div style={{background:"#1a1000",border:`2px solid ${C.orange}66`,borderRadius:12,padding:"12px 14px"}}>
+          <div style={{background:`${C.orange}11`,border:`2px solid ${C.orange}66`,borderRadius:12,padding:"12px 14px"}}>
             <div style={{color:C.orange,fontWeight:800,fontSize:12,marginBottom:8}}>
               ⚠ Pending Dues on {truckNo}
             </div>
@@ -1054,7 +1054,7 @@ function AskLRSheet({ extracted, trips, vehicles, onConfirm, onCancel }) {
 
       {/* Driver phone prompt if missing */}
       {!duplicateDI && needsDriverPhone && (
-        <div style={{background:"#1a1000",border:`1px solid ${C.orange}44`,borderRadius:12,padding:"14px"}}>
+        <div style={{background:`${C.orange}08`,border:`1px solid ${C.orange}44`,borderRadius:12,padding:"14px"}}>
           <div style={{color:C.orange,fontWeight:800,fontSize:13,marginBottom:8}}>📞 Driver Phone Required</div>
           <div style={{color:C.muted,fontSize:12,marginBottom:10}}>
             Truck <b style={{color:C.text}}>{truckNo}</b> has no driver phone on record. Please add it now.
@@ -1213,9 +1213,9 @@ function openGoogleDrivePicker(onFile) {
     // ── Build modal DOM ──────────────────────────────────────────────────────
     const S = {
       overlay: "position:fixed;inset:0;background:#000c;z-index:99999;display:flex;align-items:center;justify-content:center;padding:12px;",
-      box:     "background:#141920;border:1.5px solid #252e3d;border-radius:16px;width:min(480px,96vw);max-height:85vh;display:flex;flex-direction:column;overflow:hidden;",
+      box:     "background:#ffffff;border:1.5px solid #ccddf0;border-radius:16px;width:min(480px,96vw);max-height:85vh;display:flex;flex-direction:column;overflow:hidden;",
       header:  "display:flex;justify-content:space-between;align-items:center;padding:16px 18px;border-bottom:1px solid #252e3d;flex-shrink:0;",
-      breadcrumb: "padding:8px 18px;background:#0d1117;font-size:11px;color:#64748b;display:flex;align-items:center;gap:4px;flex-wrap:wrap;flex-shrink:0;border-bottom:1px solid #1a2030;",
+      breadcrumb: "padding:8px 18px;background:#e8f0fa;font-size:11px;color:#4a7090;display:flex;align-items:center;gap:4px;flex-wrap:wrap;flex-shrink:0;border-bottom:1px solid #1a2030;",
       list:    "overflow-y:auto;flex:1;padding:8px;",
       row:     "display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:8px;cursor:pointer;border:none;background:none;width:100%;text-align:left;",
       footer:  "padding:12px 16px;border-top:1px solid #252e3d;flex-shrink:0;",
@@ -1227,7 +1227,7 @@ function openGoogleDrivePicker(onFile) {
     // Header
     const hdr = document.createElement("div"); hdr.style.cssText = S.header;
     hdr.innerHTML = `
-      <div style="color:#e2e8f0;font-weight:800;font-size:15px;">🔵 Google Drive</div>
+      <div style="color:#0a1f3a;font-weight:800;font-size:15px;">🔵 Google Drive</div>
       <button id="gd-close" style="background:#da363322;border:none;color:#da3633;border-radius:50%;width:28px;height:28px;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;">×</button>
     `;
 
@@ -1260,7 +1260,7 @@ function openGoogleDrivePicker(onFile) {
         const span = document.createElement("span");
         span.textContent = f.name;
         span.style.cssText = i === stack.length-1
-          ? "color:#e2e8f0;font-weight:700;"
+          ? "color:#0a1f3a;font-weight:700;"
           : "color:#1a73e8;cursor:pointer;text-decoration:underline;";
         if(i < stack.length-1) {
           span.onclick = () => { stack.splice(i+1); loadFolder(f.id); };
@@ -1312,10 +1312,10 @@ function openGoogleDrivePicker(onFile) {
         const icon = item.isFolder ? "📁" : (item.mimeType?.includes("pdf") ? "📄" : "🖼️");
         row.innerHTML = `
           <span style="font-size:20px;flex-shrink:0;">${icon}</span>
-          <span style="color:#e2e8f0;font-size:13px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${item.name}</span>
+          <span style="color:#0a1f3a;font-size:13px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${item.name}</span>
           ${item.isFolder ? '<span style="color:#64748b;font-size:12px;">›</span>' : '<span style="color:#1a73e8;font-size:11px;font-weight:700;">SELECT</span>'}
         `;
-        row.onmouseover = () => row.style.background = "#1c2535";
+        row.onmouseover = () => row.style.background = "#e8f0fa";
         row.onmouseout  = () => row.style.background = "none";
 
         if(item.isFolder) {
@@ -1847,7 +1847,7 @@ M Yantra Enterprises
         </div>
       </div>
 
-      <div style={{background:"#1a1000",border:`1px solid ${C.orange}44`,borderRadius:8,
+      <div style={{background:`${C.orange}08`,border:`1px solid ${C.orange}44`,borderRadius:8,
         padding:"9px 12px",color:C.orange,fontSize:11}}>
         📱 On mobile: Gmail will open with the email pre-filled. Attach GR Copy and Invoice from your Files app before sending.<br/>
         🖥 On desktop: Copy the email body above and paste into Gmail manually.
@@ -2128,7 +2128,7 @@ function PartyBatchEmailSheet({ trips, setTrips, onClose, log }) {
           </div>
         </div>
 
-        <div style={{background:"#1a1000",border:"1px solid "+C.orange+"44",borderRadius:8,
+        <div style={{background:`${C.orange}08`,border:"1px solid "+C.orange+"44",borderRadius:8,
           padding:"9px 12px",color:C.orange,fontSize:11}}>
           📱 On mobile: Open Gmail → attach files from Downloads → send.<br/>
           🖥 On desktop: Paste the preview into Gmail → attach downloaded files → send.
@@ -3029,14 +3029,14 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
               <input type="date" value={dateFrom} onChange={e=>setDateFrom(e.target.value)}
                 onClick={e=>e.target.showPicker?.()}
                 style={{background:C.bg,border:"1.5px solid "+C.border,borderRadius:8,color:dateFrom?C.text:C.muted,
-                  padding:"8px 10px",fontSize:13,width:"100%",colorScheme:"dark",WebkitAppearance:"none",boxSizing:"border-box"}} />
+                  padding:"8px 10px",fontSize:13,width:"100%",colorScheme:"light",WebkitAppearance:"none",boxSizing:"border-box"}} />
             </div>
             <div style={{flex:1}}>
               <div style={{color:C.muted,fontSize:11,marginBottom:3}}>TO</div>
               <input type="date" value={dateTo} onChange={e=>setDateTo(e.target.value)}
                 onClick={e=>e.target.showPicker?.()}
                 style={{background:C.bg,border:"1.5px solid "+C.border,borderRadius:8,color:dateTo?C.text:C.muted,
-                  padding:"8px 10px",fontSize:13,width:"100%",colorScheme:"dark",WebkitAppearance:"none",boxSizing:"border-box"}} />
+                  padding:"8px 10px",fontSize:13,width:"100%",colorScheme:"light",WebkitAppearance:"none",boxSizing:"border-box"}} />
             </div>
             <Btn onClick={()=>{setDateFrom("");setDateTo("");}} sm outline color={C.muted}>Clear</Btn>
           </div>
@@ -3414,7 +3414,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                         <div style={{color:C.muted,fontSize:11,marginTop:2}}>📞 {c.phone}{c.role?" · "+c.role:""}</div>
                       </div>
                       <div style={{background:"#25D366",borderRadius:10,padding:"6px 12px",
-                        color:"#fff",fontWeight:700,fontSize:12,flexShrink:0}}>
+                        color:C.text,fontWeight:700,fontSize:12,flexShrink:0}}>
                         📲 Send
                       </div>
                     </button>
@@ -4018,7 +4018,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
           {/* Warn if any diLine is missing its own frRate — old trips saved before per-DI fix */}
           {(f.diLines||[]).some(d=>!d.frRate) && (
             <div style={{background:"#1a1000",border:"1px solid #ff980044",borderRadius:6,
-              padding:"7px 10px",marginBottom:10,fontSize:11,color:"#ff9800"}}>
+              padding:"7px 10px",marginBottom:10,fontSize:11,color:"#c67c00"}}>
               ⚠ Shree rates below were auto-filled from trip level — please verify each DI rate and save.
             </div>
           )}
@@ -5188,7 +5188,7 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance, employees, setCas
           const selEmp = (employees||[]).find(e=>e.id===selEmpId);
           return (
             <div style={{display:"flex",flexDirection:"column",gap:12}}>
-              {detectedEmp && <div style={{background:"#0d1a0d",border:"1px solid #2ea04355",borderRadius:8,
+              {detectedEmp && <div style={{background:"#f0fdf4",border:"1px solid #2ea04355",borderRadius:8,
                 padding:"9px 12px",color:C.green,fontSize:12,fontWeight:600}}>
                 ✅ Detected: <b>{detectedEmp.name}</b> from "{paidTo}"
               </div>}
@@ -5212,7 +5212,7 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance, employees, setCas
                   <input type="date" value={sharedDate} onChange={e=>setSharedDate(e.target.value)}
                     onClick={e=>e.target.showPicker?.()}
                     style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,color:C.text,
-                      padding:"8px 10px",fontSize:13,width:"100%",colorScheme:"dark",WebkitAppearance:"none",boxSizing:"border-box"}} />
+                      padding:"8px 10px",fontSize:13,width:"100%",colorScheme:"light",WebkitAppearance:"none",boxSizing:"border-box"}} />
                 </div>
               </div>
               <div>
@@ -5248,7 +5248,7 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance, employees, setCas
             <input type="date" value={sharedDate} onChange={e=>setSharedDate(e.target.value)}
               onClick={e=>e.target.showPicker?.()}
               style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,color:C.text,
-                padding:"8px 10px",fontSize:13,width:"100%",colorScheme:"dark",
+                padding:"8px 10px",fontSize:13,width:"100%",colorScheme:"light",
                 WebkitAppearance:"none",boxSizing:"border-box"}} />
           </div>
           <div style={{flex:1}}>
@@ -5748,7 +5748,7 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
                 onClick={e=>e.target.showPicker?.()}
                 style={{background:C.bg,border:"1.5px solid "+C.border,borderRadius:8,
                   color:filterFrom?C.text:C.muted, padding:"9px 10px",fontSize:14,width:"100%",
-                  WebkitAppearance:"none", colorScheme:"dark", boxSizing:"border-box"}} />
+                  WebkitAppearance:"none", colorScheme:"light", boxSizing:"border-box"}} />
             </div>
             <div style={{flex:1}}>
               <div style={{color:C.muted,fontSize:11,marginBottom:4}}>TO</div>
@@ -5756,7 +5756,7 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
                 onClick={e=>e.target.showPicker?.()}
                 style={{background:C.bg,border:"1.5px solid "+C.border,borderRadius:8,
                   color:filterTo?C.text:C.muted, padding:"9px 10px",fontSize:14,width:"100%",
-                  WebkitAppearance:"none", colorScheme:"dark", boxSizing:"border-box"}} />
+                  WebkitAppearance:"none", colorScheme:"light", boxSizing:"border-box"}} />
             </div>
             <Btn onClick={()=>{setFilterFrom("");setFilterTo("");}} sm outline color={C.muted}>Clear</Btn>
           </div>
@@ -6187,14 +6187,14 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
                   <input type="date" value={filterFrom} onChange={e=>setFilterFrom(e.target.value)}
                     onClick={e=>e.target.showPicker?.()}
                     style={{background:C.bg,border:"1.5px solid "+C.border,borderRadius:8,color:filterFrom?C.text:C.muted,
-                      padding:"8px 10px",fontSize:13,width:"100%",colorScheme:"dark",WebkitAppearance:"none",boxSizing:"border-box"}} />
+                      padding:"8px 10px",fontSize:13,width:"100%",colorScheme:"light",WebkitAppearance:"none",boxSizing:"border-box"}} />
                 </div>
                 <div style={{flex:1}}>
                   <div style={{color:C.muted,fontSize:11,marginBottom:3}}>TO</div>
                   <input type="date" value={filterTo} onChange={e=>setFilterTo(e.target.value)}
                     onClick={e=>e.target.showPicker?.()}
                     style={{background:C.bg,border:"1.5px solid "+C.border,borderRadius:8,color:filterTo?C.text:C.muted,
-                      padding:"8px 10px",fontSize:13,width:"100%",colorScheme:"dark",WebkitAppearance:"none",boxSizing:"border-box"}} />
+                      padding:"8px 10px",fontSize:13,width:"100%",colorScheme:"light",WebkitAppearance:"none",boxSizing:"border-box"}} />
                 </div>
                 {(filterFrom||filterTo) && (
                   <Btn onClick={()=>{setFilterFrom("");setFilterTo("");}} sm outline color={C.muted}>Clear</Btn>
@@ -6673,7 +6673,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
 
       {/* Search */}
       <div style={{position:"relative"}}>
-        <span style={{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)",fontSize:14,color:"#555",pointerEvents:"none"}}>🔍</span>
+        <span style={{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)",fontSize:14,color:"#4a7090",pointerEvents:"none"}}>🔍</span>
         <input value={search} onChange={e=>setSearch(e.target.value)}
           placeholder="Search truck no, owner, driver…"
           style={{width:"100%",boxSizing:"border-box",background:C.bg,border:`1px solid ${C.border}`,
@@ -6747,7 +6747,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
             </div>
 
             {(!f.driverName.trim() || !f.driverPhone.trim() || (f.driverPhone.replace(/\\D/g,"").length!==10)) && (
-              <div style={{background:"#1a1000",border:`1px solid ${C.orange}44`,borderRadius:8,
+              <div style={{background:`${C.orange}08`,border:`1px solid ${C.orange}44`,borderRadius:8,
                 padding:"8px 12px",fontSize:12,color:C.orange}}>
                 {!f.driverName.trim() && <div>⚠ Driver Name is mandatory</div>}
                 {!f.driverPhone.trim() && <div>⚠ Driver Phone is mandatory</div>}
@@ -7594,7 +7594,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                 <div key={x.l} style={{background:C.bg,borderRadius:8,padding:"8px",textAlign:"center"}}><div style={{color:x.c,fontWeight:700,fontSize:12}}>{x.v}</div><div style={{color:C.muted,fontSize:9,textTransform:"uppercase"}}>{x.l}</div></div>
               ))}
             </div>
-            <div style={{background:"#0d1a0d",border:"1px solid #2ea04333",borderRadius:10,padding:"10px 12px",marginBottom:10}}>
+            <div style={{background:"#f0fdf4",border:"1px solid #2ea04333",borderRadius:10,padding:"10px 12px",marginBottom:10}}>
               <div style={{color:C.green,fontWeight:700,fontSize:10,textTransform:"uppercase",letterSpacing:1,marginBottom:7}}>💵 Cash Wallet</div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
                 {[{l:"Transferred",v:fmt(totalTransferred(e.id)),c:C.green},{l:"Advances",v:fmt(totalAdvanceGiven(e.id)),c:C.red},{l:"Balance",v:fmt(walBal),c:walBal>=0?C.accent:C.red}].map(x=>(
@@ -7634,7 +7634,7 @@ function GstReleaseForm({ gstHoldItems, gstReleases, setGstReleases, isOwner, lo
   if(!isOwner) return null;
   if(pendingItems.length === 0) return (
     <div style={{background:"#0d2618",border:"1px solid #4caf5033",borderRadius:10,
-      padding:"10px 14px",color:"#4caf50",fontSize:12,fontWeight:700,textAlign:"center"}}>
+      padding:"10px 14px",color:"#1b6e3a",fontSize:12,fontWeight:700,textAlign:"center"}}>
       ✅ All GST holds have been released
     </div>
   );
@@ -7660,27 +7660,27 @@ function GstReleaseForm({ gstHoldItems, gstReleases, setGstReleases, isOwner, lo
   };
 
   return (
-    <div style={{background:"#161b22",border:"1px solid #21262d",borderRadius:12,overflow:"hidden"}}>
+    <div style={{background:C.card,border:"1px solid #21262d",borderRadius:12,overflow:"hidden"}}>
       <button onClick={()=>setOpen(o=>!o)} style={{
         width:"100%",background:"none",border:"none",
         padding:"12px 14px",cursor:"pointer",
         display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-        <span style={{color:"#4caf50",fontWeight:700,fontSize:13}}>
+        <span style={{color:"#1b6e3a",fontWeight:700,fontSize:13}}>
           ➕ Record GST Release
         </span>
-        <span style={{color:"#555",fontSize:12}}>{open?"▲":"▼"}</span>
+        <span style={{color:"#4a7090",fontSize:12}}>{open?"▲":"▼"}</span>
       </button>
       {open && (
         <div style={{padding:"0 14px 14px",display:"flex",flexDirection:"column",gap:10}}>
           {/* Invoice selector */}
           <div>
-            <label style={{color:"#666",fontSize:11,fontWeight:700,textTransform:"uppercase",
+            <label style={{color:"#4a7090",fontSize:11,fontWeight:700,textTransform:"uppercase",
               letterSpacing:1,display:"block",marginBottom:4}}>Invoice *</label>
             <select value={inv} onChange={e=>{ setInv(e.target.value);
               const g=gstHoldItems.find(x=>x.invoiceNo===e.target.value);
               if(g) setAmt(String(g.balance)); }}
-              style={{width:"100%",background:"#0d1117",border:"1px solid #30363d",
-                borderRadius:8,color:"#e6edf3",padding:"10px 12px",fontSize:13,outline:"none"}}>
+              style={{width:"100%",background:C.card2,border:"1px solid #30363d",
+                borderRadius:8,color:C.text,padding:"10px 12px",fontSize:13,outline:"none"}}>
               <option value="">— Select Invoice —</option>
               {pendingItems.map(g=>(
                 <option key={g.invoiceNo} value={g.invoiceNo}>
@@ -7690,49 +7690,49 @@ function GstReleaseForm({ gstHoldItems, gstReleases, setGstReleases, isOwner, lo
             </select>
           </div>
           {selectedItem && (
-            <div style={{background:"#0d1117",borderRadius:8,padding:"8px 12px",fontSize:12}}>
+            <div style={{background:C.card2,borderRadius:8,padding:"8px 12px",fontSize:12}}>
               <div style={{display:"flex",justifyContent:"space-between"}}>
-                <span style={{color:"#666"}}>Total Held</span>
-                <span style={{color:"#ff9800",fontWeight:700}}>₹{Number(selectedItem.holdAmount).toLocaleString("en-IN",{maximumFractionDigits:2})}</span>
+                <span style={{color:"#4a7090"}}>Total Held</span>
+                <span style={{color:"#c67c00",fontWeight:700}}>₹{Number(selectedItem.holdAmount).toLocaleString("en-IN",{maximumFractionDigits:2})}</span>
               </div>
               <div style={{display:"flex",justifyContent:"space-between",marginTop:4}}>
-                <span style={{color:"#666"}}>Balance</span>
-                <span style={{color:"#ff6b6b",fontWeight:700}}>₹{Number(selectedItem.balance).toLocaleString("en-IN",{maximumFractionDigits:2})}</span>
+                <span style={{color:"#4a7090"}}>Balance</span>
+                <span style={{color:"#b91c1c",fontWeight:700}}>₹{Number(selectedItem.balance).toLocaleString("en-IN",{maximumFractionDigits:2})}</span>
               </div>
             </div>
           )}
           <div style={{display:"flex",gap:10}}>
             <div style={{flex:1}}>
-              <label style={{color:"#666",fontSize:11,fontWeight:700,textTransform:"uppercase",
+              <label style={{color:"#4a7090",fontSize:11,fontWeight:700,textTransform:"uppercase",
                 letterSpacing:1,display:"block",marginBottom:4}}>Release Amount ₹ *</label>
               <input type="number" value={amt} onChange={e=>setAmt(e.target.value)}
-                style={{width:"100%",boxSizing:"border-box",background:"#0d1117",border:"1px solid #30363d",
-                  borderRadius:8,color:"#e6edf3",padding:"10px 12px",fontSize:13,outline:"none"}} />
+                style={{width:"100%",boxSizing:"border-box",background:C.card2,border:"1px solid #30363d",
+                  borderRadius:8,color:C.text,padding:"10px 12px",fontSize:13,outline:"none"}} />
             </div>
             <div style={{flex:1}}>
-              <label style={{color:"#666",fontSize:11,fontWeight:700,textTransform:"uppercase",
+              <label style={{color:"#4a7090",fontSize:11,fontWeight:700,textTransform:"uppercase",
                 letterSpacing:1,display:"block",marginBottom:4}}>Date *</label>
               <input type="date" value={date} onChange={e=>setDate(e.target.value)}
                 onClick={e=>e.target.showPicker?.()}
-                style={{width:"100%",boxSizing:"border-box",background:"#0d1117",border:"1px solid #30363d",
-                  borderRadius:8,color:"#e6edf3",padding:"10px 12px",fontSize:13,outline:"none",colorScheme:"dark"}} />
+                style={{width:"100%",boxSizing:"border-box",background:C.card2,border:"1px solid #30363d",
+                  borderRadius:8,color:C.text,padding:"10px 12px",fontSize:13,outline:"none",colorScheme:"light"}} />
             </div>
           </div>
           <div>
-            <label style={{color:"#666",fontSize:11,fontWeight:700,textTransform:"uppercase",
+            <label style={{color:"#4a7090",fontSize:11,fontWeight:700,textTransform:"uppercase",
               letterSpacing:1,display:"block",marginBottom:4}}>UTR Number *</label>
             <input value={utr} onChange={e=>setUtr(e.target.value)} placeholder="e.g. 1527531918"
-              style={{width:"100%",boxSizing:"border-box",background:"#0d1117",border:"1px solid #30363d",
-                borderRadius:8,color:"#e6edf3",padding:"10px 12px",fontSize:13,outline:"none"}} />
+              style={{width:"100%",boxSizing:"border-box",background:C.card2,border:"1px solid #30363d",
+                borderRadius:8,color:C.text,padding:"10px 12px",fontSize:13,outline:"none"}} />
           </div>
           <div>
-            <label style={{color:"#666",fontSize:11,fontWeight:700,textTransform:"uppercase",
+            <label style={{color:"#4a7090",fontSize:11,fontWeight:700,textTransform:"uppercase",
               letterSpacing:1,display:"block",marginBottom:4}}>Notes</label>
             <input value={notes} onChange={e=>setNotes(e.target.value)} placeholder="Optional notes"
-              style={{width:"100%",boxSizing:"border-box",background:"#0d1117",border:"1px solid #30363d",
-                borderRadius:8,color:"#e6edf3",padding:"10px 12px",fontSize:13,outline:"none"}} />
+              style={{width:"100%",boxSizing:"border-box",background:C.card2,border:"1px solid #30363d",
+                borderRadius:8,color:C.text,padding:"10px 12px",fontSize:13,outline:"none"}} />
           </div>
-          <button onClick={save} style={{background:"#4caf50",border:"none",borderRadius:10,
+          <button onClick={save} style={{background:"#1b6e3a",border:"none",borderRadius:10,
             color:"#000",padding:"12px",fontWeight:800,fontSize:14,cursor:"pointer",width:"100%"}}>
             ✅ Record GST Release
           </button>
@@ -8220,23 +8220,23 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
   // shared UI
   const Pill = ({status,shortage}) => {
     const c={pending:{bg:"#2a2a2a",col:"#888",txt:"Pending"},
-             billed:{bg:"#1a2a1a",col:"#4caf50",txt:"Billed"},
-             paid:{bg:"#1a1a2e",col:"#5b8dee",txt:"Paid"}}[status]||{bg:"#2a2a2a",col:"#888",txt:"Pending"};
+             billed:{bg:"#1a2a1a",col:"#1b6e3a",txt:"Billed"},
+             paid:{bg:"#1a1a2e",col:"#1565c0",txt:"Paid"}}[status]||{bg:"#2a2a2a",col:"#888",txt:"Pending"};
     return <span style={{display:"inline-flex",alignItems:"center",gap:3}}>
       <span style={{background:c.bg,color:c.col,border:`1px solid ${c.col}40`,borderRadius:4,padding:"2px 7px",fontSize:10,fontWeight:700}}>{c.txt}</span>
-      {shortage&&<span style={{background:"#2a1515",color:"#ff6b6b",border:"1px solid #ff6b6b40",borderRadius:4,padding:"2px 5px",fontSize:10,fontWeight:700}}>⚠SHORT</span>}
+      {shortage&&<span style={{background:"#2a1515",color:"#b91c1c",border:"1px solid #ff6b6b40",borderRadius:4,padding:"2px 5px",fontSize:10,fontWeight:700}}>⚠SHORT</span>}
     </span>;
   };
 
   const SearchBar = ({value,onChange,placeholder}) => (
     <div style={{position:"relative",marginBottom:12}}>
-      <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",fontSize:14,color:"#555",pointerEvents:"none"}}>🔍</span>
+      <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",fontSize:14,color:"#4a7090",pointerEvents:"none"}}>🔍</span>
       <input value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
         style={{width:"100%",boxSizing:"border-box",background:"#161616",border:"1px solid #2a2a2a",
           borderRadius:8,padding:"9px 32px 9px 32px",color:"#ccc",fontSize:13,outline:"none"}}/>
       {value&&<button onClick={()=>onChange("")}
         style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",
-          background:"none",border:"none",color:"#555",cursor:"pointer",fontSize:16,lineHeight:1}}>✕</button>}
+          background:"none",border:"none",color:"#4a7090",cursor:"pointer",fontSize:16,lineHeight:1}}>✕</button>}
     </div>
   );
 
@@ -8251,18 +8251,18 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
     <div style={{background:"#0d0d0d",minHeight:"100vh",color:"#e0e0e0",fontFamily:"'DM Sans','Segoe UI',sans-serif"}}>
 
       {/* header + KPIs */}
-      <div style={{background:"#111",borderBottom:"1px solid #222",padding:"14px 16px"}}>
-        <div style={{fontSize:10,letterSpacing:3,color:"#555",marginBottom:2}}>M YANTRA ENTERPRISES</div>
+      <div style={{background:C.bg,borderBottom:"1px solid #222",padding:"14px 16px"}}>
+        <div style={{fontSize:10,letterSpacing:3,color:"#4a7090",marginBottom:2}}>M YANTRA ENTERPRISES</div>
         <div style={{fontSize:17,fontWeight:800,color:"#fff",marginBottom:12}}>💰 Shree Cement — Payments</div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8}}>
           {[
-            {label:"Total Billed",   val:`₹${fmtINR(totalBilled)}`,   col:"#5b8dee"},
-            {label:"Total Received", val:`₹${fmtINR(totalReceived)}`, col:"#4caf50"},
-            {label:"On Hold",        val:`₹${fmtINR(totalHold)}`,     col:"#ff9800"},
-            {label:"Shortage Lost",  val:`₹${fmtINR(totalShortage)}`, col:"#ff6b6b"},
+            {label:"Total Billed",   val:`₹${fmtINR(totalBilled)}`,   col:"#1565c0"},
+            {label:"Total Received", val:`₹${fmtINR(totalReceived)}`, col:"#1b6e3a"},
+            {label:"On Hold",        val:`₹${fmtINR(totalHold)}`,     col:"#c67c00"},
+            {label:"Shortage Lost",  val:`₹${fmtINR(totalShortage)}`, col:"#b91c1c"},
           ].map(m=>(
             <div key={m.label} style={{background:"#161616",borderRadius:6,padding:"8px 12px"}}>
-              <div style={{fontSize:9,color:"#555",letterSpacing:1}}>{m.label}</div>
+              <div style={{fontSize:9,color:"#4a7090",letterSpacing:1}}>{m.label}</div>
               <div style={{fontWeight:800,color:m.col,fontSize:15}}>{m.val}</div>
             </div>
           ))}
@@ -8274,14 +8274,14 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
         <div style={{background:"#1a0a0a",borderBottom:"1px solid #ff6b6b30",padding:"8px 16px",
           display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
           <span>🚨</span>
-          <span style={{color:"#ff6b6b",fontWeight:700,fontSize:12}}>
+          <span style={{color:"#b91c1c",fontWeight:700,fontSize:12}}>
             {allShortages.length} shortage{allShortages.length>1?"s":""} — ₹{fmtINR(totalShortage)} deducted
           </span>
           <button onClick={()=>setActiveTab("shortages")}
-            style={{background:"#ff6b6b15",border:"1px solid #ff6b6b50",color:"#ff6b6b",
+            style={{background:"#ff6b6b15",border:"1px solid #ff6b6b50",color:"#b91c1c",
               padding:"2px 10px",borderRadius:4,cursor:"pointer",fontSize:11}}>View</button>
           <button onClick={()=>setShowAlert(false)}
-            style={{marginLeft:"auto",background:"none",border:"none",color:"#555",cursor:"pointer",fontSize:16}}>✕</button>
+            style={{marginLeft:"auto",background:"none",border:"none",color:"#4a7090",cursor:"pointer",fontSize:16}}>✕</button>
         </div>
       )}
 
@@ -8290,9 +8290,9 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
         {CLIENTS.map(c=>(
           <button key={c} onClick={()=>setPayClient(c)}
             style={{padding:"6px 14px",borderRadius:20,fontSize:12,fontWeight:700,cursor:"pointer",
-              border:`2px solid ${payClient===c?"#5b8dee":"#333"}`,
+              border:`2px solid ${payClient===c?"#1565c0":"#333"}`,
               background:payClient===c?"#5b8dee22":"none",
-              color:payClient===c?"#5b8dee":"#666"}}>
+              color:payClient===c?"#1565c0":"#666"}}>
             {c.replace("Shree Cement ","SC ").replace("Ultratech ","Ultratech ")}
             <span style={{fontSize:10,opacity:0.7,marginLeft:4}}>
               ({(trips||[]).filter(t=>(t.client||DEFAULT_CLIENT)===c&&t.billedToShree).length})
@@ -8302,7 +8302,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
       </div>
 
       {/* tabs with badges */}
-      <div style={{background:"#111",borderBottom:"1px solid #1e1e1e",
+      <div style={{background:C.bg,borderBottom:"1px solid #1e1e1e",
         display:"flex",overflowX:"auto",WebkitOverflowScrolling:"touch",scrollbarWidth:"none"}}>
         {[
           {id:"overview",  label:"Overview",  badge:null},
@@ -8322,7 +8322,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
             {t.label}
             {t.badge!=null&&(
               <span style={{marginLeft:5,background:activeTab===t.id?"#5b8dee22":"#222",
-                color:activeTab===t.id?"#5b8dee":"#666",borderRadius:10,
+                color:activeTab===t.id?"#1565c0":"#666",borderRadius:10,
                 padding:"1px 6px",fontSize:10,fontWeight:700}}>{t.badge}</span>
             )}
           </button>
@@ -8336,20 +8336,20 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
           <div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:10,marginBottom:16}}>
               {[
-                {label:"Shree Trips",     val:shreeTrips.length,                                                               col:"#5b8dee"},
-                {label:"Pending Billing", val:shreeTrips.filter(t=>!t.shreeStatus||t.shreeStatus==="pending").length,          col:"#ff9800"},
-                {label:"Billed / Paid",   val:`${shreeTrips.filter(t=>t.shreeStatus==="billed").length} / ${shreeTrips.filter(t=>t.shreeStatus==="paid").length}`, col:"#4caf50"},
-                {label:"Shortage Alerts", val:allShortages.length,                                                             col:"#ff6b6b"},
+                {label:"Shree Trips",     val:shreeTrips.length,                                                               col:"#1565c0"},
+                {label:"Pending Billing", val:shreeTrips.filter(t=>!t.shreeStatus||t.shreeStatus==="pending").length,          col:"#c67c00"},
+                {label:"Billed / Paid",   val:`${shreeTrips.filter(t=>t.shreeStatus==="billed").length} / ${shreeTrips.filter(t=>t.shreeStatus==="paid").length}`, col:"#1b6e3a"},
+                {label:"Shortage Alerts", val:allShortages.length,                                                             col:"#b91c1c"},
               ].map(c=>(
                 <div key={c.label} style={{background:"#151515",border:"1px solid #222",borderRadius:8,padding:"12px 14px"}}>
-                  <div style={{fontSize:10,color:"#555",letterSpacing:1,marginBottom:4}}>{c.label}</div>
+                  <div style={{fontSize:10,color:"#4a7090",letterSpacing:1,marginBottom:4}}>{c.label}</div>
                   <div style={{fontSize:24,fontWeight:800,color:c.col}}>{c.val}</div>
                 </div>
               ))}
             </div>
 
             {/* scan zone */}
-            <div style={{background:"#111",border:"1px solid #222",borderRadius:8,padding:14,marginBottom:16}}>
+            <div style={{background:C.bg,border:"1px solid #222",borderRadius:8,padding:14,marginBottom:16}}>
               <div style={{fontSize:13,fontWeight:700,color:"#fff",marginBottom:10}}>📤 Scan with AI</div>
               <div style={{display:"flex",flexDirection:"column",gap:10}}>
                 {[
@@ -8360,40 +8360,40 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                     padding:"14px",textAlign:"center",background:"#0d0d0d"}}>
                     <div style={{fontSize:24,marginBottom:4}}>{btn.icon}</div>
                     <div style={{color:"#ccc",fontWeight:600,fontSize:13,marginBottom:4}}>{btn.label}</div>
-                    <div style={{fontSize:11,color:"#555",marginBottom:10}}>{btn.sub}</div>
+                    <div style={{fontSize:11,color:"#4a7090",marginBottom:10}}>{btn.sub}</div>
                     <FileSourcePicker onFile={f=>handleScan(f,btn.type)} accept=".pdf,image/*"
-                      label={btn.label} color={"#5b8dee"} compact={true} />
+                      label={btn.label} color={"#1565c0"} compact={true} />
                   </div>
                 ))}
               </div>
 
               {scanning&&(
-                <div style={{marginTop:14,textAlign:"center",color:"#5b8dee",fontSize:13}}>
+                <div style={{marginTop:14,textAlign:"center",color:"#1565c0",fontSize:13}}>
                   <span style={{display:"inline-block",animation:"spin 1s linear infinite",marginRight:6}}>⏳</span>
                   Scanning with AI…
                 </div>
               )}
               {scanError&&(
                 <div style={{marginTop:10,background:"#1a0808",border:"1px solid #ff6b6b40",borderRadius:6,
-                  padding:"10px 12px",color:"#ff6b6b",fontSize:12,display:"flex",justifyContent:"space-between",gap:8}}>
+                  padding:"10px 12px",color:"#b91c1c",fontSize:12,display:"flex",justifyContent:"space-between",gap:8}}>
                   <span>✕ {scanError}</span>
                   <button onClick={()=>{setScanError(null);setScanResult(null);}}
-                    style={{background:"none",border:"none",color:"#ff6b6b",cursor:"pointer",flexShrink:0}}>Dismiss</button>
+                    style={{background:"none",border:"none",color:"#b91c1c",cursor:"pointer",flexShrink:0}}>Dismiss</button>
                 </div>
               )}
 
               {scanResult&&!scanError&&(
-                <div style={{marginTop:12,background:"#0d1a0d",border:"1px solid #2a4a2a",borderRadius:8,padding:12}}>
-                  <div style={{fontWeight:700,color:"#4caf50",marginBottom:10,fontSize:13}}>
+                <div style={{marginTop:12,background:"#f0fdf4",border:"1px solid #86efac",borderRadius:8,padding:12}}>
+                  <div style={{fontWeight:700,color:"#1b6e3a",marginBottom:10,fontSize:13}}>
                     ✅ {scanResult.type==="invoice"?"Invoice":"Payment Advice"} scanned
                   </div>
 
                   {scanResult.type==="invoice"&&(
                     <>
-                      <div style={{fontSize:12,color:"#888",marginBottom:10,display:"flex",gap:12,flexWrap:"wrap"}}>
+                      <div style={{fontSize:12,color:"#6b82a0",marginBottom:10,display:"flex",gap:12,flexWrap:"wrap"}}>
                         <b style={{color:"#fff"}}>{scanResult.invoiceNo||"—"}</b>
                         <span>{scanResult.invoiceDate||"—"}</span>
-                        <span style={{color:"#5b8dee",fontWeight:700}}>₹{fmtINR(scanResult.totalAmount)}</span>
+                        <span style={{color:"#1565c0",fontWeight:700}}>₹{fmtINR(scanResult.totalAmount)}</span>
                       </div>
                       {/* Per-line: Step 1 identity + Step 2 amount */}
                       {(scanResult.trips||[]).map((st,i)=>{
@@ -8403,37 +8403,37 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                         const rowOk = trip && amtCheck?.ok;
                         const rowWarn = trip && !amtCheck?.ok;
                         return (
-                          <div key={i} style={{padding:"8px 0",borderBottom:"1px solid #1a2a1a",fontSize:12}}>
+                          <div key={i} style={{padding:"8px 0",borderBottom:"1px solid #ccddf0",fontSize:12}}>
                             {/* Identity row */}
                             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
                               <div style={{flex:1,minWidth:0}}>
                                 <span style={{fontFamily:"monospace",color:"#bbb",fontSize:11}}>
                                   DI: {st.diNo||"—"}
                                 </span>
-                                {st.grNo && <span style={{fontFamily:"monospace",color:"#666",fontSize:10,marginLeft:8}}>GR: {st.grNo}</span>}
+                                {st.grNo && <span style={{fontFamily:"monospace",color:"#4a7090",fontSize:10,marginLeft:8}}>GR: {st.grNo}</span>}
                               </div>
                               <span style={{fontFamily:"monospace",color:"#fff",flexShrink:0}}>₹{fmtINR(st.frtAmt)}</span>
                               <span style={{flexShrink:0,fontSize:11}}>
                                 {trip
-                                  ? <span style={{color:"#4caf50"}}>✓ LR {trip.lrNo||trip.lr}</span>
-                                  : <span style={{color:"#ff6b6b"}}>✗ no trip</span>}
+                                  ? <span style={{color:"#1b6e3a"}}>✓ LR {trip.lrNo||trip.lr}</span>
+                                  : <span style={{color:"#b91c1c"}}>✗ no trip</span>}
                               </span>
                             </div>
                             {/* Amount validation row */}
                             {trip && (
                               <div style={{display:"flex",alignItems:"center",gap:6,marginTop:3,fontSize:11}}>
-                                <span style={{color:"#555"}}>Amount:</span>
+                                <span style={{color:"#4a7090"}}>Amount:</span>
                                 {amtCheck?.ok
-                                  ? <span style={{color:"#4caf50"}}>✓ matches (₹{fmtINR(amtCheck.expectedAmt)} in trip)</span>
-                                  : <span style={{color:"#ff9800"}}>
+                                  ? <span style={{color:"#1b6e3a"}}>✓ matches (₹{fmtINR(amtCheck.expectedAmt)} in trip)</span>
+                                  : <span style={{color:"#c67c00"}}>
                                       ⚠ mismatch — invoice ₹{fmtINR(amtCheck?.invoiceAmt)} vs trip ₹{fmtINR(amtCheck?.expectedAmt)}
-                                      {" "}<span style={{color:"#ff6b6b"}}>(diff ₹{fmtINR(Math.abs(amtCheck?.diff||0))})</span>
+                                      {" "}<span style={{color:"#b91c1c"}}>(diff ₹{fmtINR(Math.abs(amtCheck?.diff||0))})</span>
                                     </span>}
                               </div>
                             )}
                             {/* No match guidance */}
                             {!trip && (
-                              <div style={{color:"#ff9800",fontSize:10,marginTop:3}}>
+                              <div style={{color:"#c67c00",fontSize:10,marginTop:3}}>
                                 ↳ Go to Trips tab, add this trip (DI: {st.diNo||"—"}) first, then scan invoice again
                               </div>
                             )}
@@ -8453,29 +8453,29 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                           <div style={{marginTop:8,padding:"8px 0",display:"flex",gap:12,flexWrap:"wrap",
                             fontSize:11,borderTop:"1px solid #1a2a1a"}}>
                             {allOk
-                              ? <span style={{color:"#4caf50",fontWeight:700}}>✓ All {lines.length} trips matched — ready to apply</span>
+                              ? <span style={{color:"#1b6e3a",fontWeight:700}}>✓ All {lines.length} trips matched — ready to apply</span>
                               : <>
-                                  <span style={{color:"#4caf50"}}>{amtOk} matched</span>
-                                  {amtMismatch>0 && <span style={{color:"#ff9800"}}>⚠ {amtMismatch} amount mismatch</span>}
-                                  {noTrip>0 && <span style={{color:"#ff6b6b"}}>✗ {noTrip} trip not in system — add to Trips tab first</span>}
+                                  <span style={{color:"#1b6e3a"}}>{amtOk} matched</span>
+                                  {amtMismatch>0 && <span style={{color:"#c67c00"}}>⚠ {amtMismatch} amount mismatch</span>}
+                                  {noTrip>0 && <span style={{color:"#b91c1c"}}>✗ {noTrip} trip not in system — add to Trips tab first</span>}
                                 </>}
                           </div>
                           {alreadySaved && (
-                            <div style={{background:"#ff6b6b22",border:"1px solid #ff6b6b44",borderRadius:8,
-                              padding:"8px 12px",color:"#ff6b6b",fontSize:12,fontWeight:700}}>
+                            <div style={{background:"#fef2f2",border:"1px solid #ff6b6b44",borderRadius:8,
+                              padding:"8px 12px",color:"#b91c1c",fontSize:12,fontWeight:700}}>
                               ⚠ Invoice {scanResult.invoiceNo} is already saved. Scanning again will not change anything.
                             </div>
                           )}
                           <div style={{display:"flex",gap:8,marginTop:8}}>
                             <button onClick={applyInvoiceScan} disabled={!allOk||alreadySaved}
-                              style={{flex:1,background:allOk&&!alreadySaved?"#4caf50":"#333",
+                              style={{flex:1,background:allOk&&!alreadySaved?"#1b6e3a":"#333",
                                 color:allOk&&!alreadySaved?"#000":"#666",border:"none",borderRadius:6,
                                 padding:"10px",fontWeight:700,
                                 cursor:allOk&&!alreadySaved?"pointer":"not-allowed",fontSize:13}}>
                               {alreadySaved ? "Already Saved" : allOk ? "✓ Apply — Mark Billed" : "Fix issues above first"}
                             </button>
                             <button onClick={()=>setScanResult(null)}
-                              style={{background:"#222",color:"#888",border:"1px solid #333",borderRadius:6,
+                              style={{background:"#e8f0fa",color:"#6b82a0",border:"1px solid #ccddf0",borderRadius:6,
                                 padding:"10px 14px",cursor:"pointer",fontSize:12}}>Discard</button>
                           </div>
                         </>);
@@ -8485,26 +8485,26 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
 
                   {scanResult.type==="payment"&&(
                     <>
-                      <div style={{fontSize:12,color:"#888",marginBottom:10,display:"flex",gap:12,flexWrap:"wrap"}}>
+                      <div style={{fontSize:12,color:"#6b82a0",marginBottom:10,display:"flex",gap:12,flexWrap:"wrap"}}>
                         <span>UTR: <b style={{color:"#fff"}}>{scanResult.utr||"—"}</b></span>
                         <span>{scanResult.paymentDate||"—"}</span>
                       </div>
                       <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:6,marginBottom:10}}>
                         {[
-                          {l:"Net Paid",   v:scanResult.totalPaid,   c:"#4caf50"},
-                          {l:"TDS",        v:scanResult.tdsDeducted, c:"#ff9800"},
-                          {l:"Hold",       v:scanResult.holdAmount,  c:"#ff9800"},
+                          {l:"Net Paid",   v:scanResult.totalPaid,   c:"#1b6e3a"},
+                          {l:"TDS",        v:scanResult.tdsDeducted, c:"#c67c00"},
+                          {l:"Hold",       v:scanResult.holdAmount,  c:"#c67c00"},
                           {l:"Total Bill", v:scanResult.totalBilled, c:"#aaa"},
                         ].map(m=>(
                           <div key={m.l} style={{background:"#0d0d0d",borderRadius:4,padding:"6px 8px"}}>
-                            <div style={{fontSize:9,color:"#555"}}>{m.l}</div>
+                            <div style={{fontSize:9,color:"#4a7090"}}>{m.l}</div>
                             <div style={{fontWeight:700,color:m.c,fontSize:13}}>₹{fmtINR(m.v)}</div>
                           </div>
                         ))}
                       </div>
                       {(scanResult.shortages||[]).length>0&&(
                         <div style={{background:"#1a0808",borderRadius:6,padding:"8px 10px",marginBottom:8}}>
-                          <div style={{color:"#ff6b6b",fontWeight:700,fontSize:11,marginBottom:4}}>⚠ Shortages</div>
+                          <div style={{color:"#b91c1c",fontWeight:700,fontSize:11,marginBottom:4}}>⚠ Shortages</div>
                           {(scanResult.shortages||[]).map((s,i)=>(
                             <div key={i} style={{fontSize:11,color:"#ff9999",padding:"2px 0"}}>
                               {s.lrNo} — {s.tonnes} TO — ₹{fmtINR(s.deduction)}
@@ -8514,7 +8514,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                       )}
                       {(scanResult.expenses||[]).length>0&&(
                         <div style={{background:"#1a1000",borderRadius:6,padding:"8px 10px",marginBottom:8}}>
-                          <div style={{color:"#ff9800",fontWeight:700,fontSize:11,marginBottom:4}}>
+                          <div style={{color:"#c67c00",fontWeight:700,fontSize:11,marginBottom:4}}>
                             📋 Debit Notes → will save as Expenses
                           </div>
                           {(scanResult.expenses||[]).map((e,i)=>(
@@ -8528,10 +8528,10 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                       )}
                       <div style={{display:"flex",gap:8}}>
                         <button onClick={applyPaymentScan}
-                          style={{flex:1,background:"#5b8dee",color:"#000",border:"none",borderRadius:6,
+                          style={{flex:1,background:"#1565c0",color:"#000",border:"none",borderRadius:6,
                             padding:"10px",fontWeight:700,cursor:"pointer",fontSize:12}}>✓ Apply — Mark Paid</button>
                         <button onClick={()=>setScanResult(null)}
-                          style={{background:"#222",color:"#888",border:"1px solid #333",borderRadius:6,
+                          style={{background:"#e8f0fa",color:"#6b82a0",border:"1px solid #ccddf0",borderRadius:6,
                             padding:"10px 14px",cursor:"pointer",fontSize:12}}>Discard</button>
                       </div>
                     </>
@@ -8541,13 +8541,13 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
             </div>
 
             {/* recent trips */}
-            <div style={{background:"#111",border:"1px solid #222",borderRadius:8,overflow:"hidden"}}>
+            <div style={{background:C.bg,border:"1px solid #222",borderRadius:8,overflow:"hidden"}}>
               <div style={{padding:"10px 14px",borderBottom:"1px solid #1e1e1e",
                 display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                 <span style={{fontWeight:700,fontSize:13}}>Recent Shree Trips</span>
                 {shreeTrips.length>5&&(
                   <button onClick={()=>setActiveTab("invoices")}
-                    style={{background:"none",border:"none",color:"#5b8dee",fontSize:12,cursor:"pointer"}}>
+                    style={{background:"none",border:"none",color:"#1565c0",fontSize:12,cursor:"pointer"}}>
                     View all →</button>
                 )}
               </div>
@@ -8560,9 +8560,9 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                       <span style={{fontFamily:"monospace",fontSize:12,color:"#ccc"}}>{t.lr||t.lrNo}</span>
                       <Pill status={t.shreeStatus||"pending"} shortage={t.shreeShortage}/>
                     </div>
-                    <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:"#666"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:"#4a7090"}}>
                       <span>{t.truck||t.truckNo} · {fmtDate(t.date)}</span>
-                      <span style={{fontFamily:"monospace",color:"#5b8dee"}}>₹{fmtINR(t.billedToShree)}</span>
+                      <span style={{fontFamily:"monospace",color:"#1565c0"}}>₹{fmtINR(t.billedToShree)}</span>
                     </div>
                   </div>
                 ))
@@ -8575,7 +8575,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
         {activeTab==="invoices"&&(
           <div>
             <SearchBar value={searchInv} onChange={setSearchInv} placeholder="Search invoice no, LR, date…"/>
-            <div style={{fontSize:11,color:"#555",marginBottom:10}}>
+            <div style={{fontSize:11,color:"#4a7090",marginBottom:10}}>
               {filteredInvoices.length} of {shreeInvoices.length} invoice{shreeInvoices.length!==1?"s":""}
               {searchInv&&` · "${searchInv}"`}
             </div>
@@ -8584,7 +8584,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
               : filteredInvoices.map(inv=>{
                 const isOpen = expandedInv===inv.invoiceNo;
                 return (
-                  <div key={inv.invoiceNo} style={{background:"#111",border:"1px solid #222",
+                  <div key={inv.invoiceNo} style={{background:C.bg,border:"1px solid #222",
                     borderRadius:8,marginBottom:10,overflow:"hidden"}}>
                     <div onClick={()=>setExpandedInv(isOpen?null:inv.invoiceNo)}
                       style={{padding:"12px 14px",cursor:"pointer",
@@ -8596,16 +8596,16 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                           </span>
                           <Pill status={inv.status}/>
                         </div>
-                        <div style={{display:"flex",gap:10,fontSize:11,color:"#555",flexWrap:"wrap"}}>
+                        <div style={{display:"flex",gap:10,fontSize:11,color:"#4a7090",flexWrap:"wrap"}}>
                           <span>{fmtDate(inv.invoiceDate)}</span>
                           <span>{inv.trips.length} trip{inv.trips.length!==1?"s":""}</span>
-                          <span style={{color:"#5b8dee",fontWeight:700}}>₹{fmtINR(inv.totalAmt)}</span>
+                          <span style={{color:"#1565c0",fontWeight:700}}>₹{fmtINR(inv.totalAmt)}</span>
                         </div>
                       </div>
                       <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
                         {isOwner&&(
                           <button onClick={e=>{e.stopPropagation();deleteInvoice(inv.invoiceNo);}}
-                            style={{background:"#1a0808",border:"1px solid #ff6b6b30",color:"#ff6b6b",
+                            style={{background:"#1a0808",border:"1px solid #ff6b6b30",color:"#b91c1c",
                               borderRadius:5,padding:"5px 9px",fontSize:12,cursor:"pointer"}}>🗑</button>
                         )}
                         <span style={{color:"#333",fontSize:16,fontWeight:700}}>{isOpen?"▲":"▼"}</span>
@@ -8617,18 +8617,18 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                           <div key={t.id} style={{padding:"9px 14px",borderBottom:"1px solid #161616",
                             background:t.shreeShortage?"#140808":"#0d0d0d"}}>
                             <div style={{display:"flex",justifyContent:"space-between",fontSize:12}}>
-                              <span style={{fontFamily:"monospace",color:"#aaa"}}>{t.lr||t.lrNo}</span>
+                              <span style={{fontFamily:"monospace",color:"#6b82a0"}}>{t.lr||t.lrNo}</span>
                               <span style={{fontFamily:"monospace",color:"#ccc",fontWeight:700}}>
                                 ₹{fmtINR(t.billedToShree)}
                               </span>
                             </div>
-                            <div style={{display:"flex",gap:10,fontSize:10,color:"#555",marginTop:2}}>
+                            <div style={{display:"flex",gap:10,fontSize:10,color:"#4a7090",marginTop:2}}>
                               <span>{t.truck||t.truckNo}</span>
                               <span>{t.qty} MT</span>
-                              {t.paymentDate&&<span style={{color:"#4caf50"}}>✓ Paid {fmtDate(t.paymentDate)}</span>}
+                              {t.paymentDate&&<span style={{color:"#1b6e3a"}}>✓ Paid {fmtDate(t.paymentDate)}</span>}
                             </div>
                             {t.shreeShortage&&(
-                              <div style={{fontSize:10,color:"#ff6b6b",marginTop:3}}>
+                              <div style={{fontSize:10,color:"#b91c1c",marginTop:3}}>
                                 ⚠ {t.shreeShortage.tonnes} TO short — ₹{fmtINR(t.shreeShortage.deduction)}
                               </div>
                             )}
@@ -8636,8 +8636,8 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                         ))}
                         <div style={{padding:"8px 14px",display:"flex",justifyContent:"space-between",
                           fontSize:11,background:"#0d0d0d",borderTop:"1px solid #1a1a1a"}}>
-                          <span style={{color:"#555"}}>Invoice Total</span>
-                          <span style={{fontFamily:"monospace",color:"#fff",fontWeight:700}}>₹{fmtINR(inv.totalAmt)}</span>
+                          <span style={{color:"#4a7090"}}>Invoice Total</span>
+                          <span style={{fontFamily:"monospace",color:C.text,fontWeight:700}}>₹{fmtINR(inv.totalAmt)}</span>
                         </div>
                       </div>
                     )}
@@ -8652,7 +8652,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
         {activeTab==="payments"&&(
           <div>
             <SearchBar value={searchAdv} onChange={setSearchAdv} placeholder="Search UTR, invoice no, date…"/>
-            <div style={{fontSize:11,color:"#555",marginBottom:10}}>
+            <div style={{fontSize:11,color:"#4a7090",marginBottom:10}}>
               {filteredAdvices.length} of {shreePayments.length} advice{shreePayments.length!==1?"s":""}
               {searchAdv&&` · "${searchAdv}"`}
             </div>
@@ -8664,33 +8664,33 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                 const frtInvoices=(p.invoices||[]).filter(i=>i.invoiceNo&&!i.invoiceNo.startsWith("KR"));
                 const allExpenses=[...(p.expenses||[]),...(p.penalties||[])];
                 return (
-                  <div key={key} style={{background:"#111",border:"1px solid #222",
+                  <div key={key} style={{background:C.bg,border:"1px solid #222",
                     borderRadius:8,marginBottom:12,overflow:"hidden"}}>
                     <div onClick={()=>setExpandedAdv(isOpen?null:key)}
                       style={{padding:"12px 14px",cursor:"pointer",
                         display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
                       <div style={{flex:1,minWidth:0}}>
                         <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3,flexWrap:"wrap"}}>
-                          <span style={{fontFamily:"monospace",color:"#5b8dee",fontSize:13,fontWeight:700}}>
+                          <span style={{fontFamily:"monospace",color:"#1565c0",fontSize:13,fontWeight:700}}>
                             UTR: {p.utr}
                           </span>
                           {(p.shortages||[]).length>0&&(
-                            <span style={{background:"#2a1515",color:"#ff6b6b",border:"1px solid #ff6b6b30",
+                            <span style={{background:"#2a1515",color:"#b91c1c",border:"1px solid #ff6b6b30",
                               borderRadius:4,padding:"1px 6px",fontSize:10}}>
                               ⚠ {p.shortages.length} shortage{p.shortages.length>1?"s":""}
                             </span>
                           )}
                         </div>
-                        <div style={{display:"flex",gap:10,fontSize:11,color:"#555",flexWrap:"wrap"}}>
+                        <div style={{display:"flex",gap:10,fontSize:11,color:"#4a7090",flexWrap:"wrap"}}>
                           <span>{fmtDate(p.paymentDate||p.date)}</span>
-                          <span style={{color:"#4caf50",fontWeight:700}}>₹{fmtINR(p.totalPaid||p.paid)}</span>
+                          <span style={{color:"#1b6e3a",fontWeight:700}}>₹{fmtINR(p.totalPaid||p.paid)}</span>
                           <span>{frtInvoices.length} invoice{frtInvoices.length!==1?"s":""}</span>
                         </div>
                       </div>
                       <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
                         {isOwner&&(
                           <button onClick={e=>{e.stopPropagation();deleteAdvice(p.utr,p.id);}}
-                            style={{background:"#1a0808",border:"1px solid #ff6b6b30",color:"#ff6b6b",
+                            style={{background:"#1a0808",border:"1px solid #ff6b6b30",color:"#b91c1c",
                               borderRadius:5,padding:"5px 9px",fontSize:12,cursor:"pointer"}}>🗑</button>
                         )}
                         <span style={{color:"#333",fontSize:16,fontWeight:700}}>{isOpen?"▲":"▼"}</span>
@@ -8703,14 +8703,14 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                         <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)"}}>
                           {[
                             {l:"Total Billed",  v:p.totalBilled||p.totalBill, c:"#aaa"},
-                            {l:"Net Paid",      v:p.totalPaid||p.paid,        c:"#4caf50"},
-                            {l:"TDS Deducted",  v:p.tdsDeducted||p.tds,      c:"#ff9800"},
-                            {l:"On Hold",       v:p.holdAmount||p.gstHold,    c:"#ff9800"},
+                            {l:"Net Paid",      v:p.totalPaid||p.paid,        c:"#1b6e3a"},
+                            {l:"TDS Deducted",  v:p.tdsDeducted||p.tds,      c:"#c67c00"},
+                            {l:"On Hold",       v:p.holdAmount||p.gstHold,    c:"#c67c00"},
                           ].map((m,i)=>(
                             <div key={m.l} style={{padding:"10px 14px",background:"#0d0d0d",
                               borderRight:i%2===0?"1px solid #1a1a1a":"none",
                               borderBottom:i<2?"1px solid #1a1a1a":"none"}}>
-                              <div style={{fontSize:9,color:"#555",letterSpacing:1}}>{m.l}</div>
+                              <div style={{fontSize:9,color:"#4a7090",letterSpacing:1}}>{m.l}</div>
                               <div style={{fontWeight:800,color:m.c,fontSize:14}}>₹{fmtINR(m.v)}</div>
                             </div>
                           ))}
@@ -8718,15 +8718,15 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                         {/* invoices */}
                         {frtInvoices.length>0&&(
                           <>
-                            <div style={{padding:"6px 14px",fontSize:10,fontWeight:700,color:"#555",
+                            <div style={{padding:"6px 14px",fontSize:10,fontWeight:700,color:"#4a7090",
                               letterSpacing:1,background:"#0d0d0d",borderTop:"1px solid #1a1a1a"}}>INVOICES</div>
                             {frtInvoices.map((inv,i)=>(
                               <div key={i} style={{padding:"8px 14px",borderTop:"1px solid #161616",
                                 display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:12}}>
-                                <span style={{fontFamily:"monospace",color:"#aaa"}}>{inv.invoiceNo}</span>
+                                <span style={{fontFamily:"monospace",color:"#6b82a0"}}>{inv.invoiceNo}</span>
                                 <div style={{textAlign:"right"}}>
-                                  <div style={{color:"#4caf50",fontWeight:700}}>₹{fmtINR(inv.paymentAmt)}</div>
-                                  {inv.tds>0&&<div style={{fontSize:10,color:"#ff9800"}}>TDS ₹{fmtINR(inv.tds)}</div>}
+                                  <div style={{color:"#1b6e3a",fontWeight:700}}>₹{fmtINR(inv.paymentAmt)}</div>
+                                  {inv.tds>0&&<div style={{fontSize:10,color:"#c67c00"}}>TDS ₹{fmtINR(inv.tds)}</div>}
                                 </div>
                               </div>
                             ))}
@@ -8735,7 +8735,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                         {/* shortages */}
                         {(p.shortages||[]).length>0&&(
                           <>
-                            <div style={{padding:"6px 14px",fontSize:10,fontWeight:700,color:"#ff6b6b",
+                            <div style={{padding:"6px 14px",fontSize:10,fontWeight:700,color:"#b91c1c",
                               letterSpacing:1,background:"#140808",borderTop:"1px solid #2a1212"}}>⚠ SHORTAGES</div>
                             {(p.shortages||[]).map((s,i)=>(
                               <div key={i} style={{padding:"8px 14px",borderTop:"1px solid #1a0a0a",
@@ -8744,7 +8744,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                                   <div style={{fontFamily:"monospace",color:"#ffaaaa"}}>{s.lrNo||s.lr}</div>
                                   <div style={{fontSize:10,color:"#883333"}}>{s.tonnes} TO · {s.ref}</div>
                                 </div>
-                                <span style={{color:"#ff6b6b",fontWeight:700,fontFamily:"monospace"}}>
+                                <span style={{color:"#b91c1c",fontWeight:700,fontFamily:"monospace"}}>
                                   ₹{fmtINR(s.deduction)}
                                 </span>
                               </div>
@@ -8754,7 +8754,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                         {/* expenses / debit notes */}
                         {allExpenses.length>0&&(
                           <>
-                            <div style={{padding:"6px 14px",fontSize:10,fontWeight:700,color:"#ff9800",
+                            <div style={{padding:"6px 14px",fontSize:10,fontWeight:700,color:"#c67c00",
                               letterSpacing:1,background:"#130f00",borderTop:"1px solid #2a2000"}}>📋 DEBIT NOTES / EXPENSES</div>
                             {allExpenses.map((e,i)=>(
                               <div key={i} style={{padding:"8px 14px",borderTop:"1px solid #1a1500",
@@ -8764,7 +8764,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                                   <div style={{color:"#ffcc88"}}>{e.description||e.ref}</div>
                                   {e.ref&&<div style={{fontSize:10,color:"#665500"}}>{e.ref}</div>}
                                 </div>
-                                <span style={{color:"#ff9800",fontWeight:700,fontFamily:"monospace"}}>
+                                <span style={{color:"#c67c00",fontWeight:700,fontFamily:"monospace"}}>
                                   ₹{fmtINR(e.amount)}
                                 </span>
                               </div>
@@ -8787,8 +8787,8 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
               padding:"12px 14px",marginBottom:14,
               display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,textAlign:"center"}}>
               {[
-                {l:"Count",    v:allShortages.length,                                                         c:"#ff6b6b"},
-                {l:"Deducted", v:`₹${fmtINR(totalShortage)}`,                                                c:"#ff6b6b"},
+                {l:"Count",    v:allShortages.length,                                                         c:"#b91c1c"},
+                {l:"Deducted", v:`₹${fmtINR(totalShortage)}`,                                                c:"#b91c1c"},
                 {l:"Tonnes",   v:`${allShortages.reduce((s,sh)=>s+Number(sh.tonnes||0),0).toFixed(2)} TO`,   c:"#ff9999"},
               ].map(m=>(
                 <div key={m.l}>
@@ -8799,7 +8799,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
             </div>
 
             <SearchBar value={searchShort} onChange={setSearchShort} placeholder="Search LR, ref, UTR…"/>
-            <div style={{fontSize:11,color:"#555",marginBottom:10}}>
+            <div style={{fontSize:11,color:"#4a7090",marginBottom:10}}>
               {filteredShortages.length} of {allShortages.length} deduction{allShortages.length!==1?"s":""}
               {searchShort&&` · "${searchShort}"`}
             </div>
@@ -8817,7 +8817,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                     <span style={{fontFamily:"monospace",color:"#ffaaaa",fontSize:13,fontWeight:700}}>
                       {lrKey||"— No LR —"}
                     </span>
-                    <span style={{color:"#ff6b6b",fontWeight:800,fontFamily:"monospace",fontSize:14}}>
+                    <span style={{color:"#b91c1c",fontWeight:800,fontFamily:"monospace",fontSize:14}}>
                       ₹{fmtINR(s.deduction)}
                     </span>
                   </div>
@@ -8830,8 +8830,8 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                   {linkedTrip?(
                     <div style={{background:"#0a2000",borderRadius:6,padding:"5px 8px",fontSize:11,
                       display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                      <span style={{color:"#4caf50"}}>✓ Linked · {linkedTrip.truckNo||linkedTrip.truck} · {linkedTrip.to}</span>
-                      {linkedVeh&&<span style={{color:"#888"}}>Balance: ₹{fmtINR((linkedVeh.shortageOwed||0)-(linkedVeh.shortageRecovered||0))}</span>}
+                      <span style={{color:"#1b6e3a"}}>✓ Linked · {linkedTrip.truckNo||linkedTrip.truck} · {linkedTrip.to}</span>
+                      {linkedVeh&&<span style={{color:"#6b82a0"}}>Balance: ₹{fmtINR((linkedVeh.shortageOwed||0)-(linkedVeh.shortageRecovered||0))}</span>}
                     </div>
                   ):(
                     <div style={{background:"#2a1000",borderRadius:6,padding:"5px 8px",fontSize:11,color:"#ff8800"}}>
@@ -8852,14 +8852,14 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
             {/* KPI row */}
             <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10}}>
               {[
-                {label:"Total Held",    val:fmtINR(gstTotalHeld),     col:"#ff9800"},
-                {label:"Released",      val:fmtINR(gstTotalReleased),  col:"#4caf50"},
-                {label:"Pending",       val:fmtINR(gstHoldPending),    col:"#ff6b6b"},
+                {label:"Total Held",    val:fmtINR(gstTotalHeld),     col:"#c67c00"},
+                {label:"Released",      val:fmtINR(gstTotalReleased),  col:"#1b6e3a"},
+                {label:"Pending",       val:fmtINR(gstHoldPending),    col:"#b91c1c"},
               ].map(k=>(
-                <div key={k.label} style={{background:"#161b22",border:"1px solid #21262d",
+                <div key={k.label} style={{background:C.card,border:"1px solid #21262d",
                   borderRadius:10,padding:"12px 10px",textAlign:"center"}}>
                   <div style={{color:k.col,fontWeight:800,fontSize:15}}>{k.val}</div>
-                  <div style={{color:"#666",fontSize:10,marginTop:3,textTransform:"uppercase",letterSpacing:0.5}}>{k.label}</div>
+                  <div style={{color:"#4a7090",fontSize:10,marginTop:3,textTransform:"uppercase",letterSpacing:0.5}}>{k.label}</div>
                 </div>
               ))}
             </div>
@@ -8883,11 +8883,11 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
               );
               if(!canAutoDetect) return null;
               return (
-                <div style={{background:"#1a2a1a",border:"1px solid #4caf5033",borderRadius:10,
+                <div style={{background:C.card2,border:"1px solid #4caf5033",borderRadius:10,
                   padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                   <div>
-                    <div style={{color:"#4caf50",fontWeight:700,fontSize:12}}>🔍 Release data found in scanned advices</div>
-                    <div style={{color:"#555",fontSize:11,marginTop:2}}>Tap to mark held invoices as released</div>
+                    <div style={{color:"#1b6e3a",fontWeight:700,fontSize:12}}>🔍 Release data found in scanned advices</div>
+                    <div style={{color:"#4a7090",fontSize:11,marginTop:2}}>Tap to mark held invoices as released</div>
                   </div>
                   <button onClick={()=>{
                     // Build held map from all payment advices
@@ -8934,7 +8934,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                     } else {
                       alert("No new releases found.");
                     }
-                  }} style={{background:"#4caf50",border:"none",color:"#000",
+                  }} style={{background:"#1b6e3a",border:"none",color:"#000",
                     borderRadius:8,padding:"7px 14px",fontWeight:700,fontSize:12,cursor:"pointer",flexShrink:0}}>
                     Auto-Detect
                   </button>
@@ -8953,45 +8953,45 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
 
             {/* Hold ledger table */}
             {gstHoldItems.length===0 ? (
-              <div style={{textAlign:"center",padding:"30px 0",color:"#555"}}>
+              <div style={{textAlign:"center",padding:"30px 0",color:"#4a7090"}}>
                 <div style={{fontSize:28,marginBottom:8}}>🔒</div>
                 <div>No GST hold recorded yet.</div>
                 <div style={{fontSize:12,marginTop:4,color:"#444"}}>Hold amounts are captured automatically when you scan a payment advice.</div>
               </div>
             ) : (
               gstHoldItems.map(g=>(
-                <div key={g.invoiceNo} style={{background:"#161b22",border:"1px solid "+
-                  (g.status==="released"?"#4caf5044":g.status==="partial"?"#ff980044":"#ff6b6b44"),
+                <div key={g.invoiceNo} style={{background:C.card,border:"1px solid "+
+                  (g.status==="released"?"#86efac":g.status==="partial"?"#fde68a":"#fca5a5"),
                   borderRadius:12,padding:"12px 14px",borderLeft:"4px solid "+
-                  (g.status==="released"?"#4caf50":g.status==="partial"?"#ff9800":"#ff6b6b")}}>
+                  (g.status==="released"?"#1b6e3a":g.status==="partial"?"#c67c00":"#b91c1c")}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
                     <div>
-                      <div style={{fontWeight:700,fontSize:13,color:"#e6edf3"}}>{g.invoiceNo}</div>
-                      {g.invDate&&<div style={{color:"#666",fontSize:11,marginTop:1}}>{fmtDate(parseDD(g.invDate))}</div>}
-                      {g.sapDoc&&<div style={{color:"#666",fontSize:11}}>SAP: {g.sapDoc}</div>}
+                      <div style={{fontWeight:700,fontSize:13,color:C.text}}>{g.invoiceNo}</div>
+                      {g.invDate&&<div style={{color:"#4a7090",fontSize:11,marginTop:1}}>{fmtDate(parseDD(g.invDate))}</div>}
+                      {g.sapDoc&&<div style={{color:"#4a7090",fontSize:11}}>SAP: {g.sapDoc}</div>}
                     </div>
-                    <span style={{background:g.status==="released"?"#4caf5022":g.status==="partial"?"#ff980022":"#ff6b6b22",
-                      color:g.status==="released"?"#4caf50":g.status==="partial"?"#ff9800":"#ff6b6b",
-                      border:"1px solid "+(g.status==="released"?"#4caf5044":g.status==="partial"?"#ff980044":"#ff6b6b44"),
+                    <span style={{background:g.status==="released"?"#f0fdf4":g.status==="partial"?"#fffbeb":"#fef2f2",
+                      color:g.status==="released"?"#1b6e3a":g.status==="partial"?"#c67c00":"#b91c1c",
+                      border:"1px solid "+(g.status==="released"?"#86efac":g.status==="partial"?"#fde68a":"#fca5a5"),
                       borderRadius:20,padding:"3px 10px",fontSize:10,fontWeight:700}}>
                       {g.status==="released"?"✅ Released":g.status==="partial"?"🔄 Partial":"🔴 Pending"}
                     </span>
                   </div>
                   <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginTop:10}}>
                     {[
-                      {l:"Held",     v:fmtINR(g.holdAmount), c:"#ff9800"},
-                      {l:"Released", v:fmtINR(g.released),   c:"#4caf50"},
-                      {l:"Balance",  v:fmtINR(g.balance),    c:g.balance>0?"#ff6b6b":"#4caf50"},
+                      {l:"Held",     v:fmtINR(g.holdAmount), c:"#c67c00"},
+                      {l:"Released", v:fmtINR(g.released),   c:"#1b6e3a"},
+                      {l:"Balance",  v:fmtINR(g.balance),    c:g.balance>0?"#b91c1c":"#1b6e3a"},
                     ].map(x=>(
-                      <div key={x.l} style={{background:"#0d1117",borderRadius:8,padding:"8px",textAlign:"center"}}>
+                      <div key={x.l} style={{background:C.card2,borderRadius:8,padding:"8px",textAlign:"center"}}>
                         <div style={{color:x.c,fontWeight:700,fontSize:12}}>{x.v}</div>
-                        <div style={{color:"#555",fontSize:9,textTransform:"uppercase",letterSpacing:0.5}}>{x.l}</div>
+                        <div style={{color:"#4a7090",fontSize:9,textTransform:"uppercase",letterSpacing:0.5}}>{x.l}</div>
                       </div>
                     ))}
                   </div>
                   {g.releaseUtr&&(
-                    <div style={{marginTop:8,color:"#666",fontSize:11}}>
-                      Released via UTR: <b style={{color:"#4caf50"}}>{g.releaseUtr}</b>
+                    <div style={{marginTop:8,color:"#4a7090",fontSize:11}}>
+                      Released via UTR: <b style={{color:"#1b6e3a"}}>{g.releaseUtr}</b>
                       {g.releaseDate&&" on "+fmtDate(g.releaseDate)}
                     </div>
                   )}
@@ -9004,23 +9004,23 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
         {activeTab==="profit"&&(
           <div>
             {shreeTrips.length>0&&(
-              <div style={{background:"#0d1a0d",border:"1px solid #1a3a1a",borderRadius:8,
+              <div style={{background:"#f0fdf4",border:"1px solid #1a3a1a",borderRadius:8,
                 padding:"12px 14px",marginBottom:14,
                 display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                 <div>
                   <div style={{fontSize:10,color:"#2a6a2a",letterSpacing:1,marginBottom:2}}>TOTAL PROFIT</div>
-                  <div style={{fontSize:22,fontWeight:800,color:"#4caf50"}}>
+                  <div style={{fontSize:22,fontWeight:800,color:"#1b6e3a"}}>
                     ₹{fmtINR(shreeTrips.reduce((s,t)=>s+tripProfit(t),0))}
                   </div>
                 </div>
-                <div style={{textAlign:"right",fontSize:11,color:"#555"}}>
+                <div style={{textAlign:"right",fontSize:11,color:"#4a7090"}}>
                   <div>{shreeTrips.filter(t=>t.shreeStatus==="paid").length} paid trips</div>
                   <div>{shreeTrips.filter(t=>t.shreeShortage).length} with shortages</div>
                 </div>
               </div>
             )}
 
-            <div style={{background:"#111",border:"1px solid #222",borderRadius:8,padding:12,marginBottom:14}}>
+            <div style={{background:C.bg,border:"1px solid #222",borderRadius:8,padding:12,marginBottom:14}}>
               <div style={{fontSize:13,fontWeight:700,marginBottom:8}}>➕ Add Trip Expense</div>
               <div style={{display:"flex",flexDirection:"column",gap:8}}>
                 <SearchSelect
@@ -9031,26 +9031,26 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                 />
                 <input value={newExp.label} onChange={e=>setNewExp({...newExp,label:e.target.value})}
                   placeholder="Expense label (fuel, toll…)"
-                  style={{background:"#0d0d0d",border:"1px solid #333",borderRadius:6,
+                  style={{background:"#0d0d0d",border:"1px solid #ccddf0",borderRadius:6,
                     padding:"8px 10px",color:"#ccc",fontSize:13}}/>
                 <div style={{display:"flex",gap:8}}>
                   <input value={newExp.amount} onChange={e=>setNewExp({...newExp,amount:e.target.value})}
                     type="number" placeholder="₹ Amount"
-                    style={{flex:1,background:"#0d0d0d",border:"1px solid #333",borderRadius:6,
+                    style={{flex:1,background:"#0d0d0d",border:"1px solid #ccddf0",borderRadius:6,
                       padding:"8px 10px",color:"#ccc",fontSize:13}}/>
                   <button onClick={()=>{
                     if(!newExp.tripId||!newExp.label||!newExp.amount) return;
                     setExpenses(prev=>({...prev,[newExp.tripId]:[...(prev[newExp.tripId]||[]),
                       {label:newExp.label,amount:Number(newExp.amount)}]}));
                     setNewExp({tripId:"",label:"",amount:""});
-                  }} style={{background:"#5b8dee",color:"#000",border:"none",borderRadius:6,
+                  }} style={{background:"#1565c0",color:"#000",border:"none",borderRadius:6,
                     padding:"8px 16px",fontWeight:700,cursor:"pointer",fontSize:13}}>Add</button>
                 </div>
               </div>
             </div>
 
             <SearchBar value={searchTrip} onChange={setSearchTrip} placeholder="Search LR, truck…"/>
-            <div style={{fontSize:11,color:"#555",marginBottom:10}}>
+            <div style={{fontSize:11,color:"#4a7090",marginBottom:10}}>
               {filteredTrips.length} of {shreeTrips.length} trip{shreeTrips.length!==1?"s":""}
             </div>
 
@@ -9059,24 +9059,24 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
               : filteredTrips.map(t=>{
                 const profit=tripProfit(t);
                 return (
-                  <div key={t.id} style={{background:"#111",border:"1px solid #222",
+                  <div key={t.id} style={{background:C.bg,border:"1px solid #222",
                     borderRadius:8,padding:"11px 14px",marginBottom:8}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
                       <div>
                         <span style={{fontFamily:"monospace",fontSize:12,color:"#ccc"}}>{t.lr||t.lrNo}</span>
-                        <span style={{fontSize:11,color:"#555",marginLeft:8}}>{t.truck||t.truckNo}</span>
+                        <span style={{fontSize:11,color:"#4a7090",marginLeft:8}}>{t.truck||t.truckNo}</span>
                       </div>
-                      <span style={{fontWeight:800,fontSize:15,color:profit>=0?"#4caf50":"#ff6b6b"}}>
+                      <span style={{fontWeight:800,fontSize:15,color:profit>=0?"#1b6e3a":"#b91c1c"}}>
                         ₹{fmtINR(profit)}
                       </span>
                     </div>
                     <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:4,fontSize:11}}>
-                      <div><span style={{color:"#555",display:"block"}}>Billed</span>
+                      <div><span style={{color:"#4a7090",display:"block"}}>Billed</span>
                         <span style={{color:"#ccc",fontFamily:"monospace"}}>₹{fmtINR(t.billedToShree)}</span></div>
-                      <div><span style={{color:"#555",display:"block"}}>Shortage</span>
-                        <span style={{color:t.shreeShortage?"#ff6b6b":"#444",fontFamily:"monospace"}}>
+                      <div><span style={{color:"#4a7090",display:"block"}}>Shortage</span>
+                        <span style={{color:t.shreeShortage?"#b91c1c":"#444",fontFamily:"monospace"}}>
                           {t.shreeShortage?`₹${fmtINR(t.shreeShortage.deduction)}`:"—"}</span></div>
-                      <div><span style={{color:"#555",display:"block"}}>Expenses</span>
+                      <div><span style={{color:"#4a7090",display:"block"}}>Expenses</span>
                         <span style={{color:"#ccc",fontFamily:"monospace"}}>₹{fmtINR(tripExps(t.id))}</span></div>
                     </div>
                     {(Array.isArray(expenses)?expenses:[]).filter(e=>e.tripId===t.id).length>0&&(
@@ -9306,7 +9306,7 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, e
                   onClick={e=>e.target.showPicker?.()}
                   style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,
                     color:histFrom?C.text:C.muted,padding:"8px 10px",fontSize:13,width:"100%",
-                    colorScheme:"dark",WebkitAppearance:"none",boxSizing:"border-box"}} />
+                    colorScheme:"light",WebkitAppearance:"none",boxSizing:"border-box"}} />
               </div>
               <div style={{flex:1}}>
                 <div style={{color:C.muted,fontSize:11,marginBottom:3}}>TO</div>
@@ -9314,7 +9314,7 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, e
                   onClick={e=>e.target.showPicker?.()}
                   style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,
                     color:histTo?C.text:C.muted,padding:"8px 10px",fontSize:13,width:"100%",
-                    colorScheme:"dark",WebkitAppearance:"none",boxSizing:"border-box"}} />
+                    colorScheme:"light",WebkitAppearance:"none",boxSizing:"border-box"}} />
               </div>
               {(histFrom||histTo||histLR) && (
                 <Btn onClick={()=>{setHistFrom("");setHistTo("");setHistLR("");}} sm outline color={C.muted}>Clear</Btn>
@@ -9707,14 +9707,14 @@ function Reports({trips, vehicles, employees, payments, settlements, indents}) {
           <input type="date" value={df} onChange={e=>{setDf(e.target.value);setMonthSel("");}}
             onClick={e=>e.target.showPicker?.()}
             style={{background:C.bg,border:"1.5px solid "+C.border,borderRadius:8,color:C.text,
-              padding:"8px 10px",fontSize:13,width:"100%",colorScheme:"dark",boxSizing:"border-box"}} />
+              padding:"8px 10px",fontSize:13,width:"100%",colorScheme:"light",boxSizing:"border-box"}} />
         </div>
         <div style={{flex:1,minWidth:120}}>
           <div style={{color:C.muted,fontSize:10,marginBottom:3,fontWeight:700}}>TO</div>
           <input type="date" value={dt} onChange={e=>{setDt(e.target.value);setMonthSel("");}}
             onClick={e=>e.target.showPicker?.()}
             style={{background:C.bg,border:"1.5px solid "+C.border,borderRadius:8,color:C.text,
-              padding:"8px 10px",fontSize:13,width:"100%",colorScheme:"dark",boxSizing:"border-box"}} />
+              padding:"8px 10px",fontSize:13,width:"100%",colorScheme:"light",boxSizing:"border-box"}} />
         </div>
       </div>
 
