@@ -120,23 +120,40 @@ const Badge = ({label, color}) => (
 );
 const SC = s => ({"Pending Bill":C.accent,"Billed":C.blue,"Paid":C.green,"Unpaid":C.red}[s]||C.muted);
 
-const Field = ({label, value, onChange, type="text", placeholder="", opts=null, half=false, note=""}) => (
-  <div style={{display:"flex",flexDirection:"column",gap:5,flex:half?"1 1 45%":"1 1 100%",minWidth:0}}>
-    {label && <label style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>{label}</label>}
-    {opts
-      ? <select value={value} onChange={e=>onChange(e.target.value)}
-          style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,color:C.text,padding:"13px 12px",fontSize:15,outline:"none",WebkitAppearance:"none",appearance:"none"}}>
-          {opts.map(o => <option key={o.v??o} value={o.v??o}>{o.l??o}</option>)}
-        </select>
-      : <input type={type} value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
-          inputMode={type==="number"?"decimal":undefined}
-          onClick={type==="date"?e=>e.target.showPicker?.():undefined}
-          style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,color:C.text,padding:"13px 12px",fontSize:15,outline:"none",width:"100%",boxSizing:"border-box",
-            ...(type==="date"?{colorScheme:"dark",WebkitAppearance:"none"}:{})}} />
-    }
-    {note && <div style={{color:C.muted,fontSize:11}}>{note}</div>}
-  </div>
-);
+const Field = ({label, value, onChange, type="text", placeholder="", opts=null, half=false, note=""}) => {
+  const isNum = type === "number";
+  const handleNum = e => {
+    const v = e.target.value;
+    // Allow empty string, digits only, one decimal — no negatives, no special chars
+    if(v === "" || /^\d*\.?\d*$/.test(v)) onChange(v);
+  };
+  // For number fields: keep raw string in state so "0" doesn't vanish mid-typing
+  const displayVal = isNum ? (value === undefined || value === null ? "" : String(value)) : value;
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:5,flex:half?"1 1 45%":"1 1 100%",minWidth:0}}>
+      {label && <label style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>{label}</label>}
+      {opts
+        ? <select value={value} onChange={e=>onChange(e.target.value)}
+            style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,color:C.text,padding:"13px 12px",fontSize:15,outline:"none",WebkitAppearance:"none",appearance:"none"}}>
+            {opts.map(o => <option key={o.v??o} value={o.v??o}>{o.l??o}</option>)}
+          </select>
+        : <input
+            type="text"
+            inputMode={isNum ? "decimal" : type==="date" ? undefined : "text"}
+            value={displayVal}
+            onChange={isNum ? handleNum : e=>onChange(e.target.value)}
+            onFocus={isNum ? e=>e.target.select() : undefined}
+            placeholder={placeholder}
+            onClick={type==="date"?e=>e.target.showPicker?.():undefined}
+            style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,color:C.text,
+              padding:"13px 12px",fontSize:15,outline:"none",width:"100%",boxSizing:"border-box",
+              WebkitAppearance:"none",MozAppearance:"textfield",
+              ...(type==="date"?{colorScheme:"dark"}:{})}} />
+      }
+      {note && <div style={{color:C.muted,fontSize:11}}>{note}</div>}
+    </div>
+  );
+};
 
 // ─── SEARCHSELECT — searchable dropdown for LR/trip lists ─────────────────────
 function SearchSelect({label, value, onChange, opts=[], half=false, placeholder="Search…", note=""}) {
@@ -264,13 +281,23 @@ const Btn = ({children, onClick, color=C.accent, outline=false, sm=false, full=f
 );
 
 const Sheet = ({title, onClose, children}) => (
-  <div style={{position:"fixed",inset:0,background:"#000c",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+  <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}
+    onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
     <div style={{background:C.card,borderRadius:"20px 20px 0 0",width:"100%",maxWidth:600,maxHeight:"92vh",overflowY:"auto",paddingBottom:40}}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"18px 20px 14px",borderBottom:`1px solid ${C.border}`,position:"sticky",top:0,background:C.card,zIndex:1}}>
-        <span style={{color:C.text,fontWeight:800,fontSize:17}}>{title}</span>
-        <button onClick={onClose} style={{background:C.red,border:`2px solid ${C.red}`,color:"#fff",borderRadius:"50%",width:40,height:40,fontSize:22,fontWeight:900,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,boxShadow:"0 2px 8px #da363366"}}>×</button>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+        padding:"14px 16px 12px",borderBottom:`1px solid ${C.border}`,
+        position:"sticky",top:0,background:C.card,zIndex:1,gap:12}}>
+        <span style={{color:C.text,fontWeight:800,fontSize:16,flex:1,minWidth:0,
+          overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{title}</span>
+        <button onClick={onClose}
+          style={{background:C.red,border:"none",color:"#fff",borderRadius:12,
+            minWidth:52,height:44,fontSize:15,fontWeight:700,cursor:"pointer",
+            display:"flex",alignItems:"center",justifyContent:"center",
+            flexShrink:0,gap:4,padding:"0 14px",letterSpacing:0.3}}>
+          ✕ Close
+        </button>
       </div>
-      <div style={{padding:"18px 20px 0"}}>{children}</div>
+      <div style={{padding:"16px 18px 0"}}>{children}</div>
     </div>
   </div>
 );
@@ -1147,9 +1174,11 @@ function MergeDISheet({ conflict, onMerge, onSeparate, onCancel, isOwner=false }
         disabled={!driverRate}>
         ➕ Merge into existing trip
       </Btn>
-      <Btn onClick={onSeparate} full outline color={C.blue}>
-        Create as separate new trip
-      </Btn>
+      {onSeparate && (
+        <Btn onClick={onSeparate} full outline color={C.muted}>
+          Save as new separate trip
+        </Btn>
+      )}
       <Btn onClick={onCancel} full outline color={C.muted}>
         Cancel
       </Btn>
@@ -1843,7 +1872,7 @@ M Yantra Enterprises
 function PartyBatchEmailSheet({ trips, setTrips, onClose, log }) {
   const [selected, setSelected] = useState(new Set());
   const [toEmail,  setToEmail]  = useState("");
-  const [step,     setStep]     = useState("select"); // "select" | "compose"
+  const [step,     setStep]     = useState("select"); // "select" | "compose" | "sealed"
   const [opened,   setOpened]   = useState(false);
 
   const pending = trips.filter(t => t.orderType==="party" && !t.emailSentAt);
@@ -1950,11 +1979,52 @@ function PartyBatchEmailSheet({ trips, setTrips, onClose, log }) {
           </div>
         ))}
 
-        <Btn onClick={()=>setStep("compose")} full color={C.accent}
-          disabled={selected.size===0}>
-          Compose Email → ({selected.size} trips selected)
-        </Btn>
+        {/* Two action options */}
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:2}}>
+            Choose confirmation method
+          </div>
+          <Btn onClick={()=>setStep("compose")} full color={C.accent}
+            disabled={selected.size===0}>
+            📧 Compose Email → ({selected.size} trip{selected.size!==1?"s":""} selected)
+          </Btn>
+          <Btn onClick={()=>setStep("sealed")} full color={C.orange}
+            disabled={selected.size===0}>
+            🏷️ Upload Sealed Invoice → ({selected.size} trip{selected.size!==1?"s":""} selected)
+          </Btn>
+          <div style={{color:C.muted,fontSize:11,textAlign:"center"}}>
+            Use Email if party needs to confirm · Use Sealed Invoice if you already have the stamped copy
+          </div>
+        </div>
         <Btn onClick={onClose} full outline color={C.muted}>Cancel</Btn>
+      </>)}
+
+      {step==="sealed" && (<>
+        <button onClick={()=>setStep("select")}
+          style={{background:"none",border:"none",color:C.blue,fontSize:12,
+            cursor:"pointer",textAlign:"left",padding:"0 0 4px"}}>
+          ← Back to selection
+        </button>
+        <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,borderRadius:10,padding:"12px 14px",color:C.orange,fontSize:12,fontWeight:700}}>
+          🏷️ Upload Sealed Invoice for {selected.size} trip{selected.size!==1?"s":""}
+        </div>
+        <div style={{color:C.muted,fontSize:12}}>
+          For each selected trip, tap the <b style={{color:C.orange}}>🏷️ Upload Sealed Invoice</b> button
+          on its trip card. The sealed invoice will be merged with GR + Invoice into one PDF.
+        </div>
+        {selTrips.map(t=>(
+          <div key={t.id} style={{background:C.card,borderRadius:12,padding:"11px 14px",
+            display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div>
+              <div style={{fontWeight:700,fontSize:13}}>{t.truckNo} <span style={{color:C.blue,fontSize:12}}>LR:{t.lrNo||"—"}</span></div>
+              <div style={{color:C.muted,fontSize:11}}>{t.consignee||"—"} · {t.qty}MT</div>
+            </div>
+            <span style={{color:t.mergedPdfPath?C.green:C.orange,fontSize:11,fontWeight:700}}>
+              {t.mergedPdfPath?"✅ Done":"⏳ Pending"}
+            </span>
+          </div>
+        ))}
+        <Btn onClick={onClose} full color={C.green}>Done</Btn>
       </>)}
 
       {step==="compose" && (<>
@@ -2898,11 +2968,14 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
               </Btn>
             ) : null;
           })()}
-          <Btn onClick={()=>{
+          <button onClick={()=>{
             if(isIn){setOrderTypeStep("godown");setF(blankForm(false));}
             else{setOrderTypeStep("selecting");}
             setAddSheet(true);
-          }} color={ac} sm>+ Add Trip</Btn>
+          }} style={{background:ac,border:"none",borderRadius:10,color:"#fff",
+            padding:"8px 16px",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+            Add Trip
+          </button>
         </div>
       </div>
       {/* Warning: >5 pending party emails */}
@@ -2920,9 +2993,19 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                 📲 Remind
               </button>
               <button onClick={()=>setPartyEmailSheet(true)}
-                style={{background:C.red,border:"none",color:"#fff",borderRadius:8,
+                style={{background:C.blue,border:"none",color:"#fff",borderRadius:8,
                   padding:"4px 10px",fontSize:11,fontWeight:700,cursor:"pointer"}}>
-                Send Now
+                📧 Email
+              </button>
+              <button onClick={()=>{
+                // Find first party trip with GR uploaded but no merged PDF for sealed invoice
+                const t = (trips||[]).find(x=>x.orderType==="party"&&x.grFilePath&&!x.mergedPdfPath);
+                if(t) setSealedSheet(t);
+                else setSealedSheet((trips||[]).find(x=>x.orderType==="party"&&!x.mergedPdfPath)||null);
+              }}
+                style={{background:C.orange,border:"none",color:"#fff",borderRadius:8,
+                  padding:"4px 10px",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+                🏷️ Sealed
               </button>
             </div>
           </div>
@@ -3211,7 +3294,21 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                     <div style={{padding:"5px 12px 8px",display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",
                       borderTop:"1px solid "+C.border+"33"}}>
                       <Badge label="🤝 Party" color={C.accent} />
-                      {t.orderType==="party" && !t.emailSentAt && !t.sealedInvoicePath && !t.mergedPdfPath && <Badge label="⚠ Confirmation Pending" color={C.red} />}
+                      {t.orderType==="party" && !t.emailSentAt && !t.sealedInvoicePath && !t.mergedPdfPath && (
+                        <div style={{display:"flex",gap:5,alignItems:"center",flexWrap:"wrap"}}>
+                          <Badge label="⚠ Pending" color={C.red} />
+                          <button onClick={e=>{e.stopPropagation();setPartyEmailSheet(true);}}
+                            style={{background:C.blue+"22",color:C.blue,border:`1px solid ${C.blue}44`,borderRadius:16,
+                              padding:"3px 10px",fontSize:10,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+                            📧 Email
+                          </button>
+                          <button onClick={e=>{e.stopPropagation();setSealedSheet(t);}}
+                            style={{background:C.orange+"22",color:C.orange,border:`1px solid ${C.orange}44`,borderRadius:16,
+                              padding:"3px 10px",fontSize:10,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+                            🏷️ Sealed Invoice
+                          </button>
+                        </div>
+                      )}
                       {t.orderType==="party" && t.emailSentAt && !t.receiptFilePath && !t.mergedPdfPath && <Badge label="📧 Awaiting Reply" color={C.blue} />}
                       {t.receiptFilePath && !t.mergedPdfPath && <Badge label="🔄 Receipt uploaded" color={C.teal} />}
                       {t.sealedInvoicePath && !t.mergedPdfPath && <Badge label="🏷️ Sealed uploaded" color={C.orange} />}
@@ -3397,7 +3494,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                     onConfirm={onLRConfirmed} onCancel={()=>setDiConflict(null)} />
                 ) : (
                   <MergeDISheet conflict={diConflict} onMerge={addDIToExisting}
-                    onSeparate={()=>{setF(p=>({...p,...diConflict.extracted}));setDiConflict(null);}}
+                    onSeparate={null}
                     onCancel={()=>setDiConflict(null)} isOwner={user.role==="owner"} />
                 )
               ) : (
@@ -3518,7 +3615,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                     onCancel={()=>setDiConflict(null)} />
                 ) : (
                   <MergeDISheet conflict={diConflict} onMerge={addDIToExisting}
-                    onSeparate={()=>{setF(p=>({...p,...diConflict.extracted,orderType:"party"}));setDiConflict(null);}}
+                    onSeparate={null}
                     onCancel={()=>setDiConflict(null)} isOwner={user.role==="owner"} />
                 )
               ) : (
@@ -3958,7 +4055,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
             <label style={{color:(!f.givenRate||+f.givenRate<=0)?C.red:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>
               Driver Rate ₹/MT {(!f.givenRate||+f.givenRate<=0) && <span style={{fontSize:10}}>*required</span>}
             </label>
-            <input type="number" value={f.givenRate||""} onChange={e=>ff("givenRate")(e.target.value)}
+            <input type="text" inputMode="decimal" value={f.givenRate||""} onChange={e=>{const v=e.target.value;if(v===""||/^\d*\.?\d*$/.test(v))ff("givenRate")(v);}}
               style={{background:C.bg,border:`1.5px solid ${(!f.givenRate||+f.givenRate<=0)?C.red:C.border}`,
                 borderRadius:10,color:C.text,padding:"13px 12px",fontSize:15,outline:"none",
                 width:"100%",boxSizing:"border-box"}} />
@@ -3966,10 +4063,9 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
         </div>
       )}
       <div style={{display:"flex",gap:10}}>
-        <Field label="Advance ₹"            value={f.advance||""}           onChange={ff("advance")}           type="number" half />
-        <Field label="Shortage Recovery ₹"  value={f.shortageRecovery||""} onChange={ff("shortageRecovery")} type="number" half
-          note={veh&&(veh.shortageOwed||0)>(veh.shortageRecovered||0)?`Pending: ₹${((veh.shortageOwed||0)-(veh.shortageRecovered||0)).toLocaleString("en-IN")}`:""}
-        />
+        <Field label="Advance ₹" value={f.advance||""} onChange={ff("advance")} type="number" half />
+        <Field label="Shortage Recovery ₹" value={f.shortageRecovery||""} onChange={ff("shortageRecovery")} type="number" half
+          note={veh&&(veh.shortageOwed||0)>(veh.shortageRecovered||0)?`Pending: ₹${((veh.shortageOwed||0)-(veh.shortageRecovered||0)).toLocaleString("en-IN")}`:""} />
       </div>
       {+f.advance>0 && (employees||[]).length>0 && (
         <div>
@@ -3986,22 +4082,24 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
         </div>
       )}
       <div style={{display:"flex",gap:10}}>
-        <div style={{display:"flex",flexDirection:"column",gap:5,flex:"1 1 45%",minWidth:0}}>
+        <div style={{display:"flex",flexDirection:"column",gap:5,flex:"1 1 100%",minWidth:0}}>
           <label style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Loan Recovery ₹</label>
           {(()=>{
             const loanBal = veh ? Math.max(0,(veh.loan||0)-(veh.loanRecovered||0)) : null;
             const overLimit = loanBal !== null && (+f.loanRecovery||0) > loanBal;
             return (<>
-              <input type="number" value={f.loanRecovery||""} inputMode="decimal"
+              <input type="text" inputMode="decimal" value={f.loanRecovery===undefined||f.loanRecovery===null?"":String(f.loanRecovery)}
                 onChange={e=>{
-                  const val = +e.target.value||0;
-                  if(loanBal !== null && val > loanBal){
-                    ff("loanRecovery")(String(loanBal));
-                  } else {
-                    ff("loanRecovery")(e.target.value);
-                  }
+                  const raw = e.target.value;
+                  if(raw !== "" && !/^\d*\.?\d*$/.test(raw)) return; // block non-numeric, negatives
+                  // Only clamp against loanBal when user finishes typing (on blur), not on every keystroke
+                  ff("loanRecovery")(raw);
                 }}
-                style={{background:C.bg,border:`1.5px solid ${overLimit?C.red:C.border}`,borderRadius:10,color:C.text,padding:"13px 12px",fontSize:15,outline:"none",width:"100%",boxSizing:"border-box"}} />
+                onBlur={e=>{
+                  const val = parseFloat(e.target.value)||0;
+                  if(loanBal !== null && val > loanBal) ff("loanRecovery")(String(loanBal));
+                }}
+                style={{background:C.bg,border:`1.5px solid ${overLimit?C.red:C.border}`,borderRadius:10,color:C.text,padding:"13px 12px",fontSize:15,outline:"none",width:"100%",boxSizing:"border-box",MozAppearance:"textfield",WebkitAppearance:"none"}} />
               {loanBal !== null && loanBal > 0 && (
                 <div style={{color:overLimit?C.red:C.muted,fontSize:11}}>
                   {overLimit ? `⚠ Max allowed: ₹${loanBal.toLocaleString("en-IN")}` : `Pending: ₹${loanBal.toLocaleString("en-IN")}`}
@@ -4013,9 +4111,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
             </>);
           })()}
         </div>
-        <Field label="Shortage MT (Shree)" value={f.shortage||""} onChange={ff("shortage")} type="number" half
-          note="Shortage reported by Shree Cement (in MT)"
-        />
+
       </div>
       {isParty && (
         <div style={{background:C.accent+"11",border:`1px solid ${C.accent}33`,borderRadius:10,padding:"12px 14px"}}>
