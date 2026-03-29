@@ -7879,7 +7879,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
     const stGr = (st.grNo||"").trim();
     const stLr = (st.lrNo||"").trim();
 
-    // 1. Match by DI number (first priority — DI is the most precise identifier)
+    // 1. Match by DI number (first priority — exact match only)
     if(stDi) {
       const byDi = tripList.find(t =>
         (t.diNo||"").split("+").map(s=>s.trim()).includes(stDi) ||
