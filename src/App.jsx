@@ -733,10 +733,10 @@ export default function App() {
     <div style={{background:C.bg,minHeight:"100vh",fontFamily:"system-ui,-apple-system,'Segoe UI',sans-serif",color:C.text,maxWidth:600,margin:"0 auto",paddingBottom:80,position:"relative"}}>
         {/* Logo watermark */}
         <div style={{position:"fixed",top:"50%",left:"50%",transform:"translate(-50%,-50%)",
-          width:300,height:300,pointerEvents:"none",zIndex:0,
+          width:"min(85vw,85vh)",height:"min(85vw,85vh)",pointerEvents:"none",zIndex:0,
           backgroundImage:`url(${LOGO_B64})`,backgroundSize:"contain",
           backgroundRepeat:"no-repeat",backgroundPosition:"center",
-          opacity:0.07}} />
+          opacity:0.09}} />
       {/* TOP BAR */}
       <div style={{position:"sticky",top:0,zIndex:50,background:C.card,borderBottom:`1px solid ${C.border}`,padding:"11px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div>
