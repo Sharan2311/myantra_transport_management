@@ -1406,6 +1406,7 @@ Extract the following fields from this document image and return ONLY a JSON obj
   "grNo": "GR number / Goods Receipt number",
   "truckNo": "Vehicle/Truck registration number",
   "consignee": "Consignee name / destination party",
+  "consignor": "Consignor name — the cement company/plant name e.g. Shree Cement Limited KARNATAKA CEMENT PROJECT GUNTUR",
   "from": "Source/loading location",
   "to": "Destination/unloading location",
   "grade": "Material grade - use exactly 'Cement Packed' or 'Cement Bulk' for cement, else actual material name",
@@ -2539,10 +2540,23 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
   // LR is always manual — so we show LR-ask screen first, then check for duplicates
   // Detect client from scanned consignee/from field
   const detectClient = (extracted) => {
-    const haystack = ((extracted.consignee||"")+" "+(extracted.from||"")).toLowerCase();
-    if(haystack.includes("ultratech")) return "Ultratech Malkhed";
-    if(haystack.includes("guntur"))    return "Shree Cement Guntur";
-    return DEFAULT_CLIENT; // default to Shree Kodla
+    // Search ALL text fields — consignor plant name can appear anywhere in the GR
+    const haystack = [
+      extracted.consignee||"",
+      extracted.consignor||"",
+      extracted.from||"",
+      extracted.to||"",
+      extracted.grade||"",
+      extracted.grNo||"",
+      extracted.diNo||"",
+    ].join(" ").toLowerCase();
+    if(haystack.includes("ultratech"))  return "Ultratech Malkhed";
+    if(haystack.includes("guntur"))     return "Shree Cement Guntur";
+    if(haystack.includes("malkhed"))    return "Ultratech Malkhed";
+    // Also check the "from" field specifically for plant location keywords
+    const fromStr = (extracted.from||"").toLowerCase();
+    if(fromStr.includes("guntur"))      return "Shree Cement Guntur";
+    return DEFAULT_CLIENT;
   };
 
   const onDIExtracted = (extracted, _ignored) => {
@@ -3825,28 +3839,23 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
               <Field label="GR No" value={f.grNo||""} onChange={ff("grNo")} placeholder="1070/MYE/2670" half /></>}
       </div>
 
-      {/* Client / Plant selector */}
-      {!locked && (
-        <div style={{marginBottom:4}}>
-          <div style={{fontSize:11,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>
-            Client / Plant *
-          </div>
-          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-            {CLIENTS.map(c => (
-              <button key={c} onClick={()=>ff("client")(c)}
-                style={{padding:"8px 14px",borderRadius:20,fontSize:12,fontWeight:700,cursor:"pointer",
-                  border:`2px solid ${(f.client||DEFAULT_CLIENT)===c?ac:C.border}`,
-                  background:(f.client||DEFAULT_CLIENT)===c?ac+"22":"none",
-                  color:(f.client||DEFAULT_CLIENT)===c?ac:C.muted}}>
-                {c}
-              </button>
-            ))}
-          </div>
+      {/* Client / Plant selector — always visible, editable even after scan */}
+      <div style={{marginBottom:4}}>
+        <div style={{fontSize:11,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>
+          Client / Plant *
         </div>
-      )}
-      {locked && (
-        <LockedField label="Client / Plant" value={f.client||DEFAULT_CLIENT} />
-      )}
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          {CLIENTS.map(c => (
+            <button key={c} onClick={()=>ff("client")(c)}
+              style={{padding:"8px 14px",borderRadius:20,fontSize:12,fontWeight:700,cursor:"pointer",
+                border:`2px solid ${(f.client||DEFAULT_CLIENT)===c?ac:C.border}`,
+                background:(f.client||DEFAULT_CLIENT)===c?ac+"22":"none",
+                color:(f.client||DEFAULT_CLIENT)===c?ac:C.muted}}>
+              {c}
+            </button>
+          ))}
+        </div>
+      </div>
       <div style={{display:"flex",gap:10}}>
         {locked
           ? <><LockedField label="From" value={f.from} half /><LockedField label="To" value={f.to} half /></>
@@ -7767,21 +7776,114 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
     finally { setScanning(false); }
   };
 
+  // ── Step 1: IDENTITY MATCH — find the trip by DI or GR number ───────────────
+  // Returns {trip, via} or null. Does NOT check amount here.
+  const matchInvoiceLine = (st, tripList) => {
+    const stDi = (st.diNo||"").trim();
+    const stGr = (st.grNo||"").trim();
+    const stLr = (st.lrNo||"").trim();
+
+    // 1. Match by DI number (first priority — DI is the most precise identifier)
+    if(stDi) {
+      const byDi = tripList.find(t =>
+        (t.diNo||"").split("+").map(s=>s.trim()).includes(stDi) ||
+        (t.diLines||[]).some(d=>(d.diNo||"").trim()===stDi)
+      );
+      if(byDi) return {trip:byDi, via:"DI"};
+    }
+    // 2. Match by GR number (second priority)
+    if(stGr) {
+      const byGr = tripList.find(t =>
+        (t.grNo||"").split("+").map(g=>g.trim()).some(g=>g===stGr) ||
+        (t.diLines||[]).some(d=>(d.grNo||"").trim()===stGr)
+      );
+      if(byGr) return {trip:byGr, via:"GR"};
+    }
+    // 3. Match by LR number (fallback)
+    if(stLr) {
+      const byLr = tripList.find(t=>(t.lrNo||t.lr||"").trim()===stLr);
+      if(byLr) return {trip:byLr, via:"LR"};
+    }
+    return null;
+  };
+
+  // ── Step 2: AMOUNT VALIDATION — after identity match, check the billed amount ─
+  // For multi-DI trips: the invoice splits into separate lines per DI.
+  // We compare the invoice line amount against what's stored on the matched diLine (or full trip).
+  const checkAmount = (st, trip) => {
+    const invoiceAmt = Number(st.frtAmt||0);
+    if(invoiceAmt === 0) return {ok:true, diff:0}; // can't validate if no amount
+
+    const stDi = (st.diNo||"").trim();
+    let expectedAmt = 0;
+
+    if(stDi && (trip.diLines||[]).length > 0) {
+      // Multi-DI: find the specific diLine and compute its billed amount
+      const diLine = trip.diLines.find(d=>(d.diNo||"").trim()===stDi);
+      if(diLine) {
+        expectedAmt = (diLine.qty||0) * (diLine.frRate||trip.frRate||0);
+      } else {
+        // DI matched at trip level but no diLine — use full trip billing
+        expectedAmt = trip.billedToShree || (trip.qty||0)*(trip.frRate||0);
+      }
+    } else {
+      // Single DI trip — compare against full billedToShree or qty×frRate
+      expectedAmt = trip.billedToShree || (trip.qty||0)*(trip.frRate||0);
+    }
+
+    const diff = invoiceAmt - expectedAmt;
+    const ok = Math.abs(diff) < 2; // allow ₹2 rounding tolerance
+    return {ok, diff, invoiceAmt, expectedAmt};
+  };
+
   const applyInvoiceScan = () => {
     if(!scanResult || scanResult.type!=="invoice") return;
     const invNo = scanResult.invoiceNo;
     if((trips||[]).some(t=>t.invoiceNo===invNo)) {
       setScanError(`Invoice ${invNo} is already uploaded. Discard this scan.`); return;
     }
-    const invDate = parseDD(scanResult.invoiceDate);
+
+    // Check for amount mismatches — block if any line has a significant mismatch
     const scTrips = scanResult.trips||[];
+    const allTrips = trips||[];
+    const mismatches = scTrips.filter(st=>{
+      const m = matchInvoiceLine(st, allTrips);
+      if(!m) return false;
+      const {ok} = checkAmount(st, m.trip);
+      return !ok;
+    });
+    if(mismatches.length > 0) {
+      const details = mismatches.map(st=>{
+        const m = matchInvoiceLine(st, allTrips);
+        const {invoiceAmt, expectedAmt} = checkAmount(st, m.trip);
+        return `DI ${st.diNo||st.grNo}: invoice ₹${invoiceAmt.toLocaleString("en-IN")} vs trip ₹${expectedAmt.toLocaleString("en-IN")}`;
+      }).join("
+");
+      setScanError(`Amount mismatch on ${mismatches.length} line(s):
+${details}
+
+Check the trip frRate or billedToShree before applying.`);
+      return;
+    }
+
+    const invDate = parseDD(scanResult.invoiceDate);
+    let matched = 0;
     setTrips(prev=>prev.map(t=>{
-      const match=scTrips.find(st=>st.lrNo===t.lr&&Math.abs(Number(st.frtAmt||0)-Number(t.billedToShree||0))<2);
-      if(match) return {...t, invoiceNo:invNo, invoiceDate:invDate, shreeStatus:"billed"};
+      const lineMatch = scTrips.reduce((found, st) => {
+        if(found) return found;
+        const r = matchInvoiceLine(st, [t]);
+        return r ? {st, via:r.via} : null;
+      }, null);
+      if(lineMatch) {
+        matched++;
+        return {...t, invoiceNo:invNo, invoiceDate:invDate, shreeStatus:"billed",
+          billedToShree: Number(lineMatch.st.frtAmt||t.billedToShree||0) || t.billedToShree};
+      }
       return t;
     }));
-    log && log(`Invoice ${invNo} scanned — trips marked Billed`);
-    setScanResult(null);
+    log && log(`Invoice ${invNo} scanned — ${matched} trip(s) marked Billed`);
+    if(matched===0) setScanError("No trips were matched. Check that the trips are saved in Trips tab first.");
+    else setScanResult(null);
   };
 
   const applyPaymentScan = () => {
@@ -8137,21 +8239,67 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                         <span>{scanResult.invoiceDate||"—"}</span>
                         <span style={{color:"#5b8dee",fontWeight:700}}>₹{fmtINR(scanResult.totalAmount)}</span>
                       </div>
+                      {/* Per-line: Step 1 identity + Step 2 amount */}
                       {(scanResult.trips||[]).map((st,i)=>{
-                        const match=(trips||[]).find(t=>t.lr===st.lrNo&&Math.abs(Number(t.billedToShree||0)-Number(st.frtAmt||0))<2);
+                        const m   = matchInvoiceLine(st, trips||[]);
+                        const trip = m?.trip;
+                        const amtCheck = trip ? checkAmount(st, trip) : null;
+                        const rowOk = trip && amtCheck?.ok;
+                        const rowWarn = trip && !amtCheck?.ok;
                         return (
-                          <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
-                            padding:"6px 0",borderBottom:"1px solid #1a2a1a",fontSize:12}}>
-                            <span style={{fontFamily:"monospace",color:"#aaa"}}>{st.lrNo}</span>
-                            <span style={{fontFamily:"monospace"}}>₹{fmtINR(st.frtAmt)}</span>
-                            <span>{match
-                              ?<span style={{color:"#4caf50",fontSize:11}}>✓ matched</span>
-                              :<span style={{color:"#ff6b6b",fontSize:11}}>✗ no match</span>}
-                            </span>
+                          <div key={i} style={{padding:"8px 0",borderBottom:"1px solid #1a2a1a",fontSize:12}}>
+                            {/* Identity row */}
+                            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+                              <div style={{flex:1,minWidth:0}}>
+                                <span style={{fontFamily:"monospace",color:"#bbb",fontSize:11}}>
+                                  DI: {st.diNo||"—"}
+                                </span>
+                                {st.grNo && <span style={{fontFamily:"monospace",color:"#666",fontSize:10,marginLeft:8}}>GR: {st.grNo}</span>}
+                              </div>
+                              <span style={{fontFamily:"monospace",color:"#fff",flexShrink:0}}>₹{fmtINR(st.frtAmt)}</span>
+                              <span style={{flexShrink:0,fontSize:11}}>
+                                {trip
+                                  ? <span style={{color:"#4caf50"}}>✓ LR {trip.lrNo||trip.lr}</span>
+                                  : <span style={{color:"#ff6b6b"}}>✗ no trip</span>}
+                              </span>
+                            </div>
+                            {/* Amount validation row */}
+                            {trip && (
+                              <div style={{display:"flex",alignItems:"center",gap:6,marginTop:3,fontSize:11}}>
+                                <span style={{color:"#555"}}>Amount:</span>
+                                {amtCheck?.ok
+                                  ? <span style={{color:"#4caf50"}}>✓ matches (₹{fmtINR(amtCheck.expectedAmt)} in trip)</span>
+                                  : <span style={{color:"#ff9800"}}>
+                                      ⚠ mismatch — invoice ₹{fmtINR(amtCheck?.invoiceAmt)} vs trip ₹{fmtINR(amtCheck?.expectedAmt)}
+                                      {" "}<span style={{color:"#ff6b6b"}}>(diff ₹{fmtINR(Math.abs(amtCheck?.diff||0))})</span>
+                                    </span>}
+                              </div>
+                            )}
+                            {/* No match guidance */}
+                            {!trip && (
+                              <div style={{color:"#ff9800",fontSize:10,marginTop:3}}>
+                                ↳ Go to Trips tab, add this trip (DI: {st.diNo||"—"}) first, then scan invoice again
+                              </div>
+                            )}
                           </div>
                         );
                       })}
-                      <div style={{display:"flex",gap:8,marginTop:12}}>
+                      {/* Summary bar */}
+                      {(()=>{
+                        const lines = scanResult.trips||[];
+                        const identityOk  = lines.filter(st=>matchInvoiceLine(st,trips||[])).length;
+                        const amtOk       = lines.filter(st=>{const m=matchInvoiceLine(st,trips||[]);return m&&checkAmount(st,m.trip).ok;}).length;
+                        const noTrip      = lines.length - identityOk;
+                        const amtMismatch = identityOk - amtOk;
+                        return (
+                          <div style={{marginTop:8,padding:"8px 0",display:"flex",gap:12,flexWrap:"wrap",fontSize:11,borderTop:"1px solid #1a2a1a"}}>
+                            <span style={{color:"#4caf50"}}>{amtOk} fully matched</span>
+                            {amtMismatch>0 && <span style={{color:"#ff9800"}}>{amtMismatch} amount mismatch</span>}
+                            {noTrip>0      && <span style={{color:"#ff6b6b"}}>{noTrip} trip not found</span>}
+                          </div>
+                        );
+                      })()}
+                      <div style={{display:"flex",gap:8,marginTop:8}}>
                         <button onClick={applyInvoiceScan}
                           style={{flex:1,background:"#4caf50",color:"#000",border:"none",borderRadius:6,
                             padding:"10px",fontWeight:700,cursor:"pointer",fontSize:13}}>✓ Apply — Mark Billed</button>
