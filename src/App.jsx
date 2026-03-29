@@ -357,7 +357,8 @@ function BottomNav({tab, setTab, user, trips, driverPays, vehicles}) {
     const paid = (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
     return netDue>0 && paid<netDue;
   }).length;
-  const badges = {trips:pendingBills||null, billing:pendingBills||null, more:unsettledDrivers||null};
+  // Only billing and more tabs get badges — trips/diesel tabs don't need them
+  const badges = {billing:pendingBills||null, more:unsettledDrivers||null};
 
   return (
     <nav style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:600,background:C.card,borderTop:`1px solid ${C.border}`,display:"flex",zIndex:100,paddingBottom:"env(safe-area-inset-bottom,6px)"}}>
@@ -4125,18 +4126,28 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
         </div>
       )}
       <div style={{display:"flex",gap:10}}>
-        <Field label="TAFAL ₹" value={f.tafal||"0"} onChange={ff("tafal")} type="number" half
-          note={veh?.tafalExempt?"This vehicle is exempt":""} />
-        <Field label="Diesel Estimate ₹" value={f.dieselEstimate||"0"} onChange={ff("dieselEstimate")} type="number" half
-          note="Driver's estimate (update later via Indent)" />
+        <Field label="TAFAL ₹" value={f.tafal||""} onChange={ff("tafal")} type="number" half
+          placeholder="0" note={veh?.tafalExempt?"This vehicle is exempt":""} />
+        <Field label="Diesel Estimate ₹" value={f.dieselEstimate||""} onChange={ff("dieselEstimate")} type="number" half
+          note="Driver's estimate (update later via Indent)" placeholder="0" />
       </div>
       <Field label="⛽ Diesel Indent No"
         value={f.dieselIndentNo||""} onChange={ff("dieselIndentNo")}
         placeholder="e.g. 25748 — from pump slip before loading"
         note="Pump gives this before loading — used to match diesel slip" />
       {showStatus && (
-        <Field label="Status" value={f.status||"Pending Bill"} onChange={ff("status")}
-          opts={["Pending Bill","Billed","Paid"].map(x=>({v:x,l:x}))} />
+        user?.role==="owner"
+          ? <Field label="Status" value={f.status||"Pending Bill"} onChange={ff("status")}
+              opts={["Pending Bill","Billed","Paid"].map(x=>({v:x,l:x}))} />
+          : <div style={{display:"flex",flexDirection:"column",gap:5}}>
+              <label style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Status</label>
+              <div style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,
+                color:C.muted,padding:"13px 12px",fontSize:15,display:"flex",
+                justifyContent:"space-between",alignItems:"center"}}>
+                <span style={{color:C.text}}>{f.status||"Pending Bill"}</span>
+                <span style={{fontSize:11,color:C.muted}}>🔒 Owner only</span>
+              </div>
+            </div>
       )}
 
       {/* Live calc */}
@@ -4184,10 +4195,23 @@ function Billing({trips, setTrips, user, log}) {
   const pending = trips.filter(t => t.status==="Pending Bill");
   const billed  = trips.filter(t => t.status==="Billed");
   const paid    = trips.filter(t => t.status==="Paid");
-  const [sel, setSel]     = useState([]);
-  const [invNo, setInvNo] = useState("");
+  const [sel, setSel]         = useState([]);
+  const [invNo, setInvNo]     = useState("");
+  const [orderFilter, setOrderFilter] = useState("All"); // "All" | "godown" | "party"
   const tgl = id => setSel(p => p.includes(id) ? p.filter(x=>x!==id) : [...p,id]);
-  const totalSel = pending.filter(t=>sel.includes(t.id)).reduce((s,t)=>s+t.qty*t.frRate,0);
+
+  // Apply order type filter to pending
+  const filteredPending = orderFilter==="All" ? pending
+    : orderFilter==="party"  ? pending.filter(t=>t.orderType==="party")
+    : pending.filter(t=>!t.orderType||t.orderType==="godown");
+
+  const totalSel = filteredPending.filter(t=>sel.includes(t.id)).reduce((s,t)=>s+t.qty*t.frRate,0);
+
+  // Totals by type
+  const godownPending = pending.filter(t=>!t.orderType||t.orderType==="godown");
+  const partyPending  = pending.filter(t=>t.orderType==="party");
+  const godownTotal   = godownPending.reduce((s,t)=>s+t.qty*t.frRate,0);
+  const partyTotal    = partyPending.reduce((s,t)=>s+t.qty*t.frRate,0);
 
   const bill = () => {
     const inv = invNo.trim() || ("SMYE"+Date.now().toString().slice(-8));
@@ -4214,56 +4238,113 @@ function Billing({trips, setTrips, user, log}) {
         <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>How Billing Works</div>
         <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
           {[
-            {l:"① Add Trip",    c:C.accent},
-            {l:"→",            c:C.muted},
-            {l:"② Select here",c:C.blue},
-            {l:"→",            c:C.muted},
-            {l:"③ Generate Invoice", c:C.blue},
-            {l:"→",            c:C.muted},
-            {l:"④ Shree Pays → record in Shree Payments", c:C.green},
-          ].map((x,i) => x.l==="→"
-            ? <span key={i} style={{color:C.muted,fontSize:14}}>→</span>
-            : <div key={i} style={{background:x.c+"22",border:`1px solid ${x.c}44`,borderRadius:8,padding:"4px 9px",fontSize:11,fontWeight:700,color:x.c}}>{x.l}</div>
+            {l:"① Add Trip",c:C.accent},{l:"→",c:C.muted},
+            {l:"② Select here",c:C.blue},{l:"→",c:C.muted},
+            {l:"③ Generate Invoice",c:C.blue},{l:"→",c:C.muted},
+            {l:"④ Shree Pays → record in Shree Payments",c:C.green},
+          ].map((x,i)=>x.l==="→"
+            ?<span key={i} style={{color:C.muted,fontSize:14}}>→</span>
+            :<div key={i} style={{background:x.c+"22",border:`1px solid ${x.c}44`,borderRadius:8,padding:"4px 9px",fontSize:11,fontWeight:700,color:x.c}}>{x.l}</div>
           )}
         </div>
       </div>
 
+      {/* Split totals — godown vs party */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
-        <KPI icon="⚠" label="Pending"  value={pending.length} color={C.accent} sub={fmt(pending.reduce((s,t)=>s+t.qty*t.frRate,0))} />
-        <KPI icon="🧾" label="Billed"   value={billed.length}  color={C.blue}   sub={fmt(billed.reduce((s,t)=>s+t.qty*t.frRate,0))} />
-        <KPI icon="✅" label="Paid"     value={paid.length}    color={C.green}  sub={fmt(paid.reduce((s,t)=>s+t.qty*t.frRate,0))} />
+        <div style={{background:C.card,borderRadius:12,padding:"12px 14px",borderTop:`3px solid ${C.accent}`}}>
+          <div style={{color:C.muted,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>⚠ Pending</div>
+          <div style={{color:C.accent,fontWeight:900,fontSize:20,marginTop:4}}>{pending.length}</div>
+          <div style={{color:C.muted,fontSize:11,marginTop:2}}>{fmt(pending.reduce((s,t)=>s+t.qty*(t.frRate||0),0))}</div>
+        </div>
+        <div style={{background:C.card,borderRadius:12,padding:"12px 14px",borderTop:`3px solid ${C.blue}`}}>
+          <div style={{color:C.muted,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>🧾 Billed</div>
+          <div style={{color:C.blue,fontWeight:900,fontSize:20,marginTop:4}}>{billed.length}</div>
+          <div style={{color:C.muted,fontSize:11,marginTop:2}}>{fmt(billed.reduce((s,t)=>s+t.qty*(t.frRate||0),0))}</div>
+        </div>
+        <div style={{background:C.card,borderRadius:12,padding:"12px 14px",borderTop:`3px solid ${C.green}`}}>
+          <div style={{color:C.muted,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>✅ Paid</div>
+          <div style={{color:C.green,fontWeight:900,fontSize:20,marginTop:4}}>{paid.length}</div>
+          <div style={{color:C.muted,fontSize:11,marginTop:2}}>{fmt(paid.reduce((s,t)=>s+t.qty*(t.frRate||0),0))}</div>
+        </div>
       </div>
 
-      {/* Step 1 — Select trips */}
+      {/* Godown vs Party unbilled totals */}
+      {pending.length > 0 && (godownPending.length>0 && partyPending.length>0) && (
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+          <div style={{background:C.card,borderRadius:10,padding:"10px 14px",borderLeft:`4px solid ${C.blue}`}}>
+            <div style={{color:C.muted,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>🏭 Godown Unbilled</div>
+            <div style={{color:C.blue,fontWeight:800,fontSize:16,marginTop:2}}>{godownPending.length} trips</div>
+            <div style={{color:C.accent,fontWeight:700,fontSize:14}}>{fmt(godownTotal)}</div>
+          </div>
+          <div style={{background:C.card,borderRadius:10,padding:"10px 14px",borderLeft:`4px solid ${C.accent}`}}>
+            <div style={{color:C.muted,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>🤝 Party Unbilled</div>
+            <div style={{color:C.accent,fontWeight:800,fontSize:16,marginTop:2}}>{partyPending.length} trips</div>
+            <div style={{color:C.accent,fontWeight:700,fontSize:14}}>{fmt(partyTotal)}</div>
+          </div>
+        </div>
+      )}
+
+      {/* Pending trips — filter + list */}
       {pending.length > 0 && (
         <div>
           <div style={{background:C.accent+"11",border:`1px solid ${C.accent}33`,borderRadius:10,padding:"9px 12px",color:C.accent,fontSize:12,fontWeight:700,marginBottom:10}}>
             ① Tick the trips you want to include in one invoice
           </div>
-          <div style={{display:"flex",justifyContent:"space-between",marginBottom:8,alignItems:"center"}}>
-            <span style={{color:C.muted,fontSize:12}}>Pending ({pending.length})</span>
-            <div style={{display:"flex",gap:10}}>
-              <button onClick={()=>setSel(pending.map(t=>t.id))} style={{background:"none",border:"none",color:C.blue,fontSize:12,cursor:"pointer",fontWeight:700}}>Select All</button>
-              <button onClick={()=>setSel([])} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer"}}>Clear</button>
+
+          {/* Filter pills */}
+          <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:10}}>
+            {[
+              {id:"All",   label:`All (${pending.length})`},
+              {id:"godown",label:`🏭 Godown (${godownPending.length})`},
+              {id:"party", label:`🤝 Party (${partyPending.length})`},
+            ].map(tab=>(
+              <button key={tab.id} onClick={()=>{setOrderFilter(tab.id);setSel([]);}}
+                style={{padding:"5px 12px",borderRadius:16,fontSize:12,fontWeight:700,cursor:"pointer",
+                  border:`1.5px solid ${orderFilter===tab.id?C.blue:C.border}`,
+                  background:orderFilter===tab.id?C.blue+"22":"none",
+                  color:orderFilter===tab.id?C.blue:C.muted}}>
+                {tab.label}
+              </button>
+            ))}
+            <div style={{marginLeft:"auto",display:"flex",gap:10}}>
+              <button onClick={()=>setSel(filteredPending.map(t=>t.id))}
+                style={{background:"none",border:"none",color:C.blue,fontSize:12,cursor:"pointer",fontWeight:700}}>Select All</button>
+              <button onClick={()=>setSel([])}
+                style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer"}}>Clear</button>
             </div>
           </div>
-          {pending.map(t => (
+
+          {filteredPending.length===0 && (
+            <div style={{textAlign:"center",color:C.muted,padding:"20px 0",fontSize:13}}>
+              No {orderFilter==="godown"?"godown":orderFilter==="party"?"party":""} trips pending billing
+            </div>
+          )}
+
+          {filteredPending.map(t => (
             <div key={t.id} onClick={()=>tgl(t.id)}
-              style={{background:sel.includes(t.id)?C.accent+"11":C.card,border:`1.5px solid ${sel.includes(t.id)?C.accent:C.border}`,borderRadius:14,padding:"12px 14px",cursor:"pointer",display:"flex",gap:12,marginBottom:8}}>
-              <div style={{width:22,height:22,borderRadius:6,background:sel.includes(t.id)?C.accent:"transparent",border:`2px solid ${sel.includes(t.id)?C.accent:C.border}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,flexShrink:0,marginTop:2}}>{sel.includes(t.id)&&"✓"}</div>
+              style={{background:sel.includes(t.id)?C.accent+"11":C.card,
+                border:`1.5px solid ${sel.includes(t.id)?C.accent:C.border}`,
+                borderRadius:14,padding:"12px 14px",cursor:"pointer",display:"flex",gap:12,marginBottom:8}}>
+              <div style={{width:22,height:22,borderRadius:6,
+                background:sel.includes(t.id)?C.accent:"transparent",
+                border:`2px solid ${sel.includes(t.id)?C.accent:C.border}`,
+                display:"flex",alignItems:"center",justifyContent:"center",
+                fontSize:13,flexShrink:0,marginTop:2}}>{sel.includes(t.id)&&"✓"}</div>
               <div style={{flex:1}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
                   <div>
-                    <div style={{fontWeight:800,fontSize:14}}>{t.truckNo}</div>
+                    <div style={{fontWeight:800,fontSize:14}}>{t.truckNo}
+                      {t.orderType==="party" && <span style={{fontSize:10,color:C.accent,fontWeight:700,marginLeft:6,background:C.accent+"22",borderRadius:6,padding:"1px 5px"}}>🤝 Party</span>}
+                    </div>
                     <div style={{color:C.blue,fontSize:12}}>LR: {t.lrNo||"—"} · GR: {t.grNo||"—"}</div>
                     <div style={{color:C.muted,fontSize:11}}>{t.from}→{t.to} · {t.qty}MT · {t.date}</div>
                     <div style={{color:C.muted,fontSize:11}}>DI: {t.diNo||"—"} · {t.grade} · {t.bags} bags</div>
                     <div style={{color:ROLES[t.createdBy]?.color||C.muted,fontSize:11,marginTop:2}}>by {t.createdBy} · {t.createdAt}</div>
                   </div>
                   <div style={{textAlign:"right",flexShrink:0}}>
-                    <div style={{color:C.green,fontWeight:800,fontSize:15}}>{fmt(t.qty*t.frRate)}</div>
+                    <div style={{color:C.green,fontWeight:800,fontSize:15}}>{fmt(t.qty*(t.frRate||0))}</div>
                     <div style={{color:C.muted,fontSize:10}}>{t.qty}MT × ₹{t.frRate}</div>
-                    {t.shortage>0 && <Badge label={`⚠ ${t.shortage}MT short`} color={C.red} />}
+                    {t.shortage>0 && <Badge label={"⚠ "+t.shortage+"MT short"} color={C.red} />}
                   </div>
                 </div>
               </div>
@@ -4272,7 +4353,7 @@ function Billing({trips, setTrips, user, log}) {
         </div>
       )}
 
-      {/* Step 2 — Generate */}
+      {/* Step 2 — Generate Invoice */}
       {sel.length > 0 && (
         <div style={{background:C.blue+"11",border:`1.5px solid ${C.blue}`,borderRadius:14,padding:"14px 16px"}}>
           <div style={{color:C.blue,fontWeight:800,marginBottom:12}}>② Generate Invoice — {sel.length} trip{sel.length>1?"s":""}</div>
@@ -4289,17 +4370,16 @@ function Billing({trips, setTrips, user, log}) {
       {/* Billed invoices grouped */}
       {Object.keys(invoiceGroups).length > 0 && (
         <div>
-          <div style={{color:C.blue,fontWeight:700,fontSize:13,marginBottom:8}}>Billed Invoices — Awaiting Shree Payment</div>
+          <div style={{color:C.blue,fontWeight:700,fontSize:13,marginBottom:8}}>Billed Invoices — Awaiting Payment</div>
           {Object.entries(invoiceGroups).map(([inv, ts]) => (
             <div key={inv} style={{background:C.card,borderRadius:14,padding:"14px 16px",marginBottom:10,borderLeft:`4px solid ${C.blue}`}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
                 <div>
                   <div style={{color:C.blue,fontWeight:800,fontSize:14}}>{inv}</div>
                   <div style={{color:C.muted,fontSize:12}}>{ts.length} trips · by {ts[0].billedBy||"—"}</div>
-                  <div style={{color:C.muted,fontSize:11}}>{ts[0].billedAt||""}</div>
                 </div>
                 <div style={{textAlign:"right"}}>
-                  <div style={{color:C.green,fontWeight:800,fontSize:16}}>{fmt(ts.reduce((s,t)=>s+t.qty*t.frRate,0))}</div>
+                  <div style={{color:C.green,fontWeight:800,fontSize:16}}>{fmt(ts.reduce((s,t)=>s+t.qty*(t.frRate||0),0))}</div>
                   <Badge label="Awaiting Payment" color={C.orange} />
                 </div>
               </div>
@@ -4309,7 +4389,7 @@ function Billing({trips, setTrips, user, log}) {
                     <span style={{fontWeight:700,fontSize:13}}>{t.truckNo}</span>
                     <span style={{color:C.muted,fontSize:11,marginLeft:8}}>LR:{t.lrNo||"—"} · {t.to} · {t.qty}MT</span>
                   </div>
-                  <span style={{color:C.blue,fontWeight:700}}>{fmt(t.qty*t.frRate)}</span>
+                  <span style={{color:C.blue,fontWeight:700}}>{fmt(t.qty*(t.frRate||0))}</span>
                 </div>
               ))}
             </div>
@@ -4327,11 +4407,12 @@ function Billing({trips, setTrips, user, log}) {
                 <span style={{fontWeight:700}}>{t.truckNo}</span>
                 <span style={{color:C.muted,fontSize:11,marginLeft:8}}>LR:{t.lrNo||"—"} · {t.invoiceNo}</span>
               </div>
-              <span style={{color:C.green,fontWeight:800}}>{fmt(t.qty*t.frRate)}</span>
+              <span style={{color:C.green,fontWeight:800}}>{fmt(t.qty*(t.frRate||0))}</span>
             </div>
           ))}
         </div>
       )}
+
       {pending.length===0 && billed.length===0 && paid.length===0 && (
         <div style={{textAlign:"center",color:C.muted,padding:40}}>No trips yet — add trips first from the Trips tab</div>
       )}
@@ -7986,7 +8067,9 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
       }, null);
       if(lineMatch) {
         matched++;
-        return {...t, invoiceNo:invNo, invoiceDate:invDate, shreeStatus:"billed",
+        return {...t, invoiceNo:invNo, invoiceDate:invDate,
+          status:"Billed", billedBy:"scan", billedAt:nowTs(),
+          shreeStatus:"billed",
           billedToShree: Number(lineMatch.st.frtAmt||t.billedToShree||0) || t.billedToShree};
       }
       return t;
