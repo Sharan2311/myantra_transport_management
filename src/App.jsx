@@ -7953,12 +7953,8 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
         const m = matchInvoiceLine(st, allTrips);
         const {invoiceAmt, expectedAmt} = checkAmount(st, m.trip);
         return `DI ${st.diNo||st.grNo}: invoice ₹${invoiceAmt.toLocaleString("en-IN")} vs trip ₹${expectedAmt.toLocaleString("en-IN")}`;
-      }).join("
-");
-      setScanError(`Amount mismatch on ${mismatches.length} line(s):
-${details}
-
-Check the trip frRate or billedToShree before applying.`);
+      }).join("\n");
+      setScanError("Amount mismatch on "+mismatches.length+" line(s):\n"+details+"\n\nCheck the trip frRate or billedToShree before applying.");
       return;
     }
 
