@@ -414,6 +414,22 @@ function MoreMenu({user, setTab, trips, driverPays, vehicles}) {
 
   return (
     <div style={{display:"flex",flexDirection:"column",gap:18}}>
+
+      {/* Company card at top of More menu */}
+      <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,
+        padding:"16px",display:"flex",alignItems:"center",gap:14,marginBottom:4}}>
+        <div style={{width:56,height:56,borderRadius:"50%",flexShrink:0,
+          backgroundImage:`url(${LOGO_B64})`,backgroundSize:"cover",backgroundPosition:"center",
+          border:`2px solid ${C.border}`}} />
+        <div>
+          <div style={{color:C.accent,fontWeight:900,fontSize:16,letterSpacing:0.5}}>M. YANTRA ENTERPRISES</div>
+          <div style={{color:C.muted,fontSize:11,letterSpacing:2,marginTop:2}}>TRANSPORT MANAGEMENT</div>
+          <div style={{color:C.text,fontSize:12,marginTop:4,fontWeight:600}}>
+            {user.name} · <span style={{color:C.muted,textTransform:"capitalize"}}>{user.role}</span>
+          </div>
+        </div>
+      </div>
+
       {MORE_GROUPS.map(g => {
         const tabs = MORE_TABS.filter(t=>t.group===g.id&&can(user,t.perm));
         if(!tabs.length) return null;
@@ -723,8 +739,11 @@ export default function App() {
   if (!user) {
     if (loading) return (
       <div style={{minHeight:"100vh",background:C.bg,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:12,fontFamily:"system-ui"}}>
-        <div style={{fontSize:36}}>⬡</div>
-        <div style={{color:C.accent,fontWeight:900,fontSize:18}}>M. YANTRA</div>
+        <div style={{width:96,height:96,borderRadius:"50%",
+          backgroundImage:`url(${LOGO_B64})`,backgroundSize:"cover",backgroundPosition:"center",
+          boxShadow:`0 0 24px ${C.accent}44`,border:`2px solid ${C.border}`,
+          marginBottom:4}} />
+        <div style={{color:C.accent,fontWeight:900,fontSize:18,letterSpacing:0.5}}>M. YANTRA</div>
         <div style={{color:C.muted,fontSize:13}}>Connecting to database…</div>
       </div>
     );
@@ -733,17 +752,34 @@ export default function App() {
 
   return (
     <div style={{background:C.bg,minHeight:"100vh",fontFamily:"system-ui,-apple-system,'Segoe UI',sans-serif",color:C.text,maxWidth:600,margin:"0 auto",paddingBottom:80,position:"relative"}}>
-        {/* Logo watermark */}
-        <div style={{position:"fixed",top:"50%",left:"50%",transform:"translate(-50%,-50%)",
-          width:"min(85vw,85vh)",height:"min(85vw,85vh)",pointerEvents:"none",zIndex:0,
-          backgroundImage:`url(${LOGO_B64})`,backgroundSize:"contain",
-          backgroundRepeat:"no-repeat",backgroundPosition:"center",
-          opacity:0.09}} />
+        {/* Subtle watermark — bottom-right, very faint, behind all content */}
+        <div style={{
+          position:"fixed",
+          bottom:90,
+          right:"calc(50% - 280px)",
+          width:220,
+          height:220,
+          pointerEvents:"none",
+          zIndex:0,
+          backgroundImage:`url(${LOGO_B64})`,
+          backgroundSize:"contain",
+          backgroundRepeat:"no-repeat",
+          backgroundPosition:"center",
+          opacity:0.045,
+          filter:"grayscale(60%)",
+        }} />
       {/* TOP BAR */}
       <div style={{position:"sticky",top:0,zIndex:50,background:C.card,borderBottom:`1px solid ${C.border}`,padding:"11px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div>
-          <div style={{color:C.accent,fontWeight:900,fontSize:14}}>⬡ M. YANTRA</div>
-          <div style={{color:C.muted,fontSize:10,letterSpacing:1}}>TRANSPORT MANAGEMENT</div>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <div style={{width:32,height:32,borderRadius:"50%",flexShrink:0,
+              backgroundImage:`url(${LOGO_B64})`,backgroundSize:"cover",backgroundPosition:"center",
+              border:`1.5px solid ${C.border}`}} />
+            <div>
+              <div style={{color:C.accent,fontWeight:900,fontSize:14}}>M. YANTRA</div>
+              <div style={{color:C.muted,fontSize:10,letterSpacing:1}}>TRANSPORT MANAGEMENT</div>
+            </div>
+          </div>
         </div>
         <div style={{display:"flex",gap:10,alignItems:"center"}}>
           <div style={{display:"flex",alignItems:"center",gap:5}}>
