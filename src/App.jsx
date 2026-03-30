@@ -483,7 +483,9 @@ function Login({onLogin}) {
     <div style={{minHeight:"100vh",background:C.bg,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,fontFamily:"system-ui,-apple-system,sans-serif"}}>
       <div style={{width:"100%",maxWidth:380}}>
         <div style={{textAlign:"center",marginBottom:32}}>
-          <div style={{fontSize:44,marginBottom:8}}>⬡</div>
+          <div style={{width:140,height:140,borderRadius:"50%",margin:"0 auto 16px",
+            backgroundImage:`url(${LOGO_B64})`,backgroundSize:"cover",backgroundPosition:"center",
+            boxShadow:`0 4px 20px ${C.accent}33`,border:`3px solid ${C.border}`}} />
           <div style={{color:C.accent,fontWeight:900,fontSize:22,letterSpacing:1}}>M. YANTRA ENTERPRISES</div>
           <div style={{color:C.muted,fontSize:12,letterSpacing:3,marginTop:4}}>TRANSPORT MANAGEMENT</div>
         </div>
@@ -8248,12 +8250,12 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
   );
 
   return (
-    <div style={{background:"#0d0d0d",minHeight:"100vh",color:"#e0e0e0",fontFamily:"'DM Sans','Segoe UI',sans-serif"}}>
+    <div style={{background:C.bg,minHeight:"100vh",color:C.text,fontFamily:"'DM Sans','Segoe UI',sans-serif"}}>
 
       {/* header + KPIs */}
-      <div style={{background:C.bg,borderBottom:"1px solid #222",padding:"14px 16px"}}>
-        <div style={{fontSize:10,letterSpacing:3,color:"#4a7090",marginBottom:2}}>M YANTRA ENTERPRISES</div>
-        <div style={{fontSize:17,fontWeight:800,color:"#fff",marginBottom:12}}>💰 Shree Cement — Payments</div>
+      <div style={{background:C.card,borderBottom:`1px solid ${C.border}`,padding:"14px 16px"}}>
+        <div style={{fontSize:10,letterSpacing:3,color:C.muted,marginBottom:2}}>M YANTRA ENTERPRISES</div>
+        <div style={{fontSize:17,fontWeight:800,color:C.text,marginBottom:12}}>💰 Shree Cement — Payments</div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8}}>
           {[
             {label:"Total Billed",   val:`₹${fmtINR(totalBilled)}`,   col:"#1565c0"},
@@ -8261,7 +8263,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
             {label:"On Hold",        val:`₹${fmtINR(totalHold)}`,     col:"#c67c00"},
             {label:"Shortage Lost",  val:`₹${fmtINR(totalShortage)}`, col:"#b91c1c"},
           ].map(m=>(
-            <div key={m.label} style={{background:"#161616",borderRadius:6,padding:"8px 12px"}}>
+            <div key={m.label} style={{background:C.card2,borderRadius:6,padding:"8px 12px",border:`1px solid ${C.border}`}}>
               <div style={{fontSize:9,color:"#4a7090",letterSpacing:1}}>{m.label}</div>
               <div style={{fontWeight:800,color:m.col,fontSize:15}}>{m.val}</div>
             </div>
@@ -8271,17 +8273,17 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
 
       {/* shortage alert */}
       {showAlert&&allShortages.length>0&&(
-        <div style={{background:"#1a0a0a",borderBottom:"1px solid #ff6b6b30",padding:"8px 16px",
+        <div style={{background:"#fef2f2",borderBottom:`1px solid ${C.red}30`,padding:"8px 16px",
           display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
           <span>🚨</span>
           <span style={{color:"#b91c1c",fontWeight:700,fontSize:12}}>
             {allShortages.length} shortage{allShortages.length>1?"s":""} — ₹{fmtINR(totalShortage)} deducted
           </span>
           <button onClick={()=>setActiveTab("shortages")}
-            style={{background:"#ff6b6b15",border:"1px solid #ff6b6b50",color:"#b91c1c",
+            style={{background:C.red+"15",border:`1px solid ${C.red}50`,color:C.red,
               padding:"2px 10px",borderRadius:4,cursor:"pointer",fontSize:11}}>View</button>
           <button onClick={()=>setShowAlert(false)}
-            style={{marginLeft:"auto",background:"none",border:"none",color:"#4a7090",cursor:"pointer",fontSize:16}}>✕</button>
+            style={{marginLeft:"auto",background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:16}}>✕</button>
         </div>
       )}
 
@@ -8290,9 +8292,9 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
         {CLIENTS.map(c=>(
           <button key={c} onClick={()=>setPayClient(c)}
             style={{padding:"6px 14px",borderRadius:20,fontSize:12,fontWeight:700,cursor:"pointer",
-              border:`2px solid ${payClient===c?"#1565c0":"#333"}`,
-              background:payClient===c?"#5b8dee22":"none",
-              color:payClient===c?"#1565c0":"#666"}}>
+              border:`2px solid ${payClient===c?C.accent:C.border}`,
+              background:payClient===c?C.accent+"22":C.card,
+              color:payClient===c?C.accent:C.muted}}>
             {c.replace("Shree Cement ","SC ").replace("Ultratech ","Ultratech ")}
             <span style={{fontSize:10,opacity:0.7,marginLeft:4}}>
               ({(trips||[]).filter(t=>(t.client||DEFAULT_CLIENT)===c&&t.billedToShree).length})
@@ -8302,7 +8304,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
       </div>
 
       {/* tabs with badges */}
-      <div style={{background:C.bg,borderBottom:"1px solid #1e1e1e",
+      <div style={{background:C.card,borderBottom:`1px solid ${C.border}`,
         display:"flex",overflowX:"auto",WebkitOverflowScrolling:"touch",scrollbarWidth:"none"}}>
         {[
           {id:"overview",  label:"Overview",  badge:null},
@@ -8316,13 +8318,13 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
             background:"none",border:"none",padding:"11px 14px",cursor:"pointer",
             whiteSpace:"nowrap",flexShrink:0,
             fontSize:13,fontWeight:activeTab===t.id?700:400,
-            color:activeTab===t.id?"#fff":"#555",
-            borderBottom:activeTab===t.id?"2px solid #5b8dee":"2px solid transparent",
+            color:activeTab===t.id?C.accent:C.muted,
+            borderBottom:activeTab===t.id?`2px solid ${C.accent}`:"2px solid transparent",
           }}>
             {t.label}
             {t.badge!=null&&(
-              <span style={{marginLeft:5,background:activeTab===t.id?"#5b8dee22":"#222",
-                color:activeTab===t.id?"#1565c0":"#666",borderRadius:10,
+              <span style={{marginLeft:5,background:activeTab===t.id?C.accent+"22":C.dim,
+                color:activeTab===t.id?C.accent:C.muted,borderRadius:10,
                 padding:"1px 6px",fontSize:10,fontWeight:700}}>{t.badge}</span>
             )}
           </button>
@@ -8341,23 +8343,23 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                 {label:"Billed / Paid",   val:`${shreeTrips.filter(t=>t.shreeStatus==="billed").length} / ${shreeTrips.filter(t=>t.shreeStatus==="paid").length}`, col:"#1b6e3a"},
                 {label:"Shortage Alerts", val:allShortages.length,                                                             col:"#b91c1c"},
               ].map(c=>(
-                <div key={c.label} style={{background:"#151515",border:"1px solid #222",borderRadius:8,padding:"12px 14px"}}>
-                  <div style={{fontSize:10,color:"#4a7090",letterSpacing:1,marginBottom:4}}>{c.label}</div>
+                <div key={c.label} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,padding:"12px 14px"}}>
+                  <div style={{fontSize:10,color:C.muted,letterSpacing:1,marginBottom:4}}>{c.label}</div>
                   <div style={{fontSize:24,fontWeight:800,color:c.col}}>{c.val}</div>
                 </div>
               ))}
             </div>
 
             {/* scan zone */}
-            <div style={{background:C.bg,border:"1px solid #222",borderRadius:8,padding:14,marginBottom:16}}>
-              <div style={{fontSize:13,fontWeight:700,color:"#fff",marginBottom:10}}>📤 Scan with AI</div>
+            <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,padding:14,marginBottom:16}}>
+              <div style={{fontSize:13,fontWeight:700,color:C.text,marginBottom:10}}>📤 Scan with AI</div>
               <div style={{display:"flex",flexDirection:"column",gap:10}}>
                 {[
                   {icon:"📄",label:"Upload Invoice PDF",      sub:"Extracts LR-wise FRT amounts → marks trips Billed",   type:"invoice"},
                   {icon:"💳",label:"Upload Payment Advice",   sub:"Marks trips Paid + saves electricity/penalty expenses",type:"payment"},
                 ].map(btn=>(
-                  <div key={btn.type} style={{border:"1.5px dashed #2a2a2a",borderRadius:8,
-                    padding:"14px",textAlign:"center",background:"#0d0d0d"}}>
+                  <div key={btn.type} style={{border:`1.5px dashed ${C.border}`,borderRadius:8,
+                    padding:"14px",textAlign:"center",background:C.card2}}>
                     <div style={{fontSize:24,marginBottom:4}}>{btn.icon}</div>
                     <div style={{color:"#ccc",fontWeight:600,fontSize:13,marginBottom:4}}>{btn.label}</div>
                     <div style={{fontSize:11,color:"#4a7090",marginBottom:10}}>{btn.sub}</div>
@@ -8374,7 +8376,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                 </div>
               )}
               {scanError&&(
-                <div style={{marginTop:10,background:"#1a0808",border:"1px solid #ff6b6b40",borderRadius:6,
+                <div style={{marginTop:10,background:"#fef2f2",border:`1px solid ${C.red}40`,borderRadius:6,
                   padding:"10px 12px",color:"#b91c1c",fontSize:12,display:"flex",justifyContent:"space-between",gap:8}}>
                   <span>✕ {scanError}</span>
                   <button onClick={()=>{setScanError(null);setScanResult(null);}}
@@ -8391,7 +8393,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                   {scanResult.type==="invoice"&&(
                     <>
                       <div style={{fontSize:12,color:"#6b82a0",marginBottom:10,display:"flex",gap:12,flexWrap:"wrap"}}>
-                        <b style={{color:"#fff"}}>{scanResult.invoiceNo||"—"}</b>
+                        <b style={{color:C.text}}>{scanResult.invoiceNo||"—"}</b>
                         <span>{scanResult.invoiceDate||"—"}</span>
                         <span style={{color:"#1565c0",fontWeight:700}}>₹{fmtINR(scanResult.totalAmount)}</span>
                       </div>
@@ -8412,7 +8414,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                                 </span>
                                 {st.grNo && <span style={{fontFamily:"monospace",color:"#4a7090",fontSize:10,marginLeft:8}}>GR: {st.grNo}</span>}
                               </div>
-                              <span style={{fontFamily:"monospace",color:"#fff",flexShrink:0}}>₹{fmtINR(st.frtAmt)}</span>
+                              <span style={{fontFamily:"monospace",color:C.text,flexShrink:0}}>₹{fmtINR(st.frtAmt)}</span>
                               <span style={{flexShrink:0,fontSize:11}}>
                                 {trip
                                   ? <span style={{color:"#1b6e3a"}}>✓ LR {trip.lrNo||trip.lr}</span>
@@ -8468,7 +8470,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                           )}
                           <div style={{display:"flex",gap:8,marginTop:8}}>
                             <button onClick={applyInvoiceScan} disabled={!allOk||alreadySaved}
-                              style={{flex:1,background:allOk&&!alreadySaved?"#1b6e3a":"#333",
+                              style={{flex:1,background:allOk&&!alreadySaved?C.green:C.dim,
                                 color:allOk&&!alreadySaved?"#000":"#666",border:"none",borderRadius:6,
                                 padding:"10px",fontWeight:700,
                                 cursor:allOk&&!alreadySaved?"pointer":"not-allowed",fontSize:13}}>
@@ -8486,7 +8488,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                   {scanResult.type==="payment"&&(
                     <>
                       <div style={{fontSize:12,color:"#6b82a0",marginBottom:10,display:"flex",gap:12,flexWrap:"wrap"}}>
-                        <span>UTR: <b style={{color:"#fff"}}>{scanResult.utr||"—"}</b></span>
+                        <span>UTR: <b style={{color:C.text}}>{scanResult.utr||"—"}</b></span>
                         <span>{scanResult.paymentDate||"—"}</span>
                       </div>
                       <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:6,marginBottom:10}}>
@@ -8496,14 +8498,14 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                           {l:"Hold",       v:scanResult.holdAmount,  c:"#c67c00"},
                           {l:"Total Bill", v:scanResult.totalBilled, c:"#aaa"},
                         ].map(m=>(
-                          <div key={m.l} style={{background:"#0d0d0d",borderRadius:4,padding:"6px 8px"}}>
+                          <div key={m.l} style={{background:C.card2,borderRadius:4,padding:"6px 8px",border:`1px solid ${C.border}`}}>
                             <div style={{fontSize:9,color:"#4a7090"}}>{m.l}</div>
                             <div style={{fontWeight:700,color:m.c,fontSize:13}}>₹{fmtINR(m.v)}</div>
                           </div>
                         ))}
                       </div>
                       {(scanResult.shortages||[]).length>0&&(
-                        <div style={{background:"#1a0808",borderRadius:6,padding:"8px 10px",marginBottom:8}}>
+                        <div style={{background:"#fef2f2",borderRadius:6,padding:"8px 10px",marginBottom:8,border:`1px solid ${C.red}30`}}>
                           <div style={{color:"#b91c1c",fontWeight:700,fontSize:11,marginBottom:4}}>⚠ Shortages</div>
                           {(scanResult.shortages||[]).map((s,i)=>(
                             <div key={i} style={{fontSize:11,color:"#ff9999",padding:"2px 0"}}>
@@ -8513,7 +8515,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                         </div>
                       )}
                       {(scanResult.expenses||[]).length>0&&(
-                        <div style={{background:"#1a1000",borderRadius:6,padding:"8px 10px",marginBottom:8}}>
+                        <div style={{background:"#fffbeb",borderRadius:6,padding:"8px 10px",marginBottom:8,border:`1px solid ${C.orange}30`}}>
                           <div style={{color:"#c67c00",fontWeight:700,fontSize:11,marginBottom:4}}>
                             📋 Debit Notes → will save as Expenses
                           </div>
@@ -8591,7 +8593,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                         display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                       <div style={{flex:1,minWidth:0}}>
                         <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3,flexWrap:"wrap"}}>
-                          <span style={{fontFamily:"monospace",fontWeight:700,color:"#fff",fontSize:13}}>
+                          <span style={{fontFamily:"monospace",fontWeight:700,color:C.text,fontSize:13}}>
                             {inv.invoiceNo}
                           </span>
                           <Pill status={inv.status}/>
@@ -8605,17 +8607,17 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                       <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
                         {isOwner&&(
                           <button onClick={e=>{e.stopPropagation();deleteInvoice(inv.invoiceNo);}}
-                            style={{background:"#1a0808",border:"1px solid #ff6b6b30",color:"#b91c1c",
+                            style={{background:"#fef2f2",border:`1px solid ${C.red}30`,color:C.red,
                               borderRadius:5,padding:"5px 9px",fontSize:12,cursor:"pointer"}}>🗑</button>
                         )}
-                        <span style={{color:"#333",fontSize:16,fontWeight:700}}>{isOpen?"▲":"▼"}</span>
+                        <span style={{color:C.muted,fontSize:16,fontWeight:700}}>{isOpen?"▲":"▼"}</span>
                       </div>
                     </div>
                     {isOpen&&(
                       <div style={{borderTop:"1px solid #1e1e1e"}}>
                         {inv.trips.map(t=>(
                           <div key={t.id} style={{padding:"9px 14px",borderBottom:"1px solid #161616",
-                            background:t.shreeShortage?"#140808":"#0d0d0d"}}>
+                            background:t.shreeShortage?"#fef2f2":C.card2}}>
                             <div style={{display:"flex",justifyContent:"space-between",fontSize:12}}>
                               <span style={{fontFamily:"monospace",color:"#6b82a0"}}>{t.lr||t.lrNo}</span>
                               <span style={{fontFamily:"monospace",color:"#ccc",fontWeight:700}}>
@@ -8635,7 +8637,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                           </div>
                         ))}
                         <div style={{padding:"8px 14px",display:"flex",justifyContent:"space-between",
-                          fontSize:11,background:"#0d0d0d",borderTop:"1px solid #1a1a1a"}}>
+                          fontSize:11,background:C.card,borderTop:`1px solid ${C.border}`}}>
                           <span style={{color:"#4a7090"}}>Invoice Total</span>
                           <span style={{fontFamily:"monospace",color:C.text,fontWeight:700}}>₹{fmtINR(inv.totalAmt)}</span>
                         </div>
@@ -8690,10 +8692,10 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                       <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
                         {isOwner&&(
                           <button onClick={e=>{e.stopPropagation();deleteAdvice(p.utr,p.id);}}
-                            style={{background:"#1a0808",border:"1px solid #ff6b6b30",color:"#b91c1c",
+                            style={{background:"#fef2f2",border:`1px solid ${C.red}30`,color:C.red,
                               borderRadius:5,padding:"5px 9px",fontSize:12,cursor:"pointer"}}>🗑</button>
                         )}
-                        <span style={{color:"#333",fontSize:16,fontWeight:700}}>{isOpen?"▲":"▼"}</span>
+                        <span style={{color:C.muted,fontSize:16,fontWeight:700}}>{isOpen?"▲":"▼"}</span>
                       </div>
                     </div>
 
@@ -8702,12 +8704,12 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                         {/* amounts grid */}
                         <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)"}}>
                           {[
-                            {l:"Total Billed",  v:p.totalBilled||p.totalBill, c:"#aaa"},
+                            {l:"Total Billed",  v:p.totalBilled||p.totalBill, c:C.muted},
                             {l:"Net Paid",      v:p.totalPaid||p.paid,        c:"#1b6e3a"},
                             {l:"TDS Deducted",  v:p.tdsDeducted||p.tds,      c:"#c67c00"},
                             {l:"On Hold",       v:p.holdAmount||p.gstHold,    c:"#c67c00"},
                           ].map((m,i)=>(
-                            <div key={m.l} style={{padding:"10px 14px",background:"#0d0d0d",
+                            <div key={m.l} style={{padding:"10px 14px",background:C.card,
                               borderRight:i%2===0?"1px solid #1a1a1a":"none",
                               borderBottom:i<2?"1px solid #1a1a1a":"none"}}>
                               <div style={{fontSize:9,color:"#4a7090",letterSpacing:1}}>{m.l}</div>
@@ -8719,7 +8721,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                         {frtInvoices.length>0&&(
                           <>
                             <div style={{padding:"6px 14px",fontSize:10,fontWeight:700,color:"#4a7090",
-                              letterSpacing:1,background:"#0d0d0d",borderTop:"1px solid #1a1a1a"}}>INVOICES</div>
+                              letterSpacing:1,background:C.card,borderTop:`1px solid ${C.border}`}}>INVOICES</div>
                             {frtInvoices.map((inv,i)=>(
                               <div key={i} style={{padding:"8px 14px",borderTop:"1px solid #161616",
                                 display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:12}}>
@@ -8828,7 +8830,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                     {s.paymentDate&&<span>{fmtDate(s.paymentDate)}</span>}
                   </div>
                   {linkedTrip?(
-                    <div style={{background:"#0a2000",borderRadius:6,padding:"5px 8px",fontSize:11,
+                    <div style={{background:"#f0fdf4",borderRadius:6,padding:"5px 8px",fontSize:11,
                       display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                       <span style={{color:"#1b6e3a"}}>✓ Linked · {linkedTrip.truckNo||linkedTrip.truck} · {linkedTrip.to}</span>
                       {linkedVeh&&<span style={{color:"#6b82a0"}}>Balance: ₹{fmtINR((linkedVeh.shortageOwed||0)-(linkedVeh.shortageRecovered||0))}</span>}
