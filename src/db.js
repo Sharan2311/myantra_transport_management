@@ -338,6 +338,7 @@ export const DB = {
 
   getExpenses:     () => fetchAll('mye_expenses', expenseFromDB),
   saveExpense:     e  => upsertOne('mye_expenses', expenseToDB, e),
+  deleteExpense:   id => deleteOne('mye_expenses', id),
 
   getGstReleases:  () => fetchAll('mye_gst_releases', gstFromDB),
   saveGstRelease:  g  => upsertOne('mye_gst_releases', gstToDB, g),

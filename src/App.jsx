@@ -656,6 +656,27 @@ export default function App() {
       const next = typeof updater === "function" ? updater(prev) : updater;
       const prevIds = new Set((prev||[]).map(e=>e.id));
       next.filter(e => !prevIds.has(e.id)).forEach(e => DB.saveExpense(e).catch(err => setSaveErr(err.message)));
+
+      // ── Dedup by UTR: if same UTR appears more than once, keep first and delete the rest from DB ──
+      const seenUtr = new Map(); // utr → first expense id
+      const toDelete = [];
+      [...next].sort((a,b)=>(a.createdAt||"").localeCompare(b.createdAt||"")).forEach(e => {
+        const utrKey = (e.utr||e.notes||"").trim().toLowerCase();
+        if(!utrKey) return; // no UTR — always keep
+        // Extract raw UTR from notes like "UTR:151493411"
+        const rawUtr = utrKey.startsWith("utr:") ? utrKey.slice(4) : utrKey;
+        if(!rawUtr) return;
+        if(seenUtr.has(rawUtr)) {
+          toDelete.push(e.id); // duplicate — schedule for DB deletion
+        } else {
+          seenUtr.set(rawUtr, e.id);
+        }
+      });
+      if(toDelete.length > 0) {
+        toDelete.forEach(id => DB.deleteExpense(id).catch(err => console.warn("dedup delete:", err)));
+        console.log("[Expenses] Removed", toDelete.length, "duplicate UTR expense(s) from DB");
+        return next.filter(e => !toDelete.includes(e.id));
+      }
       return next;
     });
   };
@@ -8088,6 +8109,18 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
     }
     const invList=scanResult.invoices||[], shorts=scanResult.shortages||[], exps=scanResult.expenses||[];
 
+    // Block save if any referenced invoice has NOT been uploaded yet
+    const savedInvoiceNos = new Set((trips||[]).filter(t=>t.invoiceNo).map(t=>t.invoiceNo.trim()));
+    const missingInvoices = invList.filter(i => {
+      const invNo = (i.invoiceNo||"").trim();
+      return invNo && !savedInvoiceNos.has(invNo);
+    });
+    if(missingInvoices.length > 0) {
+      const missing = missingInvoices.map(i=>i.invoiceNo).join(", ");
+      setScanError(`Invoice${missingInvoices.length>1?"s":""} not uploaded: ${missing}. Please upload ${missingInvoices.length>1?"these invoices":"this invoice"} in the Invoices tab first, then scan the payment advice again.`);
+      return;
+    }
+
     // Build a map of lrNo → trip for shortages lookup
     const allTrips = trips||[];
     const lrToTrip = {};
@@ -8171,19 +8204,29 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
 
     setPayments(prev=>[...(prev||[]),pa]);
 
-    // Save expenses — expenses is a flat array, add each as a new record
+    // Save expenses — skip entirely if this UTR already has expenses saved
     if(exps.length>0&&setExpenses){
-      const newExps = exps.map(exp=>({
-        id:"EXP"+Date.now()+Math.random().toString(36).slice(2,6),
-        date:pDate||new Date().toISOString().slice(0,10),
-        label:exp.description||exp.ref||"Shree Expense",
-        amount:Math.abs(Number(exp.amount||0)),  // abs() handles negative amounts like "590.00-"
-        category:exp.category||"other",
-        notes:"UTR:"+utr,
-        createdBy:user?.name||"",
-        createdAt:new Date().toISOString()
-      }));
-      setExpenses(prev=>[...(Array.isArray(prev)?prev:[]),...newExps]);
+      // Check manual expenses for same UTR
+      const utrAlreadyInManual = (Array.isArray(expenses)?expenses:[])
+        .some(e => e.notes && e.notes.includes("UTR:"+utr));
+      // Check shree payment advice expenses (stored inside payments) for same UTR
+      const utrAlreadyInPayments = (payments||[])
+        .some(p => p.utr===utr && (p.expenses||[]).length>0);
+      if(utrAlreadyInManual || utrAlreadyInPayments) {
+        log && log("EXPENSE SKIP: UTR "+utr+" already has expenses saved — skipping duplicate");
+      } else {
+        const newExps = exps.map(exp=>({
+          id:"EXP"+Date.now()+Math.random().toString(36).slice(2,6),
+          date:pDate||new Date().toISOString().slice(0,10),
+          label:exp.description||exp.ref||"Shree Expense",
+          amount:Math.abs(Number(exp.amount||0)),  // abs() handles negative amounts like "590.00-"
+          category:exp.category||"other",
+          notes:"UTR:"+utr,
+          createdBy:user?.name||"",
+          createdAt:new Date().toISOString()
+        }));
+        setExpenses(prev=>[...(Array.isArray(prev)?prev:[]),...newExps]);
+      }
     }
 
     // Push shortages to vehicle shortage ledger (linked to LR)
@@ -8564,14 +8607,53 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                           ))}
                         </div>
                       )}
-                      <div style={{display:"flex",gap:8}}>
-                        <button onClick={applyPaymentScan}
-                          style={{flex:1,background:"#1565c0",color:"#000",border:"none",borderRadius:6,
-                            padding:"10px",fontWeight:700,cursor:"pointer",fontSize:12}}>✓ Apply — Mark Paid</button>
-                        <button onClick={()=>setScanResult(null)}
-                          style={{background:"#e8f0fa",color:"#6b82a0",border:"1px solid #ccddf0",borderRadius:6,
-                            padding:"10px 14px",cursor:"pointer",fontSize:12}}>Discard</button>
-                      </div>
+                      {(()=>{
+                        const savedInvoiceNos = new Set((trips||[]).filter(t=>t.invoiceNo).map(t=>t.invoiceNo.trim()));
+                        const missingInvs = (scanResult.invoices||[]).filter(i=>{
+                          const n=(i.invoiceNo||"").trim();
+                          return n && !savedInvoiceNos.has(n);
+                        });
+                        const dupUtr = (payments||[]).some(p=>p.utr===scanResult.utr);
+                        const canApply = missingInvs.length===0 && !dupUtr;
+                        return (<>
+                          {missingInvs.length>0 && (
+                            <div style={{background:"#fffbeb",border:`1px solid ${C.orange}`,borderRadius:10,
+                              padding:"12px 14px",marginBottom:8}}>
+                              <div style={{color:C.orange,fontWeight:800,fontSize:13,marginBottom:6}}>
+                                ⚠ Invoice{missingInvs.length>1?"s":""} not uploaded yet
+                              </div>
+                              {missingInvs.map(i=>(
+                                <div key={i.invoiceNo} style={{display:"flex",alignItems:"center",gap:6,
+                                  background:C.card,borderRadius:6,padding:"6px 10px",marginBottom:4,
+                                  border:`1px solid ${C.border}`}}>
+                                  <span style={{fontSize:16}}>📄</span>
+                                  <div>
+                                    <div style={{fontWeight:700,fontSize:12,color:C.text}}>{i.invoiceNo}</div>
+                                    <div style={{fontSize:11,color:C.muted}}>₹{fmtINR(i.totalAmt||i.paymentAmt)}</div>
+                                  </div>
+                                </div>
+                              ))}
+                              <div style={{fontSize:12,color:C.text,marginTop:8,lineHeight:1.5}}>
+                                Go to the <b>Invoices tab</b> → scan or upload{" "}
+                                {missingInvs.length>1?"each invoice":"this invoice"} first,
+                                then come back and scan this payment advice again.
+                              </div>
+                            </div>
+                          )}
+                          <div style={{display:"flex",gap:8}}>
+                            <button onClick={applyPaymentScan} disabled={!canApply}
+                              style={{flex:1,background:canApply?C.accent:C.dim,
+                                color:canApply?"#fff":C.muted,border:"none",borderRadius:6,
+                                padding:"10px",fontWeight:700,
+                                cursor:canApply?"pointer":"not-allowed",fontSize:12}}>
+                              {dupUtr ? "Already Saved" : missingInvs.length>0 ? `Upload ${missingInvs.length} invoice${missingInvs.length>1?"s":""} first` : "✓ Apply — Mark Paid"}
+                            </button>
+                            <button onClick={()=>setScanResult(null)}
+                              style={{background:C.card2,color:C.muted,border:`1px solid ${C.border}`,borderRadius:6,
+                                padding:"10px 14px",cursor:"pointer",fontSize:12}}>Discard</button>
+                          </div>
+                        </>);
+                      })()}
                     </>
                   )}
                 </div>
@@ -9618,9 +9700,20 @@ function ExpensesLedger({expenses, setExpenses, payments, user, log}) {
             <Field label="UTR / Ref No" value={f.utr} onChange={ff("utr")} placeholder="Optional — e.g. 1527531918" />
             <div style={{color:C.muted,fontSize:12}}>Recording as: <b style={{color:ROLES[user.role]?.color}}>{user.name}</b></div>
             <Btn onClick={()=>{
+              if(!f.label.trim()) { alert("Enter a description."); return; }
+              if(!f.amount||+f.amount<=0) { alert("Enter a valid amount."); return; }
               if(f.utr.trim()) {
-                const dupUTR = (Array.isArray(expenses)?expenses:[]).some(e => e.utr && e.utr.trim().toLowerCase() === f.utr.trim().toLowerCase());
-                if(dupUTR) { alert("⚠️ An expense with UTR \""+f.utr.trim()+"\" already exists. Duplicate not saved.\n\nUTR \""+f.utr.trim()+"\" ಹೊಂದಿರುವ ವೆಚ್ಚ ಈಗಾಗಲೇ ಇದೆ. ನಕಲು ಸೇರಿಸಲಾಗಿಲ್ಲ."); return; }
+                const utrLower = f.utr.trim().toLowerCase();
+                // Check manual expenses
+                const dupManual = (Array.isArray(expenses)?expenses:[])
+                  .some(e => e.utr && e.utr.trim().toLowerCase()===utrLower);
+                // Check shree payment-advice expenses (notes field contains "UTR:XXXX")
+                const dupShree = (payments||[])
+                  .some(p => p.utr && p.utr.trim().toLowerCase()===utrLower && (p.expenses||[]).length>0);
+                if(dupManual||dupShree) {
+                  alert("⚠️ An expense with UTR \"" + f.utr.trim() + "\" already exists.\nDuplicate not saved.");
+                  return;
+                }
               }
               const e={...f,id:uid(),amount:+f.amount,utr:f.utr.trim(),createdBy:user.username,createdAt:nowTs()};
               setExpenses(prev=>[e,...(prev||[])]);
