@@ -657,24 +657,30 @@ export default function App() {
       const prevIds = new Set((prev||[]).map(e=>e.id));
       next.filter(e => !prevIds.has(e.id)).forEach(e => DB.saveExpense(e).catch(err => setSaveErr(err.message)));
 
-      // ── Dedup by UTR: if same UTR appears more than once, keep first and delete the rest from DB ──
-      const seenUtr = new Map(); // utr → first expense id
+      // ── Dedup by UTR: keep oldest, delete all exact duplicates from DB ──
+      // Handles: e.utr field directly, or notes field like "UTR:151493411"
+      const extractUtr = e => {
+        if(e.utr && e.utr.trim()) return e.utr.trim().toLowerCase();
+        const m = (e.notes||"").match(/UTR[:\s]*([\w]+)/i);
+        return m ? m[1].toLowerCase() : "";
+      };
+      const seenUtr = new Map();
       const toDelete = [];
-      [...next].sort((a,b)=>(a.createdAt||"").localeCompare(b.createdAt||"")).forEach(e => {
-        const utrKey = (e.utr||e.notes||"").trim().toLowerCase();
-        if(!utrKey) return; // no UTR — always keep
-        // Extract raw UTR from notes like "UTR:151493411"
-        const rawUtr = utrKey.startsWith("utr:") ? utrKey.slice(4) : utrKey;
-        if(!rawUtr) return;
-        if(seenUtr.has(rawUtr)) {
-          toDelete.push(e.id); // duplicate — schedule for DB deletion
-        } else {
-          seenUtr.set(rawUtr, e.id);
-        }
-      });
+      // Sort oldest-first so we keep the first occurrence
+      [...next]
+        .sort((a,b)=>(a.createdAt||a.date||"").localeCompare(b.createdAt||b.date||""))
+        .forEach(e => {
+          const rawUtr = extractUtr(e);
+          if(!rawUtr) return; // no UTR — always keep
+          if(seenUtr.has(rawUtr)) {
+            toDelete.push(e.id);
+          } else {
+            seenUtr.set(rawUtr, e.id);
+          }
+        });
       if(toDelete.length > 0) {
         toDelete.forEach(id => DB.deleteExpense(id).catch(err => console.warn("dedup delete:", err)));
-        console.log("[Expenses] Removed", toDelete.length, "duplicate UTR expense(s) from DB");
+        console.log("[Expenses] Auto-removed", toDelete.length, "duplicate UTR expense(s) from DB");
         return next.filter(e => !toDelete.includes(e.id));
       }
       return next;
@@ -773,21 +779,22 @@ export default function App() {
 
   return (
     <div style={{background:C.bg,minHeight:"100vh",fontFamily:"system-ui,-apple-system,'Segoe UI',sans-serif",color:C.text,maxWidth:600,margin:"0 auto",paddingBottom:80,position:"relative"}}>
-        {/* Subtle watermark — bottom-right, very faint, behind all content */}
+        {/* Watermark — bottom-right corner, extremely faint, pure background */}
         <div style={{
           position:"fixed",
-          bottom:90,
-          right:"calc(50% - 280px)",
-          width:220,
-          height:220,
+          bottom:100,
+          right:"calc(50% - 270px)",
+          width:160,
+          height:160,
           pointerEvents:"none",
           zIndex:0,
           backgroundImage:`url(${LOGO_B64})`,
           backgroundSize:"contain",
           backgroundRepeat:"no-repeat",
           backgroundPosition:"center",
-          opacity:0.045,
-          filter:"grayscale(60%)",
+          opacity:0.028,
+          filter:"grayscale(80%) blur(0.4px)",
+          mixBlendMode:"multiply",
         }} />
       {/* TOP BAR */}
       <div style={{position:"sticky",top:0,zIndex:50,background:C.card,borderBottom:`1px solid ${C.border}`,padding:"11px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
