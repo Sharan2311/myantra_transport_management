@@ -971,7 +971,7 @@ function Dashboard({trips, vehicles, employees, indents, pumps, pumpPayments, dr
 // Morning workflow: employee uploads all GR PDFs at once.
 // AI scans them in parallel. One screen shows all trips — enter LR + driver rate per row.
 // Tap "Save All" → all trips created in one shot.
-function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user, log, onClose }) {
+function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user, log, onClose, employees=[], cashTransfers=[], setCashTransfers }) {
   // Each item: { id, file, status, extracted, lrNo, givenRate, driverPhone, orderType, error, dupTrip }
   const [items, setItems] = useState([]);
   const [saving, setSaving] = useState(false);
@@ -1059,6 +1059,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       lrNo:"", givenRate:"", driverPhone:"", orderType:"godown",
       advance:"0", shortageRecovery:"0", loanRecovery:"0",
       tafal:"", dieselEstimate:"0", dieselIndentNo:"",
+      cashEmpId:"",
       grFile:null, invoiceFile:null,
     }));
     setItems(prev => [...prev, ...newItems]);
@@ -1306,9 +1307,10 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           advance:+item.advance||0,
           shortageRecovery:+item.shortageRecovery||0,
           loanRecovery:+item.loanRecovery||0,
-          tafal:+item.tafal||(settings?.tafalPerTrip||300),
+          tafal: item.tafal !== "" && item.tafal !== null && item.tafal !== undefined ? +item.tafal : (settings?.tafalPerTrip||300),
           dieselEstimate:+item.dieselEstimate||0,
           dieselIndentNo:item.dieselIndentNo?.trim()||"",
+          cashEmpId:item.cashEmpId||"",
           orderType:item.orderType||"godown", diLines:[],
           grFilePath:grUrl, invoiceFilePath:invUrl,
           emailSentAt:"", partyEmail:"", batchId:"",
@@ -1317,6 +1319,17 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           createdBy:user.username, createdAt:nowTs(),
         };
         setTrips(p=>[trip,...(p||[])]);
+        // If advance linked to employee wallet, record the deduction
+        if(trip.cashEmpId && trip.advance > 0 && setCashTransfers) {
+          const empName = employees.find(e=>e.id===trip.cashEmpId)?.name||trip.cashEmpId;
+          const wxn = {id:"WX-"+trip.id, empId:trip.cashEmpId, amount:-trip.advance,
+            date:trip.date||today(),
+            note:`Advance — LR ${trip.lrNo||"—"} · ${trip.truckNo}`,
+            lrNo:trip.lrNo||"", tripId:trip.id,
+            createdBy:user.username, createdAt:nowTs()};
+          setCashTransfers(prev=>[wxn,...(Array.isArray(prev)?prev:[])]);
+          log("WALLET ADVANCE",`${empName} −₹${trip.advance} LR:${trip.lrNo}`);
+        }
         log("BATCH TRIP", `LR:${lrNo} DI:${trip.diNo} ${trip.truckNo} ${trip.qty}MT [${trip.orderType}]`);
         count++;
       } else {
@@ -1656,10 +1669,41 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                   </div>
                 </div>
 
+                {/* Employee wallet dropdown — shown when advance > 0 and employees exist */}
+                {+item.advance > 0 && employees.length > 0 && (
+                  <div>
+                    <div style={{fontSize:10,color:C.green,marginBottom:3,fontWeight:700}}>
+                      💵 DEDUCT ADVANCE FROM EMPLOYEE WALLET
+                    </div>
+                    <select value={item.cashEmpId||""} onChange={e=>update(item.id,"cashEmpId",e.target.value)}
+                      style={{width:"100%",background:C.bg,
+                        border:`1.5px solid ${item.cashEmpId?C.green:C.border}`,
+                        borderRadius:8,color:item.cashEmpId?C.text:C.muted,
+                        padding:"8px 10px",fontSize:13,outline:"none"}}>
+                      <option value="">— None (no wallet effect) —</option>
+                      {employees.map(e=>(
+                        <option key={e.id} value={e.id}>{e.name}</option>
+                      ))}
+                    </select>
+                    {item.cashEmpId && (
+                      <div style={{color:C.green,fontSize:11,marginTop:3}}>
+                        ✓ ₹{(+item.advance).toLocaleString("en-IN")} will be deducted from {employees.find(e=>e.id===item.cashEmpId)?.name}'s wallet on save
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* Shortage Recovery + Loan Recovery */}
                 <div style={{display:"flex",gap:8}}>
                   <div style={{flex:1}}>
-                    <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>SHORTAGE RECOVERY ₹</div>
+                    <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>SHORTAGE RECOVERY ₹
+                      {(()=>{
+                        const truckNo = (item.extracted?.truckNo||"").toUpperCase().trim();
+                        const veh = vehicles.find(v=>v.truckNo===truckNo);
+                        const pending = veh ? Math.max(0,(veh.shortageOwed||0)-(veh.shortageRecovered||0)) : 0;
+                        return pending > 0 ? <span style={{color:C.orange,fontWeight:600}}> · Pending ₹{pending.toLocaleString("en-IN")}</span> : null;
+                      })()}
+                    </div>
                     <input value={item.shortageRecovery??""} onChange={e=>update(item.id,"shortageRecovery",e.target.value)}
                       type="number" placeholder="0"
                       style={{width:"100%",border:`1.5px solid ${C.border}`,borderRadius:8,
@@ -1667,7 +1711,14 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                         outline:"none",boxSizing:"border-box"}} />
                   </div>
                   <div style={{flex:1}}>
-                    <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>LOAN RECOVERY ₹</div>
+                    <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>LOAN RECOVERY ₹
+                      {(()=>{
+                        const truckNo = (item.extracted?.truckNo||"").toUpperCase().trim();
+                        const veh = vehicles.find(v=>v.truckNo===truckNo);
+                        const loanBal = veh ? Math.max(0,(veh.loan||0)-(veh.loanRecovered||0)) : 0;
+                        return loanBal > 0 ? <span style={{color:C.orange,fontWeight:600}}> · Bal ₹{loanBal.toLocaleString("en-IN")}</span> : null;
+                      })()}
+                    </div>
                     <input value={item.loanRecovery??""} onChange={e=>update(item.id,"loanRecovery",e.target.value)}
                       type="number" placeholder="0"
                       style={{width:"100%",border:`1.5px solid ${C.border}`,borderRadius:8,
@@ -1707,7 +1758,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                 const qty     = +item.extracted.qty || 0;
                 const frRate  = +item.extracted.frRate || 0;
                 const driver  = +item.givenRate || 0;
-                const tafal   = +item.tafal || (settings?.tafalPerTrip||300);
+                const tafal   = item.tafal !== "" && item.tafal !== null && item.tafal !== undefined ? +item.tafal : (settings?.tafalPerTrip||300);
                 const advance = +item.advance || 0;
                 const diesel  = +item.dieselEstimate || 0;
                 const shrRec  = +item.shortageRecovery || 0;
@@ -1718,27 +1769,28 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                 const perMT   = frRate - driver;
                 const marginOk = perMT >= 30;
                 const net     = gross - advance - tafal - diesel - shrRec - loanRec;
+                const rows = [
+                  ...(frRate > 0 ? [{l:"Billed to Shree", v:fmt(billed), c:C.blue}] : []),
+                  {l:"Gross to Driver",       v:fmt(gross),   c:C.orange},
+                  {l:"(−) Advance",           v:fmt(advance), c:advance>0?C.red:C.muted},
+                  {l:"(−) Tafal",             v:fmt(tafal),   c:C.purple},
+                  {l:"(−) Diesel",            v:fmt(diesel),  c:diesel>0?C.orange:C.muted},
+                  {l:"(−) Shortage Recovery", v:fmt(shrRec),  c:shrRec>0?C.red:C.muted},
+                  {l:"(−) Loan Recovery",     v:fmt(loanRec), c:loanRec>0?C.red:C.muted},
+                  ...(frRate > 0 ? [{l:marginOk?"My Margin ✓":"⚠ Margin",
+                    v:`${fmt(margin)} (₹${perMT.toFixed(0)}/MT)`,
+                    c:marginOk?C.green:C.red}] : []),
+                  {l:"Est. Net to Driver",    v:fmt(net),     c:net>=0?C.green:C.red},
+                ];
                 return (
-                  <div style={{background:marginOk?C.green+"08":C.red+"08",
-                    border:`1px solid ${marginOk?C.green:C.red}33`,
+                  <div style={{background:(frRate>0?(marginOk?C.green:C.red):C.blue)+"08",
+                    border:`1px solid ${(frRate>0?(marginOk?C.green:C.red):C.blue)}33`,
                     borderRadius:10,padding:"10px 12px",marginTop:2}}>
                     <div style={{fontSize:10,color:C.muted,fontWeight:700,
                       textTransform:"uppercase",letterSpacing:1,marginBottom:7}}>
                       Calculation Preview
                     </div>
-                    {[
-                      {l:"Billed to Shree",      v:fmt(billed),  c:C.blue},
-                      {l:"Gross to Driver",       v:fmt(gross),   c:C.orange},
-                      {l:"(−) Advance",           v:fmt(advance), c:advance>0?C.red:C.muted},
-                      {l:"(−) Tafal",             v:fmt(tafal),   c:C.purple},
-                      {l:"(−) Diesel",            v:fmt(diesel),  c:diesel>0?C.orange:C.muted},
-                      {l:"(−) Shortage Recovery", v:fmt(shrRec),  c:shrRec>0?C.red:C.muted},
-                      {l:"(−) Loan Recovery",     v:fmt(loanRec), c:loanRec>0?C.red:C.muted},
-                      {l:marginOk?"My Margin ✓":"⚠ Margin",
-                        v:`${fmt(margin)} (₹${perMT.toFixed(0)}/MT)`,
-                        c:marginOk?C.green:C.red},
-                      {l:"Est. Net to Driver",    v:fmt(net),     c:net>=0?C.green:C.red},
-                    ].map(x=>(
+                    {rows.map(x=>(
                       <div key={x.l} style={{display:"flex",justifyContent:"space-between",
                         padding:"4px 0",borderBottom:`1px solid ${C.border}22`,fontSize:12}}>
                         <span style={{color:C.muted}}>{x.l}</span>
@@ -2482,6 +2534,15 @@ Rules:
       <style>{`
         @keyframes bounce {
           0%,100%{transform:translateY(0)} 50%{transform:translateY(-6px)}
+        }
+        input[type=number]::-webkit-inner-spin-button,
+        input[type=number]::-webkit-outer-spin-button {
+          -webkit-appearance: none;
+          margin: 0;
+        }
+        input[type=number] {
+          -moz-appearance: textfield;
+          appearance: textfield;
         }
       `}</style>
     </div>
@@ -4339,6 +4400,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
           <BatchDIScanner
             trips={trips} vehicles={vehicles} setVehicles={setVehicles}
             setTrips={setTrips} settings={settings} user={user} log={log}
+            employees={employees||[]} cashTransfers={cashTransfers||[]} setCashTransfers={setCashTransfers}
             onClose={()=>setBatchDISheet(false)}
           />
         </Sheet>
