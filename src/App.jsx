@@ -282,9 +282,9 @@ const Btn = ({children, onClick, color=C.accent, outline=false, sm=false, full=f
   }}>{loading ? "Saving…" : children}</button>
 );
 
-const Sheet = ({title, onClose, children}) => (
+const Sheet = ({title, onClose, children, noBackdropClose}) => (
   <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}
-    onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
+    onClick={e=>{if(!noBackdropClose && e.target===e.currentTarget)onClose();}}>
     <div style={{background:C.card,borderRadius:"20px 20px 0 0",width:"100%",maxWidth:600,maxHeight:"92vh",overflowY:"auto",paddingBottom:40}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
         padding:"14px 16px 12px",borderBottom:`1px solid ${C.border}`,
@@ -1102,6 +1102,29 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
     if(+x.dieselEstimate > 0 && !x.dieselIndentNo?.trim()) return false;
     // Party order requires GR file AND invoice file
     if(x.orderType==="party" && (!x.grFile || !x.invoiceFile)) return false;
+    // Net to driver must not be negative (unless it's only diesel — multi-DI case, warn at save time)
+    {
+      const qty = +x.extracted?.qty || 0;
+      const driver = +x.givenRate || 0;
+      const _gross = qty * driver;
+      const tafalVal = x.tafal !== "" && x.tafal !== null && x.tafal !== undefined
+        ? +x.tafal
+        : (settings?.tafalPerTrip || 300);
+      const _net = _gross
+        - (+x.advance || 0)
+        - tafalVal
+        - (+x.dieselEstimate || 0)
+        - (+x.shortageRecovery || 0)
+        - (+x.loanRecovery || 0);
+      if (_net < 0) {
+        const isOnlyDiesel = (+x.dieselEstimate || 0) > 0
+          && (+x.advance || 0) === 0
+          && (+x.shortageRecovery || 0) === 0
+          && (+x.loanRecovery || 0) === 0;
+        if (!isOnlyDiesel) return false; // hard block — negative net not from diesel
+        // isOnlyDiesel = allow (will confirm at save time)
+      }
+    }
     return true;
   });
   const canSave = readyItems.length > 0 && !saving;
@@ -1156,6 +1179,33 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
         if(!item.invoiceFile) {
           alert(`LR ${item.lrNo}: Invoice file is required for Party orders.\nPlease upload the invoice.`);
           return;
+        }
+      }
+      // Validate: Est. Net to Driver cannot be negative (same as single trip saveNew)
+      {
+        const qty = +item.extracted?.qty || 0;
+        const driver = +item.givenRate || 0;
+        const _gross = qty * driver;
+        const tafalVal = item.tafal !== "" && item.tafal !== null && item.tafal !== undefined
+          ? +item.tafal
+          : (settings?.tafalPerTrip || 300);
+        const _net = _gross
+          - (+item.advance || 0)
+          - tafalVal
+          - (+item.dieselEstimate || 0)
+          - (+item.shortageRecovery || 0)
+          - (+item.loanRecovery || 0);
+        if (_net < 0) {
+          const isOnlyDiesel = (+item.dieselEstimate || 0) > 0
+            && (+item.advance || 0) === 0
+            && (+item.shortageRecovery || 0) === 0
+            && (+item.loanRecovery || 0) === 0;
+          if (isOnlyDiesel) {
+            if (!window.confirm(`LR ${item.lrNo}: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative) — likely because diesel covers multiple DIs.\n\nSave anyway? You can merge the second DI after saving.`)) return;
+          } else {
+            alert(`LR ${item.lrNo}: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\nPlease reduce Advance / Loan / Shortage Recovery.`);
+            return;
+          }
         }
       }
     }
@@ -1590,7 +1640,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                 <div style={{display:"flex",gap:8}}>
                   <div style={{flex:1}}>
                     <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>ADVANCE ₹</div>
-                    <input value={item.advance||"0"} onChange={e=>update(item.id,"advance",e.target.value)}
+                    <input value={item.advance??""} onChange={e=>update(item.id,"advance",e.target.value)}
                       type="number" placeholder="0"
                       style={{width:"100%",border:`1.5px solid ${C.border}`,borderRadius:8,
                         padding:"8px 10px",fontSize:13,background:C.bg,color:C.text,
@@ -1598,7 +1648,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                   </div>
                   <div style={{flex:1}}>
                     <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>TAFAL ₹</div>
-                    <input value={item.tafal||"300"} onChange={e=>update(item.id,"tafal",e.target.value)}
+                    <input value={item.tafal??""} onChange={e=>update(item.id,"tafal",e.target.value)}
                       type="number" placeholder="300"
                       style={{width:"100%",border:`1.5px solid ${C.border}`,borderRadius:8,
                         padding:"8px 10px",fontSize:13,background:C.bg,color:C.text,
@@ -1610,7 +1660,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                 <div style={{display:"flex",gap:8}}>
                   <div style={{flex:1}}>
                     <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>SHORTAGE RECOVERY ₹</div>
-                    <input value={item.shortageRecovery||"0"} onChange={e=>update(item.id,"shortageRecovery",e.target.value)}
+                    <input value={item.shortageRecovery??""} onChange={e=>update(item.id,"shortageRecovery",e.target.value)}
                       type="number" placeholder="0"
                       style={{width:"100%",border:`1.5px solid ${C.border}`,borderRadius:8,
                         padding:"8px 10px",fontSize:13,background:C.bg,color:C.text,
@@ -1618,7 +1668,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                   </div>
                   <div style={{flex:1}}>
                     <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>LOAN RECOVERY ₹</div>
-                    <input value={item.loanRecovery||"0"} onChange={e=>update(item.id,"loanRecovery",e.target.value)}
+                    <input value={item.loanRecovery??""} onChange={e=>update(item.id,"loanRecovery",e.target.value)}
                       type="number" placeholder="0"
                       style={{width:"100%",border:`1.5px solid ${C.border}`,borderRadius:8,
                         padding:"8px 10px",fontSize:13,background:C.bg,color:C.text,
@@ -1630,7 +1680,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                 <div style={{display:"flex",gap:8}}>
                   <div style={{flex:1}}>
                     <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>DIESEL ESTIMATE ₹</div>
-                    <input value={item.dieselEstimate||"0"} onChange={e=>update(item.id,"dieselEstimate",e.target.value)}
+                    <input value={item.dieselEstimate??""} onChange={e=>update(item.id,"dieselEstimate",e.target.value)}
                       type="number" placeholder="0"
                       style={{width:"100%",border:`1.5px solid ${+item.dieselEstimate>0&&!item.dieselIndentNo?.trim()?C.red:C.border}`,
                         borderRadius:8,padding:"8px 10px",fontSize:13,background:C.bg,color:C.text,
@@ -4285,7 +4335,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
 
       {/* ── BATCH DI SCANNER SHEET ── */}
       {batchDISheet && (
-        <Sheet title="🌅 Morning Batch — Scan GR Copies" onClose={()=>setBatchDISheet(false)}>
+        <Sheet title="🌅 Morning Batch — Scan GR Copies" onClose={()=>setBatchDISheet(false)} noBackdropClose>
           <BatchDIScanner
             trips={trips} vehicles={vehicles} setVehicles={setVehicles}
             setTrips={setTrips} settings={settings} user={user} log={log}
