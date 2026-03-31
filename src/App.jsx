@@ -18,15 +18,30 @@ const today = () => new Date().toISOString().split("T")[0];
 const nowTs = () => new Date().toLocaleString("en-IN",{dateStyle:"short",timeStyle:"short"});
 const uid   = () => Math.random().toString(36).slice(2,9).toUpperCase();
 
+// ─── FINANCIAL YEAR HELPERS ───────────────────────────────────────────────────
+// Indian FY: April 1 → March 31. FY2025 = Apr 2024–Mar 2025, FY2026 = Apr 2025–Mar 2026
+const getFY = (dateStr) => {
+  if(!dateStr) return null;
+  const [y,m] = dateStr.split("-").map(Number);
+  return m >= 4 ? y+1 : y; // Apr onwards = next year's FY
+};
+const getFYRange = (fy) => ({
+  from: `${fy-1}-04-01`,
+  to:   `${fy}-03-31`,
+});
+const currentFY = () => getFY(today());
+const FY_LABEL  = fy => `FY ${fy-1}–${String(fy).slice(2)}`; // "FY 2025–26"
+
 
 
 // ─── ROLES ────────────────────────────────────────────────────────────────────
 const ROLES = {
-  owner:    {label:"Owner",         color:C.accent, perms:["trips","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","admin"]},
-  manager:  {label:"Manager",       color:C.blue,   perms:["trips","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal"]},
-  operator: {label:"Trip Operator", color:C.teal,   perms:["trips","billing","diesel"]},
-  accounts: {label:"Accounts",      color:C.purple, perms:["billing","payments","reports","diesel","tafal"]},
-  viewer:   {label:"Viewer",        color:C.muted,  perms:["reports"]},
+  owner:         {label:"Owner",               color:C.accent,  perms:["trips","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","admin"]},
+  manager:       {label:"Manager",             color:C.blue,    perms:["trips","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal"]},
+  fleet_manager: {label:"Cement Fleet Manager",color:C.teal,    perms:["trips","billing","diesel","tafal","driverPay"]},
+  operator:      {label:"Trip Operator",       color:C.teal,    perms:["trips","billing","diesel"]},
+  accounts:      {label:"Accounts",            color:C.purple,  perms:["billing","payments","reports","diesel","tafal"]},
+  viewer:        {label:"Viewer",              color:C.muted,   perms:["reports"]},
 };
 const can = (user, p) => user && ROLES[user.role]?.perms.includes(p);
 
@@ -344,13 +359,21 @@ const ErrBanner = ({msg}) => msg ? (
 // ─── BOTTOM NAV ───────────────────────────────────────────────────────────────
 const MAIN_IDS = ["dashboard","trips","billing","diesel","more"];
 function BottomNav({tab, setTab, user, trips, driverPays, vehicles}) {
-  const items = [
+  const isFleet = user?.role === "fleet_manager";
+  const items = isFleet ? [
+    {id:"dashboard", icon:"⊞", label:"Home",       perm:null},
+    {id:"trips",     icon:"🚚", label:"Trips",      perm:"trips"},
+    {id:"billing",   icon:"🧾", label:"Billing",    perm:"billing"},
+    {id:"diesel",    icon:"⛽", label:"Diesel",     perm:"diesel"},
+    {id:"more",      icon:"⋯",  label:"More",       perm:null},
+  ] : [
     {id:"dashboard",icon:"⊞",label:"Home",    perm:null},
     {id:"trips",    icon:"🚚",label:"Trips",   perm:"trips"},
     {id:"billing",  icon:"🧾",label:"Billing", perm:"billing"},
     {id:"diesel",   icon:"⛽",label:"Diesel",  perm:"diesel"},
     {id:"more",     icon:"⋯", label:"More",    perm:null},
-  ].filter(n => !n.perm || can(user, n.perm));
+  ];
+  const visibleItems = items.filter(n => !n.perm || can(user, n.perm));
 
   // Badge counts
   const pendingBills = (trips||[]).filter(t=>t.status==="Pending Bill").length;
@@ -368,7 +391,7 @@ function BottomNav({tab, setTab, user, trips, driverPays, vehicles}) {
 
   return (
     <nav style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:600,background:C.card,borderTop:`1px solid ${C.border}`,display:"flex",zIndex:100,paddingBottom:"env(safe-area-inset-bottom,6px)"}}>
-      {items.map(n => {
+      {visibleItems.map(n => {
         const active = tab===n.id || (n.id==="more" && !MAIN_IDS.includes(tab));
         const badge = badges[n.id];
         return (
@@ -388,7 +411,7 @@ function BottomNav({tab, setTab, user, trips, driverPays, vehicles}) {
 
 const MORE_TABS = [
   {id:"inbound",   icon:"🏭",label:"Raw Material",   perm:"trips",      group:"ops"},
-  {id:"driverPay", icon:"🏧",label:"Driver Pay",     perm:"settlement", group:"money"},
+  {id:"driverPay", icon:"🏧",label:"Driver Pay",     perm:"driverPay",  group:"money"},
   {id:"settlement",icon:"💵",label:"Settlement",     perm:"settlement", group:"money"},
   {id:"tafal",     icon:"🤝",label:"TAFAL",          perm:"tafal",      group:"money"},
   {id:"vehicles",  icon:"🚛",label:"Vehicles",       perm:"vehicles",   group:"fleet"},
@@ -723,6 +746,7 @@ export default function App() {
   const [tab,  setTab]  = useState("dashboard");
   const [saving, setSaving] = useState(false);
   const [saveErr, setSaveErr] = useState("");
+  const [selectedFY, setSelectedFY] = useState(currentFY()); // Financial year filter
 
   const [users,       setUsers,       rU, reloadUsers]       = useDB(DB.getUsers,       []);
   const [trips,       setTrips,       rT, reloadTrips]       = useDB(DB.getTrips,       []);
@@ -916,8 +940,12 @@ export default function App() {
     });
   };
 
+  const fyRange = getFYRange(selectedFY);
+  const fyTrips = trips.filter(t => t.date >= fyRange.from && t.date <= fyRange.to);
+
   const sp = {
     trips, setTrips:dbSetTrips,
+    fyTrips, selectedFY, setSelectedFY,
     vehicles, setVehicles:dbSetVehicles,
     employees, setEmployees:dbSetEmployees,
     payments, setPayments:dbSetPayments,
@@ -1078,6 +1106,31 @@ export default function App() {
         </div>
       )}
 
+      {/* FY SELECTOR BAR — owner/manager only */}
+      {(user.role==="owner"||user.role==="manager") && (()=>{
+        // Build list of FYs that have data, plus current FY
+        const fySet = new Set([currentFY()]);
+        (trips||[]).forEach(t=>{ const fy=getFY(t.date); if(fy) fySet.add(fy); });
+        const fyList = [...fySet].sort((a,b)=>b-a); // descending — newest first
+        if(fyList.length<=1) return null; // hide if only one FY
+        return (
+          <div style={{background:C.card,borderBottom:`1px solid ${C.border}`,
+            padding:"7px 16px",display:"flex",alignItems:"center",gap:8,overflowX:"auto"}}>
+            <span style={{color:C.muted,fontSize:11,fontWeight:700,flexShrink:0}}>📅 FY:</span>
+            {fyList.map(fy=>(
+              <button key={fy} onClick={()=>setSelectedFY(fy)}
+                style={{padding:"4px 10px",borderRadius:16,fontSize:11,fontWeight:700,
+                  cursor:"pointer",flexShrink:0,whiteSpace:"nowrap",
+                  border:`1.5px solid ${selectedFY===fy?C.accent:C.border}`,
+                  background:selectedFY===fy?C.accent+"22":"transparent",
+                  color:selectedFY===fy?C.accent:C.muted}}>
+                {FY_LABEL(fy)}{fy===currentFY()?" ←":""}
+              </button>
+            ))}
+          </div>
+        );
+      })()}
+
       <div style={{padding:"14px 16px 8px"}}>
         {tab==="dashboard"  && <Dashboard {...sp} setTab={setTab} />}
         {tab==="trips"      && can(user,"trips")      && <Trips      {...sp} tripType="outbound" />}
@@ -1089,7 +1142,7 @@ export default function App() {
         {tab==="vehicles"   && can(user,"vehicles")   && <Vehicles   {...sp} />}
         {tab==="employees"  && can(user,"employees")  && <Employees  {...sp} />}
         {tab==="payments"   && can(user,"payments")   && <Payments   {...sp} />}
-        {tab==="driverPay"  && can(user,"settlement") && <DriverPayments {...sp} />}
+        {tab==="driverPay"  && can(user,"driverPay") && <DriverPayments {...sp} />}
         {tab==="expenses"   && can(user,"payments")   && <ExpensesLedger {...sp} />}
         {tab==="reports"    && can(user,"reports")    && <Reports    {...sp} />}
         {tab==="reminders"  && can(user,"reminders")  && <Reminders  {...sp} />}
@@ -1102,21 +1155,23 @@ export default function App() {
   );
 }
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
-function Dashboard({trips, vehicles, employees, indents, pumps, pumpPayments, driverPays, activity, settings, setTab, user}) {
+function Dashboard({trips, fyTrips, vehicles, employees, indents, pumps, pumpPayments, driverPays, activity, settings, setTab, user, selectedFY}) {
+  const displayTrips = fyTrips || trips; // use FY-filtered if available
   const todayStr    = today();
-  const todayTrips  = trips.filter(t => t.date===todayStr);
-  const pending     = trips.filter(t => t.status==="Pending Bill");
+  const todayTrips  = displayTrips.filter(t => t.date===todayStr);
+  const pending     = displayTrips.filter(t => t.status==="Pending Bill");
   const weekAgo     = new Date(); weekAgo.setDate(weekAgo.getDate()-7);
   const weekAgoStr  = weekAgo.toISOString().split("T")[0];
-  const oldUnsettled = trips.filter(t => !t.driverSettled && t.date < weekAgoStr && (t.qty||0)*(t.givenRate||0)>0);
-  const margin      = trips.reduce((s,t) => s + t.qty*(t.frRate-t.givenRate), 0);
+  const oldUnsettled = displayTrips.filter(t => !t.driverSettled && t.date < weekAgoStr && (t.qty||0)*(t.givenRate||0)>0);
+  const margin      = displayTrips.reduce((s,t) => s + t.qty*(t.frRate-t.givenRate), 0);
   const todayMargin = todayTrips.reduce((s,t) => s + t.qty*(t.frRate-t.givenRate), 0);
   const confirmedIndents = indents.filter(i => i.confirmed);
   const totalDieselOwed = confirmedIndents.reduce((s,i) => s+(+(i.amount)||0), 0);
   const totalDieselPaid = (pumpPayments||[]).reduce((s,p) => s+(+(p.amount)||0), 0);
   const unpaidDiesel = Math.max(0, totalDieselOwed - totalDieselPaid);
-  const tafalPool   = trips.reduce((s,t) => s+(t.tafal||0), 0);
+  const tafalPool   = displayTrips.reduce((s,t) => s+(t.tafal||0), 0);
   const vLoan       = vehicles.reduce((s,v) => s + Math.max(0, v.loan-v.loanRecovered), 0);
+  const fyLabel     = selectedFY ? FY_LABEL(selectedFY) : "";
 
   // Actionable alerts
   const alerts = [
@@ -1136,18 +1191,21 @@ function Dashboard({trips, vehicles, employees, indents, pumps, pumpPayments, dr
         <div style={{color:C.muted,fontSize:12,marginTop:2}}>{new Date().toLocaleDateString("en-IN",{weekday:"long",day:"numeric",month:"long"})}</div>
       </div>
 
-      {/* Quick Actions */}
+      {/* Quick Actions — fleet_manager sees no RM Trip button */}
       {can(user,"trips") && (
         <div style={{display:"flex",gap:8}}>
           <button onClick={()=>setTab("trips")}   style={{flex:1,background:C.accent+"22",border:`1.5px solid ${C.accent}`,color:C.accent,borderRadius:12,padding:"12px 6px",fontSize:13,fontWeight:700,cursor:"pointer"}}>🚚 + Cement</button>
-          <button onClick={()=>setTab("inbound")} style={{flex:1,background:C.teal+"22",  border:`1.5px solid ${C.teal}`,  color:C.teal,  borderRadius:12,padding:"12px 6px",fontSize:13,fontWeight:700,cursor:"pointer"}}>🏭 + RM Trip</button>
+          {user.role!=="fleet_manager" && <button onClick={()=>setTab("inbound")} style={{flex:1,background:C.teal+"22",  border:`1.5px solid ${C.teal}`,  color:C.teal,  borderRadius:12,padding:"12px 6px",fontSize:13,fontWeight:700,cursor:"pointer"}}>🏭 + RM Trip</button>}
           {can(user,"diesel") && <button onClick={()=>setTab("diesel")} style={{flex:1,background:C.orange+"22",border:`1.5px solid ${C.orange}`,color:C.orange,borderRadius:12,padding:"12px 6px",fontSize:13,fontWeight:700,cursor:"pointer"}}>⛽ Indent</button>}
         </div>
       )}
 
       {/* Today's summary */}
       <div style={{background:C.card,borderRadius:14,padding:"14px 16px"}}>
-        <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Today — {todayStr}</div>
+        <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>
+          Today — {todayStr}
+          {fyLabel && <span style={{color:C.accent,marginLeft:8,fontWeight:600}}>· {fyLabel}</span>}
+        </div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
           {[
             {l:"Trips Added",  v:todayTrips.length,       c:C.blue},
@@ -1182,7 +1240,7 @@ function Dashboard({trips, vehicles, employees, indents, pumps, pumpPayments, dr
       {(()=>{
         const clientData = CLIENTS.map(c=>({
           name: c,
-          trips: trips.filter(t=>(t.client||DEFAULT_CLIENT)===c&&t.type==="outbound"),
+          trips: displayTrips.filter(t=>(t.client||DEFAULT_CLIENT)===c&&t.type==="outbound"),
           color: c.includes("Ultratech")?C.orange:c.includes("Guntur")?C.purple:C.blue,
           short: c.replace("Shree Cement ","SC ").replace("Ultratech ","UT "),
         })).filter(cd=>cd.trips.length>0);
@@ -1207,12 +1265,14 @@ function Dashboard({trips, vehicles, employees, indents, pumps, pumpPayments, dr
         );
       })()}
 
-      {/* KPI grid */}
+      {/* KPI grid — fleet_manager sees only total trips + tafal pool */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-        <KPI icon="📈" label="Total Margin"    value={fmt(margin)}      color={C.green} sub="all time" />
-        <KPI icon="🚚" label="Total Trips"     value={trips.length}     color={C.blue}  sub={`${trips.filter(t=>t.type==="outbound").length} out · ${trips.filter(t=>t.type==="inbound").length} in`} />
-        <KPI icon="🔴" label="Vehicle Loans"   value={fmt(vLoan)}       color={C.red} />
-        <KPI icon="🤝" label="TAFAL Pool"      value={fmt(tafalPool)}   color={C.purple}sub={`₹${settings?.tafalPerTrip||300}/trip`} />
+        <KPI icon="🚚" label="Total Trips"     value={displayTrips.filter(t=>t.type==="outbound").length} color={C.blue} sub={fyLabel||"cement trips"} />
+        <KPI icon="🤝" label="TAFAL Pool"      value={fmt(tafalPool)}   color={C.purple} sub={`₹${settings?.tafalPerTrip||300}/trip`} />
+        {user.role!=="fleet_manager" && <>
+          <KPI icon="📈" label="Total Margin"  value={fmt(margin)}      color={C.green} sub={fyLabel||"all time"} />
+          <KPI icon="🔴" label="Vehicle Loans" value={fmt(vLoan)}       color={C.red} />
+        </>}
       </div>
 
       {/* Recent Activity */}
@@ -1332,7 +1392,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       lrNo:"", givenRate:"", driverPhone:"", orderType:"godown",
       advance:"0", shortageRecovery:"0", loanRecovery:"0",
       tafal:"", dieselEstimate:"0", dieselIndentNo:"",
-      cashEmpId:"",
+      cashEmpId:"", clientOverride:"",
       grFile:null, invoiceFile:null,
     }));
     setItems(prev => [...prev, ...newItems]);
@@ -1629,7 +1689,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           district:ex.district||"", state:ex.state||"",
           qty:+ex.qty||0, bags:+ex.bags||0,
           frRate:+ex.frRate||0, givenRate:+item.givenRate||0,
-          date:ex.date||today(), client:ex.client||"Shree Cement Kodla",
+          date:ex.date||today(), client:item.clientOverride||ex.client||"Shree Cement Kodla",
           status:"Pending Bill", shortage:0,
           advance:+item.advance||0,
           shortageRecovery:+item.shortageRecovery||0,
@@ -1694,7 +1754,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           district:ex0.district||"", state:ex0.state||"",
           qty:totalQty, bags:totalBags,
           frRate:allLines[0]?.frRate||0, givenRate:allLines[0]?.givenRate||0,
-          date:ex0.date||today(), client:ex0.client||"Shree Cement Kodla",
+          date:ex0.date||today(), client:primary.clientOverride||ex0.client||"Shree Cement Kodla",
           status:"Pending Bill", shortage:0,
           advance: totalAdvance,
           tafal: tafalVal,
@@ -1939,6 +1999,31 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                     <span style={{color:c,fontWeight:600}}>{v}</span>
                   </div>
                 ))}
+              </div>
+
+              {/* Client / Plant selector — auto-detected, override if wrong */}
+              <div>
+                <div style={{fontSize:10,color:C.muted,marginBottom:4,fontWeight:600,display:"flex",justifyContent:"space-between"}}>
+                  <span>CLIENT / PLANT</span>
+                  <span style={{color:C.teal,fontWeight:500}}>
+                    {item.clientOverride ? "✏ Overridden" : "🤖 Auto-detected"}
+                  </span>
+                </div>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                  {CLIENTS.map(c=>{
+                    const active = (item.clientOverride||item.extracted?.client||DEFAULT_CLIENT)===c;
+                    const col = c.includes("Ultratech")?C.orange:c.includes("Guntur")?C.purple:C.blue;
+                    return (
+                      <button key={c} onClick={()=>update(item.id,"clientOverride",active&&item.clientOverride?"":(c===item.extracted?.client?"":c))}
+                        style={{padding:"5px 10px",borderRadius:16,fontSize:11,fontWeight:700,cursor:"pointer",
+                          border:`1.5px solid ${active?col:C.border}`,
+                          background:active?col+"22":"transparent",
+                          color:active?col:C.muted}}>
+                        {c.replace("Shree Cement ","SC ").replace("Ultratech ","UT ")}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
 
               {/* LR + driver rate — the two things employee enters */}
