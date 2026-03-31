@@ -1057,6 +1057,9 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       id:uid(), file, status:"pending",
       extracted:null, dupTrip:null, error:null,
       lrNo:"", givenRate:"", driverPhone:"", orderType:"godown",
+      advance:"0", shortageRecovery:"0", loanRecovery:"0",
+      tafal:"", dieselEstimate:"0", dieselIndentNo:"",
+      grFile:null, invoiceFile:null,
     }));
     setItems(prev => [...prev, ...newItems]);
     // Scan sequentially with a small delay to avoid Anthropic rate limits
@@ -1089,12 +1092,52 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
 
   // An item is "ready" if: LR filled, driver rate filled, no LR conflict with saved trips
   // (same LR in saved trips = merge flow — handled at save time)
-  const readyItems = doneItems.filter(x =>
-    x.lrNo.trim() && x.givenRate && +x.givenRate > 0
-  );
+  const readyItems = doneItems.filter(x => {
+    if(!x.lrNo.trim()) return false;
+    if(!x.givenRate || +x.givenRate <= 0) return false;
+    // Margin must be >= 30
+    if((+x.extracted?.frRate||0) - (+x.givenRate||0) < 30) return false;
+    // If diesel estimate entered, indent no is required
+    if(+x.dieselEstimate > 0 && !x.dieselIndentNo?.trim()) return false;
+    // Party order requires GR file AND invoice file
+    if(x.orderType==="party" && (!x.grFile || !x.invoiceFile)) return false;
+    return true;
+  });
   const canSave = readyItems.length > 0 && !saving;
 
   const saveAll = async () => {
+    // Validate each ready item before saving
+    for(const item of readyItems) {
+      const margin = (+item.extracted?.frRate||0) - (+item.givenRate||0);
+      if(margin < 30) {
+        alert(`LR ${item.lrNo}: Margin is ₹${margin}/MT. Minimum ₹30/MT required.\nPlease fix the driver rate.`);
+        return;
+      }
+      if(+item.dieselEstimate > 0 && !item.dieselIndentNo?.trim()) {
+        alert(`LR ${item.lrNo}: Diesel Indent No is required when Diesel Estimate is entered.`);
+        return;
+      }
+      if(item.dieselIndentNo?.trim()) {
+        const dupIndent = (trips||[]).some(t =>
+          t.dieselIndentNo && t.dieselIndentNo.trim() === item.dieselIndentNo.trim()
+        );
+        if(dupIndent) {
+          alert(`LR ${item.lrNo}: Diesel Indent No "${item.dieselIndentNo}" already exists on another trip.`);
+          return;
+        }
+      }
+      if(item.orderType==="party") {
+        if(!item.grFile) {
+          alert(`LR ${item.lrNo}: GR Copy file is required for Party orders.\nPlease upload the GR copy.`);
+          return;
+        }
+        if(!item.invoiceFile) {
+          alert(`LR ${item.lrNo}: Invoice file is required for Party orders.\nPlease upload the invoice.`);
+          return;
+        }
+      }
+    }
+
     setSaving(true);
     let count = 0;
     const tafal = settings?.tafalPerTrip || 300;
@@ -1162,8 +1205,23 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
         // ── SINGLE new trip (godown or party) ─────────────────────────────
         const item = group[0];
         const ex = item.extracted;
+        const tripId = uid();
+        // Upload party files to Supabase Storage if party order
+        let grUrl = "", invUrl = "";
+        if(item.orderType==="party" && item.grFile) {
+          try {
+            const gr = await uploadPartyFile(tripId, "gr", item.grFile);
+            grUrl = gr.path;
+          } catch(e) { console.warn("GR upload failed:", e.message); }
+        }
+        if(item.orderType==="party" && item.invoiceFile) {
+          try {
+            const inv = await uploadPartyFile(tripId, "invoice", item.invoiceFile);
+            invUrl = inv.path;
+          } catch(e) { console.warn("Invoice upload failed:", e.message); }
+        }
         const trip = {
-          id:uid(), type:"outbound",
+          id:tripId, type:"outbound",
           lrNo, diNo:ex.diNo||"", grNo:ex.grNo||"",
           truckNo:(ex.truckNo||"").toUpperCase().trim(),
           consignee:ex.consignee||"", from:ex.from||"Kodla", to:ex.to||"",
@@ -1172,10 +1230,18 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           qty:+ex.qty||0, bags:+ex.bags||0,
           frRate:+ex.frRate||0, givenRate:+item.givenRate||0,
           date:ex.date||today(), client:ex.client||"Shree Cement Kodla",
-          status:"Pending Bill", advance:0, shortage:0, tafal,
-          dieselEstimate:0, shortageRecovery:0, loanRecovery:0,
+          status:"Pending Bill", shortage:0,
+          advance:+item.advance||0,
+          shortageRecovery:+item.shortageRecovery||0,
+          loanRecovery:+item.loanRecovery||0,
+          tafal:+item.tafal||(settings?.tafalPerTrip||300),
+          dieselEstimate:+item.dieselEstimate||0,
+          dieselIndentNo:item.dieselIndentNo?.trim()||"",
           orderType:item.orderType||"godown", diLines:[],
+          grFilePath:grUrl, invoiceFilePath:invUrl,
           emailSentAt:"", partyEmail:"", batchId:"",
+          mergedPdfPath:"", receiptFilePath:"", receiptUploadedAt:"",
+          sealedInvoicePath:"",
           createdBy:user.username, createdAt:nowTs(),
         };
         setTrips(p=>[trip,...(p||[])]);
@@ -1396,8 +1462,9 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                   color:+item.extracted.frRate-+item.givenRate>=30?C.green:C.red}}>
                   Margin: ₹{(+item.extracted.frRate-+item.givenRate).toFixed(0)}/MT
                   · Total ₹{((+item.extracted.frRate-+item.givenRate)*(+item.extracted.qty||0)).toFixed(0)}
-                  {+item.extracted.frRate-+item.givenRate<30&&
-                    <span style={{color:C.red}}> ⚠ min ₹30</span>}
+                  {+item.extracted.frRate-+item.givenRate<30&&(
+                    <span style={{color:C.red}}> ⚠ min ₹30/MT required</span>
+                  )}
                 </div>
               )}
 
@@ -1419,9 +1486,52 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                   ))}
                 </div>
                 {item.orderType==="party"&&(
-                  <div style={{marginTop:6,fontSize:11,color:C.accent,
-                    background:C.accent+"11",borderRadius:6,padding:"5px 9px"}}>
-                    ⓘ Party trip — remember to upload GR + invoice and send email after saving
+                  <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:6}}>
+                    {/* GR Copy upload */}
+                    <div style={{background:C.card2,border:`1.5px dashed ${item.grFile?C.green:C.red}`,
+                      borderRadius:10,padding:"10px 12px"}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:item.grFile?4:0}}>
+                        <div style={{fontSize:11,fontWeight:700,
+                          color:item.grFile?C.green:C.red}}>
+                          {item.grFile?"✓ GR Copy":"📄 GR Copy — required *"}
+                        </div>
+                        <label style={{background:C.teal+"22",border:`1px solid ${C.teal}44`,
+                          color:C.teal,borderRadius:6,padding:"4px 10px",
+                          fontSize:11,fontWeight:700,cursor:"pointer"}}>
+                          {item.grFile?"Replace":"Upload"}
+                          <input type="file" accept="application/pdf,image/*"
+                            style={{display:"none"}}
+                            onChange={e=>e.target.files?.[0]&&update(item.id,"grFile",e.target.files[0])} />
+                        </label>
+                      </div>
+                      {item.grFile&&(
+                        <div style={{fontSize:11,color:C.green}}>{item.grFile.name}</div>
+                      )}
+                    </div>
+                    {/* Invoice upload */}
+                    <div style={{background:C.card2,border:`1.5px dashed ${item.invoiceFile?C.green:C.red}`,
+                      borderRadius:10,padding:"10px 12px"}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:item.invoiceFile?4:0}}>
+                        <div style={{fontSize:11,fontWeight:700,
+                          color:item.invoiceFile?C.green:C.red}}>
+                          {item.invoiceFile?"✓ Invoice":"🧾 Invoice — required *"}
+                        </div>
+                        <label style={{background:C.blue+"22",border:`1px solid ${C.blue}44`,
+                          color:C.blue,borderRadius:6,padding:"4px 10px",
+                          fontSize:11,fontWeight:700,cursor:"pointer"}}>
+                          {item.invoiceFile?"Replace":"Upload"}
+                          <input type="file" accept="application/pdf,image/*"
+                            style={{display:"none"}}
+                            onChange={e=>e.target.files?.[0]&&update(item.id,"invoiceFile",e.target.files[0])} />
+                        </label>
+                      </div>
+                      {item.invoiceFile&&(
+                        <div style={{fontSize:11,color:C.blue}}>{item.invoiceFile.name}</div>
+                      )}
+                    </div>
+                    <div style={{fontSize:11,color:C.muted}}>
+                      ⓘ Files will be uploaded to storage when you tap Save All
+                    </div>
                   </div>
                 )}
               </div>
@@ -1438,6 +1548,78 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                     style={{width:"100%",border:`1.5px solid ${C.border}`,borderRadius:8,
                       padding:"8px 10px",fontSize:13,background:C.bg,color:C.text,
                       outline:"none",boxSizing:"border-box"}} />
+
+              {/* ── Extra fields (same as Add Trip form) ── */}
+              <div style={{borderTop:`1px solid ${C.border}`,paddingTop:10,
+                display:"flex",flexDirection:"column",gap:8}}>
+                <div style={{fontSize:10,color:C.muted,fontWeight:700,
+                  textTransform:"uppercase",letterSpacing:1}}>Additional Details</div>
+
+                {/* Advance + Tafal */}
+                <div style={{display:"flex",gap:8}}>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>ADVANCE ₹</div>
+                    <input value={item.advance||"0"} onChange={e=>update(item.id,"advance",e.target.value)}
+                      type="number" placeholder="0"
+                      style={{width:"100%",border:`1.5px solid ${C.border}`,borderRadius:8,
+                        padding:"8px 10px",fontSize:13,background:C.bg,color:C.text,
+                        outline:"none",boxSizing:"border-box"}} />
+                  </div>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>TAFAL ₹</div>
+                    <input value={item.tafal||"300"} onChange={e=>update(item.id,"tafal",e.target.value)}
+                      type="number" placeholder="300"
+                      style={{width:"100%",border:`1.5px solid ${C.border}`,borderRadius:8,
+                        padding:"8px 10px",fontSize:13,background:C.bg,color:C.text,
+                        outline:"none",boxSizing:"border-box"}} />
+                  </div>
+                </div>
+
+                {/* Shortage Recovery + Loan Recovery */}
+                <div style={{display:"flex",gap:8}}>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>SHORTAGE RECOVERY ₹</div>
+                    <input value={item.shortageRecovery||"0"} onChange={e=>update(item.id,"shortageRecovery",e.target.value)}
+                      type="number" placeholder="0"
+                      style={{width:"100%",border:`1.5px solid ${C.border}`,borderRadius:8,
+                        padding:"8px 10px",fontSize:13,background:C.bg,color:C.text,
+                        outline:"none",boxSizing:"border-box"}} />
+                  </div>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>LOAN RECOVERY ₹</div>
+                    <input value={item.loanRecovery||"0"} onChange={e=>update(item.id,"loanRecovery",e.target.value)}
+                      type="number" placeholder="0"
+                      style={{width:"100%",border:`1.5px solid ${C.border}`,borderRadius:8,
+                        padding:"8px 10px",fontSize:13,background:C.bg,color:C.text,
+                        outline:"none",boxSizing:"border-box"}} />
+                  </div>
+                </div>
+
+                {/* Diesel Estimate + Indent No */}
+                <div style={{display:"flex",gap:8}}>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>DIESEL ESTIMATE ₹</div>
+                    <input value={item.dieselEstimate||"0"} onChange={e=>update(item.id,"dieselEstimate",e.target.value)}
+                      type="number" placeholder="0"
+                      style={{width:"100%",border:`1.5px solid ${+item.dieselEstimate>0&&!item.dieselIndentNo?.trim()?C.red:C.border}`,
+                        borderRadius:8,padding:"8px 10px",fontSize:13,background:C.bg,color:C.text,
+                        outline:"none",boxSizing:"border-box"}} />
+                  </div>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>
+                      DIESEL INDENT NO{+item.dieselEstimate>0&&<span style={{color:C.red}}> *</span>}
+                    </div>
+                    <input value={item.dieselIndentNo||""} onChange={e=>update(item.id,"dieselIndentNo",e.target.value)}
+                      placeholder={+item.dieselEstimate>0?"Required":"e.g. 25748"}
+                      style={{width:"100%",border:`1.5px solid ${+item.dieselEstimate>0&&!item.dieselIndentNo?.trim()?C.red:C.border}`,
+                        borderRadius:8,padding:"8px 10px",fontSize:13,background:C.bg,color:C.text,
+                        outline:"none",boxSizing:"border-box"}} />
+                  </div>
+                </div>
+                {+item.dieselEstimate>0&&!item.dieselIndentNo?.trim()&&(
+                  <div style={{fontSize:11,color:C.red}}>⚠ Diesel Indent No required when estimate is entered</div>
+                )}
+              </div>
                 </div>
               )}
             </div>
@@ -1461,8 +1643,9 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           )}
           <div style={{fontSize:12,color:C.muted,marginBottom:6,textAlign:"center"}}>
             {readyItems.length} of {doneItems.length} ready
-            {readyItems.length<doneItems.length&&
-              <span style={{color:C.orange}}> · fill LR + rate for remaining</span>}
+            {readyItems.length<doneItems.length&&(
+              <span style={{color:C.orange}}> · fill LR + rate + files for remaining</span>
+            )}
           </div>
           <button onClick={saveAll} disabled={!canSave}
             style={{width:"100%",background:canSave?C.teal:C.dim,border:"none",
