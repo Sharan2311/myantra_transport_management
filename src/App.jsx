@@ -502,22 +502,215 @@ function Login({onLogin}) {
   };
 
   return (
-    <div style={{minHeight:"100vh",background:C.bg,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,fontFamily:"system-ui,-apple-system,sans-serif"}}>
-      <div style={{width:"100%",maxWidth:380}}>
-        <div style={{textAlign:"center",marginBottom:32}}>
-          <img src={LOGO_SRC} alt="M Yantra Logo"
-            style={{width:120,height:120,borderRadius:"50%",objectFit:"cover",
-              marginBottom:12,boxShadow:"0 4px 20px rgba(0,0,0,0.18)"}} />
-          <div style={{color:C.accent,fontWeight:900,fontSize:22,letterSpacing:1}}>M. YANTRA ENTERPRISES</div>
-          <div style={{color:C.muted,fontSize:12,letterSpacing:3,marginTop:4}}>TRANSPORT MANAGEMENT</div>
+    <div style={{minHeight:"100vh",background:"linear-gradient(135deg,#0a1628 0%,#0d2348 40%,#0f2d5c 70%,#071020 100%)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,fontFamily:"system-ui,-apple-system,sans-serif",overflow:"hidden",position:"relative"}}>
+
+      {/* Animated background particles */}
+      <style>{`
+        @keyframes floatUp {
+          0%   { transform:translateY(100vh) rotate(0deg); opacity:0; }
+          10%  { opacity:0.6; }
+          90%  { opacity:0.3; }
+          100% { transform:translateY(-20px) rotate(360deg); opacity:0; }
+        }
+        @keyframes pulseRing {
+          0%   { transform:scale(0.85); opacity:0.7; }
+          50%  { transform:scale(1.08); opacity:0.3; }
+          100% { transform:scale(0.85); opacity:0.7; }
+        }
+        @keyframes pulseRing2 {
+          0%   { transform:scale(0.9); opacity:0.5; }
+          50%  { transform:scale(1.18); opacity:0.1; }
+          100% { transform:scale(0.9); opacity:0.5; }
+        }
+        @keyframes rotateSlow {
+          from { transform:rotate(0deg); }
+          to   { transform:rotate(360deg); }
+        }
+        @keyframes logoGlow {
+          0%,100% { box-shadow:0 0 30px 8px #1565c055, 0 0 60px 20px #1565c022, 0 8px 32px rgba(0,0,0,0.5); }
+          50%      { box-shadow:0 0 50px 16px #1976d088, 0 0 90px 30px #1976d044, 0 8px 32px rgba(0,0,0,0.5); }
+        }
+        @keyframes titleShimmer {
+          0%   { background-position:200% center; }
+          100% { background-position:-200% center; }
+        }
+        @keyframes truckMove {
+          0%   { transform:translateX(-60px); opacity:0; }
+          15%  { opacity:1; }
+          85%  { opacity:1; }
+          100% { transform:translateX(60px); opacity:0; }
+        }
+        @keyframes fadeSlideUp {
+          from { opacity:0; transform:translateY(24px); }
+          to   { opacity:1; transform:translateY(0); }
+        }
+      `}</style>
+
+      {/* Floating bg particles */}
+      {[...Array(8)].map((_,i)=>(
+        <div key={i} style={{
+          position:"absolute",
+          left:`${10+i*11}%`,
+          bottom:"-10px",
+          width: i%3===0?8:i%3===1?5:11,
+          height: i%3===0?8:i%3===1?5:11,
+          borderRadius:"50%",
+          background: i%2===0?"rgba(21,101,192,0.4)":"rgba(255,167,38,0.3)",
+          animation:`floatUp ${6+i*1.4}s ${i*0.9}s infinite linear`,
+          pointerEvents:"none",
+        }} />
+      ))}
+
+      {/* Rotating dashed orbit ring */}
+      <div style={{
+        position:"absolute",
+        width:280,height:280,
+        borderRadius:"50%",
+        border:"1.5px dashed rgba(21,101,192,0.25)",
+        animation:"rotateSlow 18s linear infinite",
+        pointerEvents:"none",
+      }} />
+      <div style={{
+        position:"absolute",
+        width:340,height:340,
+        borderRadius:"50%",
+        border:"1px dashed rgba(255,167,38,0.12)",
+        animation:"rotateSlow 28s linear infinite reverse",
+        pointerEvents:"none",
+      }} />
+
+      <div style={{width:"100%",maxWidth:380,position:"relative",zIndex:10}}>
+
+        {/* Logo section */}
+        <div style={{textAlign:"center",marginBottom:28,animation:"fadeSlideUp 0.7s ease both"}}>
+
+          {/* Pulse rings behind logo */}
+          <div style={{position:"relative",display:"inline-block",marginBottom:16}}>
+            <div style={{
+              position:"absolute",inset:-18,borderRadius:"50%",
+              background:"rgba(21,101,192,0.18)",
+              animation:"pulseRing 2.4s ease-in-out infinite",
+            }} />
+            <div style={{
+              position:"absolute",inset:-34,borderRadius:"50%",
+              background:"rgba(21,101,192,0.08)",
+              animation:"pulseRing2 2.4s ease-in-out infinite",
+            }} />
+            {/* Logo image */}
+            <img src={LOGO_SRC} alt="M Yantra Logo"
+              style={{
+                width:148,height:148,
+                borderRadius:"50%",
+                objectFit:"cover",
+                display:"block",
+                position:"relative",
+                animation:"logoGlow 2.4s ease-in-out infinite",
+                border:"3px solid rgba(255,255,255,0.15)",
+              }} />
+          </div>
+
+          {/* Animated truck strip */}
+          <div style={{
+            height:22,
+            overflow:"hidden",
+            position:"relative",
+            marginBottom:12,
+          }}>
+            {["🚛","🚚","🚛"].map((t,i)=>(
+              <span key={i} style={{
+                position:"absolute",
+                top:0,
+                left:"50%",
+                fontSize:16,
+                animation:`truckMove ${3.5+i*0.4}s ${i*1.2}s infinite ease-in-out`,
+                transform:"translateX(-50%)",
+              }}>{t}</span>
+            ))}
+          </div>
+
+          {/* Shimmer title */}
+          <div style={{
+            fontSize:22,
+            fontWeight:900,
+            letterSpacing:1.5,
+            background:"linear-gradient(90deg,#90caf9,#ffffff,#ffd54f,#ffffff,#90caf9)",
+            backgroundSize:"200% auto",
+            WebkitBackgroundClip:"text",
+            WebkitTextFillColor:"transparent",
+            backgroundClip:"text",
+            animation:"titleShimmer 3s linear infinite",
+            marginBottom:4,
+          }}>M. YANTRA ENTERPRISES</div>
+
+          <div style={{
+            color:"rgba(255,255,255,0.45)",
+            fontSize:11,
+            letterSpacing:4,
+            fontWeight:600,
+            textTransform:"uppercase",
+          }}>Transport Management</div>
         </div>
-        <div style={{background:C.card,borderRadius:20,padding:24,display:"flex",flexDirection:"column",gap:14}}>
-          <Field label="Username" value={un} onChange={setUn} placeholder="owner / raju / suresh" />
-          <Field label="PIN" value={pin} onChange={setPin} type="password" placeholder="4-digit PIN" />
-          {err && <div style={{color:C.red,fontSize:13,background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:10,padding:"10px 14px"}}>{err}</div>}
-          <Btn onClick={go} full loading={busy}>{busy ? "Checking…" : "Login →"}</Btn>
+
+        {/* Login card */}
+        <div style={{
+          background:"rgba(255,255,255,0.06)",
+          backdropFilter:"blur(12px)",
+          WebkitBackdropFilter:"blur(12px)",
+          borderRadius:20,
+          border:"1px solid rgba(255,255,255,0.12)",
+          padding:24,
+          display:"flex",
+          flexDirection:"column",
+          gap:14,
+          boxShadow:"0 20px 60px rgba(0,0,0,0.4)",
+          animation:"fadeSlideUp 0.7s 0.2s ease both",
+        }}>
+          {/* Username */}
+          <div style={{display:"flex",flexDirection:"column",gap:5}}>
+            <label style={{color:"rgba(255,255,255,0.6)",fontSize:11,fontWeight:700,letterSpacing:1,textTransform:"uppercase"}}>Username</label>
+            <input value={un} onChange={e=>setUn(e.target.value)} placeholder="owner / raju / suresh"
+              onKeyDown={e=>e.key==="Enter"&&go()}
+              style={{background:"rgba(255,255,255,0.08)",border:"1.5px solid rgba(255,255,255,0.15)",borderRadius:10,
+                color:"#fff",padding:"12px 14px",fontSize:15,outline:"none",
+                transition:"border-color 0.2s",
+              }}
+              onFocus={e=>e.target.style.borderColor="rgba(21,101,192,0.8)"}
+              onBlur={e=>e.target.style.borderColor="rgba(255,255,255,0.15)"}
+            />
+          </div>
+          {/* PIN */}
+          <div style={{display:"flex",flexDirection:"column",gap:5}}>
+            <label style={{color:"rgba(255,255,255,0.6)",fontSize:11,fontWeight:700,letterSpacing:1,textTransform:"uppercase"}}>PIN</label>
+            <input value={pin} onChange={e=>setPin(e.target.value)} type="password" placeholder="4-digit PIN"
+              onKeyDown={e=>e.key==="Enter"&&go()}
+              style={{background:"rgba(255,255,255,0.08)",border:"1.5px solid rgba(255,255,255,0.15)",borderRadius:10,
+                color:"#fff",padding:"12px 14px",fontSize:15,outline:"none",letterSpacing:4,
+              }}
+              onFocus={e=>e.target.style.borderColor="rgba(21,101,192,0.8)"}
+              onBlur={e=>e.target.style.borderColor="rgba(255,255,255,0.15)"}
+            />
+          </div>
+          {err && (
+            <div style={{color:"#ff8a80",fontSize:13,background:"rgba(183,28,28,0.2)",
+              border:"1px solid rgba(183,28,28,0.4)",borderRadius:10,padding:"10px 14px"}}>
+              ⚠ {err}
+            </div>
+          )}
+          <button onClick={go} disabled={busy}
+            style={{
+              background:busy?"rgba(21,101,192,0.5)":"linear-gradient(135deg,#1565c0,#1976d2)",
+              border:"none",borderRadius:12,color:"#fff",
+              padding:"14px",fontSize:15,fontWeight:800,
+              cursor:busy?"not-allowed":"pointer",
+              letterSpacing:0.5,
+              boxShadow:busy?"none":"0 4px 20px rgba(21,101,192,0.5)",
+              transition:"all 0.2s",
+            }}>
+            {busy ? "🔄 Checking…" : "Login →"}
+          </button>
         </div>
-        <div style={{textAlign:"center",color:C.muted,fontSize:12,marginTop:16}}>
+
+        <div style={{textAlign:"center",color:"rgba(255,255,255,0.25)",fontSize:11,marginTop:16}}>
           Users: owner · raju · suresh · accounts
         </div>
       </div>
