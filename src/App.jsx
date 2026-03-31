@@ -1059,7 +1059,16 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       lrNo:"", givenRate:"", driverPhone:"", orderType:"godown",
     }));
     setItems(prev => [...prev, ...newItems]);
-    newItems.forEach(item => scanFile(item.id, item.file));
+    // Scan sequentially with a small delay to avoid Anthropic rate limits
+    const scanSequentially = async (items) => {
+      for(let i = 0; i < items.length; i++) {
+        await scanFile(items[i].id, items[i].file);
+        if(i < items.length - 1) {
+          await new Promise(res => setTimeout(res, 1200)); // 1.2s gap between scans
+        }
+      }
+    };
+    scanSequentially(newItems);
   };
 
   const update = (id, field, val) =>
