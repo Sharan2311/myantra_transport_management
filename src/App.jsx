@@ -1098,6 +1098,17 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
     byLR[lr].push(item);
   });
 
+  // Multi-DI diesel conflict: two items with same LR both have diesel estimate or indent no
+  // Diesel should only be on ONE of the DIs (it covers the whole trip)
+  const multiDIDieselConflict = new Set(); // item ids that are part of a conflicting group
+  Object.values(byLR).forEach(group => {
+    if(group.length < 2) return;
+    const withDiesel = group.filter(x => +x.dieselEstimate > 0 || x.dieselIndentNo?.trim());
+    if(withDiesel.length > 1) {
+      withDiesel.forEach(x => multiDIDieselConflict.add(x.id));
+    }
+  });
+
   // An item is "ready" if: LR filled, driver rate filled, no LR conflict with saved trips
   // (same LR in saved trips = merge flow — handled at save time)
   const readyItems = doneItems.filter(x => {
@@ -1108,6 +1119,14 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
     if((+x.extracted?.frRate||0) - (+x.givenRate||0) < 30) return false;
     // If diesel estimate entered, indent no is required
     if(+x.dieselEstimate > 0 && !x.dieselIndentNo?.trim()) return false;
+    // Multi-DI diesel conflict — two DIs on same LR both have diesel
+    if(multiDIDieselConflict.has(x.id)) return false;
+    // Indent no must not duplicate a saved trip or another batch row
+    if(x.dieselIndentNo?.trim()) {
+      const val = x.dieselIndentNo.trim();
+      if((trips||[]).some(t => t.dieselIndentNo && t.dieselIndentNo.trim() === val)) return false;
+      if(doneItems.some(other => other.id !== x.id && (other.dieselIndentNo||"").trim() === val)) return false;
+    }
     // Party order requires GR file AND invoice file
     if(x.orderType==="party" && (!x.grFile || !x.invoiceFile)) return false;
     // Net to driver must not be negative (unless it's only diesel — multi-DI case, warn at save time)
@@ -1140,6 +1159,11 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
   const saveAll = async () => {
     // Validate each ready item before saving — per-trip with clear errors
     for(const item of readyItems) {
+      // Multi-DI diesel conflict check — should be caught by readyItems filter, but double-check
+      if(multiDIDieselConflict.has(item.id)) {
+        alert(`LR ${item.lrNo}: Diesel is entered on multiple DIs for the same LR.\nDiesel covers the whole trip — enter it on only one DI and clear it from the other.`);
+        return;
+      }
       // Duplicate DI check (catches cases where DI was added to trips after scan)
       const diNo = (item.extracted?.diNo||"").trim();
       if(diNo) {
@@ -1797,6 +1821,43 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                 </div>
                 {+item.dieselEstimate>0&&!item.dieselIndentNo?.trim()&&(
                   <div style={{fontSize:11,color:C.red}}>⚠ Diesel Indent No required when estimate is entered</div>
+                )}
+                {(()=>{
+                  const val = (item.dieselIndentNo||"").trim();
+                  if(!val) return null;
+                  const dupTrip = (trips||[]).find(t =>
+                    t.dieselIndentNo && t.dieselIndentNo.trim() === val
+                  );
+                  const dupBatch = items.find(other =>
+                    other.id !== item.id &&
+                    (other.dieselIndentNo||"").trim() === val &&
+                    (other.dieselIndentNo||"").trim() !== ""
+                  );
+                  if(dupTrip) return (
+                    <div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,
+                      padding:"8px 12px",fontSize:12,color:C.red,fontWeight:600}}>
+                      ⚠ Indent No "{val}" already used on LR {dupTrip.lrNo||"—"} ({dupTrip.truckNo} · {dupTrip.date}). Each indent must be unique.
+                    </div>
+                  );
+                  if(dupBatch) return (
+                    <div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,
+                      padding:"8px 12px",fontSize:12,color:C.red,fontWeight:600}}>
+                      ⚠ Indent No "{val}" is already entered in another row of this batch.
+                    </div>
+                  );
+                  return null;
+                })()}
+                {/* Multi-DI diesel conflict warning */}
+                {multiDIDieselConflict.has(item.id) && (
+                  <div style={{background:C.orange+"11",border:`1.5px solid ${C.orange}`,
+                    borderRadius:10,padding:"10px 12px",fontSize:12,color:C.orange,fontWeight:700,
+                    lineHeight:1.6}}>
+                    ⚠ Multi-DI trip — diesel entered on multiple DIs for LR {item.lrNo}<br/>
+                    <span style={{fontWeight:400,color:C.muted}}>
+                      Diesel covers the <b>whole trip</b>, not each DI separately.
+                      Enter diesel + indent on <b>only one</b> of the DIs and clear it from the other.
+                    </span>
+                  </div>
                 )}
               </div>
 
@@ -2861,6 +2922,7 @@ function PartyBatchEmailSheet({ trips, setTrips, onClose, log }) {
   const [toEmail,  setToEmail]  = useState("");
   const [step,     setStep]     = useState("select"); // "select" | "compose" | "sealed"
   const [opened,   setOpened]   = useState(false);
+  const [sealedTrip, setSealedTrip] = useState(null); // trip object for inline SealedInvoiceSheet
 
   const pending = trips.filter(t => t.orderType==="party" && !t.emailSentAt);
   const fmtD = d => { if(!d) return "—"; const [y,m,dy]=d.split("-"); return dy+"-"+m+"-"+y; };
@@ -2986,7 +3048,7 @@ function PartyBatchEmailSheet({ trips, setTrips, onClose, log }) {
         <Btn onClick={onClose} full outline color={C.muted}>Cancel</Btn>
       </>)}
 
-      {step==="sealed" && (<>
+      {step==="sealed" && !sealedTrip && (<>
         <button onClick={()=>setStep("select")}
           style={{background:"none",border:"none",color:C.blue,fontSize:12,
             cursor:"pointer",textAlign:"left",padding:"0 0 4px"}}>
@@ -2996,23 +3058,45 @@ function PartyBatchEmailSheet({ trips, setTrips, onClose, log }) {
           🏷️ Upload Sealed Invoice for {selected.size} trip{selected.size!==1?"s":""}
         </div>
         <div style={{color:C.muted,fontSize:12}}>
-          For each selected trip, tap the <b style={{color:C.orange}}>🏷️ Upload Sealed Invoice</b> button
-          on its trip card. The sealed invoice will be merged with GR + Invoice into one PDF.
+          Tap <b style={{color:C.orange}}>🏷️ Upload</b> on each trip to upload its sealed invoice. It will be merged with GR + Invoice into one PDF.
         </div>
         {selTrips.map(t=>(
-          <div key={t.id} style={{background:C.card,borderRadius:12,padding:"11px 14px",
-            display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-            <div>
+          <div key={t.id} style={{background:C.card,border:`1px solid ${t.mergedPdfPath?C.green:C.border}`,
+            borderRadius:12,padding:"11px 14px",
+            display:"flex",justifyContent:"space-between",alignItems:"center",gap:10}}>
+            <div style={{flex:1,minWidth:0}}>
               <div style={{fontWeight:700,fontSize:13}}>{t.truckNo} <span style={{color:C.blue,fontSize:12}}>LR:{t.lrNo||"—"}</span></div>
               <div style={{color:C.muted,fontSize:11}}>{t.consignee||"—"} · {t.qty}MT</div>
             </div>
-            <span style={{color:t.mergedPdfPath?C.green:C.orange,fontSize:11,fontWeight:700}}>
-              {t.mergedPdfPath?"✅ Done":"⏳ Pending"}
-            </span>
+            {t.mergedPdfPath
+              ? <span style={{color:C.green,fontSize:11,fontWeight:700,flexShrink:0}}>✅ Done</span>
+              : <button onClick={()=>setSealedTrip(t)}
+                  style={{background:C.orange+"11",border:`1.5px solid ${C.orange}`,
+                    color:C.orange,borderRadius:10,padding:"7px 12px",
+                    fontSize:12,fontWeight:700,cursor:"pointer",flexShrink:0,whiteSpace:"nowrap"}}>
+                  🏷️ Upload
+                </button>
+            }
           </div>
         ))}
         <Btn onClick={onClose} full color={C.green}>Done</Btn>
       </>)}
+
+      {step==="sealed" && sealedTrip && (
+        <SealedInvoiceSheet
+          trip={sealedTrip}
+          onMerge={(tripId, sealedPath, mergedPath) => {
+            setTrips(prev => prev.map(t => t.id===tripId
+              ? {...t, sealedInvoicePath:sealedPath, mergedPdfPath:mergedPath,
+                  receiptFilePath:sealedPath, receiptUploadedAt:nowTs()}
+              : t));
+            log("SEALED INVOICE", `LR:${sealedTrip.lrNo} merged (batch email)`);
+            setSealedTrip(null);
+          }}
+          onClose={()=>setSealedTrip(null)}
+          embedded
+        />
+      )}
 
       {step==="compose" && (<>
         <button onClick={()=>{setStep("select");setOpened(false);}}
@@ -3381,7 +3465,7 @@ function ReceiptUploadSheet({ trip, onMerge, onClose }) {
 // ─── SEALED INVOICE UPLOAD SHEET ─────────────────────────────────────────────
 // For party trips that receive a physically sealed/stamped invoice instead of email
 // Merges: Sealed Invoice → GR Copy → Original Invoice into one final PDF
-function SealedInvoiceSheet({ trip, onMerge, onClose }) {
+function SealedInvoiceSheet({ trip, onMerge, onClose, embedded=false }) {
   const [files,   setFiles]   = useState([]);
   const [merging, setMerging] = useState(false);
   const [error,   setError]   = useState("");
@@ -3440,6 +3524,13 @@ function SealedInvoiceSheet({ trip, onMerge, onClose }) {
 
   return (
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
+      {embedded && (
+        <button onClick={onClose}
+          style={{background:"none",border:"none",color:C.blue,fontSize:12,
+            cursor:"pointer",textAlign:"left",padding:"0 0 4px"}}>
+          ← Back to trip list
+        </button>
+      )}
       {/* Trip summary */}
       <div style={{background:C.bg,borderRadius:10,padding:"12px 14px"}}>
         <div style={{color:C.accent,fontWeight:800,fontSize:13,marginBottom:4}}>🤝 {trip.consignee||"—"}</div>
@@ -4518,7 +4609,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                   ) : (
                     <TripForm f={f} ff={ff} isIn={isIn} ac={ac} vehicles={vehicles} settings={settings} employees={employees||[]} cashTransfers={cashTransfers||[]} recentDestinations={recentDestinations} recentGrades={recentGrades}
                       onTruckChange={onTruckChange} onSubmit={saveNew} submitLabel="Save Trip"
-                      user={user} wasScanned={wasScanned} />
+                      user={user} wasScanned={wasScanned} trips={trips||[]} indents={indents||[]} />
                   )}
                 </>
               )}
@@ -4759,7 +4850,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
                       }}
                       submitLabel="💾 Save Party Trip"
                       user={user} wasScanned={wasScanned}
-                      isParty={true} />
+                      isParty={true} trips={trips||[]} indents={indents||[]} />
                   ) : (
                     <div style={{background:C.bg,border:`2px dashed ${C.border}`,borderRadius:14,
                       padding:"28px 20px",textAlign:"center",marginTop:8}}>
@@ -4860,7 +4951,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
 }
 
 // Shared form for add + edit
-function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit, submitLabel, user, showStatus=false, wasScanned=false, isParty=false, employees=[], cashTransfers=[], recentDestinations=[], recentGrades=[]}) {
+function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit, submitLabel, user, showStatus=false, wasScanned=false, isParty=false, employees=[], cashTransfers=[], recentDestinations=[], recentGrades=[], trips=[], indents=[]}) {
   // Ensure each diLine has frRate — migrate from trip-level frRate if missing
   const normalizedDiLines = (f.diLines||[]).map(d => ({...d, frRate: d.frRate || +f.frRate || 0}));
   const fWithLines = normalizedDiLines.length > 1 ? {...f, diLines: normalizedDiLines} : f;
@@ -5142,6 +5233,25 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
         value={f.dieselIndentNo||""} onChange={ff("dieselIndentNo")}
         placeholder="e.g. 25748 — from pump slip before loading"
         note="Pump gives this before loading — used to match diesel slip" />
+      {(()=>{
+        const val = (f.dieselIndentNo||"").trim();
+        if(!val) return null;
+        const dupTrip = trips.find(t => t.id !== f.id && t.dieselIndentNo && t.dieselIndentNo.trim() === val);
+        const dupIndent = indents.find(i => i.indentNo && String(i.indentNo).trim() === val);
+        if(dupTrip) return (
+          <div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,
+            padding:"8px 12px",fontSize:12,color:C.red,fontWeight:600}}>
+            ⚠ Indent No "{val}" already used on LR {dupTrip.lrNo||"—"} ({dupTrip.truckNo} · {dupTrip.date}). Each indent must be unique.
+          </div>
+        );
+        if(dupIndent) return (
+          <div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,
+            padding:"8px 12px",fontSize:12,color:C.red,fontWeight:600}}>
+            ⚠ Indent No "{val}" already exists in Diesel records ({dupIndent.truckNo} · {dupIndent.date}). Each indent must be unique.
+          </div>
+        );
+        return null;
+      })()}
       {showStatus && (
         user?.role==="owner"
           ? <Field label="Status" value={f.status||"Pending Bill"} onChange={ff("status")}
