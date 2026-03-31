@@ -1303,10 +1303,36 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
         const totalBags = allLines.reduce((s,d)=>s+(d.bags||0),0);
         const allDiNos  = allLines.map(d=>d.diNo).filter(Boolean).join(" + ");
         const allGrNos  = [...new Set(allLines.map(d=>d.grNo).filter(Boolean))].join(" + ");
+        // Carry over diesel/advance/recoveries from the batch item (use first item that has values)
+        const itemWithDiesel = group.find(x => +x.dieselEstimate > 0) || group[0];
+        const itemWithAdvance = group.find(x => +x.advance > 0) || group[0];
+        const newDieselEstimate = existingTrip.dieselEstimate || +itemWithDiesel.dieselEstimate || 0;
+        const newDieselIndentNo = existingTrip.dieselIndentNo || itemWithDiesel.dieselIndentNo?.trim() || "";
+        const newAdvance = (existingTrip.advance||0) + (+itemWithAdvance.advance||0);
+        const newShortageRec = (existingTrip.shortageRecovery||0) + group.reduce((s,x)=>s+(+x.shortageRecovery||0),0);
+        const newLoanRec = (existingTrip.loanRecovery||0) + group.reduce((s,x)=>s+(+x.loanRecovery||0),0);
         const updated = { ...existingTrip, diNo:allDiNos, grNo:allGrNos,
           qty:totalQty, bags:totalBags, diLines:allLines,
+          dieselEstimate: newDieselEstimate,
+          dieselIndentNo: newDieselIndentNo,
+          advance: newAdvance,
+          shortageRecovery: newShortageRec,
+          loanRecovery: newLoanRec,
           editedBy:user.username, editedAt:nowTs() };
         setTrips(p=>p.map(t=>t.id===existingTrip.id?updated:t));
+        // Sync vehicle ledger for recoveries added by this merge
+        const truckNo = (existingTrip.truckNo||"").toUpperCase().trim();
+        const addedSR = group.reduce((s,x)=>s+(+x.shortageRecovery||0),0);
+        const addedLR = group.reduce((s,x)=>s+(+x.loanRecovery||0),0);
+        if(truckNo && (addedSR > 0 || addedLR > 0)) {
+          setVehicles(prev=>prev.map(veh=>{
+            if(veh.truckNo!==truckNo) return veh;
+            let upd={...veh};
+            if(addedSR>0){const txn={id:uid(),type:"recovery",date:existingTrip.date||today(),qty:0,amount:addedSR,lrNo:lrNo,note:"Batch merge"};upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+addedSR,shortageTxns:[...(upd.shortageTxns||[]),txn]};}
+            if(addedLR>0){const txn={id:uid(),type:"recovery",date:existingTrip.date||today(),amount:addedLR,lrNo:lrNo,note:"Batch merge"};upd={...upd,loanRecovered:(upd.loanRecovered||0)+addedLR,loanTxns:[...(upd.loanTxns||[]),txn]};}
+            return upd;
+          }));
+        }
         log("BATCH MERGE", `LR:${lrNo} +${newLines.length} DI(s) → ${totalQty}MT`);
         count += group.length;
       } else if(group.length === 1) {
@@ -1383,6 +1409,16 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
         const totalBags = allLines.reduce((s,d)=>s+(d.bags||0),0);
         const allDiNos  = allLines.map(d=>d.diNo).filter(Boolean).join(" + ");
         const allGrNos  = [...new Set(allLines.map(d=>d.grNo).filter(Boolean))].join(" + ");
+        // Pick fields from whichever item has them (diesel on one DI covers whole trip)
+        const itemWithDiesel = group.find(x => +x.dieselEstimate > 0) || primary;
+        const totalAdvance = group.reduce((s,x)=>s+(+x.advance||0),0);
+        const totalShortagRec = group.reduce((s,x)=>s+(+x.shortageRecovery||0),0);
+        const totalLoanRec = group.reduce((s,x)=>s+(+x.loanRecovery||0),0);
+        // Tafal: use primary's value (one tafal per trip, not per DI)
+        const tafalVal = primary.tafal !== "" && primary.tafal !== null && primary.tafal !== undefined
+          ? +primary.tafal : (settings?.tafalPerTrip||300);
+        // cashEmpId: use whichever item has an advance linked to wallet
+        const itemWithWallet = group.find(x => x.cashEmpId && +x.advance > 0) || null;
         const trip = {
           id:uid(), type:"outbound",
           lrNo, diNo:allDiNos, grNo:allGrNos,
@@ -1393,14 +1429,44 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           qty:totalQty, bags:totalBags,
           frRate:allLines[0]?.frRate||0, givenRate:allLines[0]?.givenRate||0,
           date:ex0.date||today(), client:ex0.client||"Shree Cement Kodla",
-          status:"Pending Bill", advance:0, shortage:0, tafal,
-          dieselEstimate:0, shortageRecovery:0, loanRecovery:0,
+          status:"Pending Bill", shortage:0,
+          advance: totalAdvance,
+          tafal: tafalVal,
+          dieselEstimate: +itemWithDiesel.dieselEstimate||0,
+          dieselIndentNo: itemWithDiesel.dieselIndentNo?.trim()||"",
+          shortageRecovery: totalShortagRec,
+          loanRecovery: totalLoanRec,
+          cashEmpId: itemWithWallet?.cashEmpId||"",
           orderType:primary.orderType||"godown", diLines:allLines,
           emailSentAt:"", partyEmail:"", batchId:"",
+          mergedPdfPath:"", receiptFilePath:"", receiptUploadedAt:"",
+          sealedInvoicePath:"",
           createdBy:user.username, createdAt:nowTs(),
         };
         setTrips(p=>[trip,...(p||[])]);
-        log("BATCH MULTI-DI", `LR:${lrNo} ${allDiNos} ${totalQty}MT`);
+        // Wallet deduction if advance linked to employee
+        if(trip.cashEmpId && trip.advance > 0 && setCashTransfers) {
+          const empName = employees.find(e=>e.id===trip.cashEmpId)?.name||trip.cashEmpId;
+          const wxn = {id:"WX-"+trip.id, empId:trip.cashEmpId, amount:-trip.advance,
+            date:trip.date||today(),
+            note:`Advance — LR ${trip.lrNo||"—"} · ${trip.truckNo}`,
+            lrNo:trip.lrNo||"", tripId:trip.id,
+            createdBy:user.username, createdAt:nowTs()};
+          setCashTransfers(prev=>[wxn,...(Array.isArray(prev)?prev:[])]);
+          log("WALLET ADVANCE",`${empName} −₹${trip.advance} LR:${trip.lrNo}`);
+        }
+        // Sync vehicle ledger for shortage/loan recoveries
+        const tn = trip.truckNo;
+        if(tn && (totalShortagRec > 0 || totalLoanRec > 0)) {
+          setVehicles(prev=>prev.map(veh=>{
+            if(veh.truckNo!==tn) return veh;
+            let upd={...veh};
+            if(totalShortagRec>0){const txn={id:uid(),type:"recovery",date:trip.date||today(),qty:0,amount:totalShortagRec,lrNo:lrNo,note:"Batch multi-DI"};upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+totalShortagRec,shortageTxns:[...(upd.shortageTxns||[]),txn]};}
+            if(totalLoanRec>0){const txn={id:uid(),type:"recovery",date:trip.date||today(),amount:totalLoanRec,lrNo:lrNo,note:"Batch multi-DI"};upd={...upd,loanRecovered:(upd.loanRecovered||0)+totalLoanRec,loanTxns:[...(upd.loanTxns||[]),txn]};}
+            return upd;
+          }));
+        }
+        log("BATCH MULTI-DI", `LR:${lrNo} ${allDiNos} ${totalQty}MT diesel:${trip.dieselEstimate} indent:${trip.dieselIndentNo||"—"}`);
         count += group.length;
       }
     }
