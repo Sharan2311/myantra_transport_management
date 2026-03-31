@@ -989,6 +989,512 @@ function Dashboard({trips, vehicles, employees, indents, pumps, pumpPayments, dr
 
 
 
+
+// ─── BATCH DI SCANNER ─────────────────────────────────────────────────────────
+// Morning workflow: employee uploads all GR PDFs at once.
+// AI scans them in parallel. One screen shows all trips — enter LR + driver rate per row.
+// Tap "Save All" → all trips created in one shot.
+function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user, log, onClose }) {
+  // Each item: { id, file, status, extracted, lrNo, givenRate, driverPhone, orderType, error, dupTrip }
+  const [items, setItems] = useState([]);
+  const [saving, setSaving] = useState(false);
+  const [savedCount, setSavedCount] = useState(0);
+  const inputRef = useRef();
+
+  const DI_PROMPT = `You are reading a Delivery Instruction (DI) or GR copy for a cement transport company in India.
+Extract the following fields and return ONLY a JSON object:
+{
+  "diNo": "DI number",
+  "grNo": "GR number (e.g. 1070/MYE/3969)",
+  "truckNo": "Vehicle registration number — uppercase no spaces",
+  "consignee": "Consignee name",
+  "consignor": "Consignor/plant name",
+  "from": "Loading location",
+  "to": "Destination",
+  "grade": "Material grade — exactly 'Cement Packed' or 'Cement Bulk' for cement",
+  "district": "Destination district from consignee address",
+  "state": "Destination state name",
+  "qty": "Quantity in MT as number only",
+  "bags": "Number of bags as number only",
+  "frRate": "Freight rate per MT — look in Rate PMT column, number only",
+  "date": "Date in YYYY-MM-DD format"
+}
+Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing numbers.`;
+
+  const fileToBase64 = file => new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result.split(",")[1]);
+    r.onerror = rej;
+    r.readAsDataURL(file);
+  });
+
+  const detectClient = ex => {
+    const hay = [ex.consignee||"",ex.consignor||"",ex.from||"",ex.to||""].join(" ").toLowerCase();
+    if(hay.includes("ultratech")) return "Ultratech Malkhed";
+    if(hay.includes("guntur"))    return "Shree Cement Guntur";
+    return "Shree Cement Kodla";
+  };
+
+  const checkDupDI = (diNo, excludeItemId) => {
+    const d = (diNo||"").trim();
+    if(!d) return null;
+    // Check saved trips
+    const inTrips = (trips||[]).find(t => {
+      if(t.diLines&&t.diLines.length>0) return t.diLines.some(x=>x.diNo===d);
+      return (t.diNo||"").split("+").map(s=>s.trim()).includes(d);
+    });
+    if(inTrips) return {source:"saved", trip:inTrips};
+    // Check other batch items (same scan session)
+    const inBatch = items.find(it =>
+      it.id !== excludeItemId &&
+      it.status==="done" && !it.dupTrip &&
+      (it.extracted?.diNo||"").trim()===d
+    );
+    if(inBatch) return {source:"batch", item:inBatch};
+    return null;
+  };
+
+  const scanFile = async (id, file) => {
+    setItems(prev => prev.map(x => x.id===id ? {...x, status:"scanning"} : x));
+    try {
+      const base64 = await fileToBase64(file);
+      const resp = await fetch("/.netlify/functions/scan-di", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ base64, mediaType: file.type, prompt: DI_PROMPT }),
+      });
+      const data = await resp.json();
+      if(!resp.ok||data.error) throw new Error(data.error||"Scan failed");
+      const extracted = JSON.parse(data.text.replace(/```json|```/g,"").trim());
+      const client = detectClient(extracted);
+      const dup = checkDupDI(extracted.diNo, id);
+      setItems(prev => prev.map(x => x.id===id
+        ? {...x, status:"done", extracted:{...extracted,client}, dupTrip:dup, error:null}
+        : x));
+    } catch(e) {
+      setItems(prev => prev.map(x => x.id===id ? {...x, status:"error", error:e.message} : x));
+    }
+  };
+
+  const addFiles = files => {
+    const newItems = Array.from(files).map(file => ({
+      id:uid(), file, status:"pending",
+      extracted:null, dupTrip:null, error:null,
+      lrNo:"", givenRate:"", driverPhone:"", orderType:"godown",
+    }));
+    setItems(prev => [...prev, ...newItems]);
+    newItems.forEach(item => scanFile(item.id, item.file));
+  };
+
+  const update = (id, field, val) =>
+    setItems(prev => prev.map(x => x.id===id ? {...x,[field]:val} : x));
+  const removeItem = id => setItems(prev => prev.filter(x=>x.id!==id));
+
+  // Items that are done, no dup, LR filled, driver rate filled
+  const doneItems = items.filter(x=>x.status==="done"&&!x.dupTrip);
+
+  // Group by LR — items sharing same LR = multi-DI on same trip
+  const byLR = {};
+  doneItems.forEach(item => {
+    const lr = item.lrNo.trim();
+    if(!lr) return;
+    if(!byLR[lr]) byLR[lr] = [];
+    byLR[lr].push(item);
+  });
+
+  // An item is "ready" if: LR filled, driver rate filled, no LR conflict with saved trips
+  // (same LR in saved trips = merge flow — handled at save time)
+  const readyItems = doneItems.filter(x =>
+    x.lrNo.trim() && x.givenRate && +x.givenRate > 0
+  );
+  const canSave = readyItems.length > 0 && !saving;
+
+  const saveAll = async () => {
+    setSaving(true);
+    let count = 0;
+    const tafal = settings?.tafalPerTrip || 300;
+
+    // Group ready items by LR to handle multi-DI merges
+    const lrGroups = {};
+    readyItems.forEach(item => {
+      const lr = item.lrNo.trim();
+      if(!lrGroups[lr]) lrGroups[lr] = [];
+      lrGroups[lr].push(item);
+    });
+
+    for(const [lrNo, group] of Object.entries(lrGroups)) {
+      // Check if this LR already exists in saved trips
+      const existingTrip = (trips||[]).find(t => t.lrNo === lrNo);
+
+      // Ensure vehicles registered
+      for(const item of group) {
+        const truckNo = (item.extracted.truckNo||"").toUpperCase().trim();
+        const existingVeh = vehicles.find(v=>v.truckNo===truckNo);
+        if(truckNo && !existingVeh) {
+          const nv = { id:uid(), truckNo, ownerName:"", phone:"",
+            driverName:"", driverPhone:item.driverPhone||"", driverLicense:"",
+            accountNo:"", ifsc:"", loan:0, loanRecovered:0, deductPerTrip:0,
+            tafalExempt:false, shortageOwed:0, shortageRecovered:0,
+            loanTxns:[], shortageTxns:[], createdBy:user.username };
+          setVehicles(p=>[...(p||[]),nv]);
+          log("AUTO-CREATE VEHICLE", truckNo);
+        } else if(existingVeh && item.driverPhone && !existingVeh.driverPhone) {
+          setVehicles(p=>p.map(v=>v.truckNo===truckNo?{...v,driverPhone:item.driverPhone}:v));
+        }
+      }
+
+      if(existingTrip) {
+        // ── MERGE: add new DIs into existing trip ──────────────────────────
+        const existingLines = existingTrip.diLines&&existingTrip.diLines.length>0
+          ? existingTrip.diLines.map(d=>({...d,frRate:d.frRate||existingTrip.frRate||0}))
+          : [{diNo:existingTrip.diNo,grNo:existingTrip.grNo,
+              qty:existingTrip.qty,bags:existingTrip.bags,
+              givenRate:existingTrip.givenRate,frRate:existingTrip.frRate||0}];
+        const newLines = group.map(item => ({
+          diNo: item.extracted.diNo||"",
+          grNo: item.extracted.grNo||"",
+          qty:  +item.extracted.qty||0,
+          bags: +item.extracted.bags||0,
+          givenRate: +item.givenRate||0,
+          frRate: +item.extracted.frRate||0,
+        }));
+        const allLines = [...existingLines, ...newLines];
+        const totalQty  = allLines.reduce((s,d)=>s+(d.qty||0),0);
+        const totalBags = allLines.reduce((s,d)=>s+(d.bags||0),0);
+        const allDiNos  = allLines.map(d=>d.diNo).filter(Boolean).join(" + ");
+        const allGrNos  = [...new Set(allLines.map(d=>d.grNo).filter(Boolean))].join(" + ");
+        const updated = { ...existingTrip, diNo:allDiNos, grNo:allGrNos,
+          qty:totalQty, bags:totalBags, diLines:allLines,
+          editedBy:user.username, editedAt:nowTs() };
+        setTrips(p=>p.map(t=>t.id===existingTrip.id?updated:t));
+        log("BATCH MERGE", `LR:${lrNo} +${newLines.length} DI(s) → ${totalQty}MT`);
+        count += group.length;
+      } else if(group.length === 1) {
+        // ── SINGLE new trip (godown or party) ─────────────────────────────
+        const item = group[0];
+        const ex = item.extracted;
+        const trip = {
+          id:uid(), type:"outbound",
+          lrNo, diNo:ex.diNo||"", grNo:ex.grNo||"",
+          truckNo:(ex.truckNo||"").toUpperCase().trim(),
+          consignee:ex.consignee||"", from:ex.from||"Kodla", to:ex.to||"",
+          grade:ex.grade||"Cement Packed",
+          district:ex.district||"", state:ex.state||"",
+          qty:+ex.qty||0, bags:+ex.bags||0,
+          frRate:+ex.frRate||0, givenRate:+item.givenRate||0,
+          date:ex.date||today(), client:ex.client||"Shree Cement Kodla",
+          status:"Pending Bill", advance:0, shortage:0, tafal,
+          dieselEstimate:0, shortageRecovery:0, loanRecovery:0,
+          orderType:item.orderType||"godown", diLines:[],
+          emailSentAt:"", partyEmail:"", batchId:"",
+          createdBy:user.username, createdAt:nowTs(),
+        };
+        setTrips(p=>[trip,...(p||[])]);
+        log("BATCH TRIP", `LR:${lrNo} DI:${trip.diNo} ${trip.truckNo} ${trip.qty}MT [${trip.orderType}]`);
+        count++;
+      } else {
+        // ── MULTI-DI on new LR: build diLines from the start ──────────────
+        const primary = group[0];
+        const ex0 = primary.extracted;
+        const allLines = group.map(item => ({
+          diNo: item.extracted.diNo||"",
+          grNo: item.extracted.grNo||"",
+          qty:  +item.extracted.qty||0,
+          bags: +item.extracted.bags||0,
+          givenRate: +item.givenRate||0,
+          frRate: +item.extracted.frRate||0,
+        }));
+        const totalQty  = allLines.reduce((s,d)=>s+(d.qty||0),0);
+        const totalBags = allLines.reduce((s,d)=>s+(d.bags||0),0);
+        const allDiNos  = allLines.map(d=>d.diNo).filter(Boolean).join(" + ");
+        const allGrNos  = [...new Set(allLines.map(d=>d.grNo).filter(Boolean))].join(" + ");
+        const trip = {
+          id:uid(), type:"outbound",
+          lrNo, diNo:allDiNos, grNo:allGrNos,
+          truckNo:(ex0.truckNo||"").toUpperCase().trim(),
+          consignee:ex0.consignee||"", from:ex0.from||"Kodla", to:ex0.to||"",
+          grade:ex0.grade||"Cement Packed",
+          district:ex0.district||"", state:ex0.state||"",
+          qty:totalQty, bags:totalBags,
+          frRate:allLines[0]?.frRate||0, givenRate:allLines[0]?.givenRate||0,
+          date:ex0.date||today(), client:ex0.client||"Shree Cement Kodla",
+          status:"Pending Bill", advance:0, shortage:0, tafal,
+          dieselEstimate:0, shortageRecovery:0, loanRecovery:0,
+          orderType:primary.orderType||"godown", diLines:allLines,
+          emailSentAt:"", partyEmail:"", batchId:"",
+          createdBy:user.username, createdAt:nowTs(),
+        };
+        setTrips(p=>[trip,...(p||[])]);
+        log("BATCH MULTI-DI", `LR:${lrNo} ${allDiNos} ${totalQty}MT`);
+        count += group.length;
+      }
+    }
+
+    setSavedCount(c=>c+count);
+    setSaving(false);
+    setItems(prev => prev.filter(x => !readyItems.find(r=>r.id===x.id)));
+  };
+
+  const scanningCount = items.filter(x=>x.status==="scanning"||x.status==="pending").length;
+
+  // LR grouping indicator — show badge when 2+ items share same LR
+  const lrCounts = {};
+  items.forEach(it => { if(it.lrNo.trim()) lrCounts[it.lrNo.trim()]=(lrCounts[it.lrNo.trim()]||0)+1; });
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+
+      {/* How-to */}
+      <div style={{background:C.teal+"11",border:`1px solid ${C.teal}33`,borderRadius:12,padding:"12px 14px"}}>
+        <div style={{color:C.teal,fontWeight:800,fontSize:13,marginBottom:4}}>📋 Morning Batch — How it works</div>
+        <div style={{color:C.muted,fontSize:12,lineHeight:1.7}}>
+          1. Download all GR PDFs from Shree Shayog<br/>
+          2. Upload them all here — AI scans in parallel<br/>
+          3. Enter <b>LR</b> + <b>driver rate</b> for each · Same LR on multiple GRs = multi-DI trip<br/>
+          4. Choose <b>Godown</b> or <b>Party</b> order type per trip<br/>
+          5. Tap <b>Save All</b> — done
+        </div>
+      </div>
+
+      {/* Upload zone */}
+      <div onClick={()=>inputRef.current?.click()}
+        style={{border:`2px dashed ${C.teal}`,borderRadius:14,padding:"20px",
+          textAlign:"center",cursor:"pointer",background:C.bg,
+          display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
+        <div style={{fontSize:32}}>📂</div>
+        <div style={{color:C.teal,fontWeight:800,fontSize:14}}>Tap to upload GR PDFs</div>
+        <div style={{color:C.muted,fontSize:12}}>Select multiple files at once</div>
+        <input ref={inputRef} type="file" multiple accept="application/pdf,image/*"
+          style={{display:"none"}}
+          onChange={e=>{if(e.target.files?.length)addFiles(e.target.files);e.target.value="";}} />
+      </div>
+
+      {/* Success banner */}
+      {savedCount>0 && (
+        <div style={{background:C.green+"11",border:`1px solid ${C.green}44`,
+          borderRadius:10,padding:"10px 14px",display:"flex",alignItems:"center",gap:8}}>
+          <span style={{fontSize:20}}>✅</span>
+          <div>
+            <div style={{color:C.green,fontWeight:800,fontSize:13}}>
+              {savedCount} trip{savedCount>1?"s":""} saved!
+            </div>
+            <div style={{color:C.muted,fontSize:11}}>
+              {items.length>0?`${items.length} remaining`:"All done — you can close this screen"}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Scanning progress */}
+      {scanningCount>0 && (
+        <div style={{background:C.blue+"11",border:`1px solid ${C.blue}33`,
+          borderRadius:10,padding:"10px 14px",display:"flex",alignItems:"center",gap:10}}>
+          <div style={{display:"flex",gap:4}}>
+            {[0,1,2].map(i=>(
+              <div key={i} style={{width:7,height:7,borderRadius:"50%",background:C.blue,
+                opacity:0.3+(i*0.3),animation:`bounce 1s ${i*0.2}s infinite`}} />
+            ))}
+          </div>
+          <div style={{color:C.blue,fontWeight:700,fontSize:13}}>
+            Scanning {scanningCount} document{scanningCount>1?"s":""}…
+          </div>
+        </div>
+      )}
+
+      {/* Trip cards */}
+      {items.map(item => (
+        <div key={item.id} style={{background:C.card,borderRadius:14,overflow:"hidden",
+          border:`1px solid ${
+            item.dupTrip?C.orange:
+            item.status==="error"?C.red:
+            item.status==="done"&&item.lrNo.trim()&&lrCounts[item.lrNo.trim()]>1?C.teal:
+            item.status==="done"?C.border:C.blue+"44"}`}}>
+
+          {/* Status bar */}
+          <div style={{padding:"8px 14px",display:"flex",alignItems:"center",
+            justifyContent:"space-between",
+            background:
+              item.status==="scanning"||item.status==="pending"?C.blue+"11":
+              item.status==="error"?C.red+"11":
+              item.dupTrip?C.orange+"11":C.green+"08"}}>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <span style={{fontSize:15}}>
+                {item.status==="scanning"||item.status==="pending"?"⏳":
+                 item.status==="error"?"❌":
+                 item.dupTrip?"⚠️":"✓"}
+              </span>
+              <span style={{fontSize:12,fontWeight:700,color:
+                item.status==="scanning"||item.status==="pending"?C.blue:
+                item.status==="error"?C.red:
+                item.dupTrip?C.orange:C.green}}>
+                {item.status==="scanning"?"Scanning with AI…":
+                 item.status==="pending"?"Waiting…":
+                 item.status==="error"?"Scan failed":
+                 item.dupTrip?.source==="batch"?`Same DI as another row above`:
+                 item.dupTrip?`Duplicate — already in LR ${item.dupTrip.trip?.lrNo}`:
+                 `${item.extracted?.truckNo||"?"} · ${item.extracted?.qty||0} MT`}
+              </span>
+              {/* Multi-DI badge */}
+              {item.status==="done"&&!item.dupTrip&&item.lrNo.trim()&&lrCounts[item.lrNo.trim()]>1&&(
+                <span style={{background:C.teal+"22",color:C.teal,fontSize:10,fontWeight:700,
+                  borderRadius:8,padding:"2px 7px"}}>
+                  {lrCounts[item.lrNo.trim()]} DIs · same LR
+                </span>
+              )}
+            </div>
+            <button onClick={()=>removeItem(item.id)}
+              style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:16,padding:"0 4px"}}>
+              ✕
+            </button>
+          </div>
+
+          {/* Error */}
+          {item.status==="error" && (
+            <div style={{padding:"10px 14px"}}>
+              <div style={{color:C.red,fontSize:12,marginBottom:8}}>{item.error}</div>
+              <button onClick={()=>scanFile(item.id,item.file)}
+                style={{background:C.red+"11",border:`1px solid ${C.red}44`,color:C.red,
+                  borderRadius:8,padding:"6px 12px",fontSize:12,cursor:"pointer",fontWeight:700}}>
+                🔄 Retry
+              </button>
+            </div>
+          )}
+
+          {/* Scanned + input */}
+          {item.status==="done"&&!item.dupTrip&&(
+            <div style={{padding:"12px 14px",display:"flex",flexDirection:"column",gap:10}}>
+
+              {/* Scanned fields summary */}
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"4px 16px",fontSize:12}}>
+                {[
+                  ["DI",    item.extracted.diNo,                C.muted],
+                  ["GR",    item.extracted.grNo,                C.muted],
+                  ["To",    item.extracted.to,                  C.text],
+                  ["MT",    item.extracted.qty+" MT",           C.text],
+                  ["Fr ₹",  "₹"+item.extracted.frRate+"/MT",   C.blue],
+                  ["Date",  item.extracted.date,                C.muted],
+                ].filter(([,v])=>v&&v!=="0 MT"&&v!=="0").map(([l,v,c])=>(
+                  <div key={l}>
+                    <span style={{color:C.muted,fontSize:10}}>{l}: </span>
+                    <span style={{color:c,fontWeight:600}}>{v}</span>
+                  </div>
+                ))}
+              </div>
+
+              {/* LR + driver rate — the two things employee enters */}
+              <div style={{display:"flex",gap:8}}>
+                <div style={{flex:2}}>
+                  <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>LR NUMBER *</div>
+                  <input value={item.lrNo} onChange={e=>update(item.id,"lrNo",e.target.value)}
+                    placeholder="e.g. MYE/2526/001"
+                    style={{width:"100%",border:`1.5px solid ${item.lrNo.trim()?C.green:C.border}`,
+                      borderRadius:8,padding:"8px 10px",fontSize:13,background:C.bg,
+                      color:C.text,outline:"none",boxSizing:"border-box"}} />
+                </div>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>DRIVER ₹/MT *</div>
+                  <input value={item.givenRate} onChange={e=>update(item.id,"givenRate",e.target.value)}
+                    type="number" placeholder="rate"
+                    style={{width:"100%",border:`1.5px solid ${item.givenRate&&+item.givenRate>0?C.green:C.border}`,
+                      borderRadius:8,padding:"8px 10px",fontSize:13,background:C.bg,
+                      color:C.text,outline:"none",boxSizing:"border-box"}} />
+                </div>
+              </div>
+
+              {/* Margin preview */}
+              {item.givenRate&&+item.givenRate>0&&+item.extracted.frRate>0&&(
+                <div style={{fontSize:11,fontWeight:600,
+                  color:+item.extracted.frRate-+item.givenRate>=30?C.green:C.red}}>
+                  Margin: ₹{(+item.extracted.frRate-+item.givenRate).toFixed(0)}/MT
+                  · Total ₹{((+item.extracted.frRate-+item.givenRate)*(+item.extracted.qty||0)).toFixed(0)}
+                  {+item.extracted.frRate-+item.givenRate<30&&
+                    <span style={{color:C.red}}> ⚠ min ₹30</span>}
+                </div>
+              )}
+
+              {/* Order type — Godown vs Party */}
+              <div>
+                <div style={{fontSize:10,color:C.muted,marginBottom:5,fontWeight:600}}>ORDER TYPE</div>
+                <div style={{display:"flex",gap:8}}>
+                  {["godown","party"].map(ot=>(
+                    <button key={ot} onClick={()=>update(item.id,"orderType",ot)}
+                      style={{flex:1,padding:"7px",borderRadius:8,fontSize:12,fontWeight:700,
+                        cursor:"pointer",
+                        background:item.orderType===ot?
+                          (ot==="party"?C.accent:C.teal):C.card2,
+                        color:item.orderType===ot?"#fff":C.muted,
+                        border:`1.5px solid ${item.orderType===ot?
+                          (ot==="party"?C.accent:C.teal):C.border}`}}>
+                      {ot==="party"?"🤝 Party":"🏭 Godown"}
+                    </button>
+                  ))}
+                </div>
+                {item.orderType==="party"&&(
+                  <div style={{marginTop:6,fontSize:11,color:C.accent,
+                    background:C.accent+"11",borderRadius:6,padding:"5px 9px"}}>
+                    ⓘ Party trip — remember to upload GR + invoice and send email after saving
+                  </div>
+                )}
+              </div>
+
+              {/* New truck — driver phone */}
+              {item.extracted.truckNo&&
+               !vehicles.find(v=>v.truckNo===(item.extracted.truckNo||"").toUpperCase().trim())&&(
+                <div>
+                  <div style={{fontSize:10,color:C.orange,marginBottom:3,fontWeight:600}}>
+                    📞 NEW TRUCK — DRIVER PHONE
+                  </div>
+                  <input value={item.driverPhone} onChange={e=>update(item.id,"driverPhone",e.target.value)}
+                    type="tel" placeholder="9XXXXXXXXX"
+                    style={{width:"100%",border:`1.5px solid ${C.border}`,borderRadius:8,
+                      padding:"8px 10px",fontSize:13,background:C.bg,color:C.text,
+                      outline:"none",boxSizing:"border-box"}} />
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      ))}
+
+      {/* Save All — sticky footer */}
+      {doneItems.length>0&&(
+        <div style={{position:"sticky",bottom:0,background:C.bg,paddingTop:8,paddingBottom:4}}>
+          {/* Multi-DI summary if any LR has multiple DIs */}
+          {Object.entries(lrCounts).some(([,c])=>c>1)&&(
+            <div style={{background:C.teal+"11",border:`1px solid ${C.teal}33`,
+              borderRadius:8,padding:"7px 12px",marginBottom:8,fontSize:12,color:C.teal}}>
+              {Object.entries(lrCounts).filter(([,c])=>c>1).map(([lr,c])=>(
+                <span key={lr} style={{marginRight:12}}>
+                  📎 LR {lr}: {c} DIs → 1 trip
+                </span>
+              ))}
+            </div>
+          )}
+          <div style={{fontSize:12,color:C.muted,marginBottom:6,textAlign:"center"}}>
+            {readyItems.length} of {doneItems.length} ready
+            {readyItems.length<doneItems.length&&
+              <span style={{color:C.orange}}> · fill LR + rate for remaining</span>}
+          </div>
+          <button onClick={saveAll} disabled={!canSave}
+            style={{width:"100%",background:canSave?C.teal:C.dim,border:"none",
+              borderRadius:12,color:canSave?"#fff":C.muted,padding:"14px",
+              fontSize:15,fontWeight:800,cursor:canSave?"pointer":"not-allowed"}}>
+            {saving?"Saving…":canSave
+              ?`✓ Save ${readyItems.length} Trip${readyItems.length>1?"s":""}`
+              :"Fill LR + driver rate to save"}
+          </button>
+        </div>
+      )}
+
+      {items.length===0&&savedCount===0&&(
+        <div style={{textAlign:"center",color:C.muted,fontSize:13,padding:"20px 0"}}>
+          Upload GR PDFs above to get started
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 // ─── ASK LR SHEET ─────────────────────────────────────────────────────────────
 // Shown after scanning — asks user to enter LR number, then checks for duplicates
 function AskLRSheet({ extracted, trips, vehicles, onConfirm, onCancel }) {
@@ -3042,6 +3548,14 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
               </Btn>
             ) : null;
           })()}
+          {!isIn && (
+            <button onClick={()=>setBatchDISheet(true)}
+              style={{background:C.teal,border:"none",borderRadius:10,color:"#fff",
+                padding:"8px 12px",fontSize:13,fontWeight:700,cursor:"pointer",
+                display:"flex",alignItems:"center",gap:5}}>
+              🌅 Batch
+            </button>
+          )}
           <button onClick={()=>{
             if(isIn){setOrderTypeStep("godown");setF(blankForm(false));}
             else{setOrderTypeStep("selecting");}
@@ -3515,6 +4029,17 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
             setTrips={setTrips}
             log={log}
             onClose={()=>setBatchReceiptSheet(null)}
+          />
+        </Sheet>
+      )}
+
+      {/* ── BATCH DI SCANNER SHEET ── */}
+      {batchDISheet && (
+        <Sheet title="🌅 Morning Batch — Scan GR Copies" onClose={()=>setBatchDISheet(false)}>
+          <BatchDIScanner
+            trips={trips} vehicles={vehicles} setVehicles={setVehicles}
+            setTrips={setTrips} settings={settings} user={user} log={log}
+            onClose={()=>setBatchDISheet(false)}
           />
         </Sheet>
       )}
