@@ -36,14 +36,32 @@ const FY_LABEL  = fy => `FY ${fy-1}–${String(fy).slice(2)}`; // "FY 2025–26"
 
 // ─── ROLES ────────────────────────────────────────────────────────────────────
 const ROLES = {
-  owner:         {label:"Owner",               color:C.accent,  perms:["trips","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","admin"]},
-  manager:       {label:"Manager",             color:C.blue,    perms:["trips","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal"]},
-  fleet_manager: {label:"Cement Fleet Manager",color:C.teal,    perms:["trips","billing","diesel","tafal","driverPay"]},
+  owner:         {label:"Owner",               color:C.accent,  perms:["trips","inbound","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","admin","driverPay"]},
+  manager:       {label:"Manager",             color:C.blue,    perms:["trips","inbound","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","driverPay"]},
+  fleet_manager: {label:"Cement Fleet Manager",color:C.teal,    perms:["cement_trips","billing","tafal","diesel_view","driverPay_view"]},
   operator:      {label:"Trip Operator",       color:C.teal,    perms:["trips","billing","diesel"]},
   accounts:      {label:"Accounts",            color:C.purple,  perms:["billing","payments","reports","diesel","tafal"]},
   viewer:        {label:"Viewer",              color:C.muted,   perms:["reports"]},
 };
-const can = (user, p) => user && ROLES[user.role]?.perms.includes(p);
+const can = (user, p) => {
+  if(!user) return false;
+  const perms = ROLES[user.role]?.perms || [];
+  if(perms.includes(p)) return true;
+  // cement_trips grants access to "trips" (outbound only) but NOT "inbound"
+  if(p==="trips" && perms.includes("cement_trips")) return true;
+  // diesel_view grants access to diesel tab (read-only); driverPay_view grants driverPay tab (read-only)
+  if(p==="diesel"    && perms.includes("diesel_view"))    return true;
+  if(p==="driverPay" && perms.includes("driverPay_view")) return true;
+  return false;
+};
+const canEdit = (user, p) => {
+  // Returns false for view-only perms — fleet_manager cannot add/edit diesel or driver pay
+  if(!user) return false;
+  const perms = ROLES[user.role]?.perms || [];
+  if(p==="diesel"    && perms.includes("diesel_view")    && !perms.includes("diesel"))    return false;
+  if(p==="driverPay" && perms.includes("driverPay_view") && !perms.includes("driverPay")) return false;
+  return perms.includes(p);
+};
 
 // ─── SUPABASE DATA HOOK ────────────────────────────────────────────────────────
 // Loads data once, then every 15 seconds. Writes go straight to DB + local state.
@@ -410,18 +428,18 @@ function BottomNav({tab, setTab, user, trips, driverPays, vehicles}) {
 }
 
 const MORE_TABS = [
-  {id:"inbound",   icon:"🏭",label:"Raw Material",   perm:"trips",      group:"ops"},
-  {id:"driverPay", icon:"🏧",label:"Driver Pay",     perm:"driverPay",  group:"money"},
-  {id:"settlement",icon:"💵",label:"Settlement",     perm:"settlement", group:"money"},
-  {id:"tafal",     icon:"🤝",label:"TAFAL",          perm:"tafal",      group:"money"},
-  {id:"vehicles",  icon:"🚛",label:"Vehicles",       perm:"vehicles",   group:"fleet"},
-  {id:"employees", icon:"👥",label:"Employees",      perm:"employees",  group:"fleet"},
-  {id:"payments",  icon:"💰",label:"Shree Payments", perm:"payments",   group:"finance"},
-  {id:"expenses",  icon:"🧮",label:"Expenses",       perm:"payments",   group:"finance"},
-  {id:"reports",   icon:"📤",label:"Reports",        perm:"reports",    group:"info"},
-  {id:"reminders", icon:"📲",label:"Reminders",      perm:"reminders",  group:"info"},
-  {id:"activity",  icon:"📋",label:"Activity Log",   perm:"reports",    group:"info"},
-  {id:"admin",     icon:"⚙", label:"User Admin",     perm:"admin",      group:"info"},
+  {id:"inbound",   icon:"🏭",label:"Raw Material",   perm:"inbound",      group:"ops"},
+  {id:"driverPay", icon:"🏧",label:"Driver Pay",     perm:"driverPay",    group:"money"},
+  {id:"settlement",icon:"💵",label:"Settlement",     perm:"settlement",   group:"money"},
+  {id:"tafal",     icon:"🤝",label:"TAFAL",          perm:"tafal",        group:"money"},
+  {id:"vehicles",  icon:"🚛",label:"Vehicles",       perm:"vehicles",     group:"fleet"},
+  {id:"employees", icon:"👥",label:"Employees",      perm:"employees",    group:"fleet"},
+  {id:"payments",  icon:"💰",label:"Shree Payments", perm:"payments",     group:"finance"},
+  {id:"expenses",  icon:"🧮",label:"Expenses",       perm:"payments",     group:"finance"},
+  {id:"reports",   icon:"📤",label:"Reports",        perm:"reports",      group:"info"},
+  {id:"reminders", icon:"📲",label:"Reminders",      perm:"reminders",    group:"info"},
+  {id:"activity",  icon:"📋",label:"Activity Log",   perm:"reports",      group:"info"},
+  {id:"admin",     icon:"⚙", label:"User Admin",     perm:"admin",        group:"info"},
 ];
 const MORE_GROUPS = [
   {id:"ops",     label:"Operations"},
@@ -1145,15 +1163,15 @@ export default function App() {
       <div style={{padding:"14px 16px 8px"}}>
         {tab==="dashboard"  && <Dashboard {...sp} setTab={setTab} />}
         {tab==="trips"      && can(user,"trips")      && <Trips      {...sp} tripType="outbound" />}
-        {tab==="inbound"    && can(user,"trips")      && <Trips      {...sp} tripType="inbound" />}
+        {tab==="inbound"    && can(user,"inbound")    && <Trips      {...sp} tripType="inbound" />}
         {tab==="billing"    && can(user,"billing")    && <Billing    {...sp} />}
         {tab==="settlement" && can(user,"settlement") && <Settlement {...sp} />}
         {tab==="tafal"      && can(user,"tafal")      && <TafalMod   {...sp} />}
-        {tab==="diesel"     && can(user,"diesel")     && <DieselMod  {...sp} />}
+        {tab==="diesel"     && can(user,"diesel")     && <DieselMod  {...sp} viewOnly={!canEdit(user,"diesel")} />}
         {tab==="vehicles"   && can(user,"vehicles")   && <Vehicles   {...sp} />}
         {tab==="employees"  && can(user,"employees")  && <Employees  {...sp} />}
         {tab==="payments"   && can(user,"payments")   && <Payments   {...sp} />}
-        {tab==="driverPay"  && can(user,"driverPay") && <DriverPayments {...sp} />}
+        {tab==="driverPay"  && can(user,"driverPay") && <DriverPayments {...sp} viewOnly={!canEdit(user,"driverPay")} />}
         {tab==="expenses"   && can(user,"payments")   && <ExpensesLedger {...sp} />}
         {tab==="reports"    && can(user,"reports")    && <Reports    {...sp} />}
         {tab==="reminders"  && can(user,"reminders")  && <Reminders  {...sp} />}
@@ -6981,7 +6999,7 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance, employees, setCas
 }
 
 // ─── DIESEL MODULE ────────────────────────────────────────────────────────────
-function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, driverPays, setDriverPays, user, log}) {
+function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, driverPays, setDriverPays, user, log, viewOnly=false}) {
   const [view,        setView]        = useState("pumps");
   const [pumpSheet,   setPumpSheet]   = useState(false);
   const [scanSheet,   setScanSheet]   = useState(false);
@@ -7317,11 +7335,14 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
 
       {/* Header */}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-        <div style={{color:C.orange,fontWeight:800,fontSize:16}}>⛽ Diesel & Pump</div>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <div style={{color:C.orange,fontWeight:800,fontSize:16}}>⛽ Diesel & Pump</div>
+          {viewOnly && <span style={{background:C.orange+"22",color:C.orange,fontSize:10,fontWeight:700,borderRadius:8,padding:"2px 8px"}}>VIEW ONLY</span>}
+        </div>
         <div style={{display:"flex",gap:8}}>
           <Btn onClick={()=>setShowFilter(v=>!v)} sm outline color={showFilter?C.orange:C.muted}>📅 Filter</Btn>
-          <Btn onClick={()=>setScanSheet(true)} sm outline color={C.blue}>📷 Scan Slip</Btn>
-          <Btn onClick={()=>setPumpSheet(true)} sm outline color={C.muted}>+ Pump</Btn>
+          {!viewOnly && <Btn onClick={()=>setScanSheet(true)} sm outline color={C.blue}>📷 Scan Slip</Btn>}
+          {!viewOnly && <Btn onClick={()=>setPumpSheet(true)} sm outline color={C.muted}>+ Pump</Btn>}
         </div>
       </div>
 
@@ -10770,7 +10791,7 @@ function ShortageRecoverBtn({v, setVehicles, log}) {
 // ─── DRIVER PAYMENTS ──────────────────────────────────────────────────────────
 // Driver payment is separate from settlement.
 // Record bank transfers against a trip. "Balance due" auto-updates.
-function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, employees, cashTransfers, setCashTransfers, user, log}) {
+function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, employees, cashTransfers, setCashTransfers, user, log, viewOnly=false}) {
   const [filter,    setFilter]    = useState("unpaid");
   const [paySheet,  setPaySheet]  = useState(null);
   const [splitSheet, setSplitSheet] = useState(null); // scanned multi-LR data
@@ -10912,10 +10933,12 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, e
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div style={{color:C.blue,fontWeight:800,fontSize:16}}>🏧 Driver Payments</div>
-        {/* Global scan button */}
-        <FileSourcePicker onFile={scanGlobal} accept="image/*,application/pdf"
-          label={scanningGlobal?"Reading…":"Scan Payment"}
-          color={C.purple||"#7c3aed"} icon="📷" compact={true} />
+        {viewOnly
+          ? <span style={{background:C.orange+"22",color:C.orange,fontSize:11,fontWeight:700,borderRadius:8,padding:"4px 10px"}}>👁 View Only</span>
+          : <FileSourcePicker onFile={scanGlobal} accept="image/*,application/pdf"
+              label={scanningGlobal?"Reading…":"Scan Payment"}
+              color={C.purple||"#7c3aed"} icon="📷" compact={true} />
+        }
       </div>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
         <KPI icon="⏳" label="Balance Due"  value={fmt(totalBalance)}    color={C.accent} sub={`${unpaidTrips.length} trips`} />
@@ -11094,7 +11117,7 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, e
               </div>
             </div>
           ))}
-          {t.balance>0&&<Btn onClick={()=>{setPaySheet(t);setPf({amount:String(t.balance),utr:"",date:today(),paidTo:"",notes:""});}} full sm color={C.green}>+ Record Payment</Btn>}
+          {t.balance>0&&!viewOnly&&<Btn onClick={()=>{setPaySheet(t);setPf({amount:String(t.balance),utr:"",date:today(),paidTo:"",notes:""});}} full sm color={C.green}>+ Record Payment</Btn>}
         </div>
       ));
       })()}
