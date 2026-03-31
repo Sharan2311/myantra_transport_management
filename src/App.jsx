@@ -1333,14 +1333,31 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
         </div>
       </div>
 
-      {/* Upload zone */}
-      <div onClick={()=>inputRef.current?.click()}
-        style={{border:`2px dashed ${C.teal}`,borderRadius:14,padding:"20px",
-          textAlign:"center",cursor:"pointer",background:C.bg,
-          display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
+      {/* Upload zone — local + Google Drive */}
+      <div style={{border:`2px dashed ${C.teal}`,borderRadius:14,padding:"20px",
+          background:C.bg,display:"flex",flexDirection:"column",alignItems:"center",gap:10}}>
         <div style={{fontSize:32}}>📂</div>
-        <div style={{color:C.teal,fontWeight:800,fontSize:14}}>Tap to upload GR PDFs</div>
+        <div style={{color:C.teal,fontWeight:800,fontSize:14}}>Upload GR PDFs</div>
         <div style={{color:C.muted,fontSize:12}}>Select multiple files at once</div>
+        <div style={{display:"flex",gap:10,width:"100%",maxWidth:320}}>
+          <button onClick={()=>inputRef.current?.click()}
+            style={{flex:1,background:C.teal+"22",border:`1.5px solid ${C.teal}66`,
+              borderRadius:10,padding:"10px 8px",color:C.teal,fontWeight:700,
+              fontSize:13,cursor:"pointer",display:"flex",alignItems:"center",
+              justifyContent:"center",gap:6}}>
+            📁 Local / Camera
+          </button>
+          <button onClick={async()=>{
+              try { await openGoogleDrivePicker(f=>addFiles([f])); }
+              catch(e) { alert("Google Drive: "+(e.message||"Could not open.")); }
+            }}
+            style={{flex:1,background:"#1a73e822",border:"1.5px solid #1a73e866",
+              borderRadius:10,padding:"10px 8px",color:"#4285f4",fontWeight:700,
+              fontSize:13,cursor:"pointer",display:"flex",alignItems:"center",
+              justifyContent:"center",gap:6}}>
+            🔵 Google Drive
+          </button>
+        </div>
         <input ref={inputRef} type="file" multiple accept="application/pdf,image/*"
           style={{display:"none"}}
           onChange={e=>{if(e.target.files?.length)addFiles(e.target.files);e.target.value="";}} />
@@ -1634,6 +1651,54 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                   <div style={{fontSize:11,color:C.red}}>⚠ Diesel Indent No required when estimate is entered</div>
                 )}
               </div>
+
+              {/* Live Calculation Preview — updates as user types */}
+              {item.givenRate && +item.givenRate > 0 && item.extracted && (()=>{
+                const qty     = +item.extracted.qty || 0;
+                const frRate  = +item.extracted.frRate || 0;
+                const driver  = +item.givenRate || 0;
+                const tafal   = +item.tafal || (settings?.tafalPerTrip||300);
+                const advance = +item.advance || 0;
+                const diesel  = +item.dieselEstimate || 0;
+                const shrRec  = +item.shortageRecovery || 0;
+                const loanRec = +item.loanRecovery || 0;
+                const billed  = qty * frRate;
+                const gross   = qty * driver;
+                const margin  = billed - gross;
+                const perMT   = frRate - driver;
+                const marginOk = perMT >= 30;
+                const net     = gross - advance - tafal - diesel - shrRec - loanRec;
+                return (
+                  <div style={{background:marginOk?C.green+"08":C.red+"08",
+                    border:`1px solid ${marginOk?C.green:C.red}33`,
+                    borderRadius:10,padding:"10px 12px",marginTop:2}}>
+                    <div style={{fontSize:10,color:C.muted,fontWeight:700,
+                      textTransform:"uppercase",letterSpacing:1,marginBottom:7}}>
+                      Calculation Preview
+                    </div>
+                    {[
+                      {l:"Billed to Shree",      v:fmt(billed),  c:C.blue},
+                      {l:"Gross to Driver",       v:fmt(gross),   c:C.orange},
+                      {l:"(−) Advance",           v:fmt(advance), c:advance>0?C.red:C.muted},
+                      {l:"(−) Tafal",             v:fmt(tafal),   c:C.purple},
+                      {l:"(−) Diesel",            v:fmt(diesel),  c:diesel>0?C.orange:C.muted},
+                      {l:"(−) Shortage Recovery", v:fmt(shrRec),  c:shrRec>0?C.red:C.muted},
+                      {l:"(−) Loan Recovery",     v:fmt(loanRec), c:loanRec>0?C.red:C.muted},
+                      {l:marginOk?"My Margin ✓":"⚠ Margin",
+                        v:`${fmt(margin)} (₹${perMT.toFixed(0)}/MT)`,
+                        c:marginOk?C.green:C.red},
+                      {l:"Est. Net to Driver",    v:fmt(net),     c:net>=0?C.green:C.red},
+                    ].map(x=>(
+                      <div key={x.l} style={{display:"flex",justifyContent:"space-between",
+                        padding:"4px 0",borderBottom:`1px solid ${C.border}22`,fontSize:12}}>
+                        <span style={{color:C.muted}}>{x.l}</span>
+                        <span style={{color:x.c,fontWeight:700}}>{x.v}</span>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
+
             </div>
           )}
         </div>
