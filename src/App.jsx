@@ -493,22 +493,31 @@ function Login({onLogin}) {
   const [pin, setPin] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [hints, setHints] = useState([]);
+
+  // Load active usernames on mount for the hint row
+  React.useEffect(() => {
+    supabase.from('mye_users').select('username,active').then(({data}) => {
+      if(data) setHints(data.filter(u=>u.active!==false).map(u=>u.username));
+    });
+  }, []);
 
   const go = async () => {
-    const username = un.trim().toLowerCase();
+    const username = un.trim();
     if (!username || !pin) { setErr("Enter username and PIN."); return; }
     setBusy(true); setErr("");
     try {
-      // Query Supabase directly — bypasses any caching issue
-      // Fetch by username only, check pin + active in JS
+      // Query case-insensitively — usernames may be stored with any casing (Wasim, wasim, WASIM)
       const { data: rows, error } = await supabase
         .from('mye_users')
         .select('*')
-        .eq('username', username);
+        .ilike('username', username);
       const data = (rows||[]).find(u => u.pin === pin && u.active !== false);
       if (error) throw new Error(error.message);
       if (!data) {
-        setErr("Wrong username or PIN. Try again.");
+        // Give a more helpful message — distinguish wrong user vs wrong PIN
+        const anyUser = (rows||[]).find(u => u.active !== false);
+        setErr(anyUser ? "Wrong PIN. Try again." : "Username not found. Check spelling.");
       } else {
         const u = {
           id: data.id, name: data.name, username: data.username,
@@ -733,7 +742,9 @@ function Login({onLogin}) {
         </div>
 
         <div style={{textAlign:"center",color:"rgba(255,255,255,0.25)",fontSize:11,marginTop:16}}>
-          Users: owner · raju · suresh · accounts
+          {hints.length > 0
+            ? `Users: ${hints.join(" · ")}`
+            : "Enter your username and PIN to continue"}
         </div>
       </div>
     </div>
