@@ -3116,6 +3116,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
   const [batchReceiptSheet, setBatchReceiptSheet] = useState(null); // batchId string
   // Sealed invoice upload sheet
   const [sealedSheet, setSealedSheet] = useState(null); // trip object
+  const [batchDISheet,  setBatchDISheet]  = useState(false); // morning batch GR scanner
 
   const blankForm = (isParty=false) => ({
     type:tripType, lrNo:"", diNo:"", truckNo:"", grNo:"", dieselIndentNo:"",
