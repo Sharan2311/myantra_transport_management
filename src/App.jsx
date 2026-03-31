@@ -3727,7 +3727,34 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
   const list   = trips.filter(t => t.type===tripType);
   const clist  = clientFilter ? list.filter(t => (t.client||DEFAULT_CLIENT)===clientFilter) : list;
   const dlist  = (dateFrom||dateTo) ? clist.filter(t => t.date>=(dateFrom||"2000-01-01") && t.date<=(dateTo||"2099-12-31")) : clist;
-  const slist  = search ? dlist.filter(t => (t.truckNo+t.lrNo+t.grNo+t.diNo+t.to+t.consignee+(t.client||"")).toLowerCase().includes(search.toLowerCase())) : dlist;
+  const slist  = search ? dlist.filter(t => {
+    const q = search.trim().toLowerCase();
+    if(!q) return true;
+    // LR: match from end of number (e.g. "2910" matches "MYE/2526/2910" but NOT "2929")
+    const lrNum = (t.lrNo||"").split("/").pop().toLowerCase();
+    if(lrNum === q) return true;
+    if((t.lrNo||"").toLowerCase() === q) return true;
+    // LR prefix match (e.g. "MYE/2526/29" matches "MYE/2526/2910")
+    if((t.lrNo||"").toLowerCase().startsWith(q)) return true;
+    // Truck: exact or prefix match (e.g. "KA29" matches "KA29A9502")
+    if((t.truckNo||"").toLowerCase().startsWith(q)) return true;
+    if((t.truckNo||"").toLowerCase() === q) return true;
+    // GR: exact or contains full query
+    if((t.grNo||"").toLowerCase().includes(q)) return true;
+    // DI: exact or contains full query (DI numbers are long, substring is fine)
+    if((t.diNo||"").toLowerCase().includes(q)) return true;
+    // Destination: word-start match
+    if((t.to||"").toLowerCase().startsWith(q)) return true;
+    if((t.to||"").toLowerCase().split(/\s+/).some(w=>w.startsWith(q))) return true;
+    // Consignee: word-start match
+    if((t.consignee||"").toLowerCase().startsWith(q)) return true;
+    if((t.consignee||"").toLowerCase().split(/\s+/).some(w=>w.startsWith(q))) return true;
+    // Client: contains match
+    if((t.client||"").toLowerCase().includes(q)) return true;
+    // Grade
+    if((t.grade||"").toLowerCase().includes(q)) return true;
+    return false;
+  }) : dlist;
   const shown  = filter==="All" ? slist : slist.filter(t => t.status===filter);
 
   // When truck number changes, check if tafalExempt
