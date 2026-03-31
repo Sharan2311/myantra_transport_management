@@ -413,7 +413,7 @@ function MoreMenu({user, setTab, trips, driverPays, vehicles}) {
   const unsettled = (trips||[]).filter(t=>{
     if(t.driverSettled) return false;
     const veh=(vehicles||[]).find(v=>v.truckNo===t.truckNo);
-    const netDue=Math.max(0,(t.qty||0)*(t.givenRate||0)-(t.advance||0)-(t.tafal||0)-(veh?.deductPerTrip||0)-(t.dieselEstimate||0));
+    const netDue=Math.max(0,(t.qty||0)*(t.givenRate||0)-(t.advance||0)-(t.tafal||0)-(veh?.deductPerTrip||0)-(t.dieselEstimate||0)-(t.shortageRecovery||0)-(t.loanRecovery||0));
     return netDue>0 && (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0)<netDue;
   }).length;
   const tabBadge = {driverPay:unsettled||null, settlement:unsettled||null};
@@ -535,10 +535,10 @@ function Login({onLogin}) {
           100% { background-position:-200% center; }
         }
         @keyframes truckMove {
-          0%   { transform:translateX(-60px); opacity:0; }
-          15%  { opacity:1; }
-          85%  { opacity:1; }
-          100% { transform:translateX(60px); opacity:0; }
+          0%   { left:-10%; opacity:0; }
+          8%   { opacity:1; }
+          92%  { opacity:1; }
+          100% { left:110%; opacity:0; }
         }
         @keyframes fadeSlideUp {
           from { opacity:0; transform:translateY(24px); }
@@ -619,11 +619,10 @@ function Login({onLogin}) {
             {["🚛","🚚","🚛"].map((t,i)=>(
               <span key={i} style={{
                 position:"absolute",
-                top:0,
-                left:"50%",
-                fontSize:16,
-                animation:`truckMove ${3.5+i*0.4}s ${i*1.2}s infinite ease-in-out`,
-                transform:"translateX(-50%)",
+                top:"50%",
+                transform:"translateY(-50%) scaleX(-1)",
+                fontSize:18,
+                animation:`truckMove ${3.8+i*0.5}s ${i*1.3}s infinite linear`,
               }}>{t}</span>
             ))}
           </div>
@@ -945,7 +944,7 @@ export default function App() {
       if(t.driverSettled) return false;                    // already settled
       const veh = vehicles.find(v=>v.truckNo===t.truckNo);
       const gross   = (t.qty||0)*(t.givenRate||0);
-      const deducts = (t.advance||0)+(t.tafal||0)+(veh?.deductPerTrip||0)+(t.dieselEstimate||0)+((t.shortage||0)*(t.givenRate||0));
+      const deducts = (t.advance||0)+(t.tafal||0)+(veh?.deductPerTrip||0)+(t.dieselEstimate||0)+((t.shortage||0)*(t.givenRate||0))+(t.shortageRecovery||0)+(t.loanRecovery||0);
       const netDue  = Math.max(0, gross - deducts);
       if(netDue <= 0) return false;                        // nothing due — not a real trip payment
       const paid = (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
@@ -956,7 +955,7 @@ export default function App() {
       if(!toSettle.find(s=>s.id===t.id)) return t;
       const veh = vehicles.find(v=>v.truckNo===t.truckNo);
       const gross   = (t.qty||0)*(t.givenRate||0);
-      const deducts = (t.advance||0)+(t.tafal||0)+(veh?.deductPerTrip||0)+(t.dieselEstimate||0)+((t.shortage||0)*(t.givenRate||0));
+      const deducts = (t.advance||0)+(t.tafal||0)+(veh?.deductPerTrip||0)+(t.dieselEstimate||0)+((t.shortage||0)*(t.givenRate||0))+(t.shortageRecovery||0)+(t.loanRecovery||0);
       const netDue  = Math.max(0, gross - deducts);
       return {...t, driverSettled:true, settledBy:"auto", netPaid:netDue};
     }));
@@ -964,10 +963,84 @@ export default function App() {
 
   if (!user) {
     if (loading) return (
-      <div style={{minHeight:"100vh",background:C.bg,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:12,fontFamily:"system-ui"}}>
-        <div style={{fontSize:36,marginBottom:4}}>⬡</div>
-        <div style={{color:C.accent,fontWeight:900,fontSize:18,letterSpacing:0.5}}>M. YANTRA</div>
-        <div style={{color:C.muted,fontSize:13}}>Connecting to database…</div>
+      <div style={{minHeight:"100vh",background:"linear-gradient(135deg,#0a1628 0%,#0d2348 40%,#0f2d5c 70%,#071020 100%)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:0,fontFamily:"system-ui",overflow:"hidden",position:"relative"}}>
+        <style>{`
+          @keyframes dbPulseRing {
+            0%,100% { transform:scale(0.88); opacity:0.6; }
+            50%      { transform:scale(1.12); opacity:0.2; }
+          }
+          @keyframes dbPulseRing2 {
+            0%,100% { transform:scale(0.8); opacity:0.4; }
+            50%      { transform:scale(1.22); opacity:0.08; }
+          }
+          @keyframes dbLogoGlow {
+            0%,100% { box-shadow:0 0 30px 8px #1565c055,0 0 60px 20px #1565c022,0 8px 32px rgba(0,0,0,0.5); }
+            50%      { box-shadow:0 0 55px 18px #1976d088,0 0 90px 30px #1976d044,0 8px 32px rgba(0,0,0,0.5); }
+          }
+          @keyframes dbDotBounce {
+            0%,80%,100% { transform:translateY(0); opacity:0.4; }
+            40%          { transform:translateY(-10px); opacity:1; }
+          }
+          @keyframes dbTruckLoad {
+            0%   { left:-5%; opacity:0; }
+            8%   { opacity:1; }
+            92%  { opacity:1; }
+            100% { left:105%; opacity:0; }
+          }
+          @keyframes dbRotate {
+            from { transform:rotate(0deg); }
+            to   { transform:rotate(360deg); }
+          }
+          @keyframes dbShimmer {
+            0%   { background-position:200% center; }
+            100% { background-position:-200% center; }
+          }
+          @keyframes dbFloat {
+            0%,100% { transform:translateY(0px); }
+            50%      { transform:translateY(-8px); }
+          }
+        `}</style>
+
+        {/* Rotating orbit rings */}
+        <div style={{position:"absolute",width:280,height:280,borderRadius:"50%",border:"1.5px dashed rgba(21,101,192,0.2)",animation:"dbRotate 18s linear infinite",pointerEvents:"none"}} />
+        <div style={{position:"absolute",width:360,height:360,borderRadius:"50%",border:"1px dashed rgba(255,167,38,0.1)",animation:"dbRotate 28s linear infinite reverse",pointerEvents:"none"}} />
+
+        {/* Logo with pulse rings */}
+        <div style={{position:"relative",display:"inline-flex",alignItems:"center",justifyContent:"center",marginBottom:28,animation:"dbFloat 3s ease-in-out infinite"}}>
+          <div style={{position:"absolute",inset:-20,borderRadius:"50%",background:"rgba(21,101,192,0.15)",animation:"dbPulseRing 2.2s ease-in-out infinite"}} />
+          <div style={{position:"absolute",inset:-38,borderRadius:"50%",background:"rgba(21,101,192,0.07)",animation:"dbPulseRing2 2.2s ease-in-out infinite"}} />
+          <img src={LOGO_SRC} alt="M Yantra"
+            style={{width:130,height:130,borderRadius:"50%",objectFit:"cover",position:"relative",
+              border:"3px solid rgba(255,255,255,0.15)",
+              animation:"dbLogoGlow 2.2s ease-in-out infinite"}} />
+        </div>
+
+        {/* Title */}
+        <div style={{fontSize:20,fontWeight:900,letterSpacing:1.5,
+          background:"linear-gradient(90deg,#90caf9,#ffffff,#ffd54f,#ffffff,#90caf9)",
+          backgroundSize:"200% auto",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",
+          backgroundClip:"text",animation:"dbShimmer 3s linear infinite",marginBottom:6}}>
+          M. YANTRA ENTERPRISES
+        </div>
+
+        {/* Truck animation strip */}
+        <div style={{width:220,height:28,position:"relative",overflow:"hidden",marginBottom:18}}>
+          {["🚛","🚚","🚛"].map((_,i)=>(
+            <span key={i} style={{position:"absolute",top:"50%",
+              transform:"translateY(-50%) scaleX(-1)",fontSize:18,
+              animation:`dbTruckLoad ${3.6+i*0.5}s ${i*1.2}s infinite linear`}}>🚛</span>
+          ))}
+        </div>
+
+        {/* Connecting text + bouncing dots */}
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          <span style={{color:"rgba(255,255,255,0.5)",fontSize:13,letterSpacing:1}}>Connecting to database</span>
+          {[0,1,2].map(i=>(
+            <span key={i} style={{display:"inline-block",width:6,height:6,borderRadius:"50%",
+              background:"#90caf9",
+              animation:`dbDotBounce 1.2s ${i*0.2}s infinite ease-in-out`}} />
+          ))}
+        </div>
       </div>
     );
     return <Login onLogin={u=>{setUser(u);log("LOGIN",`${u.name} signed in`);}} />;
@@ -3864,6 +3937,7 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
   const [addSheet,    setAddSheet]    = useState(false);
   const [editSheet,   setEditSheet]   = useState(null);
   const [filter,      setFilter]      = useState("All");
+  const [orderTypeFilter, setOrderTypeFilter] = useState("All"); // "All"|"godown"|"party"
   const [search,      setSearch]      = useState("");
   const [clientFilter, setClientFilter] = useState(""); // "" = All clients
   const [diConflict,  setDiConflict]  = useState(null);
@@ -3918,7 +3992,8 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
   const ff = k => v => setF(p => ({...p, [k]:v}));
 
   const list   = trips.filter(t => t.type===tripType);
-  const clist  = clientFilter ? list.filter(t => (t.client||DEFAULT_CLIENT)===clientFilter) : list;
+  const olist  = orderTypeFilter==="All" ? list : orderTypeFilter==="party" ? list.filter(t=>t.orderType==="party") : list.filter(t=>!t.orderType||t.orderType==="godown");
+  const clist  = clientFilter ? olist.filter(t => (t.client||DEFAULT_CLIENT)===clientFilter) : olist;
   const dlist  = (dateFrom||dateTo) ? clist.filter(t => t.date>=(dateFrom||"2000-01-01") && t.date<=(dateTo||"2099-12-31")) : clist;
   const slist  = search ? dlist.filter(t => {
     const q = search.trim().toLowerCase();
@@ -4445,6 +4520,26 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
       </div>
 
       <PillBar items={["All","Pending Bill","Billed","Paid"].map(s=>({id:s,label:s+(s!=="All"?` (${list.filter(t=>t.status===s).length})`:""  ),color:SC(s)}))} active={filter} onSelect={setFilter} />
+
+      {/* Order type filter — only for outbound trips */}
+      {!isIn && (
+        <div style={{display:"flex",gap:6,alignItems:"center"}}>
+          <span style={{color:C.muted,fontSize:11,fontWeight:700,flexShrink:0}}>Order:</span>
+          {[
+            {id:"All",    label:"All",           icon:"📦"},
+            {id:"godown", label:`Godown (${list.filter(t=>!t.orderType||t.orderType==="godown").length})`, icon:"🏭"},
+            {id:"party",  label:`Party (${list.filter(t=>t.orderType==="party").length})`,  icon:"🤝"},
+          ].map(o=>(
+            <button key={o.id} onClick={()=>setOrderTypeFilter(o.id)}
+              style={{padding:"5px 10px",borderRadius:20,border:`1.5px solid ${orderTypeFilter===o.id?C.accent:C.border}`,
+                background:orderTypeFilter===o.id?C.accent+"22":"transparent",
+                color:orderTypeFilter===o.id?C.accent:C.muted,
+                fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+              {o.icon} {o.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Client / Plant filter — only shows when multiple clients present */}
       {(()=>{
