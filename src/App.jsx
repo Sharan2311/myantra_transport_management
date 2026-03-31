@@ -1093,6 +1093,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
   // An item is "ready" if: LR filled, driver rate filled, no LR conflict with saved trips
   // (same LR in saved trips = merge flow — handled at save time)
   const readyItems = doneItems.filter(x => {
+    if(x.dupTrip) return false; // has known duplicate DI
     if(!x.lrNo.trim()) return false;
     if(!x.givenRate || +x.givenRate <= 0) return false;
     // Margin must be >= 30
@@ -1106,8 +1107,29 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
   const canSave = readyItems.length > 0 && !saving;
 
   const saveAll = async () => {
-    // Validate each ready item before saving
+    // Validate each ready item before saving — per-trip with clear errors
     for(const item of readyItems) {
+      // Duplicate DI check (catches cases where DI was added to trips after scan)
+      const diNo = (item.extracted?.diNo||"").trim();
+      if(diNo) {
+        const dupInSaved = (trips||[]).find(t => {
+          if(t.diLines&&t.diLines.length>0) return t.diLines.some(d=>d.diNo===diNo);
+          return (t.diNo||"").split("+").map(s=>s.trim()).includes(diNo);
+        });
+        if(dupInSaved) {
+          alert(`LR ${item.lrNo}: DI ${diNo} is already recorded in LR ${dupInSaved.lrNo} (${dupInSaved.truckNo}).\nThis trip cannot be saved.`);
+          return;
+        }
+        // Duplicate within this batch session
+        const dupInBatch = readyItems.find(other =>
+          other.id !== item.id &&
+          (other.extracted?.diNo||"").trim() === diNo
+        );
+        if(dupInBatch) {
+          alert(`LR ${item.lrNo}: DI ${diNo} appears in another row (LR ${dupInBatch.lrNo}).\nTwo trips cannot have the same DI number.`);
+          return;
+        }
+      }
       const margin = (+item.extracted?.frRate||0) - (+item.givenRate||0);
       if(margin < 30) {
         alert(`LR ${item.lrNo}: Margin is ₹${margin}/MT. Minimum ₹30/MT required.\nPlease fix the driver rate.`);
@@ -1490,44 +1512,34 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                     {/* GR Copy upload */}
                     <div style={{background:C.card2,border:`1.5px dashed ${item.grFile?C.green:C.red}`,
                       borderRadius:10,padding:"10px 12px"}}>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:item.grFile?4:0}}>
-                        <div style={{fontSize:11,fontWeight:700,
-                          color:item.grFile?C.green:C.red}}>
-                          {item.grFile?"✓ GR Copy":"📄 GR Copy — required *"}
-                        </div>
-                        <label style={{background:C.teal+"22",border:`1px solid ${C.teal}44`,
-                          color:C.teal,borderRadius:6,padding:"4px 10px",
-                          fontSize:11,fontWeight:700,cursor:"pointer"}}>
-                          {item.grFile?"Replace":"Upload"}
-                          <input type="file" accept="application/pdf,image/*"
-                            style={{display:"none"}}
-                            onChange={e=>e.target.files?.[0]&&update(item.id,"grFile",e.target.files[0])} />
-                        </label>
+                      <div style={{fontSize:11,fontWeight:700,
+                        color:item.grFile?C.green:C.red,marginBottom:6}}>
+                        {item.grFile?"✓ GR Copy":"📄 GR Copy — required *"}
                       </div>
                       {item.grFile&&(
-                        <div style={{fontSize:11,color:C.green}}>{item.grFile.name}</div>
+                        <div style={{fontSize:11,color:C.green,marginBottom:6}}>{item.grFile.name}</div>
                       )}
+                      <FileSourcePicker
+                        onFile={f=>update(item.id,"grFile",f)}
+                        accept="application/pdf,image/*"
+                        label={item.grFile?"Replace GR Copy":"Upload GR Copy"}
+                        color={C.green} compact />
                     </div>
                     {/* Invoice upload */}
-                    <div style={{background:C.card2,border:`1.5px dashed ${item.invoiceFile?C.green:C.red}`,
+                    <div style={{background:C.card2,border:`1.5px dashed ${item.invoiceFile?C.blue:C.red}`,
                       borderRadius:10,padding:"10px 12px"}}>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:item.invoiceFile?4:0}}>
-                        <div style={{fontSize:11,fontWeight:700,
-                          color:item.invoiceFile?C.green:C.red}}>
-                          {item.invoiceFile?"✓ Invoice":"🧾 Invoice — required *"}
-                        </div>
-                        <label style={{background:C.blue+"22",border:`1px solid ${C.blue}44`,
-                          color:C.blue,borderRadius:6,padding:"4px 10px",
-                          fontSize:11,fontWeight:700,cursor:"pointer"}}>
-                          {item.invoiceFile?"Replace":"Upload"}
-                          <input type="file" accept="application/pdf,image/*"
-                            style={{display:"none"}}
-                            onChange={e=>e.target.files?.[0]&&update(item.id,"invoiceFile",e.target.files[0])} />
-                        </label>
+                      <div style={{fontSize:11,fontWeight:700,
+                        color:item.invoiceFile?C.blue:C.red,marginBottom:6}}>
+                        {item.invoiceFile?"✓ Invoice":"🧾 Invoice — required *"}
                       </div>
                       {item.invoiceFile&&(
-                        <div style={{fontSize:11,color:C.blue}}>{item.invoiceFile.name}</div>
+                        <div style={{fontSize:11,color:C.blue,marginBottom:6}}>{item.invoiceFile.name}</div>
                       )}
+                      <FileSourcePicker
+                        onFile={f=>update(item.id,"invoiceFile",f)}
+                        accept="application/pdf,image/*"
+                        label={item.invoiceFile?"Replace Invoice":"Upload Invoice"}
+                        color={C.blue} compact />
                     </div>
                     <div style={{fontSize:11,color:C.muted}}>
                       ⓘ Files will be uploaded to storage when you tap Save All
@@ -1548,6 +1560,8 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                     style={{width:"100%",border:`1.5px solid ${C.border}`,borderRadius:8,
                       padding:"8px 10px",fontSize:13,background:C.bg,color:C.text,
                       outline:"none",boxSizing:"border-box"}} />
+                </div>
+              )}
 
               {/* ── Extra fields (same as Add Trip form) ── */}
               <div style={{borderTop:`1px solid ${C.border}`,paddingTop:10,
@@ -1620,8 +1634,6 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                   <div style={{fontSize:11,color:C.red}}>⚠ Diesel Indent No required when estimate is entered</div>
                 )}
               </div>
-                </div>
-              )}
             </div>
           )}
         </div>
