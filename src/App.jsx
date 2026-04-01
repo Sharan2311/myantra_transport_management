@@ -6392,7 +6392,7 @@ function PumpRow({p, paid, onPayAll}) {
 
 
 // ─── DIESEL ALERT BANNER ──────────────────────────────────────────────────────
-function DieselAlertBanner({ alerts, trips, indents, user, onLink, onDismiss, onDelete }) {
+function DieselAlertBanner({ alerts, trips, indents, user, onLink, onDismiss, onDelete, viewOnly=false }) {
   const [expandedId, setExpandedId] = useState(null);
   const [linkTripId,  setLinkTripId]  = useState("");
   const [dismissReason, setDismissReason] = useState("");
@@ -6457,7 +6457,7 @@ function DieselAlertBanner({ alerts, trips, indents, user, onLink, onDismiss, on
               <div style={{color:C.red,fontWeight:800,fontSize:16}}>
                 ₹{(alert.amount||0).toLocaleString("en-IN")}
               </div>
-              {user.role==="owner" && (
+              {user.role==="owner" && !viewOnly && (
                 <button onClick={e=>{e.stopPropagation();if(window.confirm(`Delete alert for ${alert.truckNo}?\nThis cannot be undone.`)){onDelete(alert.id);}}}
                   style={{background:"none",border:"1px solid "+C.red+"44",borderRadius:5,color:C.red,
                     fontSize:10,padding:"2px 6px",cursor:"pointer",marginTop:3,display:"block",width:"100%"}}>
@@ -6472,6 +6472,13 @@ function DieselAlertBanner({ alerts, trips, indents, user, onLink, onDismiss, on
           {expandedId===alert.id && (
             <div style={{padding:"0 14px 14px",borderTop:`1px solid ${C.border}22`,
               display:"flex",flexDirection:"column",gap:10,paddingTop:12}}>
+
+              {viewOnly ? (
+                <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,
+                  borderRadius:8,padding:"10px 12px",color:C.orange,fontSize:12,fontWeight:600,textAlign:"center"}}>
+                  👁 View Only — contact owner to resolve this alert
+                </div>
+              ) : (<>
 
               {/* Send WhatsApp alert */}
               <Btn onClick={()=>sendWhatsApp(alert)} full outline color={C.red} sm>
@@ -6541,6 +6548,7 @@ function DieselAlertBanner({ alerts, trips, indents, user, onLink, onDismiss, on
                   </Btn>
                 </div>
               )}
+              </>)}
             </div>
           )}
         </div>
@@ -7544,6 +7552,7 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
       {redAlerts.length > 0 && (
         <DieselAlertBanner
           alerts={redAlerts} trips={trips} indents={indents} user={user}
+          viewOnly={viewOnly}
           onLink={(alertId, tripId) => linkAlertToTrip(alertId, tripId)}
           onDismiss={(alertId, reason) => dismissAlert(alertId, reason)}
           onDelete={deleteAlert}
