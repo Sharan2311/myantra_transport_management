@@ -434,7 +434,7 @@ const MORE_TABS = [
   {id:"tafal",     icon:"🤝",label:"TAFAL",          perm:"tafal",        group:"money"},
   {id:"vehicles",  icon:"🚛",label:"Vehicles",       perm:"vehicles",     group:"fleet"},
   {id:"employees", icon:"👥",label:"Employees",      perm:"employees",    group:"fleet"},
-  {id:"payments",  icon:"💰",label:"Shree Payments", perm:"payments",     group:"finance"},
+  {id:"payments",  icon:"💰",label:"Payments",        perm:"payments",   group:"finance"},
   {id:"expenses",  icon:"🧮",label:"Expenses",       perm:"payments",     group:"finance"},
   {id:"reports",   icon:"📤",label:"Reports",        perm:"reports",      group:"info"},
   {id:"reminders", icon:"📲",label:"Reminders",      perm:"reminders",    group:"info"},
@@ -776,6 +776,7 @@ export default function App() {
   const [saving, setSaving] = useState(false);
   const [saveErr, setSaveErr] = useState("");
   const [selectedFY, setSelectedFY] = useState(currentFY()); // Financial year filter
+  const [selectedClient, setSelectedClient] = useState(""); // "" = All clients
 
   const [users,       setUsers,       rU, reloadUsers]       = useDB(DB.getUsers,       []);
   const [trips,       setTrips,       rT, reloadTrips]       = useDB(DB.getTrips,       []);
@@ -975,6 +976,7 @@ export default function App() {
   const sp = {
     trips, setTrips:dbSetTrips,
     fyTrips, selectedFY, setSelectedFY,
+    selectedClient, setSelectedClient,
     vehicles, setVehicles:dbSetVehicles,
     employees, setEmployees:dbSetEmployees,
     payments, setPayments:dbSetPayments,
@@ -1135,27 +1137,55 @@ export default function App() {
         </div>
       )}
 
-      {/* FY SELECTOR BAR — owner/manager only */}
-      {(user.role==="owner"||user.role==="manager") && (()=>{
-        // Build list of FYs that have data, plus current FY
+      {/* FY + CLIENT FILTER BAR */}
+      {(()=>{
+        // Build FY list from data
         const fySet = new Set([currentFY()]);
         (trips||[]).forEach(t=>{ const fy=getFY(t.date); if(fy) fySet.add(fy); });
-        const fyList = [...fySet].sort((a,b)=>b-a); // descending — newest first
-        if(fyList.length<=1) return null; // hide if only one FY
+        const fyList = [...fySet].sort((a,b)=>b-a);
+        // Build client list from data
+        const clientsInData = CLIENTS.filter(c=>(trips||[]).some(t=>(t.client||DEFAULT_CLIENT)===c));
+        const showBar = fyList.length > 1 || clientsInData.length > 1;
+        if(!showBar) return null;
         return (
-          <div style={{background:C.card,borderBottom:`1px solid ${C.border}`,
-            padding:"7px 16px",display:"flex",alignItems:"center",gap:8,overflowX:"auto"}}>
-            <span style={{color:C.muted,fontSize:11,fontWeight:700,flexShrink:0}}>📅 FY:</span>
-            {fyList.map(fy=>(
-              <button key={fy} onClick={()=>setSelectedFY(fy)}
-                style={{padding:"4px 10px",borderRadius:16,fontSize:11,fontWeight:700,
-                  cursor:"pointer",flexShrink:0,whiteSpace:"nowrap",
-                  border:`1.5px solid ${selectedFY===fy?C.accent:C.border}`,
-                  background:selectedFY===fy?C.accent+"22":"transparent",
-                  color:selectedFY===fy?C.accent:C.muted}}>
-                {FY_LABEL(fy)}{fy===currentFY()?" ←":""}
-              </button>
-            ))}
+          <div style={{background:C.card,borderBottom:`1px solid ${C.border}`,padding:"8px 16px",display:"flex",flexDirection:"column",gap:6}}>
+            {/* FY row */}
+            {fyList.length > 1 && (
+              <div style={{display:"flex",alignItems:"center",gap:6,overflowX:"auto"}}>
+                <span style={{color:C.muted,fontSize:10,fontWeight:700,flexShrink:0,letterSpacing:0.5}}>📅 FY</span>
+                {fyList.map(fy=>(
+                  <button key={fy} onClick={()=>setSelectedFY(fy)}
+                    style={{padding:"3px 9px",borderRadius:14,fontSize:11,fontWeight:700,
+                      cursor:"pointer",flexShrink:0,whiteSpace:"nowrap",
+                      border:`1.5px solid ${selectedFY===fy?C.accent:C.border}`,
+                      background:selectedFY===fy?C.accent+"22":"transparent",
+                      color:selectedFY===fy?C.accent:C.muted}}>
+                    {FY_LABEL(fy)}{fy===currentFY()?" ←":""}
+                  </button>
+                ))}
+              </div>
+            )}
+            {/* Client row */}
+            {clientsInData.length > 1 && (
+              <div style={{display:"flex",alignItems:"center",gap:6,overflowX:"auto"}}>
+                <span style={{color:C.muted,fontSize:10,fontWeight:700,flexShrink:0,letterSpacing:0.5}}>🏭 Client</span>
+                {["", ...clientsInData].map(c=>{
+                  const label = c==="" ? "All" : c.replace("Shree Cement ","SC ").replace("Ultratech ","UT ");
+                  const col = c===""?C.muted:c.includes("Ultratech")?C.orange:c.includes("Guntur")?C.purple:C.blue;
+                  const active = selectedClient===c;
+                  return (
+                    <button key={c||"all"} onClick={()=>setSelectedClient(c)}
+                      style={{padding:"3px 9px",borderRadius:14,fontSize:11,fontWeight:700,
+                        cursor:"pointer",flexShrink:0,whiteSpace:"nowrap",
+                        border:`1.5px solid ${active?col:C.border}`,
+                        background:active?col+"22":"transparent",
+                        color:active?col:C.muted}}>
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
         );
       })()}
@@ -4044,7 +4074,7 @@ function SealedInvoiceSheet({ trip, onMerge, onClose, embedded=false }) {
 }
 
 // ─── TRIPS ────────────────────────────────────────────────────────────────────
-function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripType, user, log, driverPays, employees, cashTransfers, setCashTransfers, allTripsLoaded, loadingAllTrips, loadAllTrips}) {
+function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles, indents, settings, tripType, user, log, driverPays, employees, cashTransfers, setCashTransfers, allTripsLoaded, loadingAllTrips, loadAllTrips}) {
   const isIn = tripType === "inbound";
   const ac   = isIn ? C.teal : C.accent;
 
@@ -4105,9 +4135,10 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
   const [f, setF] = useState(blankForm);
   const ff = k => v => setF(p => ({...p, [k]:v}));
 
-  const list   = trips.filter(t => t.type===tripType);
+  const baseTrips = fyTrips || trips; // use FY-filtered if available
+  const list   = baseTrips.filter(t => t.type===tripType);
   const olist  = orderTypeFilter==="All" ? list : orderTypeFilter==="party" ? list.filter(t=>t.orderType==="party") : list.filter(t=>!t.orderType||t.orderType==="godown");
-  const clist  = clientFilter ? olist.filter(t => (t.client||DEFAULT_CLIENT)===clientFilter) : olist;
+  const clist  = selectedClient ? olist.filter(t => (t.client||DEFAULT_CLIENT)===selectedClient) : (clientFilter ? olist.filter(t => (t.client||DEFAULT_CLIENT)===clientFilter) : olist);
   const dlist  = (dateFrom||dateTo) ? clist.filter(t => t.date>=(dateFrom||"2000-01-01") && t.date<=(dateTo||"2099-12-31")) : clist;
   const slist  = search ? dlist.filter(t => {
     const q = search.trim().toLowerCase();
@@ -4509,64 +4540,99 @@ function Trips({trips, setTrips, vehicles, setVehicles, indents, settings, tripT
 
   return (
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-        <div style={{color:ac,fontWeight:800,fontSize:16}}>{isIn?"🏭 Raw Material":"🚚 Cement Trips"}</div>
+
+      {/* ── HEADER CARD ── */}
+      <div style={{background:C.card,borderRadius:16,padding:"14px 16px",
+        border:`1px solid ${C.border}`,
+        boxShadow:"0 1px 4px rgba(0,0,0,0.06)"}}>
+
+        {/* Title row */}
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+          <div>
+            <div style={{color:ac,fontWeight:900,fontSize:18,letterSpacing:0.2}}>
+              {isIn ? "🏭 Raw Material" : "🚛 Cement Trips"}
+            </div>
+            <div style={{color:C.muted,fontSize:11,marginTop:1}}>
+              {shown.length} trip{shown.length!==1?"s":""} · {shown.reduce((s,t)=>s+(t.qty||0),0)} MT
+            </div>
+          </div>
+          {/* Date filter toggle */}
+          <button onClick={()=>setShowDateFilter(v=>!v)}
+            style={{background:(showDateFilter||(dateFrom||dateTo))?C.orange+"22":"transparent",
+              border:`1.5px solid ${(showDateFilter||(dateFrom||dateTo))?C.orange:C.border}`,
+              borderRadius:10,color:(showDateFilter||(dateFrom||dateTo))?C.orange:C.muted,
+              padding:"6px 10px",fontSize:12,fontWeight:700,cursor:"pointer",
+              display:"flex",alignItems:"center",gap:4}}>
+            📅{(dateFrom||dateTo)?" Filtered":""}
+          </button>
+        </div>
+
+        {/* Action buttons row */}
         <div style={{display:"flex",gap:8}}>
-          <Btn onClick={()=>setShowDateFilter(v=>!v)} sm outline color={showDateFilter||(dateFrom||dateTo)?C.orange:C.muted}>📅</Btn>
           {!isIn && (() => {
-            const pending = trips.filter(t=>t.orderType==="party"&&!t.emailSentAt);
-            return pending.length>0 ? (
-              <Btn onClick={()=>setPartyEmailSheet(true)} sm
-                color={pending.length>5?C.red:C.accent}>
-                📧 {pending.length}
-              </Btn>
+            const pendingEmail = trips.filter(t=>t.orderType==="party"&&!t.emailSentAt);
+            return pendingEmail.length>0 ? (
+              <button onClick={()=>setPartyEmailSheet(true)}
+                style={{flex:1,background:pendingEmail.length>5?C.red+"11":C.accent+"11",
+                  border:`1.5px solid ${pendingEmail.length>5?C.red:C.accent}`,
+                  borderRadius:10,color:pendingEmail.length>5?C.red:C.accent,
+                  padding:"8px 4px",fontSize:12,fontWeight:700,cursor:"pointer",
+                  display:"flex",alignItems:"center",justifyContent:"center",gap:4}}>
+                📧 <span style={{background:pendingEmail.length>5?C.red:C.accent,
+                  color:"#fff",borderRadius:8,padding:"1px 6px",fontSize:11}}>
+                  {pendingEmail.length}
+                </span>
+              </button>
             ) : null;
           })()}
           {!isIn && (
             <button onClick={()=>setBatchDISheet(true)}
-              style={{background:C.teal,border:"none",borderRadius:10,color:"#fff",
-                padding:"8px 12px",fontSize:13,fontWeight:700,cursor:"pointer",
-                display:"flex",alignItems:"center",gap:5}}>
+              style={{flex:1,background:C.teal+"11",border:`1.5px solid ${C.teal}`,
+                borderRadius:10,color:C.teal,padding:"8px 4px",fontSize:12,
+                fontWeight:700,cursor:"pointer",display:"flex",
+                alignItems:"center",justifyContent:"center",gap:4}}>
               🌅 Batch
             </button>
           )}
           <button onClick={()=>{
-            if(isIn){setOrderTypeStep("godown");setF(blankForm(false));}
-            else{setOrderTypeStep("selecting");}
-            setAddSheet(true);
-          }} style={{background:ac,border:"none",borderRadius:10,color:"#fff",
-            padding:"8px 16px",fontSize:13,fontWeight:700,cursor:"pointer"}}>
-            Add Trip
+              if(isIn){setOrderTypeStep("godown");setF(blankForm(false));}
+              else{setOrderTypeStep("selecting");}
+              setAddSheet(true);
+            }}
+            style={{flex:2,background:ac,border:"none",borderRadius:10,color:"#fff",
+              padding:"9px 8px",fontSize:13,fontWeight:800,cursor:"pointer",
+              display:"flex",alignItems:"center",justifyContent:"center",gap:5}}>
+            ＋ Add Trip
           </button>
         </div>
       </div>
-      {/* Warning: >5 pending party emails */}
+
+      {/* Warning banner: >5 pending party emails */}
       {!isIn && (() => {
         const pending = trips.filter(t=>t.orderType==="party"&&!t.emailSentAt);
         return pending.length>5 ? (
-          <div style={{background:C.red+"11",border:"1px solid "+C.red+"44",borderRadius:10,
-            padding:"9px 14px",color:C.red,fontSize:12,fontWeight:700,
-            display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
-            <span style={{flex:1}}>⚠ {pending.length} party trips waiting for email</span>
-            <div style={{display:"flex",gap:6,flexShrink:0}}>
+          <div style={{background:C.red+"11",border:`1px solid ${C.red}44`,borderRadius:12,
+            padding:"10px 14px",display:"flex",flexWrap:"wrap",alignItems:"center",gap:8}}>
+            <span style={{color:C.red,fontSize:12,fontWeight:700,flex:1,minWidth:120}}>
+              ⚠ {pending.length} party trips waiting for email
+            </span>
+            <div style={{display:"flex",gap:6}}>
               <button onClick={()=>setWaSheet(true)}
                 style={{background:"#25D366",border:"none",color:"#fff",borderRadius:8,
-                  padding:"4px 10px",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+                  padding:"5px 10px",fontSize:11,fontWeight:700,cursor:"pointer"}}>
                 📲 Remind
               </button>
               <button onClick={()=>setPartyEmailSheet(true)}
                 style={{background:C.blue,border:"none",color:"#fff",borderRadius:8,
-                  padding:"4px 10px",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+                  padding:"5px 10px",fontSize:11,fontWeight:700,cursor:"pointer"}}>
                 📧 Email
               </button>
               <button onClick={()=>{
-                // Find first party trip with GR uploaded but no merged PDF for sealed invoice
-                const t = (trips||[]).find(x=>x.orderType==="party"&&x.grFilePath&&!x.mergedPdfPath);
-                if(t) setSealedSheet(t);
-                else setSealedSheet((trips||[]).find(x=>x.orderType==="party"&&!x.mergedPdfPath)||null);
-              }}
+                  const t=(trips||[]).find(x=>x.orderType==="party"&&x.grFilePath&&!x.mergedPdfPath);
+                  setSealedSheet(t||(trips||[]).find(x=>x.orderType==="party"&&!x.mergedPdfPath)||null);
+                }}
                 style={{background:C.orange,border:"none",color:"#fff",borderRadius:8,
-                  padding:"4px 10px",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+                  padding:"5px 10px",fontSize:11,fontWeight:700,cursor:"pointer"}}>
                 🏷️ Sealed
               </button>
             </div>
@@ -5803,10 +5869,12 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
 }
 
 // ─── BILLING ──────────────────────────────────────────────────────────────────
-function Billing({trips, setTrips, user, log}) {
-  const pending = trips.filter(t => t.status==="Pending Bill");
-  const billed  = trips.filter(t => t.status==="Billed");
-  const paid    = trips.filter(t => t.status==="Paid");
+function Billing({trips, setTrips, fyTrips, selectedClient, user, log}) {
+  const baseTrips = fyTrips || trips;
+  const filteredTrips = selectedClient ? baseTrips.filter(t=>(t.client||DEFAULT_CLIENT)===selectedClient) : baseTrips;
+  const pending = filteredTrips.filter(t => t.status==="Pending Bill");
+  const billed  = filteredTrips.filter(t => t.status==="Billed");
+  const paid    = filteredTrips.filter(t => t.status==="Paid");
   const [orderFilter, setOrderFilter] = useState("All"); // "All" | "godown" | "party"
 
   // Apply order type filter to pending
@@ -8459,7 +8527,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
               {/* Record Recovery */}
               <div style={{background:C.bg,borderRadius:12,padding:14}}>
                 <div style={{color:C.green,fontWeight:700,fontSize:12,marginBottom:10}}>💰 Record Recovery</div>
-                {bal<=0&&<div style={{background:"#002200",borderRadius:8,padding:"7px 10px",fontSize:11,color:C.green,marginBottom:8}}>✓ Loan fully recovered — no balance pending</div>}
+                {bal<=0&&<div style={{background:C.green+"11",borderRadius:8,padding:"7px 10px",fontSize:11,color:C.green,marginBottom:8}}>✓ Loan fully recovered — no balance pending</div>}
                 {bal>0&&<div style={{background:"#1a0a00",borderRadius:8,padding:"7px 10px",fontSize:11,color:C.orange,marginBottom:8}}>Outstanding balance: ₹{fmt(bal)}{+rAmt>0?` · Entering: ₹${fmt(+rAmt)}${+rAmt>bal?" ⚠ exceeds balance":" ✓"}`:""}  </div>}
                 <div style={{display:"flex",gap:10}}>
                   <Field label="Amount ₹ *" value={rAmt}  onChange={setRAmt}  type="number" half />
@@ -8633,8 +8701,8 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
                   const owedMT  = txns.filter(x=>x.type==="shortage").reduce((s,x)=>s+(x.qty||0),0);
                   const recvdMT = txns.filter(x=>x.type==="recovery").reduce((s,x)=>s+(x.qty||0),0);
                   const balMT   = Math.max(0, owedMT-recvdMT);
-                  if(owedMT===0) return <div style={{background:"#002200",borderRadius:8,padding:"7px 10px",fontSize:11,color:C.green,marginBottom:8}}>✓ No shortage recorded — nothing to recover</div>;
-                  if(balMT<=0)  return <div style={{background:"#002200",borderRadius:8,padding:"7px 10px",fontSize:11,color:C.green,marginBottom:8}}>✓ Shortage fully recovered</div>;
+                  if(owedMT===0) return <div style={{background:C.green+"11",borderRadius:8,padding:"7px 10px",fontSize:11,color:C.green,marginBottom:8}}>✓ No shortage recorded — nothing to recover</div>;
+                  if(balMT<=0)  return <div style={{background:C.green+"11",borderRadius:8,padding:"7px 10px",fontSize:11,color:C.green,marginBottom:8}}>✓ Shortage fully recovered</div>;
                   return <div style={{background:"#1a0a00",borderRadius:8,padding:"7px 10px",fontSize:11,color:C.orange,marginBottom:8}}>
                     Outstanding: {balMT.toFixed(3)} MT{+srAmt>0?` · Entering: ${srAmt}MT${+srAmt>balMT?" ⚠ exceeds balance":" ✓"}`:""}
                   </div>;
@@ -9030,7 +9098,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
       h2{margin-bottom:2px}
       .sub{color:#666;font-size:12px;margin-bottom:14px}
       table{width:100%;border-collapse:collapse;margin-top:12px}
-      th{background:#1a1a2e;color:#fff;padding:7px 8px;text-align:left;font-size:11px}
+      th{background:#1565c0;color:#fff;padding:7px 8px;text-align:left;font-size:11px}
       td{padding:6px 8px;border-bottom:1px solid #eee;font-size:11px}
       .summary{display:flex;gap:24px;margin:12px 0;font-size:13px}
       .sv{font-weight:bold}.sc{color:green}.sd{color:#c00}.sb{color:#f97316}
@@ -9241,7 +9309,7 @@ function GstReleaseForm({ gstHoldItems, gstReleases, setGstReleases, isOwner, lo
 
   if(!isOwner) return null;
   if(pendingItems.length === 0) return (
-    <div style={{background:"#0d2618",border:"1px solid #4caf5033",borderRadius:10,
+    <div style={{background:C.green+"11",border:`1px solid ${C.green}33`,borderRadius:10,
       padding:"10px 14px",color:"#1b6e3a",fontSize:12,fontWeight:700,textAlign:"center"}}>
       ✅ All GST holds have been released
     </div>
@@ -9849,9 +9917,9 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
 
   // shared UI
   const Pill = ({status,shortage}) => {
-    const c={pending:{bg:"#2a2a2a",col:"#888",txt:"Pending"},
+    const c={pending:{bg:C.bg,col:C.muted,txt:"Pending"},
              billed:{bg:"#1a2a1a",col:"#1b6e3a",txt:"Billed"},
-             paid:{bg:"#1a1a2e",col:"#1565c0",txt:"Paid"}}[status]||{bg:"#2a2a2a",col:"#888",txt:"Pending"};
+             paid:{bg:C.blue+"11",col:C.blue,txt:"Paid"}}[status]||{bg:C.bg,col:C.muted,txt:"Pending"};
     return <span style={{display:"inline-flex",alignItems:"center",gap:3}}>
       <span style={{background:c.bg,color:c.col,border:`1px solid ${c.col}40`,borderRadius:4,padding:"2px 7px",fontSize:10,fontWeight:700}}>{c.txt}</span>
       {shortage&&<span style={{background:"#2a1515",color:"#b91c1c",border:"1px solid #ff6b6b40",borderRadius:4,padding:"2px 5px",fontSize:10,fontWeight:700}}>⚠SHORT</span>}
@@ -9862,7 +9930,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
     <div style={{position:"relative",marginBottom:12}}>
       <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",fontSize:14,color:"#4a7090",pointerEvents:"none"}}>🔍</span>
       <input value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
-        style={{width:"100%",boxSizing:"border-box",background:"#161616",border:"1px solid #2a2a2a",
+        style={{width:"100%",boxSizing:"border-box",background:C.bg,border:`1px solid ${C.border}`,
           borderRadius:8,padding:"9px 32px 9px 32px",color:"#ccc",fontSize:13,outline:"none"}}/>
       {value&&<button onClick={()=>onChange("")}
         style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",
@@ -10210,7 +10278,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
             </div>
 
             {/* recent trips */}
-            <div style={{background:C.bg,border:"1px solid #222",borderRadius:8,overflow:"hidden"}}>
+            <div style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,overflow:"hidden"}}>
               <div style={{padding:"10px 14px",borderBottom:"1px solid #1e1e1e",
                 display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                 <span style={{fontWeight:700,fontSize:13}}>Recent Shree Trips</span>
@@ -10223,7 +10291,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
               {shreeTrips.length===0
                 ? <EmptyState icon="🚛" text='Trips with "Billed to Shree" amount will appear here.'/>
                 : shreeTrips.slice(0,5).map(t=>(
-                  <div key={t.id} style={{padding:"10px 14px",borderBottom:"1px solid #161616",
+                  <div key={t.id} style={{padding:"10px 14px",borderBottom:`1px solid ${C.border}`,
                     background:t.shreeShortage?"#140808":"transparent"}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3}}>
                       <span style={{fontFamily:"monospace",fontSize:12,color:"#ccc"}}>{t.lr||t.lrNo}</span>
@@ -10253,7 +10321,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
               : filteredInvoices.map(inv=>{
                 const isOpen = expandedInv===inv.invoiceNo;
                 return (
-                  <div key={inv.invoiceNo} style={{background:C.bg,border:"1px solid #222",
+                  <div key={inv.invoiceNo} style={{background:C.bg,border:`1px solid ${C.border}`,
                     borderRadius:8,marginBottom:10,overflow:"hidden"}}>
                     <div onClick={()=>setExpandedInv(isOpen?null:inv.invoiceNo)}
                       style={{padding:"12px 14px",cursor:"pointer",
@@ -10283,7 +10351,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                     {isOpen&&(
                       <div style={{borderTop:"1px solid #1e1e1e"}}>
                         {inv.trips.map(t=>(
-                          <div key={t.id} style={{padding:"9px 14px",borderBottom:"1px solid #161616",
+                          <div key={t.id} style={{padding:"9px 14px",borderBottom:`1px solid ${C.border}`,
                             background:t.shreeShortage?"#fef2f2":C.card2}}>
                             <div style={{display:"flex",justifyContent:"space-between",fontSize:12}}>
                               <span style={{fontFamily:"monospace",color:"#6b82a0"}}>{t.lr||t.lrNo}</span>
@@ -10333,7 +10401,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                 const frtInvoices=(p.invoices||[]).filter(i=>i.invoiceNo&&!i.invoiceNo.startsWith("KR"));
                 const allExpenses=[...(p.expenses||[]),...(p.penalties||[])];
                 return (
-                  <div key={key} style={{background:C.bg,border:"1px solid #222",
+                  <div key={key} style={{background:C.bg,border:`1px solid ${C.border}`,
                     borderRadius:8,marginBottom:12,overflow:"hidden"}}>
                     <div onClick={()=>setExpandedAdv(isOpen?null:key)}
                       style={{padding:"12px 14px",cursor:"pointer",
@@ -10377,8 +10445,8 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                             {l:"On Hold",       v:p.holdAmount||p.gstHold,    c:"#c67c00"},
                           ].map((m,i)=>(
                             <div key={m.l} style={{padding:"10px 14px",background:C.card,
-                              borderRight:i%2===0?"1px solid #1a1a1a":"none",
-                              borderBottom:i<2?"1px solid #1a1a1a":"none"}}>
+                              borderRight:i%2===0?`1px solid ${C.border}`:"none",
+                              borderBottom:i<2?`1px solid ${C.border}`:"none"}}>
                               <div style={{fontSize:9,color:"#4a7090",letterSpacing:1}}>{m.l}</div>
                               <div style={{fontWeight:800,color:m.c,fontSize:14}}>₹{fmtINR(m.v)}</div>
                             </div>
@@ -10390,7 +10458,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                             <div style={{padding:"6px 14px",fontSize:10,fontWeight:700,color:"#4a7090",
                               letterSpacing:1,background:C.card,borderTop:`1px solid ${C.border}`}}>INVOICES</div>
                             {frtInvoices.map((inv,i)=>(
-                              <div key={i} style={{padding:"8px 14px",borderTop:"1px solid #161616",
+                              <div key={i} style={{padding:"8px 14px",borderTop:`1px solid ${C.border}`,
                                 display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:12}}>
                                 <span style={{fontFamily:"monospace",color:"#6b82a0"}}>{inv.invoiceNo}</span>
                                 <div style={{textAlign:"right"}}>
@@ -10689,7 +10757,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
               </div>
             )}
 
-            <div style={{background:C.bg,border:"1px solid #222",borderRadius:8,padding:12,marginBottom:14}}>
+            <div style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:12,marginBottom:14}}>
               <div style={{fontSize:13,fontWeight:700,marginBottom:8}}>➕ Add Trip Expense</div>
               <div style={{display:"flex",flexDirection:"column",gap:8}}>
                 <SearchSelect
@@ -10700,12 +10768,12 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                 />
                 <input value={newExp.label} onChange={e=>setNewExp({...newExp,label:e.target.value})}
                   placeholder="Expense label (fuel, toll…)"
-                  style={{background:"#0d0d0d",border:"1px solid #ccddf0",borderRadius:6,
+                  style={{background:C.bg,border:"1px solid #ccddf0",borderRadius:6,
                     padding:"8px 10px",color:"#ccc",fontSize:13}}/>
                 <div style={{display:"flex",gap:8}}>
                   <input value={newExp.amount} onChange={e=>setNewExp({...newExp,amount:e.target.value})}
                     type="number" placeholder="₹ Amount"
-                    style={{flex:1,background:"#0d0d0d",border:"1px solid #ccddf0",borderRadius:6,
+                    style={{flex:1,background:C.bg,border:"1px solid #ccddf0",borderRadius:6,
                       padding:"8px 10px",color:"#ccc",fontSize:13}}/>
                   <button onClick={()=>{
                     if(!newExp.tripId||!newExp.label||!newExp.amount) return;
@@ -10728,7 +10796,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
               : filteredTrips.map(t=>{
                 const profit=tripProfit(t);
                 return (
-                  <div key={t.id} style={{background:C.bg,border:"1px solid #222",
+                  <div key={t.id} style={{background:C.bg,border:`1px solid ${C.border}`,
                     borderRadius:8,padding:"11px 14px",marginBottom:8}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
                       <div>
