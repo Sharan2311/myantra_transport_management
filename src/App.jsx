@@ -148,9 +148,8 @@ const mkTrip = (o) => ({
   shortageRecovery:0, loanRecovery:0,
   status:"Pending Bill", invoiceNo:"", paymentStatus:"Unpaid",
   driverSettled:false, dieselEstimate:0,
-  dieselIndentNo:"",
-  lrPending:false,      // true = saved without LR, assigned later by owner
-  diLines:[],
+  dieselIndentNo:"", // indent number from pump slip — given before loading
+  diLines:[], // [{diNo, grNo, qty, bags, givenRate}] — for multi-DI trips
   createdBy:"system", createdAt:nowTs(), ...o
 });
 
@@ -1564,8 +1563,8 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
   // An item is "ready" if: LR filled, driver rate filled, no LR conflict with saved trips
   // (same LR in saved trips = merge flow — handled at save time)
   const readyItems = doneItems.filter(x => {
-    if(x.dupTrip) return false;
-    // LR is now optional — trips save with lrPending=true if no LR
+    if(x.dupTrip) return false; // has known duplicate DI
+    if(!x.lrNo.trim()) return false;
     if(!x.givenRate || +x.givenRate <= 0) return false;
     // Margin must be >= 30
     if((+x.extracted?.frRate||0) - (+x.givenRate||0) < 30) return false;
@@ -1823,7 +1822,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           tafal: item.tafal !== "" && item.tafal !== null && item.tafal !== undefined ? +item.tafal : (settings?.tafalPerTrip||300),
           dieselEstimate:+item.dieselEstimate||0,
           dieselIndentNo:item.dieselIndentNo?.trim()||"",
-          lrPending: !lrNo.trim(),
+          cashEmpId:item.cashEmpId||"",
           orderType:item.orderType||"godown", diLines:[],
           grFilePath:grUrl, invoiceFilePath:invUrl,
           emailSentAt:"", partyEmail:"", batchId:"",
@@ -1889,7 +1888,6 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           shortageRecovery: totalShortagRec,
           loanRecovery: totalLoanRec,
           cashEmpId: itemWithWallet?.cashEmpId||"",
-          lrPending: !lrNo.trim(),
           orderType:primary.orderType||"godown", diLines:allLines,
           emailSentAt:"", partyEmail:"", batchId:"",
           mergedPdfPath:"", receiptFilePath:"", receiptUploadedAt:"",
@@ -2156,12 +2154,10 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
               {/* LR + driver rate — the two things employee enters */}
               <div style={{display:"flex",gap:8}}>
                 <div style={{flex:2}}>
-                  <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>
-                    LR NUMBER <span style={{color:C.muted,fontWeight:400}}>(optional — assign later)</span>
-                  </div>
+                  <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>LR NUMBER *</div>
                   <input value={item.lrNo} onChange={e=>update(item.id,"lrNo",e.target.value)}
-                    placeholder="e.g. MYE/2526/001 — or leave blank"
-                    style={{width:"100%",border:`1.5px solid ${item.lrNo.trim()?C.green:C.orange+"66"}`,
+                    placeholder="e.g. MYE/2526/001"
+                    style={{width:"100%",border:`1.5px solid ${item.lrNo.trim()?C.green:C.border}`,
                       borderRadius:8,padding:"8px 10px",fontSize:13,background:C.bg,
                       color:C.text,outline:"none",boxSizing:"border-box"}} />
                 </div>
@@ -2477,7 +2473,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           <div style={{fontSize:12,color:C.muted,marginBottom:6,textAlign:"center"}}>
             {readyItems.length} of {doneItems.length} ready
             {readyItems.length<doneItems.length&&(
-              <span style={{color:C.orange}}> · fill driver rate for remaining</span>
+              <span style={{color:C.orange}}> · fill LR + rate + files for remaining</span>
             )}
           </div>
           <button onClick={saveAll} disabled={!canSave}
@@ -4143,100 +4139,6 @@ function SealedInvoiceSheet({ trip, onMerge, onClose, embedded=false }) {
   );
 }
 
-// ─── LR ASSIGN SHEET ─────────────────────────────────────────────────────────
-// Owner assigns LR number to a trip saved without LR (lrPending=true)
-// Also detects same-truck same-date LR-pending trips and offers to merge them
-function LrAssignSheet({ trip, trips, vehicles, user, onAssign }) {
-  const [lrNo, setLrNo] = React.useState("");
-  const [error, setError] = React.useState("");
-
-  // Find other same-truck same-date LR-pending trips
-  const siblings = (trips||[]).filter(t =>
-    t.lrPending && t.truckNo===trip.truckNo &&
-    t.date===trip.date && t.id!==trip.id
-  );
-
-  // Check if LR already exists
-  const existingTrip = lrNo.trim() ? (trips||[]).find(t=>t.lrNo===lrNo.trim()&&!t.lrPending) : null;
-
-  const canSave = lrNo.trim().length > 0;
-
-  return (
-    <div style={{display:"flex",flexDirection:"column",gap:14}}>
-      {/* Trip summary */}
-      <div style={{background:C.bg,borderRadius:12,padding:"12px 14px",
-        border:`1px solid ${C.border}`}}>
-        <div style={{fontWeight:800,fontSize:15,marginBottom:6}}>{trip.truckNo}</div>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"4px 12px",fontSize:12}}>
-          {[
-            ["Date",  trip.date],
-            ["To",    trip.to||"—"],
-            ["MT",    trip.qty+" MT"],
-            ["DI",    trip.diNo||"—"],
-            ["GR",    trip.grNo||"—"],
-            ["Rate",  "₹"+(trip.givenRate||0)+"/MT"],
-          ].map(([l,v])=>(
-            <div key={l}>
-              <span style={{color:C.muted,fontSize:10}}>{l}: </span>
-              <span style={{color:C.text,fontWeight:600}}>{v}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Sibling trips to merge */}
-      {siblings.length>0 && (
-        <div style={{background:C.teal+"11",border:`1px solid ${C.teal}33`,borderRadius:10,
-          padding:"10px 12px"}}>
-          <div style={{color:C.teal,fontWeight:700,fontSize:12,marginBottom:6}}>
-            📎 {siblings.length} more LR-pending trip{siblings.length>1?"s":""} for this truck on {trip.date}
-          </div>
-          {siblings.map(s=>(
-            <div key={s.id} style={{fontSize:11,color:C.muted,padding:"2px 0"}}>
-              DI: {s.diNo||"—"} · {s.qty}MT · ₹{s.givenRate||0}/MT
-            </div>
-          ))}
-          <div style={{color:C.teal,fontSize:11,marginTop:4,fontWeight:600}}>
-            ✓ All will be merged into the same LR
-          </div>
-        </div>
-      )}
-
-      {/* LR input */}
-      <div>
-        <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:6,
-          textTransform:"uppercase",letterSpacing:0.5}}>
-          LR Number *
-        </div>
-        <input
-          value={lrNo}
-          onChange={e=>{setLrNo(e.target.value);setError("");}}
-          placeholder="e.g. MYE/2526/2910"
-          style={{width:"100%",boxSizing:"border-box",
-            background:C.bg,border:`1.5px solid ${error?C.red:lrNo.trim()?C.green:C.border}`,
-            borderRadius:10,color:C.text,padding:"12px 14px",fontSize:15,outline:"none"}}
-        />
-        {existingTrip && (
-          <div style={{marginTop:6,background:C.orange+"11",borderRadius:8,padding:"8px 10px",
-            fontSize:12,color:C.orange,fontWeight:600}}>
-            ⚠ LR {lrNo.trim()} already exists ({existingTrip.truckNo} · {existingTrip.date}).
-            Assigning anyway will add DI to that trip.
-          </div>
-        )}
-        {error && <div style={{color:C.red,fontSize:12,marginTop:4}}>{error}</div>}
-      </div>
-
-      <Btn onClick={()=>{
-        const lr = lrNo.trim();
-        if(!lr){setError("Please enter the LR number.");return;}
-        onAssign(trip.id, lr);
-      }} full color={C.accent} disabled={!canSave}>
-        ✓ Assign LR{siblings.length>0?` + Merge ${siblings.length+1} DIs`:""}
-      </Btn>
-    </div>
-  );
-}
-
 // ─── TRIPS ────────────────────────────────────────────────────────────────────
 function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles, indents, settings, tripType, user, log, driverPays, employees, cashTransfers, setCashTransfers, allTripsLoaded, loadingAllTrips, loadAllTrips}) {
   const isIn = tripType === "inbound";
@@ -4276,8 +4178,6 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
   // Sealed invoice upload sheet
   const [sealedSheet, setSealedSheet] = useState(null); // trip object
   const [batchDISheet,  setBatchDISheet]  = useState(false); // morning batch GR scanner
-  const [lrAssignSheet, setLrAssignSheet] = useState(null); // trip for LR assignment
-  const [showLrPending, setShowLrPending] = useState(false); // LR pending panel
 
   const blankForm = (isParty=false) => ({
     type:tripType, lrNo:"", diNo:"", truckNo:"", grNo:"", dieselIndentNo:"",
@@ -4470,8 +4370,6 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       alert("Driver Rate ₹/MT is mandatory.\nPlease enter the rate before saving.\n\nಡ್ರೈವರ್ ರೇಟ್ ₹/MT ಕಡ್ಡಾಯ.\nಸೇವ್ ಮಾಡುವ ಮೊದಲು ದರ ನಮೂದಿಸಿ.");
       return;
     }
-    // LR is optional — if empty, save with lrPending flag
-    const lrMissing = !f.lrNo?.trim();
     // Validate: minimum margin between Shree Rate and Driver Rate
     {
       const _diLines = f.diLines||[];
@@ -4524,11 +4422,10 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       dieselEstimate:+f.dieselEstimate,
       dieselIndentNo: (f.dieselIndentNo||"").trim(),
       cashEmpId: f.cashEmpId||"",
-      lrPending: lrMissing,
       createdBy:user.username, createdAt:nowTs(),
     });
     setTrips(p => [t, ...(p||[])]);
-    log("ADD TRIP", `LR:${t.lrNo||"(pending)"} ${t.truckNo}→${t.to} ${t.qty}MT${lrMissing?" [LR PENDING]":""}`);
+    log("ADD TRIP", `LR:${t.lrNo} ${t.truckNo}→${t.to} ${t.qty}MT`);
     // If advance linked to an employee wallet, record the deduction
     // Use t.advance (numeric, from the built trip) not f.advance (string from form state)
     if(t.cashEmpId && t.advance>0) {
@@ -4860,54 +4757,6 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         </div>
       )}
 
-      {/* ── LR PENDING BANNER ── */}
-      {!isIn && (()=>{
-        const lrPendingTrips = list.filter(t=>t.lrPending);
-        if(lrPendingTrips.length===0) return null;
-        return (
-          <div style={{background:C.orange+"11",border:`1.5px solid ${C.orange}44`,borderRadius:12,padding:"10px 14px"}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <div>
-                <div style={{color:C.orange,fontWeight:800,fontSize:13}}>
-                  ⏳ {lrPendingTrips.length} trip{lrPendingTrips.length>1?"s":""} waiting for LR
-                </div>
-                <div style={{color:C.muted,fontSize:11,marginTop:2}}>
-                  Saved without LR number — assign from your LR book
-                </div>
-              </div>
-              {user.role==="owner" && (
-                <button onClick={()=>setShowLrPending(v=>!v)}
-                  style={{background:C.orange,border:"none",color:"#fff",borderRadius:10,
-                    padding:"6px 12px",fontSize:12,fontWeight:700,cursor:"pointer",flexShrink:0}}>
-                  {showLrPending?"Hide":"Assign LRs"}
-                </button>
-              )}
-            </div>
-            {showLrPending && user.role==="owner" && (
-              <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:8}}>
-                {lrPendingTrips.map(t=>(
-                  <div key={t.id} style={{background:C.card,borderRadius:10,padding:"10px 12px",
-                    display:"flex",alignItems:"center",gap:10}}>
-                    <div style={{flex:1,minWidth:0}}>
-                      <div style={{fontWeight:700,fontSize:13}}>{t.truckNo}</div>
-                      <div style={{color:C.muted,fontSize:11}}>{t.to} · {t.qty}MT · {t.date}</div>
-                      {t.diNo && <div style={{color:C.muted,fontSize:10}}>DI: {t.diNo}</div>}
-                    </div>
-                    <button onClick={()=>setLrAssignSheet(t)}
-                      style={{background:C.orange,border:"none",color:"#fff",borderRadius:8,
-                        padding:"6px 12px",fontSize:12,fontWeight:700,cursor:"pointer",flexShrink:0}}>
-                      📋 Assign LR
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        );
-      })()}
-
-
-
       <div style={{display:"flex",gap:8,alignItems:"center"}}>
         <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search truck, LR, destination…"
           style={{flex:1,background:C.card,border:`1.5px solid ${search?C.accent:C.border}`,borderRadius:10,
@@ -5060,7 +4909,6 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                     <div style={{flex:1,minWidth:0}}>
                       <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
                         <span style={{fontWeight:700,fontSize:13}}>{t.truckNo}</span>
-                        {t.lrPending && <span style={{fontSize:10,color:C.orange,fontWeight:700,background:C.orange+"18",borderRadius:6,padding:"1px 6px"}}>⏳ LR Pending</span>}
                         {t.driverSettled && <span style={{fontSize:10,color:C.green,fontWeight:600}}>✓ Settled</span>}
                         {t.diLines&&t.diLines.length>1 && <span style={{fontSize:10,color:C.teal,fontWeight:600}}>{t.diLines.length} DIs</span>}
                         {t.orderType==="party" && <span style={{fontSize:10,color:C.accent,fontWeight:600}}>🤝</span>}
@@ -5216,17 +5064,6 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                       )}
                     </div>
                   )}
-                  {/* ── LR Pending action (owner assigns) ── */}
-                  {t.lrPending && user.role==="owner" && (
-                    <div style={{padding:"8px 12px 10px",borderTop:`1px solid ${C.border}33`}}>
-                      <button onClick={e=>{e.stopPropagation();setLrAssignSheet(t);}}
-                        style={{width:"100%",background:C.orange+"22",border:`1.5px solid ${C.orange}`,
-                          borderRadius:10,color:C.orange,padding:"8px 10px",fontSize:12,
-                          fontWeight:700,cursor:"pointer"}}>
-                        📋 Assign LR Number
-                      </button>
-                    </div>
-                  )}
                   </div>
                   )}
                 </div>
@@ -5348,54 +5185,6 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
               setSealedSheet(null);
             }}
             onClose={()=>setSealedSheet(null)}
-          />
-        </Sheet>
-      )}
-
-      {/* ── LR ASSIGNMENT SHEET ── */}
-      {lrAssignSheet && (
-        <Sheet title={`📋 Assign LR — ${lrAssignSheet.truckNo}`} onClose={()=>setLrAssignSheet(null)}>
-          <LrAssignSheet
-            trip={lrAssignSheet}
-            trips={trips}
-            vehicles={vehicles}
-            user={user}
-            onAssign={(tripId, lrNo) => {
-              // Find same-truck same-date lrPending trips to merge
-              const sameGroup = trips.filter(t =>
-                t.lrPending && t.truckNo===lrAssignSheet.truckNo &&
-                t.date===lrAssignSheet.date && t.id!==tripId
-              );
-              if(sameGroup.length > 0 && window.confirm(
-                `Found ${sameGroup.length} other LR-pending trip${sameGroup.length>1?"s":""} for ${lrAssignSheet.truckNo} on ${lrAssignSheet.date}.\n\nMerge all into LR ${lrNo}?`
-              )) {
-                // Merge all DIs into the primary trip
-                const primary = trips.find(t=>t.id===tripId);
-                const allItems = [primary, ...sameGroup];
-                const allLines = allItems.map(t=>({
-                  diNo:t.diNo||"", grNo:t.grNo||"",
-                  qty:t.qty||0, bags:t.bags||0,
-                  givenRate:t.givenRate||0, frRate:t.frRate||0,
-                }));
-                const totalQty  = allLines.reduce((s,d)=>s+(d.qty||0),0);
-                const totalBags = allLines.reduce((s,d)=>s+(d.bags||0),0);
-                const allDiNos  = allLines.map(d=>d.diNo).filter(Boolean).join(" + ");
-                const allGrNos  = [...new Set(allLines.map(d=>d.grNo).filter(Boolean))].join(" + ");
-                setTrips(p => p
-                  .filter(t => !sameGroup.find(s=>s.id===t.id)) // remove secondary trips
-                  .map(t => t.id===tripId ? {
-                    ...t, lrNo, lrPending:false,
-                    diNo:allDiNos, grNo:allGrNos,
-                    qty:totalQty, bags:totalBags, diLines:allLines,
-                  } : t)
-                );
-                log("LR ASSIGN+MERGE", `LR:${lrNo} ${lrAssignSheet.truckNo} merged ${allItems.length} DIs`);
-              } else {
-                setTrips(p=>p.map(t=>t.id===tripId?{...t,lrNo,lrPending:false}:t));
-                log("LR ASSIGN", `LR:${lrNo} ${lrAssignSheet.truckNo}`);
-              }
-              setLrAssignSheet(null);
-            }}
           />
         </Sheet>
       )}
@@ -5839,14 +5628,10 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
         </div>
       )}
 
-      {/* LR Number - optional — can be assigned later by owner */}
-      <div style={{background:C.bg,borderRadius:10,padding:"12px 14px",border:`1.5px solid ${f.lrNo?.trim()?C.blue+"44":C.orange+"44"}`}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-          <div style={{color:C.blue,fontWeight:700,fontSize:12}}>📄 LR NUMBER (Lorry Receipt)</div>
-          {!f.lrNo?.trim() && <span style={{color:C.orange,fontSize:10,fontWeight:700}}>Optional — assign later</span>}
-        </div>
-        <Field value={f.lrNo||""} onChange={ff("lrNo")} placeholder="Leave blank if LR not yet available" />
-        {!f.lrNo?.trim() && <div style={{color:C.orange,fontSize:11,marginTop:4}}>ℹ Trip will be saved with ⏳ LR Pending — owner assigns LR from LR book later</div>}
+      {/* LR Number - always editable (LR is never on the GR copy, must be entered manually) */}
+      <div style={{background:C.bg,borderRadius:10,padding:"12px 14px",border:`1.5px solid ${C.blue}44`}}>
+        <div style={{color:C.blue,fontWeight:700,fontSize:12,marginBottom:6}}>📄 LR NUMBER (Lorry Receipt)</div>
+        <Field value={f.lrNo||""} onChange={ff("lrNo")} placeholder="e.g. LR/MYE/001 — identifies this trip" />
       </div>
 
       <div style={{display:"flex",gap:10}}>
