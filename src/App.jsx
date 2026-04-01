@@ -2328,8 +2328,10 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                       {(()=>{
                         const truckNo = (item.extracted?.truckNo||"").toUpperCase().trim();
                         const veh = vehicles.find(v=>v.truckNo===truckNo);
-                        const loanBal = veh ? Math.max(0,(veh.loan||0)-(veh.loanRecovered||0)) : 0;
-                        return loanBal > 0 ? <span style={{color:C.orange,fontWeight:600}}> · Bal ₹{loanBal.toLocaleString("en-IN")}</span> : null;
+                        const ownerN = (veh?.ownerName||"").trim();
+                        const ownerVs = ownerN ? (vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerN) : (veh?[veh]:[]);
+                        const loanBal = ownerVs.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
+                        return loanBal > 0 ? <span style={{color:C.orange,fontWeight:600}}> · Owner Bal ₹{loanBal.toLocaleString("en-IN")}</span> : null;
                       })()}
                     </div>
                     <input value={item.loanRecovery??""} onChange={e=>update(item.id,"loanRecovery",e.target.value)}
@@ -2550,19 +2552,22 @@ function AskLRSheet({ extracted, trips, vehicles, onConfirm, onCancel }) {
 
       {/* Vehicle pending balances — shown once LR is entered or always if truck known */}
       {existingVehicle && !duplicateDI && (()=>{
-        const loanBal = (existingVehicle.loan||0)-(existingVehicle.loanRecovered||0);
+        const ownerN2 = (existingVehicle.ownerName||"").trim();
+        const ownerVs2 = ownerN2 ? (vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerN2) : [existingVehicle];
+        const loanBal = ownerVs2.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
         const shortBal = (existingVehicle.shortageOwed||0)-(existingVehicle.shortageRecovered||0);
         if (loanBal<=0 && shortBal<=0) return null;
+        const loanLabel = ownerVs2.length>1 ? `OWNER LOAN BAL (${ownerVs2.length} vehs)` : "LOAN BALANCE";
         return (
           <div style={{background:`${C.orange}11`,border:`2px solid ${C.orange}66`,borderRadius:12,padding:"12px 14px"}}>
             <div style={{color:C.orange,fontWeight:800,fontSize:12,marginBottom:8}}>
-              ⚠ Pending Dues on {truckNo}
+              ⚠ Pending Dues on {ownerN2||truckNo}
             </div>
             <div style={{display:"flex",gap:16,fontSize:12}}>
               {loanBal>0&&(
                 <div>
                   <div style={{color:C.red,fontWeight:700}}>₹{loanBal.toLocaleString("en-IN")}</div>
-                  <div style={{color:C.muted,fontSize:10}}>LOAN BALANCE</div>
+                  <div style={{color:C.muted,fontSize:10}}>{loanLabel}</div>
                 </div>
               )}
               {shortBal>0&&(
@@ -5811,7 +5816,10 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
         <div style={{display:"flex",flexDirection:"column",gap:5,flex:"1 1 100%",minWidth:0}}>
           <label style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Loan Recovery ₹</label>
           {(()=>{
-            const loanBal = veh ? Math.max(0,(veh.loan||0)-(veh.loanRecovered||0)) : null;
+            const ownerN3 = (veh?.ownerName||"").trim();
+            const ownerVs3 = veh ? (ownerN3 ? (vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerN3) : [veh]) : [];
+            const loanBal = ownerVs3.length > 0 ? ownerVs3.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0) : null;
+            const loanLabel = ownerVs3.length>1 ? `Owner pending (${ownerVs3.length} vehs)` : "Pending";
             const overLimit = loanBal !== null && (+f.loanRecovery||0) > loanBal;
             return (<>
               <input type="text" inputMode="decimal" value={f.loanRecovery===undefined||f.loanRecovery===null?"":String(f.loanRecovery)}
@@ -5828,7 +5836,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
                 style={{background:C.bg,border:`1.5px solid ${overLimit?C.red:C.border}`,borderRadius:10,color:C.text,padding:"13px 12px",fontSize:15,outline:"none",width:"100%",boxSizing:"border-box",MozAppearance:"textfield",WebkitAppearance:"none"}} />
               {loanBal !== null && loanBal > 0 && (
                 <div style={{color:overLimit?C.red:C.muted,fontSize:11}}>
-                  {overLimit ? `⚠ Max allowed: ₹${loanBal.toLocaleString("en-IN")}` : `Pending: ₹${loanBal.toLocaleString("en-IN")}`}
+                  {overLimit ? `⚠ Max allowed: ₹${loanBal.toLocaleString("en-IN")}` : `${loanLabel}: ₹${loanBal.toLocaleString("en-IN")}`}
                 </div>
               )}
               {loanBal !== null && loanBal === 0 && (
@@ -8237,6 +8245,35 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
   );
 }
 
+// ─── DEDUCT PER TRIP FIELD (save button prevents per-keystroke DB writes) ────────
+function DeductPerTripField({ownerVehs, ownerTruckNos, ownerDeductPerTrip, setVehicles}) {
+  const [val, setVal] = useState(String(ownerDeductPerTrip));
+  const changed = (+val) !== ownerDeductPerTrip;
+  return (
+    <div style={{background:C.bg,borderRadius:12,padding:14}}>
+      <div style={{color:C.blue,fontWeight:700,fontSize:12,marginBottom:8}}>
+        ✂ Deduct Per Trip{ownerVehs.length>1?` — applies to all ${ownerVehs.length} vehicles`:""}
+      </div>
+      <div style={{display:"flex",gap:10,alignItems:"flex-end"}}>
+        <div style={{flex:1}}>
+          <Field label="Amount ₹" value={val} onChange={setVal} type="number" />
+        </div>
+        <div style={{paddingBottom:10}}>
+          <Btn onClick={()=>{
+            if(!changed) return;
+            setVehicles(p=>p.map(x=>ownerTruckNos.has(x.truckNo)?{...x,deductPerTrip:+val}:x));
+          }} sm color={changed?C.blue:C.muted}>Save</Btn>
+        </div>
+      </div>
+      {ownerVehs.length>1&&(
+        <div style={{fontSize:10,color:C.muted,marginTop:4}}>
+          Syncs to: {[...ownerTruckNos].join(", ")}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── VEHICLES ─────────────────────────────────────────────────────────────────
 function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log}) {
   const isOwner = user.role === "owner";
@@ -8250,6 +8287,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
   // Loan txn form
   const [lAmt,  setLAmt]  = useState(""); const [lDate,  setLDate]  = useState(new Date().toISOString().slice(0,10));
   const [lRef,  setLRef]  = useState(""); const [lAcct,  setLAcct]  = useState("");
+  const [lAcct2,setLAcct2]= useState(""); // vehicle selector for multi-vehicle owner
   // Recovery form  
   const [rAmt,  setRAmt]  = useState(""); const [rDate,  setRDate]  = useState(new Date().toISOString().slice(0,10));
   const [rLR,   setRLR]   = useState(""); const [rRef,   setRRef]   = useState("");
@@ -8281,7 +8319,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
         || (v.driverPhone||"").includes(q);
   });
 
-  const resetLoanForm = () => { setLAmt(""); setLDate(today()); setLRef(""); setLAcct(""); setRAmt(""); setRDate(today()); setRLR(""); setRRef(""); };
+  const resetLoanForm = () => { setLAmt(""); setLDate(today()); setLRef(""); setLAcct(""); setLAcct2(""); setRAmt(""); setRDate(today()); setRLR(""); setRRef(""); };
   const resetShForm   = () => { setShAmt(""); setShTrip(""); setSrAmt(""); setSrLR(""); };
 
   // Phone-only edit for non-owners
@@ -8294,8 +8332,15 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
                                .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
     const pays = (driverPays||[]).filter(p => p.truckNo===v.truckNo);
     const totalPaid = pays.reduce((s,p)=>s+(p.amount||0),0);
-    const loanBal = (v.loan||0)-(v.loanRecovered||0);
-    const loanTxns = v.loanTxns||[];
+    const ownerNamePDF = (v.ownerName||"").trim();
+    const ownerVehsPDF = ownerNamePDF ? (vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerNamePDF) : [v];
+    const ownerLoanGivenPDF = ownerVehsPDF.reduce((s,x)=>s+(x.loan||0),0);
+    const ownerLoanRecovPDF = ownerVehsPDF.reduce((s,x)=>s+(x.loanRecovered||0),0);
+    const loanBal = ownerLoanGivenPDF - ownerLoanRecovPDF;
+    const isMultiVehOwner = ownerVehsPDF.length > 1;
+    // Collect all loan txns across owner's vehicles for the PDF, tagged with truck
+    const loanTxns = ownerVehsPDF.flatMap(x=>(x.loanTxns||[]).map(tx=>({...tx,_truckNo:x.truckNo}))).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+    const vLoanTxns = v.loanTxns||[]; // this vehicle only (for per-vehicle section)
     const shortageTxns = v.shortageTxns||[];
 
     const tripRows = vtrips.map(t => {
@@ -8315,12 +8360,16 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
 
     const loanGivenRows = loanTxns.filter(x=>x.type==="given").map(x=>`<tr>
       <td>${fmtD(x.date)}</td><td>₹${fmt(x.amount)}</td>
-      <td>${x.ref||"—"}</td><td>${x.accountName||"—"}</td><td>${x.note||"—"}</td>
+      <td>${x.ref||"—"}</td><td>${x.accountName||"—"}</td>
+      ${isMultiVehOwner?`<td>${x._truckNo||"—"}</td>`:""}
+      <td>${x.note||"—"}</td>
     </tr>`).join("");
 
     const loanRecoveryRows = loanTxns.filter(x=>x.type==="recovery").map(x=>`<tr>
       <td>${fmtD(x.date)}</td><td>₹${fmt(x.amount)}</td>
-      <td>${x.lrNo||"—"}</td><td>${x.ref||"—"}</td><td>${x.note||"—"}</td>
+      <td>${x.lrNo||"—"}</td><td>${x.ref||"—"}</td>
+      ${isMultiVehOwner?`<td>${x._truckNo||"—"}</td>`:""}
+      <td>${x.note||"—"}</td>
     </tr>`).join("");
 
     const shortageRows = shortageTxns.filter(x=>x.type==="shortage").map(x=>`<tr>
@@ -8365,7 +8414,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
     <div class="kpis">
       <div class="kpi"><div class="val" style="color:#1d4ed8">${vtrips.length}</div><div class="lbl">TOTAL TRIPS</div></div>
       <div class="kpi"><div class="val" style="color:#15803d">₹${fmt(totalPaid)}</div><div class="lbl">TOTAL PAID</div></div>
-      <div class="kpi"><div class="val" style="color:${loanBal>0?"#dc2626":"#15803d"}">₹${fmt(loanBal)}</div><div class="lbl">LOAN BALANCE</div></div>
+      <div class="kpi"><div class="val" style="color:${loanBal>0?"#dc2626":"#15803d"}">₹${fmt(loanBal)}</div><div class="lbl">${isMultiVehOwner?"OWNER LOAN BAL":"LOAN BALANCE"}</div></div>
       <div class="kpi"><div class="val" style="color:#d97706">₹${fmt((v.shortageOwed||0)-(v.shortageRecovered||0))}</div><div class="lbl">SHORTAGE BALANCE</div></div>
       <div class="kpi"><div class="val" style="color:#7c3aed">${vtrips.filter(t=>!t.driverSettled).length}</div><div class="lbl">UNSETTLED</div></div>
     </div>
@@ -8376,16 +8425,17 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
     <h2>💳 Driver Payment History (${pays.length})</h2>
     ${pays.length===0?'<div class="empty">No payments recorded.</div>':`<table><tr><th>Date</th><th>LR No</th><th>Reference</th><th>Amount</th><th>Note</th></tr>${payRows}</table>`}
 
-    <h2>🏦 Loan Ledger — Given (${loanTxns.filter(x=>x.type==="given").length})</h2>
-    ${loanGivenRows?`<table><tr><th>Date</th><th>Amount</th><th>Reference</th><th>Account</th><th>Note</th></tr>${loanGivenRows}</table>`:'<div class="empty">No loan disbursements recorded.</div>'}
+    <h2>🏦 ${isMultiVehOwner?"Owner ":""}Loan Ledger — Given (${loanTxns.filter(x=>x.type==="given").length})</h2>
+    ${loanGivenRows?`<table><tr><th>Date</th><th>Amount</th><th>Reference</th><th>Account</th>${isMultiVehOwner?"<th>Vehicle</th>":""}<th>Note</th></tr>${loanGivenRows}</table>`:'<div class="empty">No loan disbursements recorded.</div>'}
 
-    <h2>🏦 Loan Ledger — Recoveries (${loanTxns.filter(x=>x.type==="recovery").length})</h2>
-    ${loanRecoveryRows?`<table><tr><th>Date</th><th>Amount</th><th>LR No</th><th>Reference</th><th>Note</th></tr>${loanRecoveryRows}</table>`:'<div class="empty">No loan recoveries recorded.</div>'}
+    <h2>🏦 ${isMultiVehOwner?"Owner ":""}Loan Ledger — Recoveries (${loanTxns.filter(x=>x.type==="recovery").length})</h2>
+    ${loanRecoveryRows?`<table><tr><th>Date</th><th>Amount</th><th>LR No</th><th>Reference</th>${isMultiVehOwner?"<th>Vehicle</th>":""}<th>Note</th></tr>${loanRecoveryRows}</table>`:'<div class="empty">No loan recoveries recorded.</div>'}
 
     <table style="max-width:380px;margin-top:8px">
-      <tr><th>Total Loan Given</th><td>₹${fmt(v.loan||0)}</td></tr>
-      <tr><th>Recovered</th><td>₹${fmt(v.loanRecovered||0)}</td></tr>
+      <tr><th>${isMultiVehOwner?"Owner Total Loan Given":"Total Loan Given"}</th><td>₹${fmt(ownerLoanGivenPDF)}</td></tr>
+      <tr><th>Recovered</th><td>₹${fmt(ownerLoanRecovPDF)}</td></tr>
       <tr><th style="color:#dc2626">Balance Due</th><td style="font-weight:800;color:${loanBal>0?"#dc2626":"#15803d"}">₹${fmt(loanBal)}</td></tr>
+      ${isMultiVehOwner?`<tr><th>This Vehicle Given</th><td>₹${fmt(v.loan||0)}</td></tr><tr><th>This Vehicle Recovered</th><td>₹${fmt(v.loanRecovered||0)}</td></tr>`:""}
       <tr><th>Deduct / Trip</th><td>₹${fmt(v.deductPerTrip||0)}</td></tr>
     </table>
 
@@ -8562,29 +8612,67 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
         </Sheet>
       )}
 
-      {/* ── LOAN MANAGEMENT SHEET ── */}
+      {/* ── LOAN MANAGEMENT SHEET (OWNER-LEVEL) ── */}
       {lSheet&&(()=>{
         const v = vehicles.find(x=>x.id===lSheet);
         if(!v) return null;
-        const bal = (v.loan||0)-(v.loanRecovered||0);
-        const loanTxns = v.loanTxns||[];
-        // Same-owner filter: owner can see all LRs; others see only vehicles with same owner
-        const sameOwnerTrucks = isOwner
-          ? null  // null means no filter
-          : new Set((vehicles||[]).filter(x=>x.ownerName&&x.ownerName===v.ownerName).map(x=>x.truckNo));
-        const vtrips = (trips||[]).filter(t=>{
-          if(t.driverSettled) return false;
-          if(sameOwnerTrucks===null) return true;  // owner sees all
-          return sameOwnerTrucks.has(t.truckNo)||sameOwnerTrucks.has(t.truck);
-        });
+
+        // ── Owner group: all vehicles with same ownerName (or just this one if no owner set)
+        const ownerName = (v.ownerName||"").trim();
+        const ownerVehs = ownerName
+          ? (vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerName)
+          : [v];
+        const ownerTruckNos = new Set(ownerVehs.map(x=>x.truckNo));
+
+        // ── Owner-level aggregated loan totals
+        const ownerLoanGiven     = ownerVehs.reduce((s,x)=>s+(x.loan||0),0);
+        const ownerLoanRecovered = ownerVehs.reduce((s,x)=>s+(x.loanRecovered||0),0);
+        const ownerBal           = ownerLoanGiven - ownerLoanRecovered;
+
+        // ── All transactions across owner's vehicles (tagged with truckNo)
+        const allOwnerTxns = ownerVehs.flatMap(x=>
+          (x.loanTxns||[]).map(tx=>({...tx, _vehicleId:x.id, _truckNo:x.truckNo}))
+        ).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+
+        // ── Eligible trips: unsettled, from any of owner's vehicles
+        const vtrips = (trips||[]).filter(t=>
+          !t.driverSettled &&
+          (ownerTruckNos.has(t.truckNo)||ownerTruckNos.has(t.truck))
+        );
+
+        // ── Deduct/trip — read from first owner vehicle (all are synced on save)
+        const ownerDeductPerTrip = ownerVehs[0]?.deductPerTrip || 0;
+
         return (
-          <Sheet title={`🏦 Loan — ${v.truckNo}`} onClose={()=>{setLSheet(null);resetLoanForm();}}>
+          <Sheet title={`🏦 Loan — ${ownerName||v.truckNo}${ownerVehs.length>1?` (${ownerVehs.length} vehicles)`:""}`} onClose={()=>{setLSheet(null);resetLoanForm();}}>
             <div style={{display:"flex",flexDirection:"column",gap:14}}>
-              {/* Balance summary */}
+
+              {/* Owner vehicle chips */}
+              {ownerVehs.length>1&&(
+                <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                  {ownerVehs.map(x=>{
+                    const vBal=(x.loan||0)-(x.loanRecovered||0);
+                    return (
+                      <div key={x.id} style={{background:vBal>0?C.red+"22":C.green+"22",
+                        border:`1px solid ${vBal>0?C.red:C.green}44`,borderRadius:20,
+                        padding:"3px 10px",fontSize:11,fontWeight:700,
+                        color:vBal>0?C.red:C.green}}>
+                        {x.truckNo} {vBal>0?`₹${fmt(vBal)}`:"✓"}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Owner-level Balance summary */}
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
-                {[{l:"Loan Given",v:fmt(v.loan||0),c:C.red},{l:"Recovered",v:fmt(v.loanRecovered||0),c:C.green},{l:"Balance",v:fmt(bal),c:bal>0?C.accent:C.green}].map(x=>(
+                {[
+                  {l:"Total Given",  v:"₹"+fmt(ownerLoanGiven),     c:C.red},
+                  {l:"Recovered",    v:"₹"+fmt(ownerLoanRecovered),  c:C.green},
+                  {l:"Balance",      v:"₹"+fmt(ownerBal),            c:ownerBal>0?C.accent:C.green},
+                ].map(x=>(
                   <div key={x.l} style={{background:C.bg,borderRadius:10,padding:12,textAlign:"center"}}>
-                    <div style={{color:x.c,fontWeight:800}}>{x.v}</div>
+                    <div style={{color:x.c,fontWeight:800,fontSize:13}}>{x.v}</div>
                     <div style={{color:C.muted,fontSize:10}}>{x.l}</div>
                   </div>
                 ))}
@@ -8592,7 +8680,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
 
               {/* Give Loan */}
               <div style={{background:C.bg,borderRadius:12,padding:14}}>
-                <div style={{color:C.red,fontWeight:700,fontSize:12,marginBottom:10}}>➕ Give Loan</div>
+                <div style={{color:C.red,fontWeight:700,fontSize:12,marginBottom:10}}>➕ Give Loan to {ownerName||v.truckNo}</div>
                 <div style={{display:"flex",gap:10}}>
                   <Field label="Amount ₹ *" value={lAmt} onChange={setLAmt} type="number" half />
                   <Field label="Date"        value={lDate} onChange={setLDate} type="date"   half />
@@ -8601,84 +8689,94 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
                   <Field label="Reference / Cheque No" value={lRef}  onChange={setLRef}  half />
                   <Field label="Account Name"           value={lAcct} onChange={setLAcct} half />
                 </div>
+                {ownerVehs.length>1&&(
+                  <Field label="Attach to Vehicle" value={lAcct2||v.id}
+                    onChange={val=>setLAcct2(val)}
+                    opts={ownerVehs.map(x=>({v:x.id,l:x.truckNo}))} />
+                )}
                 <Btn onClick={()=>{
                   if(!lAmt||+lAmt<=0){alert("Enter loan amount.\nಸಾಲದ ಮೊತ್ತ ನಮೂದಿಸಿ.");return;}
+                  const targetId = (ownerVehs.length>1 && lAcct2) ? lAcct2 : v.id;
                   const txn={id:uid(),type:"given",date:lDate,amount:+lAmt,ref:lRef,accountName:lAcct,note:""};
-                  setVehicles(p=>p.map(x=>x.id===lSheet?{...x,
+                  setVehicles(p=>p.map(x=>x.id===targetId?{...x,
                     loan:(x.loan||0)+ +lAmt,
                     loanTxns:[...(x.loanTxns||[]),txn]}:x));
-                  log("ADD LOAN",`${v.truckNo} ₹${fmt(+lAmt)} ref:${lRef||"—"}`);
-                  setLAmt(""); setLDate(today()); setLRef(""); setLAcct("");
+                  const targetTruck = ownerVehs.find(x=>x.id===targetId)?.truckNo||v.truckNo;
+                  log("ADD LOAN",`${ownerName||targetTruck} via ${targetTruck} ₹${fmt(+lAmt)} ref:${lRef||"—"}`);
+                  setLAmt(""); setLDate(today()); setLRef(""); setLAcct(""); setLAcct2("");
                 }} color={C.red} full>Add Loan</Btn>
               </div>
 
               {/* Record Recovery */}
               <div style={{background:C.bg,borderRadius:12,padding:14}}>
                 <div style={{color:C.green,fontWeight:700,fontSize:12,marginBottom:10}}>💰 Record Recovery</div>
-                {bal<=0&&<div style={{background:C.green+"11",borderRadius:8,padding:"7px 10px",fontSize:11,color:C.green,marginBottom:8}}>✓ Loan fully recovered — no balance pending</div>}
-                {bal>0&&<div style={{background:"#1a0a00",borderRadius:8,padding:"7px 10px",fontSize:11,color:C.orange,marginBottom:8}}>Outstanding balance: ₹{fmt(bal)}{+rAmt>0?` · Entering: ₹${fmt(+rAmt)}${+rAmt>bal?" ⚠ exceeds balance":" ✓"}`:""}  </div>}
+                {ownerBal<=0&&<div style={{background:C.green+"11",borderRadius:8,padding:"7px 10px",fontSize:11,color:C.green,marginBottom:8}}>✓ Loan fully recovered — no balance pending</div>}
+                {ownerBal>0&&<div style={{background:"#1a0a00",borderRadius:8,padding:"7px 10px",fontSize:11,color:C.orange,marginBottom:8}}>
+                  Outstanding: ₹{fmt(ownerBal)}{+rAmt>0?` · Entering: ₹${fmt(+rAmt)}${+rAmt>ownerBal?" ⚠ exceeds balance":" ✓"}`:""}</div>}
                 <div style={{display:"flex",gap:10}}>
                   <Field label="Amount ₹ *" value={rAmt}  onChange={setRAmt}  type="number" half />
                   <Field label="Date"        value={rDate} onChange={setRDate} type="date"   half />
                 </div>
                 <div style={{display:"flex",gap:10}}>
-                  <SearchSelect label="Link LR No" value={rLR} onChange={setRLR}
+                  <SearchSelect label="Link LR No (any owner vehicle)" value={rLR} onChange={setRLR}
                     opts={[{v:"",l:"— None —"},...vtrips.map(t=>({v:t.lrNo||t.id,l:`${t.lrNo||"—"} · ${t.truckNo} · ${t.date}`}))]}
-                    half placeholder={`Search LR… (${vtrips.length} available)`} />
+                    half placeholder={`Search LR… (${vtrips.length} trips)`} />
                   <Field label="Reference" value={rRef} onChange={setRRef} half />
                 </div>
                 <Btn onClick={()=>{
                   if(!rAmt||+rAmt<=0){alert("Enter recovery amount.\nವಸೂಲಾತಿ ಮೊತ್ತ ನಮೂದಿಸಿ.");return;}
-                  // Validate 1: cannot recover more than outstanding loan balance
-                  if(+rAmt > bal){alert(`Recovery ₹${fmt(+rAmt)} exceeds loan balance ₹${fmt(bal)}.\nMax recoverable: ₹${fmt(bal)}`);return;}
-                  // Validate 2: if linked to an LR, cannot exceed that trip's Est. Net to Driver
+                  if(+rAmt > ownerBal){alert(`Recovery ₹${fmt(+rAmt)} exceeds owner loan balance ₹${fmt(ownerBal)}.\nMax: ₹${fmt(ownerBal)}`);return;}
                   if(rLR){
                     const linkedTrip = (trips||[]).find(t=>(t.lrNo||t.id)===rLR);
                     if(linkedTrip){
-                      const tripVeh = vehicles.find(x=>x.truckNo===(linkedTrip.truckNo||"").toUpperCase().trim());
                       const tripNet = (linkedTrip.qty||0)*(linkedTrip.givenRate||0)
                         - (linkedTrip.advance||0) - (linkedTrip.tafal||0)
                         - (linkedTrip.dieselEstimate||0)
                         - (linkedTrip.shortageRecovery||0)
                         - (linkedTrip.loanRecovery||0);
-                      const maxFromTrip = Math.max(0, tripNet);
-                      if(+rAmt > maxFromTrip){
-                        alert(`Recovery ₹${fmt(+rAmt)} would make Est. Net to Driver negative for LR: ${rLR}.\nMax you can recover from this trip: ₹${fmt(maxFromTrip)}`);
+                      if(+rAmt > Math.max(0,tripNet)){
+                        alert(`Recovery ₹${fmt(+rAmt)} would make Est. Net to Driver negative for LR: ${rLR}.\nMax from this trip: ₹${fmt(Math.max(0,tripNet))}`);
                         return;
                       }
                     }
                   }
+                  // Attach recovery to the vehicle that ran the linked LR; else clicked vehicle
+                  const linkedTrip2 = rLR ? (trips||[]).find(t=>(t.lrNo||t.id)===rLR) : null;
+                  const targetVeh = linkedTrip2
+                    ? ownerVehs.find(x=>x.truckNo===(linkedTrip2.truckNo||"").toUpperCase().trim())
+                    : null;
+                  const targetRecovId = targetVeh ? targetVeh.id : v.id;
                   const txn={id:uid(),type:"recovery",date:rDate,amount:+rAmt,lrNo:rLR,ref:rRef,note:""};
-                  setVehicles(p=>p.map(x=>x.id===lSheet?{...x,
+                  setVehicles(p=>p.map(x=>x.id===targetRecovId?{...x,
                     loanRecovered:(x.loanRecovered||0)+ +rAmt,
                     loanTxns:[...(x.loanTxns||[]),txn]}:x));
-                  // Reflect in linked trip's loanRecovery field
                   if(rLR){
                     setTrips(p=>p.map(t=>{
                       if((t.lrNo||t.id)!==rLR) return t;
-                      const prev = t.loanRecovery||0;
-                      return {...t, loanRecovery: prev + +rAmt};
+                      return {...t, loanRecovery:(t.loanRecovery||0)+ +rAmt};
                     }));
                   }
-                  log("LOAN RECOVERY",`${v.truckNo} ₹${fmt(+rAmt)} LR:${rLR||"—"}`);
+                  const usedTruck = targetVeh?.truckNo||v.truckNo;
+                  log("LOAN RECOVERY",`${ownerName||usedTruck} via ${usedTruck} ₹${fmt(+rAmt)} LR:${rLR||"—"}`);
                   setRAmt(""); setRDate(today()); setRLR(""); setRRef("");
                 }} color={C.green} full>Record Recovery</Btn>
               </div>
 
-              {/* Deduct per trip */}
-              <div style={{display:"flex",gap:10,alignItems:"center"}}>
-                <div style={{flex:1}}>
-                  <Field label="Deduct Per Trip ₹" value={String(v.deductPerTrip||0)}
-                    onChange={val=>setVehicles(p=>p.map(x=>x.id===lSheet?{...x,deductPerTrip:+val}:x))}
-                    type="number" />
-                </div>
-              </div>
+              {/* Deduct per trip — synced to ALL owner vehicles (save button prevents per-keystroke DB writes) */}
+              <DeductPerTripField
+                ownerVehs={ownerVehs}
+                ownerTruckNos={ownerTruckNos}
+                ownerDeductPerTrip={ownerDeductPerTrip}
+                setVehicles={setVehicles}
+              />
 
-              {/* Loan transaction history */}
-              {loanTxns.length>0&&(
+              {/* Combined transaction history across all owner vehicles */}
+              {allOwnerTxns.length>0&&(
                 <>
-                  <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1,marginTop:4}}>TRANSACTION HISTORY ({loanTxns.length})</div>
-                  {[...loanTxns].reverse().map(tx=>(
+                  <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1,marginTop:4}}>
+                    TRANSACTION HISTORY ({allOwnerTxns.length})
+                  </div>
+                  {allOwnerTxns.map(tx=>(
                     <div key={tx.id} style={{background:C.bg,borderRadius:10,padding:"10px 12px",
                       display:"flex",justifyContent:"space-between",alignItems:"center",
                       borderLeft:`3px solid ${tx.type==="given"?C.red:C.green}`}}>
@@ -8688,32 +8786,27 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
                         </div>
                         <div style={{fontSize:11,color:C.muted}}>{fmtD(tx.date)}{tx.ref?` · Ref: ${tx.ref}`:""}</div>
                         {tx.accountName&&<div style={{fontSize:11,color:C.muted}}>Acct: {tx.accountName}</div>}
-                        {tx.lrNo&&<div style={{fontSize:11,color:C.blue}}>LR: {tx.lrNo}</div>}
+                        {tx._truckNo&&ownerVehs.length>1&&<div style={{fontSize:11,color:C.blue}}>🚛 {tx._truckNo}</div>}
+                        {tx.lrNo&&<div style={{fontSize:11,color:C.teal}}>LR: {tx.lrNo}</div>}
                       </div>
                       {isOwner&&<button onClick={()=>{
                         if(tx.type==="recovery"){
-                          const linkedLR = tx.lrNo;
-                          const linkedTrip = linkedLR ? (trips||[]).find(t=>t.lrNo===linkedLR) : null;
-                          const warningMsg = linkedTrip
-                            ? `Delete this ₹${fmt(tx.amount)} recovery?\n\nThis is linked to LR: ${linkedLR}\nThe Loan Recovery on that trip will be reduced by ₹${fmt(tx.amount)} (from ₹${fmt(linkedTrip.loanRecovery||0)} → ₹${fmt(Math.max(0,(linkedTrip.loanRecovery||0)-tx.amount))}).`
-                            : `Delete this ₹${fmt(tx.amount)} recovery?\n\nVehicle loan balance will increase by ₹${fmt(tx.amount)}.`;
-                          if(!window.confirm(warningMsg)) return;
-                          // Reverse loan recovered on vehicle
-                          setVehicles(p=>p.map(x=>x.id===lSheet?{...x,
-                            loanRecovered:(x.loanRecovered||0)-tx.amount,
+                          const linkedTrip = tx.lrNo?(trips||[]).find(t=>t.lrNo===tx.lrNo):null;
+                          const warn = linkedTrip
+                            ? `Delete ₹${fmt(tx.amount)} recovery?\nLinked LR: ${tx.lrNo} — trip loanRecovery will be reduced.`
+                            : `Delete ₹${fmt(tx.amount)} recovery?\nOwner loan balance will increase by ₹${fmt(tx.amount)}.`;
+                          if(!window.confirm(warn)) return;
+                          setVehicles(p=>p.map(x=>x.id===tx._vehicleId?{...x,
+                            loanRecovered:Math.max(0,(x.loanRecovered||0)-tx.amount),
                             loanTxns:(x.loanTxns||[]).filter(t=>t.id!==tx.id)}:x));
-                          // Reverse loanRecovery on the linked trip (match by lrNo OR trip id)
                           if(linkedTrip){
-                            setTrips(p=>p.map(t=>{
-                              if(t.id!==linkedTrip.id) return t;
-                              return {...t, loanRecovery:Math.max(0,(t.loanRecovery||0)-tx.amount)};
-                            }));
+                            setTrips(p=>p.map(t=>t.id!==linkedTrip.id?t:
+                              {...t,loanRecovery:Math.max(0,(t.loanRecovery||0)-tx.amount)}));
                           }
                         } else {
-                          // "given" transaction — just remove it and reduce loan amount
-                          if(!window.confirm(`Delete this ₹${fmt(tx.amount)} loan entry?\nVehicle loan total will decrease by ₹${fmt(tx.amount)}.`)) return;
-                          setVehicles(p=>p.map(x=>x.id===lSheet?{...x,
-                            loan:(x.loan||0)-tx.amount,
+                          if(!window.confirm(`Delete ₹${fmt(tx.amount)} loan entry?\nOwner loan total will decrease by ₹${fmt(tx.amount)}.`)) return;
+                          setVehicles(p=>p.map(x=>x.id===tx._vehicleId?{...x,
+                            loan:Math.max(0,(x.loan||0)-tx.amount),
                             loanTxns:(x.loanTxns||[]).filter(t=>t.id!==tx.id)}:x));
                         }
                       }} style={{background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:16}}>🗑</button>}
@@ -8893,12 +8986,17 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
       )}
 
       {filtered.map(v=>{
-        const bal=(v.loan||0)-(v.loanRecovered||0);
+        const ownerName2 = (v.ownerName||"").trim();
+        const ownerVehs2 = ownerName2 ? (vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerName2) : [v];
+        const ownerLoanG2 = ownerVehs2.reduce((s,x)=>s+(x.loan||0),0);
+        const ownerLoanR2 = ownerVehs2.reduce((s,x)=>s+(x.loanRecovered||0),0);
+        const bal = ownerLoanG2 - ownerLoanR2;
+        const vBal=(v.loan||0)-(v.loanRecovered||0); // per-vehicle for border color
         const vt=(trips||[]).filter(t=>t.truckNo===v.truckNo||t.truck===v.truckNo);
         const short=vt.reduce((s,t)=>s+(t.shortage||0),0);
         return (
           <div key={v.id} style={{background:C.card,borderRadius:14,padding:"14px 16px",
-            borderLeft:`4px solid ${bal>0?C.red:C.green}`,marginBottom:8}}>
+            borderLeft:`4px solid ${vBal>0?C.red:C.green}`,marginBottom:8}}>
             {/* Truck + owner row */}
             <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
               <div>
@@ -8906,7 +9004,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
                 <div style={{color:C.muted,fontSize:12}}>{v.ownerName||"—"}{v.phone?` · ${v.phone}`:""}</div>
               </div>
               <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:4}}>
-                <Badge label={bal>0?"Loan Due":"Clear"} color={bal>0?C.red:C.green} />
+                <Badge label={vBal>0?"Loan Due":"Clear"} color={vBal>0?C.red:C.green} />
                 {v.tafalExempt&&<Badge label="TAFAL Exempt" color={C.muted} />}
                 {isOwner ? (
                 <button onClick={()=>{setF({
@@ -8948,15 +9046,22 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
             )}
             {v.accountNo&&<div style={{color:C.blue,fontSize:11,marginBottom:6}}>🏦 A/C: {v.accountNo}{v.ifsc?` · ${v.ifsc}`:""}</div>}
 
-            {/* Loan KPIs */}
+            {/* Loan KPIs — owner-level totals */}
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:10}}>
-              {[{l:"Loan",v:fmt(v.loan||0),c:C.red},{l:"Recovered",v:fmt(v.loanRecovered||0),c:C.green},{l:"Balance",v:fmt(bal),c:bal>0?C.accent:C.green}].map(x=>(
+              {[
+                {l:ownerVehs2.length>1?"Owner Loan":"Loan",  v:fmt(ownerLoanG2), c:C.red},
+                {l:"Recovered",                               v:fmt(ownerLoanR2), c:C.green},
+                {l:"Balance",                                 v:fmt(bal),         c:bal>0?C.accent:C.green},
+              ].map(x=>(
                 <div key={x.l} style={{background:C.bg,borderRadius:8,padding:"8px",textAlign:"center"}}>
                   <div style={{color:x.c,fontWeight:700,fontSize:12}}>{x.v}</div>
                   <div style={{color:C.muted,fontSize:9}}>{x.l.toUpperCase()}</div>
                 </div>
               ))}
             </div>
+            {ownerVehs2.length>1&&vBal>0&&(
+              <div style={{fontSize:10,color:C.muted,marginBottom:6}}>This vehicle: ₹{fmt(vBal)} · Owner total across {ownerVehs2.length} vehicles</div>
+            )}
 
             <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:C.muted,marginBottom:10}}>
               <span>Trips: <b style={{color:C.text}}>{vt.length}</b></span>
@@ -11252,8 +11357,36 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, e
   };
 
   const deleteDriverPay = async (id) => {
-    setDriverPays(prev=>(prev||[]).filter(p=>p.id!==id));
+    // Find the payment being deleted so we can check its trip
+    const pay = (driverPays||[]).find(p=>p.id===id);
+    const updatedPays = (driverPays||[]).filter(p=>p.id!==id);
+    setDriverPays(updatedPays);
     await DB.deleteDriverPay(id);
+
+    // If the deleted payment was linked to a trip, recalculate balance
+    // and un-settle the trip if balance is now > 0
+    if(pay?.tripId) {
+      const trip = (trips||[]).find(t=>t.id===pay.tripId);
+      if(trip && trip.driverSettled) {
+        const veh = (vehicles||[]).find(v=>v.truckNo===trip.truckNo);
+        const gross   = (trip.qty||0)*(trip.givenRate||0);
+        const deducts = (trip.advance||0)+(trip.tafal||0)+(veh?.deductPerTrip||0)
+                       +(trip.dieselEstimate||0)+((trip.shortage||0)*(trip.givenRate||0));
+        const netDue  = Math.max(0, gross - deducts);
+        const paidNow = updatedPays.filter(p=>p.tripId===trip.id).reduce((s,p)=>s+(p.amount||0),0);
+        const newBal  = Math.max(0, netDue - paidNow);
+        if(newBal > 0) {
+          // Balance is no longer 0 — un-settle the trip
+          setTrips(prev=>prev.map(t=>t.id===trip.id
+            ? {...t, driverSettled:false, settledBy:"", netPaid:0}
+            : t));
+          // Persist to DB
+          const revertedTrip = {...trip, driverSettled:false, settledBy:"", netPaid:0};
+          try { await DB.saveTrip(revertedTrip); } catch(e){ console.error("revert trip on pay delete:",e); }
+          log && log("UNSETTLE", `LR:${trip.lrNo} ${trip.truckNo} — payment deleted, balance restored ₹${newBal.toLocaleString("en-IN")}`);
+        }
+      }
+    }
   };
 
   const scanGlobal = async (file) => {
@@ -11444,7 +11577,7 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, e
                   <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:6,flexShrink:0,marginLeft:8}}>
                     <div style={{color:C.muted,fontSize:11}}>{p.createdBy||""}</div>
                     {user.role==="owner" && (
-                      <button onClick={()=>{if(window.confirm(`Delete payment of ${fmt(p.amount)} for LR ${p.lrNo}?\nThis will restore the balance.`)) deleteDriverPay(p.id);}}
+                      <button onClick={()=>{if(window.confirm(`Delete payment of ${fmt(p.amount)} for LR ${p.lrNo}?\nBalance will be restored. If this was the final payment, the trip will be un-settled.`)) deleteDriverPay(p.id);}}
                         style={{background:"none",border:`1px solid ${C.red}55`,borderRadius:5,
                           color:C.red,fontSize:10,padding:"2px 7px",cursor:"pointer"}}>
                         🗑 Delete
@@ -11505,7 +11638,7 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, e
               <div style={{display:"flex",alignItems:"center",gap:8}}>
                 <span style={{color:C.green,fontWeight:700}}>{fmt(p.amount)}</span>
                 {user.role==="owner" && (
-                  <button onClick={()=>{if(window.confirm(`Delete payment of ${fmt(p.amount)}?\nBalance will be restored.`)) deleteDriverPay(p.id);}}
+                  <button onClick={()=>{if(window.confirm(`Delete payment of ${fmt(p.amount)}?\nBalance will be restored. If this was the final payment, the trip will be un-settled.`)) deleteDriverPay(p.id);}}
                     style={{background:"none",border:`1px solid ${C.red}44`,borderRadius:4,
                       color:C.red,fontSize:10,padding:"1px 6px",cursor:"pointer"}}>
                     🗑
