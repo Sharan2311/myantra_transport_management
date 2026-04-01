@@ -8413,7 +8413,20 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
       {/* Header */}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div style={{color:C.accent,fontWeight:800,fontSize:16}}>🚛 Vehicles & Drivers</div>
-        {isOwner && <Btn onClick={()=>{setEditId(null);setF(blank);setSheet(true);}} sm>+ Add</Btn>}
+        <div style={{display:"flex",gap:8}}>
+          {isOwner && (
+            <Btn sm outline color={C.orange} onClick={()=>{
+              const withPhone = (vehicles||[]).filter(v=>v.driverPhone);
+              if(withPhone.length===0){alert("No driver phone numbers to clear.");return;}
+              if(!window.confirm(`Clear driver phone numbers from ${withPhone.length} vehicle${withPhone.length>1?"s":""}?\n\nThey will be re-added automatically on the next batch DI scan.\n\nThis cannot be undone.`)) return;
+              setVehicles(prev=>prev.map(v=>v.driverPhone?{...v,driverPhone:""}:v));
+              log("CLEAR DRIVER PHONES",`Cleared ${withPhone.length} driver phone numbers`);
+            }}>
+              🗑 Clear Phones
+            </Btn>
+          )}
+          {isOwner && <Btn onClick={()=>{setEditId(null);setF(blank);setSheet(true);}} sm>+ Add</Btn>}
+        </div>
       </div>
 
       {/* KPIs */}
