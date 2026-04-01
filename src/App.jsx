@@ -8985,18 +8985,24 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
         </div>
       )}
 
-      {filtered.map(v=>{
+      {(()=>{
+        // Track which ownerNames we've already rendered the owner-loan header for
+        const seenOwners = new Set();
+        return filtered.map(v=>{
         const ownerName2 = (v.ownerName||"").trim();
         const ownerVehs2 = ownerName2 ? (vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerName2) : [v];
         const ownerLoanG2 = ownerVehs2.reduce((s,x)=>s+(x.loan||0),0);
         const ownerLoanR2 = ownerVehs2.reduce((s,x)=>s+(x.loanRecovered||0),0);
-        const bal = ownerLoanG2 - ownerLoanR2;
-        const vBal=(v.loan||0)-(v.loanRecovered||0); // per-vehicle for border color
+        const ownerBal2 = ownerLoanG2 - ownerLoanR2;
+        const vBal=(v.loan||0)-(v.loanRecovered||0); // per-vehicle
+        const isFirstOfOwner = ownerName2 ? !seenOwners.has(ownerName2) : true;
+        if(ownerName2) seenOwners.add(ownerName2);
+        const bal = ownerBal2; // alias for WA button
         const vt=(trips||[]).filter(t=>t.truckNo===v.truckNo||t.truck===v.truckNo);
         const short=vt.reduce((s,t)=>s+(t.shortage||0),0);
         return (
           <div key={v.id} style={{background:C.card,borderRadius:14,padding:"14px 16px",
-            borderLeft:`4px solid ${vBal>0?C.red:C.green}`,marginBottom:8}}>
+            borderLeft:`4px solid ${ownerBal2>0?C.red:C.green}`,marginBottom:8}}>
             {/* Truck + owner row */}
             <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
               <div>
@@ -9004,7 +9010,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
                 <div style={{color:C.muted,fontSize:12}}>{v.ownerName||"—"}{v.phone?` · ${v.phone}`:""}</div>
               </div>
               <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:4}}>
-                <Badge label={vBal>0?"Loan Due":"Clear"} color={vBal>0?C.red:C.green} />
+                <Badge label={ownerBal2>0?"Loan Due":"Clear"} color={ownerBal2>0?C.red:C.green} />
                 {v.tafalExempt&&<Badge label="TAFAL Exempt" color={C.muted} />}
                 {isOwner ? (
                 <button onClick={()=>{setF({
@@ -9046,21 +9052,49 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
             )}
             {v.accountNo&&<div style={{color:C.blue,fontSize:11,marginBottom:6}}>🏦 A/C: {v.accountNo}{v.ifsc?` · ${v.ifsc}`:""}</div>}
 
-            {/* Loan KPIs — owner-level totals */}
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:10}}>
-              {[
-                {l:ownerVehs2.length>1?"Owner Loan":"Loan",  v:fmt(ownerLoanG2), c:C.red},
-                {l:"Recovered",                               v:fmt(ownerLoanR2), c:C.green},
-                {l:"Balance",                                 v:fmt(bal),         c:bal>0?C.accent:C.green},
-              ].map(x=>(
-                <div key={x.l} style={{background:C.bg,borderRadius:8,padding:"8px",textAlign:"center"}}>
-                  <div style={{color:x.c,fontWeight:700,fontSize:12}}>{x.v}</div>
-                  <div style={{color:C.muted,fontSize:9}}>{x.l.toUpperCase()}</div>
+            {/* Loan KPIs */}
+            {ownerVehs2.length>1 ? (
+              // Multi-vehicle owner: show owner-total on first card, per-vehicle note on rest
+              isFirstOfOwner ? (
+                <>
+                  <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:8,
+                    padding:"5px 10px",fontSize:10,color:C.orange,fontWeight:700,marginBottom:6}}>
+                    👥 Owner total across {ownerVehs2.length} vehicles
+                  </div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:10}}>
+                    {[
+                      {l:"Owner Loan",  v:fmt(ownerLoanG2), c:C.red},
+                      {l:"Recovered",   v:fmt(ownerLoanR2), c:C.green},
+                      {l:"Balance",     v:fmt(ownerBal2),   c:ownerBal2>0?C.accent:C.green},
+                    ].map(x=>(
+                      <div key={x.l} style={{background:C.bg,borderRadius:8,padding:"8px",textAlign:"center"}}>
+                        <div style={{color:x.c,fontWeight:700,fontSize:12}}>{x.v}</div>
+                        <div style={{color:C.muted,fontSize:9}}>{x.l.toUpperCase()}</div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div style={{background:C.bg,borderRadius:8,padding:"7px 10px",fontSize:11,
+                  color:C.muted,marginBottom:10,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <span>Owner loan balance: <b style={{color:ownerBal2>0?C.accent:C.green}}>₹{fmt(ownerBal2)}</b></span>
+                  <span style={{fontSize:10}}>tap 🏦 Loan to manage</span>
                 </div>
-              ))}
-            </div>
-            {ownerVehs2.length>1&&vBal>0&&(
-              <div style={{fontSize:10,color:C.muted,marginBottom:6}}>This vehicle: ₹{fmt(vBal)} · Owner total across {ownerVehs2.length} vehicles</div>
+              )
+            ) : (
+              // Single vehicle owner: show normal per-vehicle KPIs
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:10}}>
+                {[
+                  {l:"Loan",       v:fmt(v.loan||0),          c:C.red},
+                  {l:"Recovered",  v:fmt(ownerLoanR2),        c:C.green},
+                  {l:"Balance",    v:fmt(ownerBal2),           c:ownerBal2>0?C.accent:C.green},
+                ].map(x=>(
+                  <div key={x.l} style={{background:C.bg,borderRadius:8,padding:"8px",textAlign:"center"}}>
+                    <div style={{color:x.c,fontWeight:700,fontSize:12}}>{x.v}</div>
+                    <div style={{color:C.muted,fontSize:9}}>{x.l.toUpperCase()}</div>
+                  </div>
+                ))}
+              </div>
             )}
 
             <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:C.muted,marginBottom:10}}>
@@ -9084,7 +9118,8 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
             </div>
           </div>
         );
-      })}
+      }); // end filtered.map
+      })()} {/* end owner-tracking IIFE */}
 
       {/* ── FULL HISTORY SHEET ── */}
       {hSheet&&(()=>{
