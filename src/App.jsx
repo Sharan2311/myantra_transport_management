@@ -1143,9 +1143,9 @@ export default function App() {
         const fySet = new Set([currentFY()]);
         (trips||[]).forEach(t=>{ const fy=getFY(t.date); if(fy) fySet.add(fy); });
         const fyList = [...fySet].sort((a,b)=>b-a);
-        // Build client list from data
+        // Build client list — always show (even single client, so user knows filter is active)
         const clientsInData = CLIENTS.filter(c=>(trips||[]).some(t=>(t.client||DEFAULT_CLIENT)===c));
-        const showBar = fyList.length > 1 || clientsInData.length > 1;
+        const showBar = fyList.length > 1 || clientsInData.length >= 1;
         if(!showBar) return null;
         return (
           <div style={{background:C.card,borderBottom:`1px solid ${C.border}`,padding:"8px 16px",display:"flex",flexDirection:"column",gap:6}}>
@@ -1165,27 +1165,25 @@ export default function App() {
                 ))}
               </div>
             )}
-            {/* Client row */}
-            {clientsInData.length > 1 && (
-              <div style={{display:"flex",alignItems:"center",gap:6,overflowX:"auto"}}>
-                <span style={{color:C.muted,fontSize:10,fontWeight:700,flexShrink:0,letterSpacing:0.5}}>🏭 Client</span>
-                {["", ...clientsInData].map(c=>{
-                  const label = c==="" ? "All" : c.replace("Shree Cement ","SC ").replace("Ultratech ","UT ");
-                  const col = c===""?C.muted:c.includes("Ultratech")?C.orange:c.includes("Guntur")?C.purple:C.blue;
-                  const active = selectedClient===c;
-                  return (
-                    <button key={c||"all"} onClick={()=>setSelectedClient(c)}
-                      style={{padding:"3px 9px",borderRadius:14,fontSize:11,fontWeight:700,
-                        cursor:"pointer",flexShrink:0,whiteSpace:"nowrap",
-                        border:`1.5px solid ${active?col:C.border}`,
-                        background:active?col+"22":"transparent",
-                        color:active?col:C.muted}}>
-                      {label}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
+            {/* Client row — always shown */}
+            <div style={{display:"flex",alignItems:"center",gap:6,overflowX:"auto"}}>
+              <span style={{color:C.muted,fontSize:10,fontWeight:700,flexShrink:0,letterSpacing:0.5}}>🏭 Client</span>
+              {["", ...clientsInData].map(c=>{
+                const label = c==="" ? "All" : c.replace("Shree Cement ","SC ").replace("Ultratech ","UT ");
+                const col = c===""?C.muted:c.includes("Ultratech")?C.orange:c.includes("Guntur")?C.purple:C.blue;
+                const active = selectedClient===c;
+                return (
+                  <button key={c||"all"} onClick={()=>setSelectedClient(c)}
+                    style={{padding:"3px 9px",borderRadius:14,fontSize:11,fontWeight:700,
+                      cursor:"pointer",flexShrink:0,whiteSpace:"nowrap",
+                      border:`1.5px solid ${active?col:C.border}`,
+                      background:active?col+"22":"transparent",
+                      color:active?col:C.muted}}>
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
           </div>
         );
       })()}
@@ -1214,7 +1212,7 @@ export default function App() {
   );
 }
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
-function Dashboard({trips, fyTrips, vehicles, employees, indents, pumps, pumpPayments, driverPays, activity, settings, setTab, user, selectedFY}) {
+function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pumps, pumpPayments, driverPays, activity, settings, setTab, user, selectedFY}) {
   const displayTrips = fyTrips || trips; // use FY-filtered if available
   const todayStr    = today();
   const todayTrips  = displayTrips.filter(t => t.date===todayStr);
@@ -1231,6 +1229,11 @@ function Dashboard({trips, fyTrips, vehicles, employees, indents, pumps, pumpPay
   const tafalPool   = displayTrips.reduce((s,t) => s+(t.tafal||0), 0);
   const vLoan       = vehicles.reduce((s,v) => s + Math.max(0, v.loan-v.loanRecovered), 0);
   const fyLabel     = selectedFY ? FY_LABEL(selectedFY) : "";
+
+  // ── Owner-only: pending receivables from clients ──────────────────────────
+  const totalBilled   = displayTrips.filter(t=>t.type==="outbound").reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
+  const totalReceived = (payments||[]).reduce((s,p)=>s+Number(p.totalPaid||0),0);
+  const pendingReceivable = Math.max(0, totalBilled - totalReceived);
 
   // Actionable alerts
   const alerts = [
@@ -1295,31 +1298,94 @@ function Dashboard({trips, fyTrips, vehicles, employees, indents, pumps, pumpPay
         </div>
       )}
 
-      {/* Per-client summary */}
-      {(()=>{
+      {/* ── OWNER SUMMARY: Client × Material breakdown + Receivables ── */}
+      {(user.role==="owner"||user.role==="manager") && (()=>{
+        const outbound = displayTrips.filter(t=>t.type==="outbound");
+        const inbound  = displayTrips.filter(t=>t.type==="inbound");
+        // Cement by client
         const clientData = CLIENTS.map(c=>({
           name: c,
-          trips: displayTrips.filter(t=>(t.client||DEFAULT_CLIENT)===c&&t.type==="outbound"),
-          color: c.includes("Ultratech")?C.orange:c.includes("Guntur")?C.purple:C.blue,
           short: c.replace("Shree Cement ","SC ").replace("Ultratech ","UT "),
-        })).filter(cd=>cd.trips.length>0);
-        if(clientData.length<2) return null;
+          color: c.includes("Ultratech")?C.orange:c.includes("Guntur")?C.purple:C.blue,
+          cement: outbound.filter(t=>(t.client||DEFAULT_CLIENT)===c),
+        })).filter(cd=>cd.cement.length>0);
+        const huskTrips = outbound.filter(t=>(t.grade||"").toLowerCase().includes("husk"));
         return (
-          <div>
-            <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>By Plant</div>
-            <div style={{display:"grid",gridTemplateColumns:`repeat(${clientData.length},1fr)`,gap:8}}>
-              {clientData.map(cd=>(
-                <div key={cd.name} style={{background:C.card,borderRadius:12,padding:"10px 12px",borderTop:`3px solid ${cd.color}`}}>
-                  <div style={{color:cd.color,fontWeight:700,fontSize:11,marginBottom:4}}>{cd.short}</div>
-                  <div style={{color:C.text,fontWeight:800,fontSize:16}}>{cd.trips.length}</div>
-                  <div style={{color:C.muted,fontSize:10}}>trips</div>
-                  <div style={{color:C.green,fontWeight:700,fontSize:12,marginTop:4}}>
-                    {fmt(cd.trips.reduce((s,t)=>s+t.qty*(t.frRate-t.givenRate),0))}
-                  </div>
-                  <div style={{color:C.muted,fontSize:9}}>margin</div>
-                </div>
-              ))}
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>
+              Business Summary {fyLabel && <span style={{color:C.accent}}>· {fyLabel}</span>}
             </div>
+
+            {/* Receivables card */}
+            <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.border}`}}>
+              <div style={{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:0.5,marginBottom:8}}>💰 RECEIVABLES</div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+                {[
+                  {l:"Total Billed",   v:fmt(totalBilled),         c:C.blue},
+                  {l:"Received",       v:fmt(totalReceived),       c:C.green},
+                  {l:"Pending",        v:fmt(pendingReceivable),   c:pendingReceivable>0?C.red:C.muted},
+                ].map(x=>(
+                  <div key={x.l} style={{background:C.bg,borderRadius:8,padding:"8px",textAlign:"center"}}>
+                    <div style={{color:x.c,fontWeight:800,fontSize:13}}>{x.v}</div>
+                    <div style={{color:C.muted,fontSize:9,textTransform:"uppercase",marginTop:2}}>{x.l}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Client × Cement breakdown */}
+            {clientData.length>0 && (
+              <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.border}`}}>
+                <div style={{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:0.5,marginBottom:8}}>🏭 CEMENT BY CLIENT</div>
+                <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                  {clientData.map(cd=>{
+                    const billed   = cd.cement.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
+                    const received = (payments||[]).filter(p=>p.client===cd.name||!p.client).reduce((s,p)=>s+Number(p.totalPaid||0),0);
+                    const pending  = cd.cement.filter(t=>t.status==="Pending Bill");
+                    return (
+                      <div key={cd.name} style={{display:"flex",alignItems:"center",gap:10,
+                        background:C.bg,borderRadius:8,padding:"8px 10px",
+                        borderLeft:`3px solid ${cd.color}`}}>
+                        <div style={{flex:1,minWidth:0}}>
+                          <div style={{color:cd.color,fontWeight:700,fontSize:12}}>{cd.short}</div>
+                          <div style={{color:C.muted,fontSize:10}}>{cd.cement.length} trips · {cd.cement.reduce((s,t)=>s+(t.qty||0),0)} MT</div>
+                        </div>
+                        <div style={{textAlign:"right",flexShrink:0}}>
+                          <div style={{color:C.blue,fontWeight:700,fontSize:12}}>{fmt(billed)}</div>
+                          <div style={{color:C.muted,fontSize:9}}>billed</div>
+                        </div>
+                        {pending.length>0 && (
+                          <div style={{textAlign:"right",flexShrink:0}}>
+                            <div style={{color:C.orange,fontWeight:700,fontSize:12}}>{pending.length}</div>
+                            <div style={{color:C.muted,fontSize:9}}>pending</div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Raw Material + Husk row */}
+            {(inbound.length>0||huskTrips.length>0) && (
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                {inbound.length>0 && (
+                  <div style={{background:C.card,borderRadius:12,padding:"10px 12px",borderTop:`3px solid ${C.teal}`}}>
+                    <div style={{color:C.teal,fontWeight:700,fontSize:10,marginBottom:4}}>🏭 RAW MATERIAL</div>
+                    <div style={{color:C.text,fontWeight:800,fontSize:16}}>{inbound.length}</div>
+                    <div style={{color:C.muted,fontSize:10}}>{inbound.reduce((s,t)=>s+(t.qty||0),0)} MT</div>
+                  </div>
+                )}
+                {huskTrips.length>0 && (
+                  <div style={{background:C.card,borderRadius:12,padding:"10px 12px",borderTop:`3px solid ${C.orange}`}}>
+                    <div style={{color:C.orange,fontWeight:700,fontSize:10,marginBottom:4}}>🌾 HUSK</div>
+                    <div style={{color:C.text,fontWeight:800,fontSize:16}}>{huskTrips.length}</div>
+                    <div style={{color:C.muted,fontSize:10}}>{huskTrips.reduce((s,t)=>s+(t.qty||0),0)} MT</div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         );
       })()}
@@ -9434,6 +9500,24 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
   const [expandedAdv, setExpandedAdv] = useState(null);
   const isOwner = user?.role === "owner";
 
+  // GST Payments — stored in localStorage under key "mye_gst_payments"
+  const [gstPaymentsLocal, setGstPaymentsLocal] = React.useState(() => {
+    try { return JSON.parse(localStorage.getItem("mye_gst_payments")||"[]"); } catch{ return []; }
+  });
+  const saveGstPayment = (entry) => {
+    const updated = [...gstPaymentsLocal.filter(g=>g.id!==entry.id), entry]
+      .sort((a,b)=>b.month.localeCompare(a.month));
+    setGstPaymentsLocal(updated);
+    localStorage.setItem("mye_gst_payments", JSON.stringify(updated));
+  };
+  const deleteGstPayment = (id) => {
+    const updated = gstPaymentsLocal.filter(g=>g.id!==id);
+    setGstPaymentsLocal(updated);
+    localStorage.setItem("mye_gst_payments", JSON.stringify(updated));
+  };
+  const [gstPayForm, setGstPayForm] = React.useState({month:"", cgst:"", sgst:"", igst:"", notes:""});
+  const [showGstForm, setShowGstForm] = React.useState(false);
+
   const fmtINR = n => Number(n||0).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2});
   const parseDD = s => {
     if(!s) return "";
@@ -10035,6 +10119,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
           {id:"payments",  label:"Advice",    badge:shreePayments.length||null},
           {id:"shortages", label:"Shortages", badge:allShortages.length||null},
           {id:"gst",       label:"GST Hold",  badge:gstHoldPending>0?gstHoldItems.filter(g=>g.balance>0).length:null},
+          {id:"gstpay",    label:"GST Recon", badge:null},
           {id:"profit",    label:"Profit",    badge:null},
         ].map(t=>(
           <button key={t.id} onClick={()=>setActiveTab(t.id)} style={{
@@ -10782,6 +10867,181 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                 </div>
               ))
             )}
+          </div>
+        )}
+
+        {/* ══ GST RECONCILIATION ══════════════════════════════════════ */}
+        {activeTab==="gstpay"&&(
+          <div style={{display:"flex",flexDirection:"column",gap:14}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div>
+                <div style={{fontWeight:800,fontSize:15,color:C.text}}>🧾 GST Reconciliation</div>
+                <div style={{color:C.muted,fontSize:11,marginTop:2}}>Record GST paid monthly · compare with client releases</div>
+              </div>
+              <button onClick={()=>setShowGstForm(v=>!v)}
+                style={{background:showGstForm?C.muted+"22":C.accent,border:"none",color:showGstForm?C.muted:"#fff",
+                  borderRadius:10,padding:"7px 14px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+                {showGstForm?"Cancel":"+ Record GST"}
+              </button>
+            </div>
+
+            {showGstForm && (
+              <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:14,
+                display:"flex",flexDirection:"column",gap:10}}>
+                <div style={{fontWeight:700,fontSize:13,color:C.text,marginBottom:2}}>Record GST Payment</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                  <div>
+                    <div style={{color:C.muted,fontSize:10,fontWeight:700,marginBottom:3}}>MONTH *</div>
+                    <input type="month" value={gstPayForm.month} onChange={e=>setGstPayForm(p=>({...p,month:e.target.value}))}
+                      style={{width:"100%",boxSizing:"border-box",background:C.bg,border:`1px solid ${C.border}`,
+                        borderRadius:8,color:C.text,padding:"8px 10px",fontSize:13,outline:"none",colorScheme:"light"}} />
+                  </div>
+                  <div>
+                    <div style={{color:C.muted,fontSize:10,fontWeight:700,marginBottom:3}}>CGST ₹</div>
+                    <input type="text" inputMode="decimal" value={gstPayForm.cgst} onChange={e=>setGstPayForm(p=>({...p,cgst:e.target.value}))}
+                      placeholder="0" style={{width:"100%",boxSizing:"border-box",background:C.bg,border:`1px solid ${C.border}`,
+                        borderRadius:8,color:C.text,padding:"8px 10px",fontSize:13,outline:"none"}} />
+                  </div>
+                  <div>
+                    <div style={{color:C.muted,fontSize:10,fontWeight:700,marginBottom:3}}>SGST ₹</div>
+                    <input type="text" inputMode="decimal" value={gstPayForm.sgst} onChange={e=>setGstPayForm(p=>({...p,sgst:e.target.value}))}
+                      placeholder="0" style={{width:"100%",boxSizing:"border-box",background:C.bg,border:`1px solid ${C.border}`,
+                        borderRadius:8,color:C.text,padding:"8px 10px",fontSize:13,outline:"none"}} />
+                  </div>
+                  <div>
+                    <div style={{color:C.muted,fontSize:10,fontWeight:700,marginBottom:3}}>IGST ₹</div>
+                    <input type="text" inputMode="decimal" value={gstPayForm.igst} onChange={e=>setGstPayForm(p=>({...p,igst:e.target.value}))}
+                      placeholder="0" style={{width:"100%",boxSizing:"border-box",background:C.bg,border:`1px solid ${C.border}`,
+                        borderRadius:8,color:C.text,padding:"8px 10px",fontSize:13,outline:"none"}} />
+                  </div>
+                </div>
+                <div>
+                  <div style={{color:C.muted,fontSize:10,fontWeight:700,marginBottom:3}}>NOTES</div>
+                  <input value={gstPayForm.notes} onChange={e=>setGstPayForm(p=>({...p,notes:e.target.value}))}
+                    placeholder="e.g. Challan ref, bank UTR…"
+                    style={{width:"100%",boxSizing:"border-box",background:C.bg,border:`1px solid ${C.border}`,
+                      borderRadius:8,color:C.text,padding:"8px 10px",fontSize:13,outline:"none"}} />
+                </div>
+                <button onClick={()=>{
+                  if(!gstPayForm.month){alert("Please select a month.");return;}
+                  const total = (parseFloat(gstPayForm.cgst)||0)+(parseFloat(gstPayForm.sgst)||0)+(parseFloat(gstPayForm.igst)||0);
+                  if(total<=0){alert("Enter at least one GST component > 0.");return;}
+                  saveGstPayment({
+                    id:"GSTP"+Date.now(),
+                    month:gstPayForm.month,
+                    cgst:parseFloat(gstPayForm.cgst)||0,
+                    sgst:parseFloat(gstPayForm.sgst)||0,
+                    igst:parseFloat(gstPayForm.igst)||0,
+                    total,
+                    notes:gstPayForm.notes,
+                    createdAt:new Date().toISOString(),
+                  });
+                  setGstPayForm({month:"",cgst:"",sgst:"",igst:"",notes:""});
+                  setShowGstForm(false);
+                }} style={{background:C.accent,border:"none",borderRadius:10,color:"#fff",
+                  padding:"10px",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+                  ✓ Save GST Payment
+                </button>
+              </div>
+            )}
+
+            {/* Month-wise reconciliation table */}
+            {(()=>{
+              // Build monthly GST releases from shreePayments across ALL clients
+              const monthlyReleases = {};
+              shreePayments.forEach(pa => {
+                const m = (pa.paymentDate||pa.date||"").slice(0,7); // YYYY-MM
+                if(!m) return;
+                if(!monthlyReleases[m]) monthlyReleases[m]={released:0,clients:new Set()};
+                (pa.invoices||[]).forEach(inv => {
+                  const hold = Number(inv.hold||0);
+                  if(hold===0) { // This payment has no hold = release event
+                    monthlyReleases[m].released += Number(inv.paymentAmt||inv.totalAmt||0)*0.05; // ~5% GST est
+                  }
+                });
+                // Use gstReleases for more accurate tracking
+              });
+              // Build from gstReleases (more accurate)
+              const monthlyReleasesAccurate = {};
+              (gstReleases||[]).forEach(r => {
+                const m = (r.date||"").slice(0,7);
+                if(!m) return;
+                if(!monthlyReleasesAccurate[m]) monthlyReleasesAccurate[m]={released:0,count:0};
+                monthlyReleasesAccurate[m].released += Number(r.amount||0);
+                monthlyReleasesAccurate[m].count++;
+              });
+
+              // Merge paid months + release months
+              const allMonths = new Set([
+                ...gstPaymentsLocal.map(g=>g.month),
+                ...Object.keys(monthlyReleasesAccurate),
+              ]);
+              const sorted = [...allMonths].sort((a,b)=>b.localeCompare(a));
+
+              if(sorted.length===0) return (
+                <div style={{textAlign:"center",padding:"40px 20px",color:C.muted}}>
+                  <div style={{fontSize:32,marginBottom:8}}>🧾</div>
+                  <div>No GST data yet. Record your first GST payment above.</div>
+                </div>
+              );
+
+              return (
+                <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                  {sorted.map(m=>{
+                    const paid = gstPaymentsLocal.find(g=>g.month===m);
+                    const release = monthlyReleasesAccurate[m];
+                    const paidTotal = paid?.total||0;
+                    const releasedTotal = release?.released||0;
+                    // Difference: positive = more released than paid (good), negative = paid more than released (GST credit waiting)
+                    const diff = releasedTotal - paidTotal;
+                    const [yr,mo] = m.split("-");
+                    const monthLabel = new Date(parseInt(yr),parseInt(mo)-1,1).toLocaleDateString("en-IN",{month:"short",year:"numeric"});
+                    return (
+                      <div key={m} style={{background:C.card,borderRadius:12,padding:"12px 14px",
+                        border:`1px solid ${Math.abs(diff)<1?C.green+"44":diff<0?C.orange+"44":C.blue+"44"}`}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                          <div style={{fontWeight:700,fontSize:13,color:C.text}}>{monthLabel}</div>
+                          {Math.abs(diff)<1
+                            ? <span style={{background:C.green+"22",color:C.green,borderRadius:8,padding:"2px 8px",fontSize:11,fontWeight:700}}>✓ Matched</span>
+                            : diff<0
+                              ? <span style={{background:C.orange+"22",color:C.orange,borderRadius:8,padding:"2px 8px",fontSize:11,fontWeight:700}}>⚠ Paid > Released</span>
+                              : <span style={{background:C.blue+"22",color:C.blue,borderRadius:8,padding:"2px 8px",fontSize:11,fontWeight:700}}>ℹ Released > Paid</span>
+                          }
+                        </div>
+                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
+                          <div style={{background:C.bg,borderRadius:8,padding:"8px",textAlign:"center"}}>
+                            <div style={{color:C.red,fontWeight:800,fontSize:13}}>{paidTotal>0?fmt(paidTotal):"—"}</div>
+                            <div style={{color:C.muted,fontSize:9,textTransform:"uppercase"}}>GST Paid</div>
+                            {paid && <div style={{color:C.muted,fontSize:9,marginTop:2}}>
+                              C:{fmt(paid.cgst)} S:{fmt(paid.sgst)} I:{fmt(paid.igst)}
+                            </div>}
+                          </div>
+                          <div style={{background:C.bg,borderRadius:8,padding:"8px",textAlign:"center"}}>
+                            <div style={{color:C.green,fontWeight:800,fontSize:13}}>{releasedTotal>0?fmt(releasedTotal):"—"}</div>
+                            <div style={{color:C.muted,fontSize:9,textTransform:"uppercase"}}>Released</div>
+                            {release && <div style={{color:C.muted,fontSize:9,marginTop:2}}>{release.count} release{release.count!==1?"s":""}</div>}
+                          </div>
+                          <div style={{background:C.bg,borderRadius:8,padding:"8px",textAlign:"center"}}>
+                            <div style={{color:Math.abs(diff)<1?C.green:diff<0?C.orange:C.blue,fontWeight:800,fontSize:13}}>
+                              {diff===0?"₹0":diff>0?"+"+fmt(diff):fmt(diff)}
+                            </div>
+                            <div style={{color:C.muted,fontSize:9,textTransform:"uppercase"}}>Diff</div>
+                          </div>
+                        </div>
+                        {paid?.notes && <div style={{color:C.muted,fontSize:11,marginTop:6}}>📝 {paid.notes}</div>}
+                        {paid && isOwner && (
+                          <button onClick={()=>deleteGstPayment(paid.id)}
+                            style={{background:"none",border:"none",color:C.muted,fontSize:11,
+                              cursor:"pointer",marginTop:4,padding:0,textDecoration:"underline"}}>
+                            Delete
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
           </div>
         )}
 
