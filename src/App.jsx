@@ -1426,16 +1426,33 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
 
 
 // ─── BATCH DI SCANNER ─────────────────────────────────────────────────────────
-// Morning workflow: employee uploads all GR PDFs at once.
-// AI scans them in parallel. One screen shows all trips — enter LR + driver rate per row.
-// Tap "Save All" → all trips created in one shot.
+// Flow: Upload DIs → AI scans → Auto-group by vehicle → User reviews groups
+// (select which DIs merge, set order type + driver rate per DI, group-level fields)
+// → Save All → DB.getNextLR() assigns LR atomically per group
 function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user, log, onClose, employees=[], cashTransfers=[], setCashTransfers }) {
-  // Each item: { id, file, status, extracted, lrNo, givenRate, driverPhone, orderType, error, dupTrip }
-  const [items, setItems] = useState([]);
-  const [saving, setSaving] = useState(false);
+
+  // ── Raw scanned items (one per uploaded file) ────────────────────────────────
+  // item: { id, file, status, extracted, error }
+  const [items,      setItems]      = useState([]);
+  const [saving,     setSaving]     = useState(false);
   const [savedCount, setSavedCount] = useState(0);
+  const [lrError,    setLrError]    = useState(""); // LR assignment error
   const inputRef = useRef();
 
+  // ── Groups (built from items after scanning) ─────────────────────────────────
+  // group: {
+  //   id,                    // uid
+  //   truckNo,               // vehicle
+  //   diIds: [itemId, ...],  // which items are IN this group (checked)
+  //   client,                // client override
+  //   tafal, diesel, dieselIndentNo, advance, cashEmpId,
+  //   shortageRecovery, loanRecovery
+  // }
+  // Each item also carries: orderType, givenRate, grFile, invoiceFile (per-DI)
+  const [groups, setGroups] = useState([]); // set after all scans done
+  const [groupsBuilt, setGroupsBuilt] = useState(false);
+
+  // ── DI SCAN PROMPT (unchanged) ───────────────────────────────────────────────
   const DI_PROMPT = `You are reading a Delivery Instruction (DI) or GR copy for a cement transport company in India.
 Extract the following fields and return ONLY a JSON object:
 {
@@ -1463,30 +1480,13 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
     r.readAsDataURL(file);
   });
 
+  const userClients = getUserClients(user); // clients this user is allowed to see/use
+
   const detectClient = ex => {
     const hay = [ex.consignee||"",ex.consignor||"",ex.from||"",ex.to||""].join(" ").toLowerCase();
     if(hay.includes("ultratech")) return "Ultratech Malkhed";
     if(hay.includes("guntur"))    return "Shree Cement Guntur";
     return "Shree Cement Kodla";
-  };
-
-  const checkDupDI = (diNo, excludeItemId) => {
-    const d = (diNo||"").trim();
-    if(!d) return null;
-    // Check saved trips
-    const inTrips = (trips||[]).find(t => {
-      if(t.diLines&&t.diLines.length>0) return t.diLines.some(x=>x.diNo===d);
-      return (t.diNo||"").split("+").map(s=>s.trim()).includes(d);
-    });
-    if(inTrips) return {source:"saved", trip:inTrips};
-    // Check other batch items (same scan session)
-    const inBatch = items.find(it =>
-      it.id !== excludeItemId &&
-      it.status==="done" && !it.dupTrip &&
-      (it.extracted?.diNo||"").trim()===d
-    );
-    if(inBatch) return {source:"batch", item:inBatch};
-    return null;
   };
 
   const scanFile = async (id, file) => {
@@ -1501,9 +1501,16 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       if(!resp.ok||data.error) throw new Error(data.error||"Scan failed");
       const extracted = JSON.parse(data.text.replace(/```json|```/g,"").trim());
       const client = detectClient(extracted);
-      const dup = checkDupDI(extracted.diNo, id);
+      // Check if scanned client is in user's allowed clients
+      if(userClients.length < CLIENTS.length && !userClients.includes(client)) {
+        setItems(prev => prev.map(x => x.id===id
+          ? {...x, status:"error",
+              error:`You are not assigned to "${client}". Contact owner to get access.`}
+          : x));
+        return;
+      }
       setItems(prev => prev.map(x => x.id===id
-        ? {...x, status:"done", extracted:{...extracted,client}, dupTrip:dup, error:null}
+        ? {...x, status:"done", extracted:{...extracted, client}, error:null}
         : x));
     } catch(e) {
       setItems(prev => prev.map(x => x.id===id ? {...x, status:"error", error:e.message} : x));
@@ -1513,316 +1520,262 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
   const addFiles = files => {
     const newItems = Array.from(files).map(file => ({
       id:uid(), file, status:"pending",
-      extracted:null, dupTrip:null, error:null,
-      lrNo:"", givenRate:"", driverPhone:"", orderType:"godown",
-      advance:"0", shortageRecovery:"0", loanRecovery:"0",
-      tafal:"", dieselEstimate:"0", dieselIndentNo:"",
-      cashEmpId:"", clientOverride:"",
-      grFile:null, invoiceFile:null,
+      extracted:null, error:null,
+      // per-DI fields
+      orderType:"godown", givenRate:"", grFile:null, invoiceFile:null,
     }));
     setItems(prev => [...prev, ...newItems]);
-    // Scan sequentially with a small delay to avoid Anthropic rate limits
+    setGroupsBuilt(false); // new files = rebuild groups
     const scanSequentially = async (items) => {
       for(let i = 0; i < items.length; i++) {
         await scanFile(items[i].id, items[i].file);
-        if(i < items.length - 1) {
-          await new Promise(res => setTimeout(res, 1200)); // 1.2s gap between scans
-        }
+        if(i < items.length - 1) await new Promise(res => setTimeout(res, 1200));
       }
     };
     scanSequentially(newItems);
   };
 
-  const update = (id, field, val) =>
+  // ── Auto-build groups when all scans complete ─────────────────────────────────
+  const doneItems  = items.filter(x => x.status==="done");
+  const scanningNow = items.some(x => x.status==="scanning"||x.status==="pending");
+
+  useEffect(() => {
+    if(scanningNow || items.length===0 || groupsBuilt) return;
+    if(items.some(x=>x.status==="pending"||x.status==="scanning")) return;
+    // All done (or error) — build groups by truckNo
+    const byTruck = {};
+    doneItems.forEach(item => {
+      const tn = (item.extracted?.truckNo||"UNKNOWN").toUpperCase().trim();
+      if(!byTruck[tn]) byTruck[tn] = [];
+      byTruck[tn].push(item.id);
+    });
+    const newGroups = Object.entries(byTruck).map(([truckNo, diIds]) => {
+      // Client = detected from first item of group
+      const firstItem = doneItems.find(x=>x.id===diIds[0]);
+      const client = firstItem?.extracted?.client || DEFAULT_CLIENT;
+      return {
+        id: uid(),
+        truckNo,
+        diIds,      // all checked by default
+        client,
+        tafal: String(settings?.tafalPerTrip||300),
+        diesel: "0",
+        dieselIndentNo: "",
+        advance: "0",
+        cashEmpId: "",
+        shortageRecovery: "0",
+        loanRecovery: "0",
+      };
+    });
+    setGroups(newGroups);
+    setGroupsBuilt(true);
+  }, [scanningNow, items.length, groupsBuilt]);
+
+  // Re-build if new items arrive (user uploads more after first batch)
+  const itemCount = items.length;
+  useEffect(() => { setGroupsBuilt(false); }, [itemCount]);
+
+  // ── Group helpers ─────────────────────────────────────────────────────────────
+  const updateGroup = (gid, field, val) =>
+    setGroups(prev => prev.map(g => g.id===gid ? {...g,[field]:val} : g));
+
+  const toggleDI = (gid, itemId) => {
+    setGroups(prev => prev.map(g => {
+      if(g.id!==gid) return g;
+      const checked = g.diIds.includes(itemId);
+      if(checked && g.diIds.length===1) return g; // can't uncheck last one
+      const newDiIds = checked ? g.diIds.filter(id=>id!==itemId) : [...g.diIds, itemId];
+      return {...g, diIds:newDiIds};
+    }));
+  };
+
+  // ── Per-item helpers ──────────────────────────────────────────────────────────
+  const updateItem = (id, field, val) =>
     setItems(prev => prev.map(x => x.id===id ? {...x,[field]:val} : x));
-  const removeItem = id => setItems(prev => prev.filter(x=>x.id!==id));
 
-  // Items that are done, no dup, LR filled, driver rate filled
-  const doneItems = items.filter(x=>x.status==="done"&&!x.dupTrip);
+  // ── Duplicate DI check (same as original) ────────────────────────────────────
+  const checkDupDI = (diNo) => {
+    const d = (diNo||"").trim();
+    if(!d) return null;
+    const inTrips = (trips||[]).find(t => {
+      if(t.diLines&&t.diLines.length>0) return t.diLines.some(x=>x.diNo===d);
+      return (t.diNo||"").split("+").map(s=>s.trim()).includes(d);
+    });
+    if(inTrips) return {source:"saved", trip:inTrips};
+    return null;
+  };
 
-  // Group by LR — items sharing same LR = multi-DI on same trip
-  const byLR = {};
-  doneItems.forEach(item => {
-    const lr = item.lrNo.trim();
-    if(!lr) return;
-    if(!byLR[lr]) byLR[lr] = [];
-    byLR[lr].push(item);
-  });
-
-  // Multi-DI diesel conflict: two items with same LR both have diesel estimate or indent no
-  // Diesel should only be on ONE of the DIs (it covers the whole trip)
-  const multiDIDieselConflict = new Set(); // item ids that are part of a conflicting group
-  Object.values(byLR).forEach(group => {
-    if(group.length < 2) return;
-    const withDiesel = group.filter(x => +x.dieselEstimate > 0 || x.dieselIndentNo?.trim());
-    if(withDiesel.length > 1) {
-      withDiesel.forEach(x => multiDIDieselConflict.add(x.id));
+  // ── Readiness check per group ─────────────────────────────────────────────────
+  const groupReady = (g) => {
+    const groupItems = doneItems.filter(x=>g.diIds.includes(x.id));
+    if(groupItems.length===0) return false;
+    for(const item of groupItems) {
+      if(!item.givenRate || +item.givenRate<=0) return false;
+      const frRate = +item.extracted?.frRate||0;
+      if(frRate - (+item.givenRate) < 30) return false;
+      if(item.orderType==="party" && (!item.grFile||!item.invoiceFile)) return false;
     }
-  });
-
-  // An item is "ready" if: LR filled, driver rate filled, no LR conflict with saved trips
-  // (same LR in saved trips = merge flow — handled at save time)
-  const readyItems = doneItems.filter(x => {
-    if(x.dupTrip) return false; // has known duplicate DI
-    if(!x.lrNo.trim()) return false;
-    if(!x.givenRate || +x.givenRate <= 0) return false;
-    // Margin must be >= 30
-    if((+x.extracted?.frRate||0) - (+x.givenRate||0) < 30) return false;
-    // If diesel estimate entered, indent no is required
-    if(+x.dieselEstimate > 0 && !x.dieselIndentNo?.trim()) return false;
-    // Multi-DI diesel conflict — two DIs on same LR both have diesel
-    if(multiDIDieselConflict.has(x.id)) return false;
-    // Indent no must not duplicate a saved trip or another batch row
-    if(x.dieselIndentNo?.trim()) {
-      const val = x.dieselIndentNo.trim();
-      if((trips||[]).some(t => t.dieselIndentNo && t.dieselIndentNo.trim() === val)) return false;
-      if(doneItems.some(other => other.id !== x.id && (other.dieselIndentNo||"").trim() === val)) return false;
-    }
-    // Party order requires GR file AND invoice file
-    if(x.orderType==="party" && (!x.grFile || !x.invoiceFile)) return false;
-    // Net to driver must not be negative (unless it's only diesel — multi-DI case, warn at save time)
-    {
-      const qty = +x.extracted?.qty || 0;
-      const driver = +x.givenRate || 0;
-      const _gross = qty * driver;
-      const tafalVal = x.tafal !== "" && x.tafal !== null && x.tafal !== undefined
-        ? +x.tafal
-        : (settings?.tafalPerTrip || 300);
-      const _net = _gross
-        - (+x.advance || 0)
-        - tafalVal
-        - (+x.dieselEstimate || 0)
-        - (+x.shortageRecovery || 0)
-        - (+x.loanRecovery || 0);
-      if (_net < 0) {
-        const isOnlyDiesel = (+x.dieselEstimate || 0) > 0
-          && (+x.advance || 0) === 0
-          && (+x.shortageRecovery || 0) === 0
-          && (+x.loanRecovery || 0) === 0;
-        if (!isOnlyDiesel) return false; // hard block — negative net not from diesel
-        // isOnlyDiesel = allow (will confirm at save time)
-      }
-    }
+    if(+g.diesel > 0 && !g.dieselIndentNo.trim()) return false;
     return true;
-  });
-  const canSave = readyItems.length > 0 && !saving;
+  };
 
+  const readyGroups = groups.filter(groupReady);
+  const canSave = readyGroups.length > 0 && !saving;
+
+  // ── Save All ──────────────────────────────────────────────────────────────────
   const saveAll = async () => {
-    // Validate each ready item before saving — per-trip with clear errors
-    for(const item of readyItems) {
-      // Multi-DI diesel conflict check — should be caught by readyItems filter, but double-check
-      if(multiDIDieselConflict.has(item.id)) {
-        alert(`LR ${item.lrNo}: Diesel is entered on multiple DIs for the same LR.\nDiesel covers the whole trip — enter it on only one DI and clear it from the other.`);
-        return;
-      }
-      // Duplicate DI check (catches cases where DI was added to trips after scan)
-      const diNo = (item.extracted?.diNo||"").trim();
-      if(diNo) {
-        const dupInSaved = (trips||[]).find(t => {
-          if(t.diLines&&t.diLines.length>0) return t.diLines.some(d=>d.diNo===diNo);
-          return (t.diNo||"").split("+").map(s=>s.trim()).includes(diNo);
-        });
-        if(dupInSaved) {
-          alert(`LR ${item.lrNo}: DI ${diNo} is already recorded in LR ${dupInSaved.lrNo} (${dupInSaved.truckNo}).\nThis trip cannot be saved.`);
-          return;
-        }
-        // Duplicate within this batch session
-        const dupInBatch = readyItems.find(other =>
-          other.id !== item.id &&
-          (other.extracted?.diNo||"").trim() === diNo
-        );
-        if(dupInBatch) {
-          alert(`LR ${item.lrNo}: DI ${diNo} appears in another row (LR ${dupInBatch.lrNo}).\nTwo trips cannot have the same DI number.`);
-          return;
-        }
-      }
-      const margin = (+item.extracted?.frRate||0) - (+item.givenRate||0);
-      if(margin < 30) {
-        alert(`LR ${item.lrNo}: Margin is ₹${margin}/MT. Minimum ₹30/MT required.\nPlease fix the driver rate.`);
-        return;
-      }
-      if(+item.dieselEstimate > 0 && !item.dieselIndentNo?.trim()) {
-        alert(`LR ${item.lrNo}: Diesel Indent No is required when Diesel Estimate is entered.`);
-        return;
-      }
-      if(item.dieselIndentNo?.trim()) {
-        const dupIndent = (trips||[]).some(t =>
-          t.dieselIndentNo && t.dieselIndentNo.trim() === item.dieselIndentNo.trim()
-        );
-        if(dupIndent) {
-          alert(`LR ${item.lrNo}: Diesel Indent No "${item.dieselIndentNo}" already exists on another trip.`);
-          return;
-        }
-      }
-      if(item.orderType==="party") {
-        if(!item.grFile) {
-          alert(`LR ${item.lrNo}: GR Copy file is required for Party orders.\nPlease upload the GR copy.`);
-          return;
-        }
-        if(!item.invoiceFile) {
-          alert(`LR ${item.lrNo}: Invoice file is required for Party orders.\nPlease upload the invoice.`);
-          return;
-        }
-      }
-      // Validate: Est. Net to Driver cannot be negative (same as single trip saveNew)
-      {
-        const qty = +item.extracted?.qty || 0;
-        const driver = +item.givenRate || 0;
-        const _gross = qty * driver;
-        const tafalVal = item.tafal !== "" && item.tafal !== null && item.tafal !== undefined
-          ? +item.tafal
-          : (settings?.tafalPerTrip || 300);
-        const _net = _gross
-          - (+item.advance || 0)
-          - tafalVal
-          - (+item.dieselEstimate || 0)
-          - (+item.shortageRecovery || 0)
-          - (+item.loanRecovery || 0);
-        if (_net < 0) {
-          const isOnlyDiesel = (+item.dieselEstimate || 0) > 0
-            && (+item.advance || 0) === 0
-            && (+item.shortageRecovery || 0) === 0
-            && (+item.loanRecovery || 0) === 0;
-          if (isOnlyDiesel) {
-            if (!window.confirm(`LR ${item.lrNo}: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative) — likely because diesel covers multiple DIs.\n\nSave anyway? You can merge the second DI after saving.`)) return;
-          } else {
-            alert(`LR ${item.lrNo}: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\nPlease reduce Advance / Loan / Shortage Recovery.`);
+    setLrError("");
+    // ── Pre-validate all groups (preserve all original validations) ──────────
+    for(const g of readyGroups) {
+      const groupItems = doneItems.filter(x=>g.diIds.includes(x.id));
+
+      // Duplicate DI check
+      for(const item of groupItems) {
+        const diNo = (item.extracted?.diNo||"").trim();
+        if(diNo) {
+          const dupSaved = checkDupDI(diNo);
+          if(dupSaved) {
+            alert(`DI ${diNo} (truck ${g.truckNo}) is already recorded in LR ${dupSaved.trip.lrNo}.\nCannot save.`);
             return;
           }
+          // Dup within other groups in this batch
+          const dupInBatch = readyGroups.flatMap(og=>
+            og.id!==g.id ? doneItems.filter(x=>og.diIds.includes(x.id)) : []
+          ).find(x=>(x.extracted?.diNo||"").trim()===diNo);
+          if(dupInBatch) {
+            alert(`DI ${diNo} appears in another group. Two trips cannot share the same DI.`);
+            return;
+          }
+        }
+      }
+
+      // Margin check per DI
+      for(const item of groupItems) {
+        const margin = (+item.extracted?.frRate||0) - (+item.givenRate||0);
+        if(margin < 30) {
+          alert(`Truck ${g.truckNo} · DI ${item.extracted?.diNo||"?"}: Margin ₹${margin}/MT is below ₹30 minimum.`);
+          return;
+        }
+      }
+
+      // Diesel indent
+      if(+g.diesel > 0 && !g.dieselIndentNo.trim()) {
+        alert(`Truck ${g.truckNo}: Diesel Indent No is required when Diesel Estimate is entered.`);
+        return;
+      }
+      if(g.dieselIndentNo.trim()) {
+        const dupIndent = (trips||[]).some(t =>
+          t.dieselIndentNo && t.dieselIndentNo.trim() === g.dieselIndentNo.trim()
+        );
+        if(dupIndent) {
+          alert(`Truck ${g.truckNo}: Diesel Indent No "${g.dieselIndentNo}" already exists on another trip.`);
+          return;
+        }
+      }
+
+      // Party files per DI
+      for(const item of groupItems) {
+        if(item.orderType==="party") {
+          if(!item.grFile)      { alert(`Truck ${g.truckNo} · DI ${item.extracted?.diNo||"?"}: GR Copy required for Party order.`); return; }
+          if(!item.invoiceFile) { alert(`Truck ${g.truckNo} · DI ${item.extracted?.diNo||"?"}: Invoice required for Party order.`); return; }
+        }
+      }
+
+      // Net to driver check per group
+      const totalQty  = groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0),0);
+      const totalGross = groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0)*(+x.givenRate||0),0);
+      const tafalVal  = +g.tafal || (settings?.tafalPerTrip||300);
+      const _net = totalGross - (+g.advance||0) - tafalVal - (+g.diesel||0)
+                 - (+g.shortageRecovery||0) - (+g.loanRecovery||0);
+      if(_net < 0) {
+        const isOnlyDiesel = (+g.diesel||0)>0 && (+g.advance||0)===0
+          && (+g.shortageRecovery||0)===0 && (+g.loanRecovery||0)===0;
+        if(isOnlyDiesel) {
+          if(!window.confirm(`Truck ${g.truckNo}: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative — likely diesel across DIs).\nSave anyway?`)) return;
+        } else {
+          alert(`Truck ${g.truckNo}: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\nReduce Advance / Diesel / Recoveries.`);
+          return;
         }
       }
     }
 
     setSaving(true);
-    let count = 0;
-    const tafal = settings?.tafalPerTrip || 300;
-    // Track trucks auto-created during this batch save to avoid duplicate DB inserts
-    // (vehicles state snapshot is stale within the loop — won't reflect mid-loop additions)
+    const tafal = settings?.tafalPerTrip||300;
     const createdTrucksThisBatch = new Set();
+    let count = 0;
 
-    // Group ready items by LR to handle multi-DI merges
-    const lrGroups = {};
-    readyItems.forEach(item => {
-      const lr = item.lrNo.trim();
-      if(!lrGroups[lr]) lrGroups[lr] = [];
-      lrGroups[lr].push(item);
-    });
+    for(const g of readyGroups) {
+      const groupItems = doneItems.filter(x=>g.diIds.includes(x.id));
+      const primary    = groupItems[0];
+      const ex0        = primary.extracted;
+      const client     = g.client || ex0.client || DEFAULT_CLIENT;
+      const material   = gradeToMaterial(ex0.grade, "outbound");
 
-    const lrEntries = Object.entries(lrGroups);
-    for(let ei = 0; ei < lrEntries.length; ei++) {
-      const lrNo = lrEntries[ei][0];
-      const group = lrEntries[ei][1];
-      // Check if this LR already exists in saved trips
-      const existingTrip = (trips||[]).find(t => t.lrNo === lrNo);
+      // ── Get auto-assigned LR from DB ──────────────────────────────────────
+      let lrNo;
+      try {
+        lrNo = await DB.getNextLR(client, material);
+      } catch(e) {
+        setLrError(`LR assignment failed for ${g.truckNo}: ${e.message}`);
+        setSaving(false);
+        return;
+      }
 
-      // Ensure vehicles registered
-      for(let gi = 0; gi < group.length; gi++) {
-        const item = group[gi];
-        const truckNo = (item.extracted.truckNo||"").toUpperCase().trim();
-        const existingVeh = vehicles.find(v=>v.truckNo===truckNo);
-        if(truckNo && !existingVeh && !createdTrucksThisBatch.has(truckNo)) {
-          const nv = { id:uid(), truckNo, ownerName:"", phone:"",
-            driverName:"", driverPhone:item.driverPhone||"", driverLicense:"",
-            accountNo:"", ifsc:"", loan:0, loanRecovered:0, deductPerTrip:0,
-            tafalExempt:false, shortageOwed:0, shortageRecovered:0,
-            loanTxns:[], shortageTxns:[], createdBy:user.username };
-          setVehicles(p=>[...(p||[]),nv]);
-          createdTrucksThisBatch.add(truckNo);
-          log("AUTO-CREATE VEHICLE", truckNo);
-        } else if(existingVeh && item.driverPhone && !existingVeh.driverPhone) {
-          setVehicles(p=>p.map(v=>v.truckNo===truckNo?{...v,driverPhone:item.driverPhone}:v));
+      // ── Ensure vehicles registered ────────────────────────────────────────
+      const truckNo = g.truckNo;
+      const existingVeh = vehicles.find(v=>v.truckNo===truckNo);
+      if(truckNo && !existingVeh && !createdTrucksThisBatch.has(truckNo)) {
+        const nv = { id:uid(), truckNo, ownerName:"", phone:"",
+          driverName:"", driverPhone:"", driverLicense:"",
+          accountNo:"", ifsc:"", loan:0, loanRecovered:0, deductPerTrip:0,
+          tafalExempt:false, shortageOwed:0, shortageRecovered:0,
+          loanTxns:[], shortageTxns:[], createdBy:user.username };
+        setVehicles(p=>[...(p||[]),nv]);
+        createdTrucksThisBatch.add(truckNo);
+        log("AUTO-CREATE VEHICLE", truckNo);
+      } else if(existingVeh) {
+        // Update driver phone if missing
+        const firstWithPhone = groupItems.find(x=>x.extracted?.driverPhone);
+        if(firstWithPhone && !existingVeh.driverPhone) {
+          setVehicles(p=>p.map(v=>v.truckNo===truckNo
+            ?{...v,driverPhone:firstWithPhone.extracted.driverPhone}:v));
         }
       }
 
-      if(existingTrip) {
-        // ── MERGE: add new DIs into existing trip ──────────────────────────
-        const existingLines = existingTrip.diLines&&existingTrip.diLines.length>0
-          ? existingTrip.diLines.map(d=>({...d,frRate:d.frRate||existingTrip.frRate||0}))
-          : [{diNo:existingTrip.diNo,grNo:existingTrip.grNo,
-              qty:existingTrip.qty,bags:existingTrip.bags,
-              givenRate:existingTrip.givenRate,frRate:existingTrip.frRate||0}];
-        const newLines = group.map(item => ({
-          diNo: item.extracted.diNo||"",
-          grNo: item.extracted.grNo||"",
-          qty:  +item.extracted.qty||0,
-          bags: +item.extracted.bags||0,
-          givenRate: +item.givenRate||0,
-          frRate: +item.extracted.frRate||0,
-        }));
-        const allLines = [...existingLines, ...newLines];
-        const totalQty  = allLines.reduce((s,d)=>s+(d.qty||0),0);
-        const totalBags = allLines.reduce((s,d)=>s+(d.bags||0),0);
-        const allDiNos  = allLines.map(d=>d.diNo).filter(Boolean).join(" + ");
-        const allGrNos  = [...new Set(allLines.map(d=>d.grNo).filter(Boolean))].join(" + ");
-        // Carry over diesel/advance/recoveries from the batch item (use first item that has values)
-        const itemWithDiesel = group.find(x => +x.dieselEstimate > 0) || group[0];
-        const itemWithAdvance = group.find(x => +x.advance > 0) || group[0];
-        const newDieselEstimate = existingTrip.dieselEstimate || +itemWithDiesel.dieselEstimate || 0;
-        const newDieselIndentNo = existingTrip.dieselIndentNo || itemWithDiesel.dieselIndentNo?.trim() || "";
-        const newAdvance = (existingTrip.advance||0) + (+itemWithAdvance.advance||0);
-        const newShortageRec = (existingTrip.shortageRecovery||0) + group.reduce((s,x)=>s+(+x.shortageRecovery||0),0);
-        const newLoanRec = (existingTrip.loanRecovery||0) + group.reduce((s,x)=>s+(+x.loanRecovery||0),0);
-        const updated = { ...existingTrip, diNo:allDiNos, grNo:allGrNos,
-          qty:totalQty, bags:totalBags, diLines:allLines,
-          dieselEstimate: newDieselEstimate,
-          dieselIndentNo: newDieselIndentNo,
-          advance: newAdvance,
-          shortageRecovery: newShortageRec,
-          loanRecovery: newLoanRec,
-          editedBy:user.username, editedAt:nowTs() };
-        setTrips(p=>p.map(t=>t.id===existingTrip.id?updated:t));
-        // Sync vehicle ledger for recoveries added by this merge
-        const truckNo = (existingTrip.truckNo||"").toUpperCase().trim();
-        const addedSR = group.reduce((s,x)=>s+(+x.shortageRecovery||0),0);
-        const addedLR = group.reduce((s,x)=>s+(+x.loanRecovery||0),0);
-        if(truckNo && (addedSR > 0 || addedLR > 0)) {
-          setVehicles(prev=>prev.map(veh=>{
-            if(veh.truckNo!==truckNo) return veh;
-            let upd={...veh};
-            if(addedSR>0){const txn={id:uid(),type:"recovery",date:existingTrip.date||today(),qty:0,amount:addedSR,lrNo:lrNo,note:"Batch merge"};upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+addedSR,shortageTxns:[...(upd.shortageTxns||[]),txn]};}
-            if(addedLR>0){const txn={id:uid(),type:"recovery",date:existingTrip.date||today(),amount:addedLR,lrNo:lrNo,note:"Batch merge"};upd={...upd,loanRecovered:(upd.loanRecovered||0)+addedLR,loanTxns:[...(upd.loanTxns||[]),txn]};}
-            return upd;
-          }));
-        }
-        log("BATCH MERGE", `LR:${lrNo} +${newLines.length} DI(s) → ${totalQty}MT`);
-        count += group.length;
-      } else if(group.length === 1) {
-        // ── SINGLE new trip (godown or party) ─────────────────────────────
-        const item = group[0];
-        const ex = item.extracted;
+      const tafalVal = +g.tafal!==undefined&&g.tafal!==""
+        ? +g.tafal : tafal;
+
+      if(groupItems.length === 1) {
+        // ── SINGLE DI ──────────────────────────────────────────────────────
+        const item   = groupItems[0];
+        const ex     = item.extracted;
         const tripId = uid();
-        // Upload party files to Supabase Storage if party order
-        let grUrl = "", invUrl = "";
+        let grUrl="", invUrl="";
         if(item.orderType==="party" && item.grFile) {
-          try {
-            const gr = await uploadPartyFile(tripId, "gr", item.grFile);
-            grUrl = gr.path;
-          } catch(e) { console.warn("GR upload failed:", e.message); }
+          try { grUrl = (await uploadPartyFile(tripId,"gr",item.grFile)).path; }
+          catch(e) { console.warn("GR upload failed:",e.message); }
         }
         if(item.orderType==="party" && item.invoiceFile) {
-          try {
-            const inv = await uploadPartyFile(tripId, "invoice", item.invoiceFile);
-            invUrl = inv.path;
-          } catch(e) { console.warn("Invoice upload failed:", e.message); }
+          try { invUrl = (await uploadPartyFile(tripId,"invoice",item.invoiceFile)).path; }
+          catch(e) { console.warn("Invoice upload failed:",e.message); }
         }
         const trip = {
           id:tripId, type:"outbound",
           lrNo, diNo:ex.diNo||"", grNo:ex.grNo||"",
-          truckNo:(ex.truckNo||"").toUpperCase().trim(),
-          consignee:ex.consignee||"", from:ex.from||"Kodla", to:ex.to||"",
+          truckNo, consignee:ex.consignee||"", from:ex.from||"Kodla", to:ex.to||"",
           grade:ex.grade||"Cement Packed",
           district:ex.district||"", state:ex.state||"",
           qty:+ex.qty||0, bags:+ex.bags||0,
           frRate:+ex.frRate||0, givenRate:+item.givenRate||0,
-          date:ex.date||today(), client:item.clientOverride||ex.client||"Shree Cement Kodla",
+          date:ex.date||today(), client,
           status:"Pending Bill", shortage:0,
-          advance:+item.advance||0,
-          shortageRecovery:+item.shortageRecovery||0,
-          loanRecovery:+item.loanRecovery||0,
-          tafal: item.tafal !== "" && item.tafal !== null && item.tafal !== undefined ? +item.tafal : (settings?.tafalPerTrip||300),
-          dieselEstimate:+item.dieselEstimate||0,
-          dieselIndentNo:item.dieselIndentNo?.trim()||"",
-          cashEmpId:item.cashEmpId||"",
+          advance:+g.advance||0,
+          shortageRecovery:+g.shortageRecovery||0,
+          loanRecovery:+g.loanRecovery||0,
+          tafal:tafalVal,
+          dieselEstimate:+g.diesel||0,
+          dieselIndentNo:g.dieselIndentNo.trim()||"",
+          cashEmpId:g.cashEmpId||"",
           orderType:item.orderType||"godown", diLines:[],
           grFilePath:grUrl, invoiceFilePath:invUrl,
           emailSentAt:"", partyEmail:"", batchId:"",
@@ -1831,129 +1784,142 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           createdBy:user.username, createdAt:nowTs(),
         };
         setTrips(p=>[trip,...(p||[])]);
-        // If advance linked to employee wallet, record the deduction
-        if(trip.cashEmpId && trip.advance > 0 && setCashTransfers) {
+        // Wallet advance
+        if(trip.cashEmpId && trip.advance>0 && setCashTransfers) {
           const empName = employees.find(e=>e.id===trip.cashEmpId)?.name||trip.cashEmpId;
-          const wxn = {id:"WX-"+trip.id, empId:trip.cashEmpId, amount:-trip.advance,
+          const wxn={id:"WX-"+trip.id,empId:trip.cashEmpId,amount:-trip.advance,
             date:trip.date||today(),
-            note:`Advance — LR ${trip.lrNo||"—"} · ${trip.truckNo}`,
-            lrNo:trip.lrNo||"", tripId:trip.id,
-            createdBy:user.username, createdAt:nowTs()};
+            note:`Advance — LR ${lrNo} · ${truckNo}`,
+            lrNo, tripId:trip.id, createdBy:user.username, createdAt:nowTs()};
           setCashTransfers(prev=>[wxn,...(Array.isArray(prev)?prev:[])]);
-          log("WALLET ADVANCE",`${empName} −₹${trip.advance} LR:${trip.lrNo}`);
+          log("WALLET ADVANCE",`${empName} −₹${trip.advance} LR:${lrNo}`);
         }
-        log("BATCH TRIP", `LR:${lrNo} DI:${trip.diNo} ${trip.truckNo} ${trip.qty}MT [${trip.orderType}]`);
-        count++;
+        // Loan/shortage ledger
+        if(+g.shortageRecovery>0 || +g.loanRecovery>0) {
+          setVehicles(prev=>prev.map(veh=>{
+            if(veh.truckNo!==truckNo) return veh;
+            let upd={...veh};
+            if(+g.shortageRecovery>0){const txn={id:uid(),type:"recovery",date:trip.date||today(),qty:0,amount:+g.shortageRecovery,lrNo,note:"Batch DI"};upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+(+g.shortageRecovery),shortageTxns:[...(upd.shortageTxns||[]),txn]};}
+            if(+g.loanRecovery>0){const txn={id:uid(),type:"recovery",date:trip.date||today(),amount:+g.loanRecovery,lrNo,note:"Batch DI"};upd={...upd,loanRecovered:(upd.loanRecovered||0)+(+g.loanRecovery),loanTxns:[...(upd.loanTxns||[]),txn]};}
+            return upd;
+          }));
+        }
+        log("BATCH TRIP",`LR:${lrNo} DI:${ex.diNo} ${truckNo} ${ex.qty}MT [${item.orderType}]`);
       } else {
-        // ── MULTI-DI on new LR: build diLines from the start ──────────────
-        const primary = group[0];
-        const ex0 = primary.extracted;
-        const allLines = group.map(item => ({
-          diNo: item.extracted.diNo||"",
-          grNo: item.extracted.grNo||"",
-          qty:  +item.extracted.qty||0,
-          bags: +item.extracted.bags||0,
-          givenRate: +item.givenRate||0,
-          frRate: +item.extracted.frRate||0,
-        }));
-        const totalQty  = allLines.reduce((s,d)=>s+(d.qty||0),0);
-        const totalBags = allLines.reduce((s,d)=>s+(d.bags||0),0);
-        const allDiNos  = allLines.map(d=>d.diNo).filter(Boolean).join(" + ");
-        const allGrNos  = [...new Set(allLines.map(d=>d.grNo).filter(Boolean))].join(" + ");
-        // Pick fields from whichever item has them (diesel on one DI covers whole trip)
-        const itemWithDiesel = group.find(x => +x.dieselEstimate > 0) || primary;
-        const totalAdvance = group.reduce((s,x)=>s+(+x.advance||0),0);
-        const totalShortagRec = group.reduce((s,x)=>s+(+x.shortageRecovery||0),0);
-        const totalLoanRec = group.reduce((s,x)=>s+(+x.loanRecovery||0),0);
-        // Tafal: use primary's value (one tafal per trip, not per DI)
-        const tafalVal = primary.tafal !== "" && primary.tafal !== null && primary.tafal !== undefined
-          ? +primary.tafal : (settings?.tafalPerTrip||300);
-        // cashEmpId: use whichever item has an advance linked to wallet
-        const itemWithWallet = group.find(x => x.cashEmpId && +x.advance > 0) || null;
+        // ── MULTI-DI on new LR ─────────────────────────────────────────────
+        // Upload party files per DI
+        const tripId = uid();
+        const diLines = [];
+        for(const item of groupItems) {
+          const ex = item.extracted;
+          let grUrl="", invUrl="";
+          if(item.orderType==="party" && item.grFile) {
+            try { grUrl=(await uploadPartyFile(tripId,`gr_${ex.diNo||item.id}`,item.grFile)).path; }
+            catch(e) { console.warn("GR upload failed:",e.message); }
+          }
+          if(item.orderType==="party" && item.invoiceFile) {
+            try { invUrl=(await uploadPartyFile(tripId,`inv_${ex.diNo||item.id}`,item.invoiceFile)).path; }
+            catch(e) { console.warn("Invoice upload failed:",e.message); }
+          }
+          diLines.push({
+            diNo:  ex.diNo||"",
+            grNo:  ex.grNo||"",
+            qty:   +ex.qty||0,
+            bags:  +ex.bags||0,
+            givenRate: +item.givenRate||0,
+            frRate:    +ex.frRate||0,
+            orderType: item.orderType||"godown",
+            grFilePath:  grUrl,
+            invoiceFilePath: invUrl,
+          });
+        }
+        const totalQty  = diLines.reduce((s,d)=>s+(d.qty||0),0);
+        const totalBags = diLines.reduce((s,d)=>s+(d.bags||0),0);
+        const allDiNos  = diLines.map(d=>d.diNo).filter(Boolean).join(" + ");
+        const allGrNos  = [...new Set(diLines.map(d=>d.grNo).filter(Boolean))].join(" + ");
+
         const trip = {
-          id:uid(), type:"outbound",
+          id:tripId, type:"outbound",
           lrNo, diNo:allDiNos, grNo:allGrNos,
-          truckNo:(ex0.truckNo||"").toUpperCase().trim(),
-          consignee:ex0.consignee||"", from:ex0.from||"Kodla", to:ex0.to||"",
+          truckNo, consignee:ex0.consignee||"", from:ex0.from||"Kodla", to:ex0.to||"",
           grade:ex0.grade||"Cement Packed",
           district:ex0.district||"", state:ex0.state||"",
           qty:totalQty, bags:totalBags,
-          frRate:allLines[0]?.frRate||0, givenRate:allLines[0]?.givenRate||0,
-          date:ex0.date||today(), client:primary.clientOverride||ex0.client||"Shree Cement Kodla",
+          frRate:diLines[0]?.frRate||0, givenRate:diLines[0]?.givenRate||0,
+          date:ex0.date||today(), client,
           status:"Pending Bill", shortage:0,
-          advance: totalAdvance,
-          tafal: tafalVal,
-          dieselEstimate: +itemWithDiesel.dieselEstimate||0,
-          dieselIndentNo: itemWithDiesel.dieselIndentNo?.trim()||"",
-          shortageRecovery: totalShortagRec,
-          loanRecovery: totalLoanRec,
-          cashEmpId: itemWithWallet?.cashEmpId||"",
-          orderType:primary.orderType||"godown", diLines:allLines,
+          advance:+g.advance||0,
+          tafal:tafalVal,
+          dieselEstimate:+g.diesel||0,
+          dieselIndentNo:g.dieselIndentNo.trim()||"",
+          shortageRecovery:+g.shortageRecovery||0,
+          loanRecovery:+g.loanRecovery||0,
+          cashEmpId:g.cashEmpId||"",
+          orderType:primary.orderType||"godown",
+          diLines,
           emailSentAt:"", partyEmail:"", batchId:"",
           mergedPdfPath:"", receiptFilePath:"", receiptUploadedAt:"",
           sealedInvoicePath:"",
           createdBy:user.username, createdAt:nowTs(),
         };
         setTrips(p=>[trip,...(p||[])]);
-        // Wallet deduction if advance linked to employee
-        if(trip.cashEmpId && trip.advance > 0 && setCashTransfers) {
+        // Wallet advance
+        if(trip.cashEmpId && trip.advance>0 && setCashTransfers) {
           const empName = employees.find(e=>e.id===trip.cashEmpId)?.name||trip.cashEmpId;
-          const wxn = {id:"WX-"+trip.id, empId:trip.cashEmpId, amount:-trip.advance,
+          const wxn={id:"WX-"+trip.id,empId:trip.cashEmpId,amount:-trip.advance,
             date:trip.date||today(),
-            note:`Advance — LR ${trip.lrNo||"—"} · ${trip.truckNo}`,
-            lrNo:trip.lrNo||"", tripId:trip.id,
-            createdBy:user.username, createdAt:nowTs()};
+            note:`Advance — LR ${lrNo} · ${truckNo}`,
+            lrNo, tripId:trip.id, createdBy:user.username, createdAt:nowTs()};
           setCashTransfers(prev=>[wxn,...(Array.isArray(prev)?prev:[])]);
-          log("WALLET ADVANCE",`${empName} −₹${trip.advance} LR:${trip.lrNo}`);
+          log("WALLET ADVANCE",`${empName} −₹${trip.advance} LR:${lrNo}`);
         }
-        // Sync vehicle ledger for shortage/loan recoveries
-        const tn = trip.truckNo;
-        if(tn && (totalShortagRec > 0 || totalLoanRec > 0)) {
+        // Loan/shortage ledger
+        if(+g.shortageRecovery>0 || +g.loanRecovery>0) {
           setVehicles(prev=>prev.map(veh=>{
-            if(veh.truckNo!==tn) return veh;
+            if(veh.truckNo!==truckNo) return veh;
             let upd={...veh};
-            if(totalShortagRec>0){const txn={id:uid(),type:"recovery",date:trip.date||today(),qty:0,amount:totalShortagRec,lrNo:lrNo,note:"Batch multi-DI"};upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+totalShortagRec,shortageTxns:[...(upd.shortageTxns||[]),txn]};}
-            if(totalLoanRec>0){const txn={id:uid(),type:"recovery",date:trip.date||today(),amount:totalLoanRec,lrNo:lrNo,note:"Batch multi-DI"};upd={...upd,loanRecovered:(upd.loanRecovered||0)+totalLoanRec,loanTxns:[...(upd.loanTxns||[]),txn]};}
+            if(+g.shortageRecovery>0){const txn={id:uid(),type:"recovery",date:trip.date||today(),qty:0,amount:+g.shortageRecovery,lrNo,note:"Batch multi-DI"};upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+(+g.shortageRecovery),shortageTxns:[...(upd.shortageTxns||[]),txn]};}
+            if(+g.loanRecovery>0){const txn={id:uid(),type:"recovery",date:trip.date||today(),amount:+g.loanRecovery,lrNo,note:"Batch multi-DI"};upd={...upd,loanRecovered:(upd.loanRecovered||0)+(+g.loanRecovery),loanTxns:[...(upd.loanTxns||[]),txn]};}
             return upd;
           }));
         }
-        log("BATCH MULTI-DI", `LR:${lrNo} ${allDiNos} ${totalQty}MT diesel:${trip.dieselEstimate} indent:${trip.dieselIndentNo||"—"}`);
-        count += group.length;
+        log("BATCH MULTI-DI",`LR:${lrNo} ${allDiNos} ${truckNo} ${totalQty}MT`);
       }
+      count++;
     }
 
     setSavedCount(c=>c+count);
     setSaving(false);
-    setItems(prev => prev.filter(x => !readyItems.find(r=>r.id===x.id)));
+    // Remove saved groups' items from list
+    const savedItemIds = new Set(readyGroups.flatMap(g=>g.diIds));
+    setItems(prev=>prev.filter(x=>!savedItemIds.has(x.id)));
+    setGroups(prev=>prev.filter(g=>!readyGroups.find(r=>r.id===g.id)));
   };
 
   const scanningCount = items.filter(x=>x.status==="scanning"||x.status==="pending").length;
 
-  // LR grouping indicator — show badge when 2+ items share same LR
-  const lrCounts = {};
-  items.forEach(it => { if(it.lrNo.trim()) lrCounts[it.lrNo.trim()]=(lrCounts[it.lrNo.trim()]||0)+1; });
-
+  // ── RENDER ───────────────────────────────────────────────────────────────────
   return (
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
 
       {/* How-to */}
       <div style={{background:C.teal+"11",border:`1px solid ${C.teal}33`,borderRadius:12,padding:"12px 14px"}}>
-        <div style={{color:C.teal,fontWeight:800,fontSize:13,marginBottom:4}}>📋 Morning Batch — How it works</div>
+        <div style={{color:C.teal,fontWeight:800,fontSize:13,marginBottom:4}}>📋 Batch DI Scan — How it works</div>
         <div style={{color:C.muted,fontSize:12,lineHeight:1.7}}>
-          1. Download all GR PDFs from Shree Shayog<br/>
-          2. Upload them all here — AI scans in parallel<br/>
-          3. Enter <b>LR</b> + <b>driver rate</b> for each · Same LR on multiple GRs = multi-DI trip<br/>
-          4. Choose <b>Godown</b> or <b>Party</b> order type per trip<br/>
-          5. Tap <b>Save All</b> — done
+          1. Upload all GR PDFs — AI scans in sequence<br/>
+          2. DIs are auto-grouped by vehicle number<br/>
+          3. Choose which DIs to merge per vehicle · Set order type + driver rate per DI<br/>
+          4. Set Tafal / Diesel / Advance per group<br/>
+          5. Tap <b>Save All</b> — LR numbers auto-assigned from DB
         </div>
       </div>
 
-      {/* Upload zone — local + Google Drive */}
+      {/* Upload zone */}
       <div style={{border:`2px dashed ${C.teal}`,borderRadius:14,padding:"20px",
           background:C.bg,display:"flex",flexDirection:"column",alignItems:"center",gap:10}}>
         <div style={{fontSize:32}}>📂</div>
         <div style={{color:C.teal,fontWeight:800,fontSize:14}}>Upload GR PDFs</div>
-        <div style={{color:C.muted,fontSize:12}}>Select multiple files at once</div>
+        <div style={{color:C.muted,fontSize:12}}>Select multiple files at once — auto-grouped by vehicle</div>
         <div style={{display:"flex",gap:10,width:"100%",maxWidth:320}}>
           <button onClick={()=>inputRef.current?.click()}
             style={{flex:1,background:C.teal+"22",border:`1.5px solid ${C.teal}66`,
@@ -1978,8 +1944,40 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           onChange={e=>{if(e.target.files?.length)addFiles(e.target.files);e.target.value="";}} />
       </div>
 
+      {/* Scanning progress */}
+      {scanningCount>0&&(
+        <div style={{background:C.blue+"11",border:`1px solid ${C.blue}33`,
+          borderRadius:10,padding:"10px 14px",display:"flex",alignItems:"center",gap:10}}>
+          <div style={{width:18,height:18,border:`2px solid ${C.blue}`,borderTopColor:"transparent",
+            borderRadius:"50%",animation:"spin 0.8s linear infinite",flexShrink:0}} />
+          <div style={{color:C.blue,fontSize:13}}>
+            Scanning {scanningCount} file{scanningCount>1?"s":""}… LR numbers will be auto-assigned on save
+          </div>
+        </div>
+      )}
+
+      {/* Error items */}
+      {items.filter(x=>x.status==="error").map(item=>(
+        <div key={item.id} style={{background:C.red+"11",border:`1px solid ${C.red}33`,
+          borderRadius:10,padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div>
+            <div style={{color:C.red,fontWeight:700,fontSize:12}}>⚠ Scan failed: {item.file?.name}</div>
+            <div style={{color:C.muted,fontSize:11}}>{item.error}</div>
+          </div>
+          <button onClick={()=>setItems(prev=>prev.filter(x=>x.id!==item.id))}
+            style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:18}}>✕</button>
+        </div>
+      ))}
+
+      {/* LR assignment error */}
+      {lrError&&(
+        <div style={{background:C.red+"11",border:`1px solid ${C.red}44`,borderRadius:10,padding:"10px 14px",color:C.red,fontSize:13}}>
+          ⚠ {lrError}
+        </div>
+      )}
+
       {/* Success banner */}
-      {savedCount>0 && (
+      {savedCount>0&&(
         <div style={{background:C.green+"11",border:`1px solid ${C.green}44`,
           borderRadius:10,padding:"10px 14px",display:"flex",alignItems:"center",gap:8}}>
           <span style={{fontSize:20}}>✅</span>
@@ -1988,505 +1986,276 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
               {savedCount} trip{savedCount>1?"s":""} saved!
             </div>
             <div style={{color:C.muted,fontSize:11}}>
-              {items.length>0?`${items.length} remaining`:"All done — you can close this screen"}
+              {groups.length>0?`${groups.length} group(s) remaining`:"All done — you can close"}
             </div>
           </div>
         </div>
       )}
 
-      {/* Scanning progress */}
-      {scanningCount>0 && (
-        <div style={{background:C.blue+"11",border:`1px solid ${C.blue}33`,
-          borderRadius:10,padding:"10px 14px",display:"flex",alignItems:"center",gap:10}}>
-          <div style={{display:"flex",gap:4}}>
-            {[0,1,2].map(i=>(
-              <div key={i} style={{width:7,height:7,borderRadius:"50%",background:C.blue,
-                opacity:0.3+(i*0.3),animation:`bounce 1s ${i*0.2}s infinite`}} />
-            ))}
-          </div>
-          <div style={{color:C.blue,fontWeight:700,fontSize:13}}>
-            Scanning {scanningCount} document{scanningCount>1?"s":""}…
-          </div>
-        </div>
-      )}
+      {/* ── GROUP CARDS ─────────────────────────────────────────────────────── */}
+      {groups.map(g => {
+        const groupItems = doneItems.filter(x=>g.diIds.includes(x.id));
+        // All items for this truck (including unchecked — shown greyed out)
+        const allTruckItems = doneItems.filter(x=>{
+          const tn = (x.extracted?.truckNo||"UNKNOWN").toUpperCase().trim();
+          return tn===g.truckNo;
+        });
+        if(groupItems.length===0) return null;
+        const totalQty = groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0),0);
+        const isReady  = groupReady(g);
+        const material = gradeToMaterial(groupItems[0]?.extracted?.grade,"outbound");
+        const prefix   = getLRPrefix(g.client, material);
 
-      {/* Trip cards */}
-      {items.map(item => (
-        <div key={item.id} style={{background:C.card,borderRadius:14,overflow:"hidden",
-          border:`1px solid ${
-            item.dupTrip?C.orange:
-            item.status==="error"?C.red:
-            item.status==="done"&&item.lrNo.trim()&&lrCounts[item.lrNo.trim()]>1?C.teal:
-            item.status==="done"?C.border:C.blue+"44"}`}}>
+        return (
+          <div key={g.id} style={{background:C.card,borderRadius:14,padding:"14px 16px",
+            border:`2px solid ${isReady?C.green+"66":C.border}`,marginBottom:4}}>
 
-          {/* Status bar */}
-          <div style={{padding:"8px 14px",display:"flex",alignItems:"center",
-            justifyContent:"space-between",
-            background:
-              item.status==="scanning"||item.status==="pending"?C.blue+"11":
-              item.status==="error"?C.red+"11":
-              item.dupTrip?C.orange+"11":C.green+"08"}}>
-            <div style={{display:"flex",alignItems:"center",gap:8}}>
-              <span style={{fontSize:15}}>
-                {item.status==="scanning"||item.status==="pending"?"⏳":
-                 item.status==="error"?"❌":
-                 item.dupTrip?"⚠️":"✓"}
-              </span>
-              <span style={{fontSize:12,fontWeight:700,color:
-                item.status==="scanning"||item.status==="pending"?C.blue:
-                item.status==="error"?C.red:
-                item.dupTrip?C.orange:C.green}}>
-                {item.status==="scanning"?"Scanning with AI…":
-                 item.status==="pending"?"Waiting…":
-                 item.status==="error"?"Scan failed":
-                 item.dupTrip?.source==="batch"?`DI ${item.extracted?.diNo||"?"} — duplicate in this batch`:
-                 item.dupTrip?`DI ${item.extracted?.diNo||"?"} — already in LR ${item.dupTrip.trip?.lrNo}`:
-                 `${item.extracted?.truckNo||"?"} · ${item.extracted?.qty||0} MT`}
-              </span>
-              {/* Multi-DI badge */}
-              {item.status==="done"&&!item.dupTrip&&item.lrNo.trim()&&lrCounts[item.lrNo.trim()]>1&&(
-                <span style={{background:C.teal+"22",color:C.teal,fontSize:10,fontWeight:700,
-                  borderRadius:8,padding:"2px 7px"}}>
-                  {lrCounts[item.lrNo.trim()]} DIs · same LR
-                </span>
-              )}
-            </div>
-            <button onClick={()=>removeItem(item.id)}
-              style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:16,padding:"0 4px"}}>
-              ✕
-            </button>
-          </div>
-
-          {/* Error */}
-          {item.status==="error" && (
-            <div style={{padding:"10px 14px"}}>
-              <div style={{color:C.red,fontSize:12,marginBottom:8}}>{item.error}</div>
-              <button onClick={()=>scanFile(item.id,item.file)}
-                style={{background:C.red+"11",border:`1px solid ${C.red}44`,color:C.red,
-                  borderRadius:8,padding:"6px 12px",fontSize:12,cursor:"pointer",fontWeight:700}}>
-                🔄 Retry
-              </button>
-            </div>
-          )}
-
-          {/* Duplicate — show info + prominent remove button */}
-          {item.status==="done"&&item.dupTrip&&(
-            <div style={{padding:"12px 14px",display:"flex",flexDirection:"column",gap:10}}>
-              {item.extracted&&(
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"4px 16px",fontSize:12}}>
-                  {[
-                    ["DI",   item.extracted.diNo,          C.muted],
-                    ["GR",   item.extracted.grNo,          C.muted],
-                    ["To",   item.extracted.to,            C.text],
-                    ["MT",   item.extracted.qty+" MT",     C.text],
-                    ["Fr ₹", "₹"+item.extracted.frRate+"/MT", C.blue],
-                    ["Date", item.extracted.date,          C.muted],
-                  ].filter(([,v])=>v&&v!=="0 MT"&&v!=="₹0/MT"&&v!=="0").map(([l,v,c])=>(
-                    <div key={l}>
-                      <span style={{color:C.muted,fontSize:10}}>{l}: </span>
-                      <span style={{color:c,fontWeight:600}}>{v}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-              <div style={{fontSize:11,color:C.orange,background:C.orange+"11",
-                borderRadius:8,padding:"8px 10px",lineHeight:1.6}}>
-                {item.dupTrip?.source==="batch"
-                  ? `⚠ DI ${item.extracted?.diNo||"?"} matches another row in this batch.`
-                  : `⚠ DI ${item.extracted?.diNo||"?"} already recorded in LR ${item.dupTrip?.trip?.lrNo} (${item.dupTrip?.trip?.truckNo}).`}
-                <br/>Remove this card if it was scanned by mistake.
-              </div>
-              <button onClick={()=>removeItem(item.id)}
-                style={{background:C.orange+"11",border:`1.5px solid ${C.orange}`,
-                  color:C.orange,borderRadius:10,padding:"10px",fontSize:13,
-                  fontWeight:700,cursor:"pointer",width:"100%"}}>
-                🗑 Remove Duplicate
-              </button>
-            </div>
-          )}
-
-          {/* Scanned + input */}
-          {item.status==="done"&&!item.dupTrip&&(
-            <div style={{padding:"12px 14px",display:"flex",flexDirection:"column",gap:10}}>
-
-              {/* Scanned fields summary */}
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"4px 16px",fontSize:12}}>
-                {[
-                  ["DI",    item.extracted.diNo,                C.muted],
-                  ["GR",    item.extracted.grNo,                C.muted],
-                  ["To",    item.extracted.to,                  C.text],
-                  ["MT",    item.extracted.qty+" MT",           C.text],
-                  ["Fr ₹",  "₹"+item.extracted.frRate+"/MT",   C.blue],
-                  ["Date",  item.extracted.date,                C.muted],
-                ].filter(([,v])=>v&&v!=="0 MT"&&v!=="0").map(([l,v,c])=>(
-                  <div key={l}>
-                    <span style={{color:C.muted,fontSize:10}}>{l}: </span>
-                    <span style={{color:c,fontWeight:600}}>{v}</span>
-                  </div>
-                ))}
-              </div>
-
-              {/* Client / Plant selector — auto-detected, override if wrong */}
+            {/* Group header */}
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
               <div>
-                <div style={{fontSize:10,color:C.muted,marginBottom:4,fontWeight:600,display:"flex",justifyContent:"space-between"}}>
-                  <span>CLIENT / PLANT</span>
-                  <span style={{color:C.teal,fontWeight:500}}>
-                    {item.clientOverride ? "✏ Overridden" : "🤖 Auto-detected"}
-                  </span>
-                </div>
-                <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-                  {CLIENTS.map(c=>{
-                    const active = (item.clientOverride||item.extracted?.client||DEFAULT_CLIENT)===c;
-                    const col = c.includes("Ultratech")?C.orange:c.includes("Guntur")?C.purple:C.blue;
-                    return (
-                      <button key={c} onClick={()=>update(item.id,"clientOverride",active&&item.clientOverride?"":(c===item.extracted?.client?"":c))}
-                        style={{padding:"5px 10px",borderRadius:16,fontSize:11,fontWeight:700,cursor:"pointer",
-                          border:`1.5px solid ${active?col:C.border}`,
-                          background:active?col+"22":"transparent",
-                          color:active?col:C.muted}}>
-                        {c.replace("Shree Cement ","SC ").replace("Ultratech ","UT ")}
-                      </button>
-                    );
-                  })}
+                <div style={{fontWeight:800,fontSize:15,color:C.text}}>🚛 {g.truckNo}</div>
+                <div style={{color:C.muted,fontSize:11,marginTop:2}}>
+                  {groupItems.length} DI{groupItems.length>1?"s":""} selected · {totalQty} MT total
+                  {allTruckItems.length>groupItems.length&&
+                    <span style={{color:C.orange}}> · {allTruckItems.length-groupItems.length} unselected</span>}
                 </div>
               </div>
-
-              {/* LR + driver rate — the two things employee enters */}
-              <div style={{display:"flex",gap:8}}>
-                <div style={{flex:2}}>
-                  <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>LR NUMBER *</div>
-                  <input value={item.lrNo} onChange={e=>update(item.id,"lrNo",e.target.value)}
-                    placeholder="e.g. MYE/2526/001"
-                    style={{width:"100%",border:`1.5px solid ${item.lrNo.trim()?C.green:C.border}`,
-                      borderRadius:8,padding:"8px 10px",fontSize:13,background:C.bg,
-                      color:C.text,outline:"none",boxSizing:"border-box"}} />
-                </div>
-                <div style={{flex:1}}>
-                  <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>DRIVER ₹/MT *</div>
-                  <input value={item.givenRate} onChange={e=>update(item.id,"givenRate",e.target.value)}
-                    type="text" inputMode="decimal" placeholder="rate"
-                    style={{width:"100%",border:`1.5px solid ${item.givenRate&&+item.givenRate>0?C.green:C.border}`,
-                      borderRadius:8,padding:"8px 10px",fontSize:13,background:C.bg,
-                      color:C.text,outline:"none",boxSizing:"border-box"}} />
-                </div>
+              <div style={{textAlign:"right"}}>
+                {prefix
+                  ? <Badge label={`→ ${prefix}XXX`} color={C.teal} />
+                  : <Badge label="⚠ No sequence" color={C.red} />}
               </div>
+            </div>
 
-              {/* Margin preview */}
-              {item.givenRate&&+item.givenRate>0&&+item.extracted.frRate>0&&(
-                <div style={{fontSize:11,fontWeight:600,
-                  color:+item.extracted.frRate-+item.givenRate>=30?C.green:C.red}}>
-                  Margin: ₹{(+item.extracted.frRate-+item.givenRate).toFixed(0)}/MT
-                  · Total ₹{((+item.extracted.frRate-+item.givenRate)*(+item.extracted.qty||0)).toFixed(0)}
-                  {+item.extracted.frRate-+item.givenRate<30&&(
-                    <span style={{color:C.red}}> ⚠ min ₹30/MT required</span>
-                  )}
-                </div>
-              )}
+            {/* DI checkboxes with per-DI fields */}
+            <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:12}}>
+              {allTruckItems.map(item => {
+                const ex      = item.extracted;
+                const checked = g.diIds.includes(item.id);
+                const dup     = checkDupDI(ex?.diNo);
+                const margin  = (+ex?.frRate||0) - (+item.givenRate||0);
+                const marginOk = !item.givenRate || +item.givenRate<=0 || margin>=30;
+                return (
+                  <div key={item.id} style={{background:checked?C.bg:C.dim+"44",
+                    borderRadius:10,padding:"10px 12px",opacity:checked?1:0.55,
+                    border:`1px solid ${dup?C.red:checked?C.border:"transparent"}`}}>
 
-              {/* Order type — Godown vs Party */}
-              <div>
-                <div style={{fontSize:10,color:C.muted,marginBottom:5,fontWeight:600}}>ORDER TYPE</div>
-                <div style={{display:"flex",gap:8}}>
-                  {["godown","party"].map(ot=>(
-                    <button key={ot} onClick={()=>update(item.id,"orderType",ot)}
-                      style={{flex:1,padding:"7px",borderRadius:8,fontSize:12,fontWeight:700,
-                        cursor:"pointer",
-                        background:item.orderType===ot?
-                          (ot==="party"?C.accent:C.teal):C.card2,
-                        color:item.orderType===ot?"#fff":C.muted,
-                        border:`1.5px solid ${item.orderType===ot?
-                          (ot==="party"?C.accent:C.teal):C.border}`}}>
-                      {ot==="party"?"🤝 Party":"🏭 Godown"}
-                    </button>
-                  ))}
-                </div>
-                {item.orderType==="party"&&(
-                  <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:6}}>
-                    {/* GR Copy upload */}
-                    <div style={{background:C.card2,border:`1.5px dashed ${item.grFile?C.green:C.red}`,
-                      borderRadius:10,padding:"10px 12px"}}>
-                      <div style={{fontSize:11,fontWeight:700,
-                        color:item.grFile?C.green:C.red,marginBottom:6}}>
-                        {item.grFile?"✓ GR Copy":"📄 GR Copy — required *"}
+                    {/* DI header row: checkbox + info */}
+                    <div style={{display:"flex",alignItems:"flex-start",gap:10,marginBottom:checked?8:0}}>
+                      <input type="checkbox" checked={checked}
+                        onChange={()=>toggleDI(g.id, item.id)}
+                        style={{width:18,height:18,marginTop:2,flexShrink:0,cursor:"pointer"}} />
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontWeight:700,fontSize:13,color:C.text}}>
+                          DI: {ex?.diNo||"—"} · {ex?.qty||0} MT
+                        </div>
+                        <div style={{color:C.muted,fontSize:11}}>
+                          {ex?.from||"—"} → {ex?.to||"—"} · {ex?.grade||"—"} · {ex?.date||"—"}
+                        </div>
+                        {dup&&<div style={{color:C.red,fontSize:11,fontWeight:700}}>⚠ Already in LR {dup.trip.lrNo}</div>}
                       </div>
-                      {item.grFile&&(
-                        <div style={{fontSize:11,color:C.green,marginBottom:6}}>{item.grFile.name}</div>
-                      )}
-                      <FileSourcePicker
-                        onFile={f=>update(item.id,"grFile",f)}
-                        accept="application/pdf,image/*"
-                        label={item.grFile?"Replace GR Copy":"Upload GR Copy"}
-                        color={C.green} compact />
-                    </div>
-                    {/* Invoice upload */}
-                    <div style={{background:C.card2,border:`1.5px dashed ${item.invoiceFile?C.blue:C.red}`,
-                      borderRadius:10,padding:"10px 12px"}}>
-                      <div style={{fontSize:11,fontWeight:700,
-                        color:item.invoiceFile?C.blue:C.red,marginBottom:6}}>
-                        {item.invoiceFile?"✓ Invoice":"🧾 Invoice — required *"}
+                      <div style={{fontSize:11,color:C.blue,fontWeight:700,flexShrink:0}}>
+                        FR: ₹{ex?.frRate||0}/MT
                       </div>
-                      {item.invoiceFile&&(
-                        <div style={{fontSize:11,color:C.blue,marginBottom:6}}>{item.invoiceFile.name}</div>
-                      )}
-                      <FileSourcePicker
-                        onFile={f=>update(item.id,"invoiceFile",f)}
-                        accept="application/pdf,image/*"
-                        label={item.invoiceFile?"Replace Invoice":"Upload Invoice"}
-                        color={C.blue} compact />
                     </div>
-                    <div style={{fontSize:11,color:C.muted}}>
-                      ⓘ Files will be uploaded to storage when you tap Save All
-                    </div>
-                  </div>
-                )}
-              </div>
 
-              {/* New truck — driver phone */}
-              {item.extracted.truckNo&&
-               !vehicles.find(v=>v.truckNo===(item.extracted.truckNo||"").toUpperCase().trim())&&(
-                <div>
-                  <div style={{fontSize:10,color:C.orange,marginBottom:3,fontWeight:600}}>
-                    📞 NEW TRUCK — DRIVER PHONE
-                  </div>
-                  <input value={item.driverPhone} onChange={e=>update(item.id,"driverPhone",e.target.value)}
-                    type="tel" placeholder="9XXXXXXXXX"
-                    style={{width:"100%",border:`1.5px solid ${C.border}`,borderRadius:8,
-                      padding:"8px 10px",fontSize:13,background:C.bg,color:C.text,
-                      outline:"none",boxSizing:"border-box"}} />
-                </div>
-              )}
+                    {/* Per-DI fields (only when checked) */}
+                    {checked&&(
+                      <div style={{display:"flex",flexDirection:"column",gap:8,marginLeft:28}}>
+                        {/* Order type + Driver rate */}
+                        <div style={{display:"flex",gap:8}}>
+                          <div style={{flex:1}}>
+                            <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>ORDER TYPE</div>
+                            <select value={item.orderType||"godown"}
+                              onChange={e=>updateItem(item.id,"orderType",e.target.value)}
+                              style={{width:"100%",background:C.card,border:`1.5px solid ${C.border}`,
+                                borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none"}}>
+                              <option value="godown">🏭 Godown</option>
+                              <option value="party">🤝 Party</option>
+                            </select>
+                          </div>
+                          <div style={{flex:1}}>
+                            <div style={{fontSize:10,color:marginOk?C.muted:C.red,fontWeight:700,marginBottom:3}}>
+                              DRIVER RATE ₹/MT{!marginOk&&` (margin ₹${margin} < ₹30)`}
+                            </div>
+                            <input type="text" inputMode="decimal"
+                              value={item.givenRate||""}
+                              onChange={e=>{const v=e.target.value;if(v===""||/^\d*\.?\d*$/.test(v))updateItem(item.id,"givenRate",v);}}
+                              placeholder="e.g. 980"
+                              style={{width:"100%",background:C.card,
+                                border:`1.5px solid ${(!item.givenRate||+item.givenRate<=0||!marginOk)?C.red:C.border}`,
+                                borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,
+                                outline:"none",boxSizing:"border-box"}} />
+                          </div>
+                        </div>
 
-              {/* ── Extra fields (same as Add Trip form) ── */}
-              <div style={{borderTop:`1px solid ${C.border}`,paddingTop:10,
-                display:"flex",flexDirection:"column",gap:8}}>
-                <div style={{fontSize:10,color:C.muted,fontWeight:700,
-                  textTransform:"uppercase",letterSpacing:1}}>Additional Details</div>
-
-                {/* Advance + Tafal */}
-                <div style={{display:"flex",gap:8}}>
-                  <div style={{flex:1}}>
-                    <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>ADVANCE ₹</div>
-                    <input value={item.advance??""} onChange={e=>update(item.id,"advance",e.target.value)}
-                      type="text" inputMode="decimal" placeholder="0"
-                      style={{width:"100%",border:`1.5px solid ${C.border}`,borderRadius:8,
-                        padding:"8px 10px",fontSize:13,background:C.bg,color:C.text,
-                        outline:"none",boxSizing:"border-box"}} />
-                  </div>
-                  <div style={{flex:1}}>
-                    <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>TAFAL ₹</div>
-                    <input value={item.tafal??""} onChange={e=>update(item.id,"tafal",e.target.value)}
-                      type="text" inputMode="decimal" placeholder="300"
-                      style={{width:"100%",border:`1.5px solid ${C.border}`,borderRadius:8,
-                        padding:"8px 10px",fontSize:13,background:C.bg,color:C.text,
-                        outline:"none",boxSizing:"border-box"}} />
-                  </div>
-                </div>
-
-                {/* Employee wallet dropdown — shown when advance > 0 and employees exist */}
-                {+item.advance > 0 && employees.length > 0 && (
-                  <div>
-                    <div style={{fontSize:10,color:C.green,marginBottom:3,fontWeight:700}}>
-                      💵 DEDUCT ADVANCE FROM EMPLOYEE WALLET
-                    </div>
-                    <select value={item.cashEmpId||""} onChange={e=>update(item.id,"cashEmpId",e.target.value)}
-                      style={{width:"100%",background:C.bg,
-                        border:`1.5px solid ${item.cashEmpId?C.green:C.border}`,
-                        borderRadius:8,color:item.cashEmpId?C.text:C.muted,
-                        padding:"8px 10px",fontSize:13,outline:"none"}}>
-                      <option value="">— None (no wallet effect) —</option>
-                      {employees.map(e=>(
-                        <option key={e.id} value={e.id}>{e.name}</option>
-                      ))}
-                    </select>
-                    {item.cashEmpId && (
-                      <div style={{color:C.green,fontSize:11,marginTop:3}}>
-                        ✓ ₹{(+item.advance).toLocaleString("en-IN")} will be deducted from {employees.find(e=>e.id===item.cashEmpId)?.name}'s wallet on save
+                        {/* Party files */}
+                        {item.orderType==="party"&&(
+                          <div style={{display:"flex",gap:8}}>
+                            <div style={{flex:1}}>
+                              <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
+                                GR COPY {item.grFile?<span style={{color:C.green}}>✓</span>:<span style={{color:C.red}}>* required</span>}
+                              </div>
+                              <label style={{display:"flex",alignItems:"center",gap:6,background:item.grFile?C.green+"11":C.bg,
+                                border:`1.5px solid ${item.grFile?C.green:C.border}`,borderRadius:8,
+                                padding:"7px 10px",cursor:"pointer",fontSize:12}}>
+                                <span>{item.grFile?"📄 "+item.grFile.name:"📎 Upload GR"}</span>
+                                <input type="file" accept="application/pdf,image/*" style={{display:"none"}}
+                                  onChange={e=>e.target.files?.[0]&&updateItem(item.id,"grFile",e.target.files[0])} />
+                              </label>
+                            </div>
+                            <div style={{flex:1}}>
+                              <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
+                                INVOICE {item.invoiceFile?<span style={{color:C.green}}>✓</span>:<span style={{color:C.red}}>* required</span>}
+                              </div>
+                              <label style={{display:"flex",alignItems:"center",gap:6,background:item.invoiceFile?C.green+"11":C.bg,
+                                border:`1.5px solid ${item.invoiceFile?C.green:C.border}`,borderRadius:8,
+                                padding:"7px 10px",cursor:"pointer",fontSize:12}}>
+                                <span>{item.invoiceFile?"📄 "+item.invoiceFile.name:"📎 Upload Invoice"}</span>
+                                <input type="file" accept="application/pdf,image/*" style={{display:"none"}}
+                                  onChange={e=>e.target.files?.[0]&&updateItem(item.id,"invoiceFile",e.target.files[0])} />
+                              </label>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
-                )}
+                );
+              })}
+            </div>
 
-                {/* Shortage Recovery + Loan Recovery */}
-                <div style={{display:"flex",gap:8}}>
-                  <div style={{flex:1}}>
-                    <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>SHORTAGE RECOVERY ₹
-                      {(()=>{
-                        const truckNo = (item.extracted?.truckNo||"").toUpperCase().trim();
-                        const veh = vehicles.find(v=>v.truckNo===truckNo);
-                        const pending = veh ? Math.max(0,(veh.shortageOwed||0)-(veh.shortageRecovered||0)) : 0;
-                        return pending > 0 ? <span style={{color:C.orange,fontWeight:600}}> · Pending ₹{pending.toLocaleString("en-IN")}</span> : null;
-                      })()}
-                    </div>
-                    <input value={item.shortageRecovery??""} onChange={e=>update(item.id,"shortageRecovery",e.target.value)}
-                      type="text" inputMode="decimal" placeholder="0"
-                      style={{width:"100%",border:`1.5px solid ${C.border}`,borderRadius:8,
-                        padding:"8px 10px",fontSize:13,background:C.bg,color:C.text,
-                        outline:"none",boxSizing:"border-box"}} />
-                  </div>
-                  <div style={{flex:1}}>
-                    <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>LOAN RECOVERY ₹
-                      {(()=>{
-                        const truckNo = (item.extracted?.truckNo||"").toUpperCase().trim();
-                        const veh = vehicles.find(v=>v.truckNo===truckNo);
-                        const ownerN = (veh?.ownerName||"").trim();
-                        const ownerVs = ownerN ? (vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerN) : (veh?[veh]:[]);
-                        const loanBal = ownerVs.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
-                        return loanBal > 0 ? <span style={{color:C.orange,fontWeight:600}}> · Owner Bal ₹{loanBal.toLocaleString("en-IN")}</span> : null;
-                      })()}
-                    </div>
-                    <input value={item.loanRecovery??""} onChange={e=>update(item.id,"loanRecovery",e.target.value)}
-                      type="text" inputMode="decimal" placeholder="0"
-                      style={{width:"100%",border:`1.5px solid ${C.border}`,borderRadius:8,
-                        padding:"8px 10px",fontSize:13,background:C.bg,color:C.text,
-                        outline:"none",boxSizing:"border-box"}} />
-                  </div>
-                </div>
+            {/* Group-level divider */}
+            <div style={{height:1,background:C.border,marginBottom:12}} />
 
-                {/* Diesel Estimate + Indent No */}
-                <div style={{display:"flex",gap:8}}>
-                  <div style={{flex:1}}>
-                    <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>DIESEL ESTIMATE ₹</div>
-                    <input value={item.dieselEstimate??""} onChange={e=>update(item.id,"dieselEstimate",e.target.value)}
-                      type="text" inputMode="decimal" placeholder="0"
-                      style={{width:"100%",border:`1.5px solid ${+item.dieselEstimate>0&&!item.dieselIndentNo?.trim()?C.red:C.border}`,
-                        borderRadius:8,padding:"8px 10px",fontSize:13,background:C.bg,color:C.text,
-                        outline:"none",boxSizing:"border-box"}} />
-                  </div>
-                  <div style={{flex:1}}>
-                    <div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>
-                      DIESEL INDENT NO{+item.dieselEstimate>0&&<span style={{color:C.red}}> *</span>}
-                    </div>
-                    <input value={item.dieselIndentNo||""} onChange={e=>update(item.id,"dieselIndentNo",e.target.value)}
-                      placeholder={+item.dieselEstimate>0?"Required":"e.g. 25748"}
-                      style={{width:"100%",border:`1.5px solid ${+item.dieselEstimate>0&&!item.dieselIndentNo?.trim()?C.red:C.border}`,
-                        borderRadius:8,padding:"8px 10px",fontSize:13,background:C.bg,color:C.text,
-                        outline:"none",boxSizing:"border-box"}} />
-                  </div>
+            {/* Group-level fields */}
+            <div style={{display:"flex",flexDirection:"column",gap:10}}>
+
+              {/* Client */}
+              <div>
+                <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>CLIENT / PLANT</div>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                  {userClients.map(c=>(
+                    <button key={c} onClick={()=>updateGroup(g.id,"client",c)}
+                      style={{background:g.client===c?C.teal+"33":"transparent",
+                        border:`1px solid ${g.client===c?C.teal:C.border}`,borderRadius:20,
+                        padding:"4px 10px",fontSize:11,fontWeight:700,color:g.client===c?C.teal:C.muted,cursor:"pointer"}}>
+                      {c.replace("Shree Cement ","SC ").replace("Ultratech ","UT ")}
+                    </button>
+                  ))}
                 </div>
-                {+item.dieselEstimate>0&&!item.dieselIndentNo?.trim()&&(
-                  <div style={{fontSize:11,color:C.red}}>⚠ Diesel Indent No required when estimate is entered</div>
-                )}
-                {(()=>{
-                  const val = (item.dieselIndentNo||"").trim();
-                  if(!val) return null;
-                  const dupTrip = (trips||[]).find(t =>
-                    t.dieselIndentNo && t.dieselIndentNo.trim() === val
-                  );
-                  const dupBatch = items.find(other =>
-                    other.id !== item.id &&
-                    (other.dieselIndentNo||"").trim() === val &&
-                    (other.dieselIndentNo||"").trim() !== ""
-                  );
-                  if(dupTrip) return (
-                    <div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,
-                      padding:"8px 12px",fontSize:12,color:C.red,fontWeight:600}}>
-                      ⚠ Indent No "{val}" already used on LR {dupTrip.lrNo||"—"} ({dupTrip.truckNo} · {dupTrip.date}). Each indent must be unique.
-                    </div>
-                  );
-                  if(dupBatch) return (
-                    <div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,
-                      padding:"8px 12px",fontSize:12,color:C.red,fontWeight:600}}>
-                      ⚠ Indent No "{val}" is already entered in another row of this batch.
-                    </div>
-                  );
-                  return null;
-                })()}
-                {/* Multi-DI diesel conflict warning */}
-                {multiDIDieselConflict.has(item.id) && (
-                  <div style={{background:C.orange+"11",border:`1.5px solid ${C.orange}`,
-                    borderRadius:10,padding:"10px 12px",fontSize:12,color:C.orange,fontWeight:700,
-                    lineHeight:1.6}}>
-                    ⚠ Multi-DI trip — diesel entered on multiple DIs for LR {item.lrNo}<br/>
-                    <span style={{fontWeight:400,color:C.muted}}>
-                      Diesel covers the <b>whole trip</b>, not each DI separately.
-                      Enter diesel + indent on <b>only one</b> of the DIs and clear it from the other.
-                    </span>
+              </div>
+
+              {/* Tafal + Diesel */}
+              <div style={{display:"flex",gap:10}}>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>TAFAL ₹</div>
+                  <input type="text" inputMode="decimal" value={g.tafal}
+                    onChange={e=>updateGroup(g.id,"tafal",e.target.value)}
+                    style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,
+                      borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
+                </div>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>DIESEL EST. ₹</div>
+                  <input type="text" inputMode="decimal" value={g.diesel}
+                    onChange={e=>updateGroup(g.id,"diesel",e.target.value)}
+                    style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,
+                      borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
+                </div>
+              </div>
+
+              {/* Diesel indent */}
+              {+g.diesel>0&&(
+                <div>
+                  <div style={{fontSize:10,color:+g.diesel>0&&!g.dieselIndentNo.trim()?C.red:C.muted,fontWeight:700,marginBottom:3}}>
+                    DIESEL INDENT NO {+g.diesel>0&&!g.dieselIndentNo.trim()&&"* required"}
+                  </div>
+                  <input type="text" value={g.dieselIndentNo}
+                    onChange={e=>updateGroup(g.id,"dieselIndentNo",e.target.value)}
+                    placeholder="Indent number"
+                    style={{width:"100%",background:C.bg,border:`1.5px solid ${+g.diesel>0&&!g.dieselIndentNo.trim()?C.red:C.border}`,
+                      borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
+                </div>
+              )}
+
+              {/* Advance */}
+              <div style={{display:"flex",gap:10}}>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>ADVANCE ₹</div>
+                  <input type="text" inputMode="decimal" value={g.advance}
+                    onChange={e=>updateGroup(g.id,"advance",e.target.value)}
+                    style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,
+                      borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
+                </div>
+                {+g.advance>0&&employees.length>0&&(
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>DEDUCT FROM WALLET</div>
+                    <select value={g.cashEmpId||""}
+                      onChange={e=>updateGroup(g.id,"cashEmpId",e.target.value)}
+                      style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,
+                        borderRadius:8,color:g.cashEmpId?C.text:C.muted,padding:"7px 8px",fontSize:13,outline:"none"}}>
+                      <option value="">— None —</option>
+                      {employees.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
+                    </select>
                   </div>
                 )}
               </div>
 
-              {/* Live Calculation Preview — updates as user types */}
-              {item.givenRate && +item.givenRate > 0 && item.extracted && (()=>{
-                const qty     = +item.extracted.qty || 0;
-                const frRate  = +item.extracted.frRate || 0;
-                const driver  = +item.givenRate || 0;
-                const tafal   = item.tafal !== "" && item.tafal !== null && item.tafal !== undefined ? +item.tafal : (settings?.tafalPerTrip||300);
-                const advance = +item.advance || 0;
-                const diesel  = +item.dieselEstimate || 0;
-                const shrRec  = +item.shortageRecovery || 0;
-                const loanRec = +item.loanRecovery || 0;
-                const billed  = qty * frRate;
-                const gross   = qty * driver;
-                const margin  = billed - gross;
-                const perMT   = frRate - driver;
-                const marginOk = perMT >= 30;
-                const net     = gross - advance - tafal - diesel - shrRec - loanRec;
-                const rows = [
-                  ...(frRate > 0 ? [{l:"Billed to Shree", v:fmt(billed), c:C.blue}] : []),
-                  {l:"Gross to Driver",       v:fmt(gross),   c:C.orange},
-                  {l:"(−) Advance",           v:fmt(advance), c:advance>0?C.red:C.muted},
-                  {l:"(−) Tafal",             v:fmt(tafal),   c:C.purple},
-                  {l:"(−) Diesel",            v:fmt(diesel),  c:diesel>0?C.orange:C.muted},
-                  {l:"(−) Shortage Recovery", v:fmt(shrRec),  c:shrRec>0?C.red:C.muted},
-                  {l:"(−) Loan Recovery",     v:fmt(loanRec), c:loanRec>0?C.red:C.muted},
-                  ...(frRate > 0 ? [{l:marginOk?"My Margin ✓":"⚠ Margin",
-                    v:`${fmt(margin)} (₹${perMT.toFixed(0)}/MT)`,
-                    c:marginOk?C.green:C.red}] : []),
-                  {l:"Est. Net to Driver",    v:fmt(net),     c:net>=0?C.green:C.red},
-                ];
+              {/* Shortage + Loan recovery */}
+              <div style={{display:"flex",gap:10}}>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>SHORTAGE RECOVERY ₹</div>
+                  <input type="text" inputMode="decimal" value={g.shortageRecovery}
+                    onChange={e=>updateGroup(g.id,"shortageRecovery",e.target.value)}
+                    style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,
+                      borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
+                </div>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>LOAN RECOVERY ₹</div>
+                  <input type="text" inputMode="decimal" value={g.loanRecovery}
+                    onChange={e=>updateGroup(g.id,"loanRecovery",e.target.value)}
+                    style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,
+                      borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
+                </div>
+              </div>
+
+              {/* Net preview */}
+              {(()=>{
+                const totalGross = groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0)*(+x.givenRate||0),0);
+                const tafalVal   = +g.tafal||(settings?.tafalPerTrip||300);
+                const net = totalGross-(+g.advance||0)-tafalVal-(+g.diesel||0)-(+g.shortageRecovery||0)-(+g.loanRecovery||0);
+                if(!totalGross) return null;
                 return (
-                  <div style={{background:(frRate>0?(marginOk?C.green:C.red):C.blue)+"08",
-                    border:`1px solid ${(frRate>0?(marginOk?C.green:C.red):C.blue)}33`,
-                    borderRadius:10,padding:"10px 12px",marginTop:2}}>
-                    <div style={{fontSize:10,color:C.muted,fontWeight:700,
-                      textTransform:"uppercase",letterSpacing:1,marginBottom:7}}>
-                      Calculation Preview
-                    </div>
-                    {rows.map(x=>(
-                      <div key={x.l} style={{display:"flex",justifyContent:"space-between",
-                        padding:"4px 0",borderBottom:`1px solid ${C.border}22`,fontSize:12}}>
-                        <span style={{color:C.muted}}>{x.l}</span>
-                        <span style={{color:x.c,fontWeight:700}}>{x.v}</span>
-                      </div>
-                    ))}
+                  <div style={{background:net>=0?C.green+"11":C.red+"11",borderRadius:8,
+                    padding:"7px 10px",display:"flex",justifyContent:"space-between",fontSize:12}}>
+                    <span style={{color:C.muted}}>Est. Net to Driver</span>
+                    <span style={{color:net>=0?C.green:C.red,fontWeight:800}}>
+                      ₹{net.toLocaleString("en-IN")}
+                    </span>
                   </div>
                 );
               })()}
 
+              {/* Ready indicator */}
+              {isReady
+                ? <div style={{color:C.green,fontSize:12,fontWeight:700,textAlign:"center"}}>✅ Ready to save · LR will be auto-assigned</div>
+                : <div style={{color:C.muted,fontSize:11,textAlign:"center"}}>Fill driver rate for all selected DIs to enable save</div>
+              }
             </div>
-          )}
-        </div>
-      ))}
-
-      {/* Save All — sticky footer */}
-      {doneItems.length>0&&(
-        <div style={{position:"sticky",bottom:0,background:C.bg,paddingTop:8,paddingBottom:4}}>
-          {/* Multi-DI summary if any LR has multiple DIs */}
-          {Object.entries(lrCounts).some(([lr,c])=>c>1)&&(
-            <div style={{background:C.teal+"11",border:`1px solid ${C.teal}33`,
-              borderRadius:8,padding:"7px 12px",marginBottom:8,fontSize:12,color:C.teal}}>
-              {Object.entries(lrCounts).filter(e=>e[1]>1).map(([lr,c])=>(
-                <span key={lr} style={{marginRight:12}}>
-                  📎 LR {lr}: {c} DIs → 1 trip
-                </span>
-              ))}
-            </div>
-          )}
-          <div style={{fontSize:12,color:C.muted,marginBottom:6,textAlign:"center"}}>
-            {readyItems.length} of {doneItems.length} ready
-            {readyItems.length<doneItems.length&&(
-              <span style={{color:C.orange}}> · fill LR + rate + files for remaining</span>
-            )}
           </div>
-          <button onClick={saveAll} disabled={!canSave}
-            style={{width:"100%",background:canSave?C.teal:C.dim,border:"none",
-              borderRadius:12,color:canSave?"#fff":C.muted,padding:"14px",
-              fontSize:15,fontWeight:800,cursor:canSave?"pointer":"not-allowed"}}>
-            {saving?"Saving…":canSave
-              ?`✓ Save ${readyItems.length} Trip${readyItems.length>1?"s":""}`
-              :"Fill LR + driver rate to save"}
-          </button>
-        </div>
+        );
+      })}
+
+      {/* Save All */}
+      {readyGroups.length>0&&(
+        <button onClick={saveAll} disabled={saving||!canSave}
+          style={{background:saving?C.muted:C.green,color:"#fff",border:"none",
+            borderRadius:12,padding:"15px",fontSize:16,fontWeight:800,cursor:saving?"not-allowed":"pointer",
+            width:"100%",opacity:saving?0.7:1}}>
+          {saving
+            ? "⏳ Saving & assigning LRs…"
+            : `💾 Save ${readyGroups.length} Group${readyGroups.length>1?"s":""} (${readyGroups.reduce((s,g)=>s+g.diIds.length,0)} DIs)`}
+        </button>
       )}
 
       {items.length===0&&savedCount===0&&(
@@ -2500,36 +2269,48 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
 
 
 // ─── ASK LR SHEET ─────────────────────────────────────────────────────────────
-// Shown after scanning — asks user to enter LR number, then checks for duplicates
+// Shown after scanning a single DI.
+// No manual LR entry — LR is auto-assigned on save.
+// If truck has existing unsettled same-vehicle trips, offer to merge.
+// onConfirm(existingTripOrNull, driverPhone)
 function AskLRSheet({ extracted, trips, vehicles, onConfirm, onCancel }) {
-  const [lrNo, setLrNo] = useState("");
   const [driverPhone, setDriverPhone] = useState("");
+  const [selectedMerge, setSelectedMerge] = useState(null); // trip id to merge into, or "new"
   const truckNo = (extracted.truckNo||"").toUpperCase().trim();
   const existingVehicle = vehicles ? vehicles.find(v => v.truckNo === truckNo) : null;
-  // Phone required if: vehicle exists but has no phone, OR vehicle doesn't exist yet (new truck)
   const needsDriverPhone = !existingVehicle || !existingVehicle.driverPhone;
 
-  // Check for duplicate DI across ALL trips
-  const scannedDiNo = (extracted.diNo || "").trim();
+  // Check for duplicate DI
+  const scannedDiNo = (extracted.diNo||"").trim();
   const duplicateDI = scannedDiNo ? trips.find(t => {
-    // Check diLines array
-    if (t.diLines && t.diLines.length > 0) {
-      return t.diLines.some(d => d.diNo === scannedDiNo);
-    }
-    // Check flat diNo field (may be "DI1 + DI2")
-    return (t.diNo || "").split("+").map(s=>s.trim()).includes(scannedDiNo);
+    if(t.diLines&&t.diLines.length>0) return t.diLines.some(d=>d.diNo===scannedDiNo);
+    return (t.diNo||"").split("+").map(s=>s.trim()).includes(scannedDiNo);
   }) : null;
 
-  const existing = lrNo.trim() ? trips.find(t => t.lrNo === lrNo.trim()) : null;
+  // Find unsettled trips for this truck (same vehicle = merge candidates)
+  const mergeCandidates = !duplicateDI ? (trips||[]).filter(t =>
+    !t.driverSettled &&
+    (t.truckNo===truckNo||t.truck===truckNo) &&
+    t.type==="outbound"
+  ) : [];
 
-  // Check if this DI already exists in the found LR trip
-  const diAlreadyInLR = existing && scannedDiNo && (() => {
-    if (existing.diLines && existing.diLines.length > 0)
-      return existing.diLines.some(d => d.diNo === scannedDiNo);
-    return (existing.diNo || "").split("+").map(s=>s.trim()).includes(scannedDiNo);
+  // Default: if no candidates → "new", if candidates → show choice
+  useEffect(()=>{
+    if(mergeCandidates.length===0) setSelectedMerge("new");
+  }, [mergeCandidates.length]);
+
+  const selectedTrip = selectedMerge && selectedMerge!=="new"
+    ? trips.find(t=>t.id===selectedMerge) : null;
+
+  // Check if selected trip's DI already contains this DI
+  const diAlreadyInSelected = selectedTrip && scannedDiNo && (() => {
+    if(selectedTrip.diLines&&selectedTrip.diLines.length>0)
+      return selectedTrip.diLines.some(d=>d.diNo===scannedDiNo);
+    return (selectedTrip.diNo||"").split("+").map(s=>s.trim()).includes(scannedDiNo);
   })();
 
-  const blocked = !!duplicateDI || !!diAlreadyInLR;
+  const canConfirm = !duplicateDI && selectedMerge &&
+    !diAlreadyInSelected && !(needsDriverPhone&&!driverPhone.trim());
 
   return (
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
@@ -2537,120 +2318,121 @@ function AskLRSheet({ extracted, trips, vehicles, onConfirm, onCancel }) {
       <div style={{background:C.green+"11",border:`1px solid ${C.green}33`,borderRadius:12,padding:"14px"}}>
         <div style={{color:C.green,fontWeight:800,fontSize:13,marginBottom:8}}>✓ Document Scanned</div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,fontSize:12}}>
-          {[
-            ["Truck",    extracted.truckNo],
-            ["DI No",    extracted.diNo],
-            ["GR No",    extracted.grNo],
-            ["Qty",      `${extracted.qty} MT`],
-            ["Bags",     String(extracted.bags)],
-            ["Fr.Rate",  `₹${extracted.frRate}/MT`],
-          ].map(([l,v]) => v && v !== "0" ? (
+          {[["Truck",extracted.truckNo],["DI No",extracted.diNo],["GR No",extracted.grNo],
+            ["Qty",`${extracted.qty} MT`],["Bags",String(extracted.bags)],["Fr.Rate",`₹${extracted.frRate}/MT`],
+          ].map(([l,v]) => v&&v!=="0" ? (
             <div key={l}><span style={{color:C.muted}}>{l}: </span><b style={{color:C.text}}>{v}</b></div>
-          ) : null)}
+          ):null)}
         </div>
       </div>
 
-      {/* Vehicle pending balances — shown once LR is entered or always if truck known */}
+      {/* Vehicle pending balances */}
       {existingVehicle && !duplicateDI && (()=>{
-        const ownerN2 = (existingVehicle.ownerName||"").trim();
-        const ownerVs2 = ownerN2 ? (vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerN2) : [existingVehicle];
-        const loanBal = ownerVs2.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
-        const shortBal = (existingVehicle.shortageOwed||0)-(existingVehicle.shortageRecovered||0);
-        if (loanBal<=0 && shortBal<=0) return null;
-        const loanLabel = ownerVs2.length>1 ? `OWNER LOAN BAL (${ownerVs2.length} vehs)` : "LOAN BALANCE";
+        const ownerN2=(existingVehicle.ownerName||"").trim();
+        const ownerVs2=ownerN2?(vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerN2):[existingVehicle];
+        const loanBal=ownerVs2.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
+        const shortBal=(existingVehicle.shortageOwed||0)-(existingVehicle.shortageRecovered||0);
+        if(loanBal<=0&&shortBal<=0) return null;
+        const loanLabel=ownerVs2.length>1?`OWNER LOAN BAL (${ownerVs2.length} vehs)`:"LOAN BALANCE";
         return (
           <div style={{background:`${C.orange}11`,border:`2px solid ${C.orange}66`,borderRadius:12,padding:"12px 14px"}}>
-            <div style={{color:C.orange,fontWeight:800,fontSize:12,marginBottom:8}}>
-              ⚠ Pending Dues on {ownerN2||truckNo}
-            </div>
+            <div style={{color:C.orange,fontWeight:800,fontSize:12,marginBottom:8}}>⚠ Pending Dues on {ownerN2||truckNo}</div>
             <div style={{display:"flex",gap:16,fontSize:12}}>
-              {loanBal>0&&(
-                <div>
-                  <div style={{color:C.red,fontWeight:700}}>₹{loanBal.toLocaleString("en-IN")}</div>
-                  <div style={{color:C.muted,fontSize:10}}>{loanLabel}</div>
-                </div>
-              )}
-              {shortBal>0&&(
-                <div>
-                  <div style={{color:C.red,fontWeight:700}}>₹{shortBal.toLocaleString("en-IN")}</div>
-                  <div style={{color:C.muted,fontSize:10}}>SHORTAGE BALANCE</div>
-                </div>
-              )}
+              {loanBal>0&&<div><div style={{color:C.red,fontWeight:700}}>₹{loanBal.toLocaleString("en-IN")}</div><div style={{color:C.muted,fontSize:10}}>{loanLabel}</div></div>}
+              {shortBal>0&&<div><div style={{color:C.red,fontWeight:700}}>₹{shortBal.toLocaleString("en-IN")}</div><div style={{color:C.muted,fontSize:10}}>SHORTAGE BALANCE</div></div>}
             </div>
-            <div style={{color:C.muted,fontSize:11,marginTop:6}}>
-              You can enter Shortage Recovery / Loan Recovery amounts in the trip form.
-            </div>
+            <div style={{color:C.muted,fontSize:11,marginTop:6}}>Enter Shortage/Loan Recovery in the trip form.</div>
           </div>
         );
       })()}
 
-      {/* Duplicate DI warning — block immediately */}
+      {/* Duplicate DI block */}
       {duplicateDI && (
         <div style={{background:C.red+"11",border:`1px solid ${C.red}44`,borderRadius:10,padding:"12px 14px"}}>
           <div style={{color:C.red,fontWeight:800,fontSize:13,marginBottom:4}}>🚫 Duplicate DI — Already Exists!</div>
-          <div style={{color:C.muted,fontSize:12}}>
-            DI <b style={{color:C.text}}>{scannedDiNo}</b> is already recorded in:
-          </div>
-          <div style={{color:C.muted,fontSize:12,marginTop:4}}>
-            LR: <b style={{color:C.text}}>{duplicateDI.lrNo||"—"}</b> · {duplicateDI.truckNo} · {duplicateDI.qty}MT
-          </div>
-          <div style={{color:C.red,fontSize:11,marginTop:6,fontWeight:700}}>
-            You cannot add the same DI number twice. Please check the document.
-          </div>
+          <div style={{color:C.muted,fontSize:12}}>DI <b style={{color:C.text}}>{scannedDiNo}</b> is already in LR <b style={{color:C.text}}>{duplicateDI.lrNo||"—"}</b> · {duplicateDI.truckNo} · {duplicateDI.qty}MT</div>
+          <div style={{color:C.red,fontSize:11,marginTop:6,fontWeight:700}}>You cannot add the same DI number twice.</div>
         </div>
       )}
 
-      {/* LR entry — only show if not a duplicate */}
+      {/* Merge choice — only if not dup */}
       {!duplicateDI && (
         <div style={{background:C.bg,borderRadius:12,padding:"14px",border:`2px solid ${C.blue}44`}}>
           <div style={{color:C.blue,fontWeight:800,fontSize:13,marginBottom:10}}>
-            📋 Enter LR Number for this DI
+            📋 {mergeCandidates.length>0 ? "Add to existing trip or create new?" : "LR will be auto-assigned on save"}
           </div>
-          <Field value={lrNo} onChange={setLrNo} placeholder="e.g. MYE/2526/001" />
 
-          {diAlreadyInLR && (
-            <div style={{marginTop:8,background:C.red+"11",border:`1px solid ${C.red}33`,
-              borderRadius:8,padding:"10px 12px",fontSize:12}}>
-              <div style={{color:C.red,fontWeight:800}}>🚫 This DI is already in LR {lrNo}</div>
-              <div style={{color:C.muted,marginTop:2}}>Cannot add the same DI to the same trip twice.</div>
+          {mergeCandidates.length>0 && (
+            <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:10}}>
+              {/* New trip option */}
+              <label style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer",
+                background:selectedMerge==="new"?C.green+"11":"transparent",
+                border:`1.5px solid ${selectedMerge==="new"?C.green:C.border}`,
+                borderRadius:10,padding:"10px 12px"}}>
+                <input type="radio" name="merge" value="new" checked={selectedMerge==="new"}
+                  onChange={()=>setSelectedMerge("new")} style={{width:16,height:16}} />
+                <div>
+                  <div style={{fontWeight:700,fontSize:13,color:C.green}}>🆕 New Trip</div>
+                  <div style={{fontSize:11,color:C.muted}}>Auto-assign next LR number for {extracted.client||DEFAULT_CLIENT}</div>
+                </div>
+              </label>
+
+              {/* Existing trip options */}
+              {mergeCandidates.map(t=>{
+                const diAlready = scannedDiNo && (() => {
+                  if(t.diLines&&t.diLines.length>0) return t.diLines.some(d=>d.diNo===scannedDiNo);
+                  return (t.diNo||"").split("+").map(s=>s.trim()).includes(scannedDiNo);
+                })();
+                return (
+                  <label key={t.id} style={{display:"flex",alignItems:"center",gap:10,
+                    cursor:diAlready?"not-allowed":"pointer",opacity:diAlready?0.5:1,
+                    background:selectedMerge===t.id?C.orange+"11":"transparent",
+                    border:`1.5px solid ${selectedMerge===t.id?C.orange:C.border}`,
+                    borderRadius:10,padding:"10px 12px"}}>
+                    <input type="radio" name="merge" value={t.id} checked={selectedMerge===t.id}
+                      disabled={diAlready} onChange={()=>!diAlready&&setSelectedMerge(t.id)}
+                      style={{width:16,height:16}} />
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontWeight:700,fontSize:13,color:C.orange}}>
+                        ➕ Add to LR {t.lrNo||"—"}
+                      </div>
+                      <div style={{fontSize:11,color:C.muted}}>
+                        {t.truckNo} · {t.qty}MT · DI: {t.diNo||"—"} · {t.date}
+                      </div>
+                      {diAlready&&<div style={{fontSize:11,color:C.red,fontWeight:700}}>DI already in this trip</div>}
+                    </div>
+                  </label>
+                );
+              })}
             </div>
           )}
 
-          {existing && !diAlreadyInLR && (
-            <div style={{marginTop:10,background:C.orange+"11",border:`1px solid ${C.orange}33`,
-              borderRadius:8,padding:"10px 12px",fontSize:12}}>
-              <div style={{color:C.orange,fontWeight:800,marginBottom:4}}>⚠ LR already has a trip!</div>
-              <div style={{color:C.muted}}>{existing.truckNo} · {existing.qty}MT · DI: {existing.diNo||"—"}</div>
-              <div style={{color:C.muted,marginTop:2}}>Tap Continue → you can merge this DI into that trip</div>
+          {mergeCandidates.length===0&&(
+            <div style={{color:C.green,fontSize:12,fontWeight:700}}>
+              ✓ New trip — LR will be auto-assigned from the sequence
             </div>
-          )}
-
-          {lrNo.trim() && !existing && (
-            <div style={{marginTop:8,color:C.green,fontSize:12,fontWeight:700}}>✓ New LR — will create a new trip</div>
           )}
         </div>
       )}
 
-      {/* Driver phone prompt if missing */}
+      {/* Driver phone */}
       {!duplicateDI && needsDriverPhone && (
         <div style={{background:`${C.orange}08`,border:`1px solid ${C.orange}44`,borderRadius:12,padding:"14px"}}>
           <div style={{color:C.orange,fontWeight:800,fontSize:13,marginBottom:8}}>📞 Driver Phone Required</div>
           <div style={{color:C.muted,fontSize:12,marginBottom:10}}>
-            Truck <b style={{color:C.text}}>{truckNo}</b> has no driver phone on record. Please add it now.
+            Truck <b style={{color:C.text}}>{truckNo}</b> has no driver phone. Please add it now.
           </div>
           <Field label="Driver Phone *" value={driverPhone} onChange={setDriverPhone} type="tel" placeholder="9XXXXXXXXX" />
         </div>
       )}
 
-      {!duplicateDI && (
-        <Btn onClick={()=>onConfirm(lrNo, driverPhone)} full color={C.blue}
-          disabled={!lrNo.trim() || !!diAlreadyInLR || (needsDriverPhone && !driverPhone.trim())}>
-          {existing && !diAlreadyInLR ? "Continue → Merge options" : "Continue → Fill trip details"}
+      {!duplicateDI&&(
+        <Btn onClick={()=>onConfirm(selectedTrip||null, driverPhone)} full color={C.blue}
+          disabled={!canConfirm}>
+          {selectedTrip ? "Continue → Merge into LR "+selectedTrip.lrNo : "Continue → Fill trip details"}
         </Btn>
       )}
-      <Btn onClick={onCancel} full outline color={C.muted}>
-        {duplicateDI ? "Close" : "Cancel"}
-      </Btn>
+      <Btn onClick={onCancel} full outline color={C.muted}>{duplicateDI?"Close":"Cancel"}</Btn>
     </div>
   );
 }
@@ -3209,6 +2991,50 @@ Rules:
 // ─── CLIENT / PLANT LIST ─────────────────────────────────────────────────────
 const CLIENTS = ["Shree Cement Kodla","Shree Cement Guntur","Ultratech Malkhed"];
 const DEFAULT_CLIENT = "Shree Cement Kodla";
+
+// ─── MATERIAL / LR SEQUENCE HELPERS ─────────────────────────────────────────
+// Maps (client, material) → LR prefix. Must match mye_lr_sequences table.
+const LR_PREFIXES = {
+  "Shree Cement Kodla|Cement":   "SKLC",
+  "Shree Cement Kodla|Gypsum":   "SKLGP",
+  "Shree Cement Kodla|Husk":     "SKLH",
+  "Shree Cement Guntur|Cement":  "SGNC",
+  "Shree Cement Guntur|Gypsum":  "SGNGP",
+  "Shree Cement Guntur|Husk":    "SGNH",
+  "Ultratech Malkhed|Cement":    "UTCC",
+  "Ultratech Malkhed|Gypsum":    "UTCGP",
+  "Ultratech Malkhed|Husk":      "UTCH",
+  "Inbound|Gypsum":              "INBGP",
+  "Inbound|Husk":                "INBH",
+  "Inbound|Limestone":           "INBL",
+};
+
+// Derive material category from grade string
+const gradeToMaterial = (grade, tripType) => {
+  const g = (grade||"").toLowerCase();
+  if(tripType==="inbound") {
+    if(g.includes("gypsum"))    return "Gypsum";
+    if(g.includes("husk"))      return "Husk";
+    if(g.includes("limestone")) return "Limestone";
+    return "Limestone"; // default inbound
+  }
+  // outbound
+  if(g.includes("gypsum"))  return "Gypsum";
+  if(g.includes("husk"))    return "Husk";
+  return "Cement"; // default outbound
+};
+
+// Get LR prefix for a (client, material) pair
+const getLRPrefix = (client, material) => LR_PREFIXES[`${client}|${material}`] || null;
+
+// Get the list of clients a user is allowed to see
+// Owner/manager see all. Others: if assignedClients is non-empty, restricted; else all.
+const getUserClients = (user) => {
+  if(!user) return CLIENTS;
+  if(user.role==="owner"||user.role==="manager") return CLIENTS;
+  const ac = user.assignedClients||[];
+  return ac.length>0 ? CLIENTS.filter(c=>ac.includes(c)) : CLIENTS;
+};
 // Shree Cement plants (used to decide if Shree Payments tab is relevant)
 const SHREE_CLIENTS = ["Shree Cement Kodla","Shree Cement Guntur"];
 
@@ -4297,12 +4123,11 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     setDiConflict({ extracted, existingTrip: null, askLR: true, lrInput: "" });
   };
 
-  // Called when user confirms LR number after scanning
-  const onLRConfirmed = (lrNo, driverPhone) => {
+  // Called when user confirms after scanning — existingTrip is non-null if merging, null for new trip
+  const onLRConfirmed = (existingTrip, driverPhone) => {
     const { extracted } = diConflict;
-    const existingTrip = lrNo.trim() ? trips.find(t => t.lrNo === lrNo.trim()) : null;
 
-    // Auto-create vehicle record if truck not already registered
+    // Auto-create/update vehicle record
     const truckNo = (extracted.truckNo||"").toUpperCase().trim();
     const existingVehicle = vehicles.find(v => v.truckNo === truckNo);
     if (truckNo && !existingVehicle) {
@@ -4319,15 +4144,16 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       setVehicles(p => [...(p||[]), newVehicle]);
       log("AUTO-CREATE VEHICLE", `${truckNo} driver:${driverPhone||"—"}`);
     } else if (existingVehicle && driverPhone && !existingVehicle.driverPhone) {
-      // Save driver phone if it was just entered
       setVehicles(p => p.map(v => v.truckNo===truckNo ? {...v, driverPhone} : v));
       log("UPDATE DRIVER PHONE", `${truckNo} → ${driverPhone}`);
     }
 
     if (existingTrip) {
-      setDiConflict({ extracted: { ...extracted, lrNo }, existingTrip, askLR: false });
+      // Merge into existing trip — pass to MergeDISheet
+      setDiConflict({ extracted: { ...extracted, lrNo: existingTrip.lrNo }, existingTrip, askLR: false });
     } else {
-      setF(p => ({ ...p, ...extracted, lrNo, district:extracted.district||p.district||"", state:extracted.state||p.state||"" }));
+      // New trip — lrNo will be auto-assigned on saveNew; store empty for now
+      setF(p => ({ ...p, ...extracted, lrNo: "", district:extracted.district||p.district||"", state:extracted.state||p.state||"" }));
       setWasScanned(true);
       setDiConflict(null);
     }
@@ -4370,6 +4196,18 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
   };
 
   const saveNew = async () => {
+    // ── Auto-assign LR from DB sequence ──────────────────────────────────────
+    // Inbound trips use "Inbound" as the sequence client key regardless of f.client
+    const tripClient   = isIn ? "Inbound" : (f.client || DEFAULT_CLIENT);
+    const tripMaterial = gradeToMaterial(f.grade, tripType);
+    let assignedLR = "";
+    try {
+      assignedLR = await DB.getNextLR(tripClient, tripMaterial);
+    } catch(e) {
+      alert(`Could not assign LR number: ${e.message}\nCheck that a sequence exists for ${tripClient} / ${tripMaterial}.`);
+      return;
+    }
+
     // Validate: driver rate is mandatory
     if (!f.givenRate || +f.givenRate <= 0) {
       alert("Driver Rate ₹/MT is mandatory.\nPlease enter the rate before saving.\n\nಡ್ರೈವರ್ ರೇಟ್ ₹/MT ಕಡ್ಡಾಯ.\nಸೇವ್ ಮಾಡುವ ಮೊದಲು ದರ ನಮೂದಿಸಿ.");
@@ -4421,6 +4259,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     }
     const t = mkTrip({
       ...f, type:tripType,
+      lrNo: assignedLR,  // auto-assigned from DB sequence
       qty:+f.qty, bags:+f.bags, frRate:+f.frRate, givenRate:+f.givenRate,
       advance:+f.advance, shortage:+f.shortage, tafal:+f.tafal,
       shortageRecovery:+f.shortageRecovery||0, loanRecovery:+f.loanRecovery||0,
@@ -5335,9 +5174,9 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
               {diConflict ? (
                 diConflict.askLR ? (
                   <AskLRSheet extracted={diConflict.extracted} trips={trips} vehicles={vehicles}
-                    onConfirm={(lrNo, driverPhone)=>{
-                      // Carry party fields through LR confirm
-                      onLRConfirmed(lrNo, driverPhone);
+                    onConfirm={(existingTrip, driverPhone)=>{
+                      // Carry party fields through confirm
+                      onLRConfirmed(existingTrip, driverPhone);
                       setF(p=>({...p, orderType:"party",
                         client: detectClient(diConflict.extracted)||p.client||DEFAULT_CLIENT,
                         district:diConflict.extracted.district||p.district||"",
@@ -5394,8 +5233,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                           if((indents||[]).some(i=>i.indentNo&&String(i.indentNo).trim()===f.dieselIndentNo.trim()))
                             {alert(`Indent No "${f.dieselIndentNo}" already exists in Diesel records.\nIndent No ಡೀಸೆಲ್ ರೆಕಾರ್ಡ್‌ನಲ್ಲಿ ಇದೆ.`);return;}
                         }
-                        if(f.lrNo&&f.lrNo.trim()&&trips.some(t=>t.lrNo===f.lrNo.trim()))
-                          {alert(`LR "${f.lrNo}" already exists. Each LR must be unique.\nLR "${f.lrNo}" ಈಗಾಗಲೇ ಇದೆ. ಪ್ರತಿ LR ಅನನ್ಯವಾಗಿರಬೇಕು.`);return;}
+                        // LR is auto-assigned from DB — no manual duplicate check needed
                         const _gross=(+f.qty||0)*(+f.givenRate||0);
                         const _net=_gross-(+f.advance||0)-(+f.tafal||0)-(+f.dieselEstimate||0)-(+f.shortageRecovery||0)-(+f.loanRecovery||0);
                         if(_net<0){
@@ -5405,6 +5243,16 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                         }
                         if(!f.district||!f.state){alert("District and State are required for Party orders.\nಪಾರ್ಟಿ ಆರ್ಡರ್‌ಗೆ ಜಿಲ್ಲೆ ಮತ್ತು ರಾಜ್ಯ ಕಡ್ಡಾಯ.");return;}
                         // Save directly — email sent separately via Party Email button
+                        // Auto-assign LR from DB sequence
+                        const _partyClient   = f.client || DEFAULT_CLIENT;
+                        const _partyMaterial = gradeToMaterial(f.grade, tripType);
+                        let _partyLR = "";
+                        try {
+                          _partyLR = await DB.getNextLR(_partyClient, _partyMaterial);
+                        } catch(e) {
+                          alert(`Could not assign LR: ${e.message}`);
+                          return;
+                        }
                         setUploadingFiles(true);
                         try {
                           const tripId = uid();
@@ -5444,6 +5292,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                           if(invReady) { const r=await uploadPartyFile(tripId,"invoice",invReady); invUrl=r.path; }
                           const t = mkTrip({
                             ...f, id:tripId, type:tripType,
+                            lrNo: _partyLR,  // auto-assigned from DB sequence
                             qty:+f.qty, bags:+f.bags, frRate:+f.frRate, givenRate:+f.givenRate,
                             advance:+f.advance, shortage:+f.shortage, tafal:+f.tafal,
                             shortageRecovery:+f.shortageRecovery||0, loanRecovery:+f.loanRecovery||0,
@@ -5633,10 +5482,20 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
         </div>
       )}
 
-      {/* LR Number - always editable (LR is never on the GR copy, must be entered manually) */}
+      {/* LR Number - auto-assigned on save (read-only display) */}
       <div style={{background:C.bg,borderRadius:10,padding:"12px 14px",border:`1.5px solid ${C.blue}44`}}>
         <div style={{color:C.blue,fontWeight:700,fontSize:12,marginBottom:6}}>📄 LR NUMBER (Lorry Receipt)</div>
-        <Field value={f.lrNo||""} onChange={ff("lrNo")} placeholder="e.g. LR/MYE/001 — identifies this trip" />
+        {f.lrNo ? (
+          <div style={{background:C.blue+"11",border:`1.5px solid ${C.blue}44`,borderRadius:8,
+            padding:"10px 12px",fontSize:15,fontWeight:800,color:C.blue,letterSpacing:1}}>
+            {f.lrNo}
+          </div>
+        ) : (
+          <div style={{background:C.dim,border:`1.5px solid ${C.border}`,borderRadius:8,
+            padding:"10px 12px",fontSize:13,color:C.muted,fontStyle:"italic"}}>
+            🔢 Will be auto-assigned when saved
+          </div>
+        )}
       </div>
 
       <div style={{display:"flex",gap:10}}>
@@ -5673,7 +5532,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
           Client / Plant *
         </div>
         <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-          {CLIENTS.map(c => (
+          {getUserClients(user).map(c => (
             <button key={c} onClick={()=>ff("client")(c)}
               style={{padding:"8px 14px",borderRadius:20,fontSize:12,fontWeight:700,cursor:"pointer",
                 border:`2px solid ${(f.client||DEFAULT_CLIENT)===c?ac:C.border}`,
@@ -12219,8 +12078,12 @@ function ActivityLog({activity}) {
 // ─── USER ADMIN ───────────────────────────────────────────────────────────────
 function UserAdmin({users, setUsers, user, log}) {
   const [sheet,setSheet]=useState(false); const [edit,setEdit]=useState(null);
-  const blank={name:"",username:"",pin:"",role:"operator",active:true};
+  const blank={name:"",username:"",pin:"",role:"operator",active:true,assignedClients:[]};
   const [f,setF]=useState(blank); const ff=k=>v=>setF(p=>({...p,[k]:v}));
+  const toggleClient = c => setF(p=>{
+    const cur = p.assignedClients||[];
+    return {...p, assignedClients: cur.includes(c)?cur.filter(x=>x!==c):[...cur,c]};
+  });
   const save=()=>{
     if(edit){setUsers(p=>p.map(u=>u.id===edit.id?{...u,...f}:u));log("EDIT USER",`${f.name}`);}
     else{const u={...f,id:"U"+uid(),createdAt:today()};setUsers(p=>[...(p||[]),u]);log("ADD USER",`${u.name} as ${u.role}`);}
@@ -12242,6 +12105,25 @@ function UserAdmin({users, setUsers, user, log}) {
             <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:6}}>PERMISSIONS</div>
             <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>{(ROLES[f.role]?.perms||[]).map(p=><Badge key={p} label={p} color={ROLES[f.role].color} />)}</div>
           </div>
+          {/* Assigned Clients — owner sees all, non-owner restricted to assigned */}
+          <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
+            <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:6}}>ASSIGNED CLIENTS <span style={{color:C.teal,fontWeight:400}}>(leave all unchecked = sees all)</span></div>
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {CLIENTS.map(c=>{
+                const checked=(f.assignedClients||[]).includes(c);
+                return(
+                  <label key={c} style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer"}}>
+                    <input type="checkbox" checked={checked} onChange={()=>toggleClient(c)}
+                      style={{width:16,height:16}} />
+                    <span style={{fontSize:13,color:checked?C.text:C.muted}}>{c}</span>
+                  </label>
+                );
+              })}
+            </div>
+            {(f.assignedClients||[]).length===0&&(
+              <div style={{color:C.muted,fontSize:11,marginTop:4}}>✓ No restriction — can see all clients</div>
+            )}
+          </div>
           <div style={{display:"flex",alignItems:"center",gap:10}}><input type="checkbox" checked={f.active} onChange={e=>setF(p=>({...p,active:e.target.checked}))} style={{width:20,height:20}} /><span style={{color:C.text,fontSize:15}}>Active</span></div>
           <Btn onClick={save} full>{edit?"Update":"Add User"}</Btn>
         </div>
@@ -12251,12 +12133,23 @@ function UserAdmin({users, setUsers, user, log}) {
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
             <div style={{display:"flex",gap:10,alignItems:"center"}}>
               <Av name={u.name} role={u.role} size={38} />
-              <div><div style={{fontWeight:800,fontSize:15}}>{u.name} {isMe&&<Badge label="You" color={C.accent} />}</div><div style={{color:C.muted,fontSize:12}}>@{u.username} · PIN: {u.pin}</div><Badge label={r?.label||u.role} color={r?.color||C.muted} /></div>
+              <div>
+                <div style={{fontWeight:800,fontSize:15}}>{u.name} {isMe&&<Badge label="You" color={C.accent} />}</div>
+                <div style={{color:C.muted,fontSize:12}}>@{u.username} · PIN: {u.pin}</div>
+                <Badge label={r?.label||u.role} color={r?.color||C.muted} />
+                {(u.assignedClients||[]).length>0&&(
+                  <div style={{marginTop:4,display:"flex",gap:4,flexWrap:"wrap"}}>
+                    {(u.assignedClients||[]).map(c=>(
+                      <Badge key={c} label={c.replace("Shree Cement ","SC ").replace("Ultratech ","UT ")} color={C.teal} />
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
             <Badge label={u.active?"Active":"Off"} color={u.active?C.green:C.muted} />
           </div>
           {!isMe&&<div style={{display:"flex",gap:8}}>
-            <Btn onClick={()=>{setF({name:u.name,username:u.username,pin:u.pin,role:u.role,active:u.active});setEdit(u);setSheet(true);}} sm outline color={C.blue}>Edit</Btn>
+            <Btn onClick={()=>{setF({name:u.name,username:u.username,pin:u.pin,role:u.role,active:u.active,assignedClients:u.assignedClients||[]});setEdit(u);setSheet(true);}} sm outline color={C.blue}>Edit</Btn>
             <Btn onClick={()=>{setUsers(p=>p.map(x=>x.id===u.id?{...x,active:!x.active}:x));log("TOGGLE USER",`${u.name} ${u.active?"disabled":"enabled"}`);}} sm outline color={u.active?C.red:C.green}>{u.active?"Disable":"Enable"}</Btn>
           </div>}
         </div>

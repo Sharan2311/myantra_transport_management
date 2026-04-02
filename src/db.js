@@ -241,10 +241,12 @@ const activityToDB = a => ({
 const userFromDB = r => ({
   id: r.id, name: r.name, username: r.username, pin: r.pin,
   role: r.role, active: r.active, createdAt: r.created_at,
+  assignedClients: r.assigned_clients || [],
 })
 const userToDB = u => ({
   id: u.id, name: u.name, username: u.username, pin: u.pin,
   role: u.role, active: u.active, created_at: u.createdAt,
+  assigned_clients: u.assignedClients || [],
 })
 
 const pumpPaymentFromDB = r => ({
@@ -360,6 +362,16 @@ export const DB = {
     return (data||[]).map(activityFromDB)
   },
   logActivity: a => upsertOne('mye_activity', activityToDB, a),
+
+  // Atomic LR number from Supabase sequence (no race conditions)
+  getNextLR: async (client, material) => {
+    const { data, error } = await supabase.rpc('get_next_lr', {
+      p_client: client,
+      p_material: material,
+    })
+    if (error) throw new Error(`LR sequence error: ${error.message}`)
+    return data // e.g. "SKLC020"
+  },
 
   getSettings: async () => {
     const { data } = await supabase.from('mye_settings').select('*').eq('key','app_settings').single()
