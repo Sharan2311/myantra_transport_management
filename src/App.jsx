@@ -1614,6 +1614,8 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       const frRate = +item.extracted?.frRate||0;
       if(frRate - (+item.givenRate) < 30) return false;
       if(item.orderType==="party" && (!item.grFile||!item.invoiceFile)) return false;
+      // Block if DI already exists in saved trips
+      if(checkDupDI(item.extracted?.diNo)) return false;
     }
     if(+g.diesel > 0 && !g.dieselIndentNo.trim()) return false;
     return true;
@@ -1904,13 +1906,12 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
 
       {/* How-to */}
       <div style={{background:C.teal+"11",border:`1px solid ${C.teal}33`,borderRadius:12,padding:"12px 14px"}}>
-        <div style={{color:C.teal,fontWeight:800,fontSize:13,marginBottom:4}}>📋 Batch DI Scan — How it works</div>
+        <div style={{color:C.teal,fontWeight:800,fontSize:13,marginBottom:4}}>📋 How it works</div>
         <div style={{color:C.muted,fontSize:12,lineHeight:1.7}}>
-          1. Upload all GR PDFs — AI scans in sequence<br/>
-          2. DIs are auto-grouped by vehicle number<br/>
-          3. Choose which DIs to merge per vehicle · Set order type + driver rate per DI<br/>
-          4. Set Tafal / Diesel / Advance per group<br/>
-          5. Tap <b>Save All</b> — LR numbers auto-assigned from DB
+          1. Upload 1 or more GR/DI PDFs — AI scans each one<br/>
+          2. DIs for the <b>same vehicle</b> are auto-grouped (select which to merge)<br/>
+          3. Set <b>Order type + Driver rate</b> per DI · Set Tafal / Diesel / Advance per group<br/>
+          4. Tap <b>Save</b> — LR number auto-assigned from DB sequence
         </div>
       </div>
 
@@ -1919,7 +1920,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           background:C.bg,display:"flex",flexDirection:"column",alignItems:"center",gap:10}}>
         <div style={{fontSize:32}}>📂</div>
         <div style={{color:C.teal,fontWeight:800,fontSize:14}}>Upload GR PDFs</div>
-        <div style={{color:C.muted,fontSize:12}}>Select multiple files at once — auto-grouped by vehicle</div>
+        <div style={{color:C.muted,fontSize:12}}>Upload 1 DI for a single trip · Upload multiple for batch — auto-grouped by vehicle</div>
         <div style={{display:"flex",gap:10,width:"100%",maxWidth:320}}>
           <button onClick={()=>inputRef.current?.click()}
             style={{flex:1,background:C.teal+"22",border:`1.5px solid ${C.teal}66`,
@@ -2036,9 +2037,9 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                 const margin  = (+ex?.frRate||0) - (+item.givenRate||0);
                 const marginOk = !item.givenRate || +item.givenRate<=0 || margin>=30;
                 return (
-                  <div key={item.id} style={{background:checked?C.bg:C.dim+"44",
+                  <div key={item.id} style={{background:dup?(C.red+"11"):(checked?C.bg:C.dim+"44"),
                     borderRadius:10,padding:"10px 12px",opacity:checked?1:0.55,
-                    border:`1px solid ${dup?C.red:checked?C.border:"transparent"}`}}>
+                    border:`2px solid ${dup?C.red:checked?C.border:"transparent"}`}}>
 
                     {/* DI header row: checkbox + info */}
                     <div style={{display:"flex",alignItems:"flex-start",gap:10,marginBottom:checked?8:0}}>
@@ -2052,7 +2053,10 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                         <div style={{color:C.muted,fontSize:11}}>
                           {ex?.from||"—"} → {ex?.to||"—"} · {ex?.grade||"—"} · {ex?.date||"—"}
                         </div>
-                        {dup&&<div style={{color:C.red,fontSize:11,fontWeight:700}}>⚠ Already in LR {dup.trip.lrNo}</div>}
+                        {dup&&<div style={{color:C.red,fontSize:12,fontWeight:800,
+                          background:C.red+"22",borderRadius:6,padding:"4px 8px",marginTop:4}}>
+                          🚫 DUPLICATE — Already in LR {dup.trip.lrNo} ({dup.trip.truckNo}). Will not be saved.
+                        </div>}
                       </div>
                       <div style={{fontSize:11,color:C.blue,fontWeight:700,flexShrink:0}}>
                         FR: ₹{ex?.frRate||0}/MT
@@ -2237,10 +2241,28 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
               })()}
 
               {/* Ready indicator */}
-              {isReady
-                ? <div style={{color:C.green,fontSize:12,fontWeight:700,textAlign:"center"}}>✅ Ready to save · LR will be auto-assigned</div>
-                : <div style={{color:C.muted,fontSize:11,textAlign:"center"}}>Fill driver rate for all selected DIs to enable save</div>
-              }
+              {(()=>{
+                const dupItems = groupItems.filter(x=>checkDupDI(x.extracted?.diNo));
+                const noRate   = groupItems.filter(x=>!x.givenRate||+x.givenRate<=0);
+                const lowMargin= groupItems.filter(x=>x.givenRate&&+x.givenRate>0&&(+x.extracted?.frRate||0)-(+x.givenRate)<30);
+                if(dupItems.length>0) return (
+                  <div style={{color:C.red,fontSize:12,fontWeight:800,textAlign:"center",
+                    background:C.red+"11",borderRadius:8,padding:"8px"}}>
+                    🚫 {dupItems.length} duplicate DI{dupItems.length>1?"s":""} — remove from group or uncheck to proceed
+                  </div>
+                );
+                if(noRate.length>0) return (
+                  <div style={{color:C.muted,fontSize:11,textAlign:"center"}}>
+                    Enter driver rate for {noRate.length} DI{noRate.length>1?"s":""} to enable save
+                  </div>
+                );
+                if(lowMargin.length>0) return (
+                  <div style={{color:C.red,fontSize:11,textAlign:"center"}}>
+                    ⚠ Margin below ₹30/MT on {lowMargin.length} DI{lowMargin.length>1?"s":""}
+                  </div>
+                );
+                return <div style={{color:C.green,fontSize:12,fontWeight:700,textAlign:"center"}}>✅ Ready to save · LR will be auto-assigned</div>;
+              })()}
             </div>
           </div>
         );
@@ -4495,19 +4517,14 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
               </button>
             ) : null;
           })()}
-          {!isIn && (
-            <button onClick={()=>setBatchDISheet(true)}
-              style={{flex:1,background:C.teal+"11",border:`1.5px solid ${C.teal}`,
-                borderRadius:10,color:C.teal,padding:"8px 4px",fontSize:12,
-                fontWeight:700,cursor:"pointer",display:"flex",
-                alignItems:"center",justifyContent:"center",gap:4}}>
-              🌅 Batch
-            </button>
-          )}
           <button onClick={()=>{
-              if(isIn){setOrderTypeStep("godown");setF(blankForm(false));}
-              else{setOrderTypeStep("selecting");}
-              setAddSheet(true);
+              if(isIn){
+                // Inbound trips: go to single scan flow as before
+                setOrderTypeStep("godown"); setF(blankForm(false)); setAddSheet(true);
+              } else {
+                // Outbound: always open BatchDIScanner (handles 1 or many DIs, auto-LR)
+                setBatchDISheet(true);
+              }
             }}
             style={{flex:2,background:ac,border:"none",borderRadius:10,color:"#fff",
               padding:"9px 8px",fontSize:13,fontWeight:800,cursor:"pointer",
@@ -5005,7 +5022,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
 
       {/* ── BATCH DI SCANNER SHEET ── */}
       {batchDISheet && (
-        <Sheet title="🌅 Morning Batch — Scan GR Copies" onClose={()=>setBatchDISheet(false)} noBackdropClose>
+        <Sheet title="📋 Add Trip — Scan GR / DI Copies" onClose={()=>setBatchDISheet(false)} noBackdropClose>
           <BatchDIScanner
             trips={trips} vehicles={vehicles} setVehicles={setVehicles}
             setTrips={setTrips} settings={settings} user={user} log={log}
