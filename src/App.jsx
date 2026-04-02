@@ -1527,7 +1527,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
     }));
     setItems(prev => [...prev, ...newItems]);
     setGroupsBuilt(false); // new files = rebuild groups
-    setSavedLRs([]);       // clear previous save results
+    setSavedLRs([]);       // clear previous LR results
     const scanSequentially = async (items) => {
       for(let i = 0; i < items.length; i++) {
         await scanFile(items[i].id, items[i].file);
@@ -1709,6 +1709,14 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
     const savedLRsThisBatch = [];
     let count = 0;
 
+    // If DI date is from a different FY than today, use today's date
+    // (e.g. a March DI scanned in April must go into current FY, not previous)
+    const safeTripDate = (diDate) => {
+      const t = today();
+      if(!diDate) return t;
+      return getFY(diDate) === getFY(t) ? diDate : t;
+    };
+
     for(const g of readyGroups) {
       const groupItems = doneItems.filter(x=>g.diIds.includes(x.id));
       const primary    = groupItems[0];
@@ -1772,7 +1780,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           district:ex.district||"", state:ex.state||"",
           qty:+ex.qty||0, bags:+ex.bags||0,
           frRate:+ex.frRate||0, givenRate:+item.givenRate||0,
-          date:ex.date||today(), client,
+          date:safeTripDate(ex.date), client,
           status:"Pending Bill", shortage:0,
           advance:+g.advance||0,
           shortageRecovery:+g.shortageRecovery||0,
@@ -1851,7 +1859,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           district:ex0.district||"", state:ex0.state||"",
           qty:totalQty, bags:totalBags,
           frRate:diLines[0]?.frRate||0, givenRate:diLines[0]?.givenRate||0,
-          date:ex0.date||today(), client,
+          date:safeTripDate(ex0.date), client,
           status:"Pending Bill", shortage:0,
           advance:+g.advance||0,
           tafal:tafalVal,
@@ -1895,7 +1903,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
     }
 
     setSavedCount(c=>c+count);
-    setSavedLRs(prev=>[...savedLRsThisBatch, ...prev]); // newest first
+    setSavedLRs(prev=>[...savedLRsThisBatch,...prev]);
     setSaving(false);
     // Remove saved groups' items from list
     const savedItemIds = new Set(readyGroups.flatMap(g=>g.diIds));
@@ -1982,30 +1990,26 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
         </div>
       )}
 
-      {/* Success banner — shows assigned LR numbers */}
+      {/* Success banner — shows assigned LR numbers prominently */}
       {savedLRs.length>0&&(
-        <div style={{background:C.green+"11",border:`2px solid ${C.green}66`,
-          borderRadius:12,padding:"14px"}}>
+        <div style={{background:C.green+"11",border:`2px solid ${C.green}66`,borderRadius:12,padding:"14px"}}>
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
             <span style={{fontSize:22}}>✅</span>
             <div style={{color:C.green,fontWeight:800,fontSize:14}}>
               {savedCount} trip{savedCount>1?"s":""} saved!
             </div>
           </div>
-          {/* LR number cards */}
           <div style={{display:"flex",flexDirection:"column",gap:6}}>
             {savedLRs.map((r,i)=>(
               <div key={i} style={{background:C.card,borderRadius:10,padding:"10px 14px",
                 display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                 <div>
-                  <div style={{fontSize:18,fontWeight:900,color:C.blue,letterSpacing:1}}>
-                    {r.lrNo}
-                  </div>
+                  <div style={{fontSize:20,fontWeight:900,color:C.blue,letterSpacing:1}}>{r.lrNo}</div>
                   <div style={{fontSize:11,color:C.muted,marginTop:2}}>
                     {r.truckNo} · {r.qty} MT{r.diCount>1?` · ${r.diCount} DIs`:""}
                   </div>
                 </div>
-                <div style={{fontSize:22}}>🎫</div>
+                <span style={{fontSize:24}}>🎫</span>
               </div>
             ))}
           </div>
@@ -2079,6 +2083,12 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                           background:C.red+"22",borderRadius:6,padding:"4px 8px",marginTop:4}}>
                           🚫 DUPLICATE — Already in LR {dup.trip.lrNo} ({dup.trip.truckNo}). Will not be saved.
                         </div>}
+                        {!dup && ex?.date && getFY(ex.date)!==getFY(today()) && (
+                          <div style={{color:C.orange,fontSize:11,fontWeight:700,
+                            background:C.orange+"15",borderRadius:6,padding:"4px 8px",marginTop:4}}>
+                            ⚠ DI date {ex.date} is from FY {getFY(ex.date)-1}–{String(getFY(ex.date)).slice(2)} — trip will be saved with today's date ({today()})
+                          </div>
+                        )}
                       </div>
                       <div style={{fontSize:11,color:C.blue,fontWeight:700,flexShrink:0}}>
                         FR: ₹{ex?.frRate||0}/MT
@@ -4084,12 +4094,22 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
   const slist  = search ? dlist.filter(t => {
     const q = search.trim().toLowerCase();
     if(!q) return true;
-    // LR: match from end of number (e.g. "2910" matches "MYE/2526/2910" but NOT "2929")
-    const lrNum = (t.lrNo||"").split("/").pop().toLowerCase();
+    const lrFull = (t.lrNo||"").toLowerCase();
+    // Exact LR match
+    if(lrFull === q) return true;
+    // Prefix match (e.g. "SKLC" matches "SKLC020")
+    if(lrFull.startsWith(q)) return true;
+    // Numeric suffix match — strip leading zeros from both sides
+    // e.g. "SKLC020", "SKLC0020", "SKLC20" all match each other
+    const lrAlpha = lrFull.replace(/[^a-z]/g,"");   // "sklc"
+    const lrDigits = lrFull.replace(/[^0-9]/g,"");  // "020" → numeric value 20
+    const qAlpha   = q.replace(/[^a-z]/g,"");
+    const qDigits  = q.replace(/[^0-9]/g,"");
+    if(lrAlpha && qAlpha && lrAlpha===qAlpha && lrDigits && qDigits &&
+       parseInt(lrDigits,10)===parseInt(qDigits,10)) return true;
+    // Legacy LR: match from end of number (e.g. "2910" matches "MYE/2526/2910")
+    const lrNum = lrFull.split("/").pop();
     if(lrNum === q) return true;
-    if((t.lrNo||"").toLowerCase() === q) return true;
-    // LR prefix match (e.g. "MYE/2526/29" matches "MYE/2526/2910")
-    if((t.lrNo||"").toLowerCase().startsWith(q)) return true;
     // Truck: exact or prefix match (e.g. "KA29" matches "KA29A9502")
     if((t.truckNo||"").toLowerCase().startsWith(q)) return true;
     if((t.truckNo||"").toLowerCase() === q) return true;
