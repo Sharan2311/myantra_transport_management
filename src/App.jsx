@@ -1436,6 +1436,7 @@ function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user
   const [items,      setItems]      = useState([]);
   const [saving,     setSaving]     = useState(false);
   const [savedCount, setSavedCount] = useState(0);
+  const [savedLRs,   setSavedLRs]   = useState([]); // [{lrNo, truckNo, qty, diCount}]
   const [lrError,    setLrError]    = useState(""); // LR assignment error
   const inputRef = useRef();
 
@@ -1526,6 +1527,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
     }));
     setItems(prev => [...prev, ...newItems]);
     setGroupsBuilt(false); // new files = rebuild groups
+    setSavedLRs([]);       // clear previous save results
     const scanSequentially = async (items) => {
       for(let i = 0; i < items.length; i++) {
         await scanFile(items[i].id, items[i].file);
@@ -1704,6 +1706,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
     setSaving(true);
     const tafal = settings?.tafalPerTrip||300;
     const createdTrucksThisBatch = new Set();
+    const savedLRsThisBatch = [];
     let count = 0;
 
     for(const g of readyGroups) {
@@ -1887,10 +1890,12 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
         }
         log("BATCH MULTI-DI",`LR:${lrNo} ${allDiNos} ${truckNo} ${totalQty}MT`);
       }
+      savedLRsThisBatch.push({lrNo, truckNo, qty: groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0),0), diCount: groupItems.length});
       count++;
     }
 
     setSavedCount(c=>c+count);
+    setSavedLRs(prev=>[...savedLRsThisBatch, ...prev]); // newest first
     setSaving(false);
     // Remove saved groups' items from list
     const savedItemIds = new Set(readyGroups.flatMap(g=>g.diIds));
@@ -1977,18 +1982,35 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
         </div>
       )}
 
-      {/* Success banner */}
-      {savedCount>0&&(
-        <div style={{background:C.green+"11",border:`1px solid ${C.green}44`,
-          borderRadius:10,padding:"10px 14px",display:"flex",alignItems:"center",gap:8}}>
-          <span style={{fontSize:20}}>✅</span>
-          <div>
-            <div style={{color:C.green,fontWeight:800,fontSize:13}}>
+      {/* Success banner — shows assigned LR numbers */}
+      {savedLRs.length>0&&(
+        <div style={{background:C.green+"11",border:`2px solid ${C.green}66`,
+          borderRadius:12,padding:"14px"}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+            <span style={{fontSize:22}}>✅</span>
+            <div style={{color:C.green,fontWeight:800,fontSize:14}}>
               {savedCount} trip{savedCount>1?"s":""} saved!
             </div>
-            <div style={{color:C.muted,fontSize:11}}>
-              {groups.length>0?`${groups.length} group(s) remaining`:"All done — you can close"}
-            </div>
+          </div>
+          {/* LR number cards */}
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            {savedLRs.map((r,i)=>(
+              <div key={i} style={{background:C.card,borderRadius:10,padding:"10px 14px",
+                display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div>
+                  <div style={{fontSize:18,fontWeight:900,color:C.blue,letterSpacing:1}}>
+                    {r.lrNo}
+                  </div>
+                  <div style={{fontSize:11,color:C.muted,marginTop:2}}>
+                    {r.truckNo} · {r.qty} MT{r.diCount>1?` · ${r.diCount} DIs`:""}
+                  </div>
+                </div>
+                <div style={{fontSize:22}}>🎫</div>
+              </div>
+            ))}
+          </div>
+          <div style={{color:C.muted,fontSize:11,marginTop:8,textAlign:"center"}}>
+            {groups.length>0?`${groups.length} group(s) remaining`:"All done — you can close"}
           </div>
         </div>
       )}
