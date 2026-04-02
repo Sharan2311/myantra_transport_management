@@ -1510,16 +1510,34 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           : x));
         return;
       }
-      setItems(prev => prev.map(x => x.id===id
-        ? {...x, status:"done", extracted:{...extracted, client}, error:null}
-        : x));
+      setItems(prev => {
+        // First mark this item done
+        const updated = prev.map(x => x.id===id
+          ? {...x, status:"done", extracted:{...extracted, client}, error:null}
+          : x);
+        // Then auto-remove duplicate diNo within this batch session
+        // Keep the FIRST occurrence (lowest index), remove subsequent ones
+        const diNo = (extracted.diNo||"").trim();
+        if(!diNo) return updated;
+        let firstSeen = false;
+        return updated.filter(x => {
+          const xDiNo = (x.extracted?.diNo||"").trim();
+          if(xDiNo !== diNo) return true; // different DI — keep
+          if(!firstSeen) { firstSeen = true; return true; } // first occurrence — keep
+          return false; // duplicate — auto-remove
+        });
+      });
     } catch(e) {
       setItems(prev => prev.map(x => x.id===id ? {...x, status:"error", error:e.message} : x));
     }
   };
 
   const addFiles = files => {
-    const newItems = Array.from(files).map(file => ({
+    // Filter out files already in the queue (same name + size = same file uploaded twice)
+    const existingFileKeys = new Set(items.map(x=>x.file?`${x.file.name}|${x.file.size}`:""));
+    const uniqueFiles = Array.from(files).filter(f => !existingFileKeys.has(`${f.name}|${f.size}`));
+    if(uniqueFiles.length === 0) return; // all duplicates — nothing to do
+    const newItems = uniqueFiles.map(file => ({
       id:uid(), file, status:"pending",
       extracted:null, error:null,
       // per-DI fields
