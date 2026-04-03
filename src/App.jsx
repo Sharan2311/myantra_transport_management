@@ -11470,7 +11470,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
           </div>
         )}
 
-        {recipAccounts.length===0 && accId!==="new" && (
+        {recipAccounts.length===0 && accId!=="new" && (
           <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,borderRadius:8,
             padding:"10px 12px",fontSize:12,color:C.orange}}>
             No saved accounts for this {recipType==="vehicle_owner"?"truck owner":"employee"} yet.
