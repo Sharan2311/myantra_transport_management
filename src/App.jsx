@@ -4661,6 +4661,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       {/* Warning banner: >5 pending party emails */}
       {!isIn && (() => {
         const pending = trips.filter(t=>t.orderType==="party"&&!t.emailSentAt);
+        if(!["owner","manager"].includes(user?.role)) return null;
         return pending.length>5 ? (
           <div style={{background:C.red+"11",border:`1px solid ${C.red}44`,borderRadius:12,
             padding:"10px 14px",display:"flex",flexWrap:"wrap",alignItems:"center",gap:8}}>
