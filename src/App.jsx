@@ -11332,10 +11332,13 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
     : (veh?.accountNo ? [{id:"veh_main",name:veh.ownerName||"Owner",accountNo:veh.accountNo,ifsc:veh.ifsc||"",isPrimary:true}] : []);
   const allEmpAccounts = (employees||[]).flatMap(e=>(e.accounts||[]).map(a=>({...a,_empId:e.id,_empName:e.name})));
 
-  const [recipType,  setRecipType]  = useState("vehicle_owner");
-  const [accId,      setAccId]      = useState("");
-  const [amount,     setAmount]     = useState(String(t.balance||t.netDue||0));
-  const [notes,      setNotes]      = useState("");
+  const editingReq = trip._editingReq || null;
+  const isEditing  = !!editingReq;
+
+  const [recipType,  setRecipType]  = useState(editingReq?.recipientType||"vehicle_owner");
+  const [accId,      setAccId]      = useState(editingReq?.accountId||"");
+  const [amount,     setAmount]     = useState(String(editingReq?.amount||t.balance||t.netDue||0));
+  const [notes,      setNotes]      = useState(editingReq?.notes||"");
   const [newAcc,     setNewAcc]     = useState({name:"",accountNo:"",ifsc:""});
   const [newAccEmpId,setNewAccEmpId]= useState(""); // which employee to save new account to
   const [submitted,  setSubmitted]  = useState(false);
@@ -11343,7 +11346,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
   const recipAccounts = recipType==="vehicle_owner" ? ownerAccounts : allEmpAccounts;
   const selAcc = recipAccounts.find(a=>a.id===accId);
 
-  const hasPending = (paymentRequests||[]).some(r=>r.tripId===t.id&&r.status==="pending");
+  const hasPending = !isEditing && (paymentRequests||[]).some(r=>r.tripId===t.id&&r.status==="pending");
 
   const save = () => {
     if(!accId)              { alert("Select an account."); return; }
@@ -11380,7 +11383,14 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
       ? (veh?.ownerName||t.truckNo)
       : (selAcc?._empName||finalAcc.name||"—");
 
-    const pr = {
+    const pr = isEditing ? {
+      ...editingReq,
+      amount:+amount, recipientType:recipType,
+      recipientId, recipientName,
+      accountId:finalAcc.id, accountName:finalAcc.name,
+      accountNo:finalAcc.accountNo, ifsc:finalAcc.ifsc||"",
+      notes,
+    } : {
       id:"PR"+uid(), tripId:t.id, lrNo:t.lrNo, truckNo:t.truckNo,
       amount:+amount, recipientType:recipType,
       recipientId, recipientName,
@@ -11390,9 +11400,13 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
       createdBy:user.username, createdAt:nowTs(),
       paidAt:"", paidBy:"",
     };
-    setPaymentRequests(prev=>[pr,...(prev||[])]);
+    if(isEditing) {
+      setPaymentRequests(prev=>(prev||[]).map(r=>r.id===pr.id?pr:r));
+    } else {
+      setPaymentRequests(prev=>[pr,...(prev||[])]);
+    }
     DB.savePaymentRequest(pr).catch(e=>console.error("savePaymentRequest:",e));
-    log("PAY REQUEST",`LR:${t.lrNo} ${recipientName} ₹${Number(amount).toLocaleString("en-IN")}`);
+    log(isEditing?"PAY REQUEST EDITED":"PAY REQUEST",`LR:${t.lrNo} ${recipientName} ₹${Number(amount).toLocaleString("en-IN")}`);
     setSubmitted(true);
   };
 
@@ -11414,7 +11428,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
   );
 
   return (
-    <Sheet title={`📋 Request Payment — ${t.lrNo||t.truckNo}`} onClose={onClose}>
+    <Sheet title={isEditing?`✏ Edit Request — ${t.lrNo||t.truckNo}`:`📋 Request Payment — ${t.lrNo||t.truckNo}`} onClose={onClose}>
       <div style={{display:"flex",flexDirection:"column",gap:14}}>
         {/* Trip summary */}
         <div style={{background:C.bg,borderRadius:10,padding:"12px 14px",fontSize:13}}>
@@ -11426,11 +11440,15 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
         </div>
 
         {hasPending && (
-          <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:8,
-            padding:"8px 12px",fontSize:12,color:C.orange,fontWeight:700}}>
-            ⚠ A pending request already exists for this trip
+          <div style={{background:C.red+"11",border:`1px solid ${C.red}44`,borderRadius:10,
+            padding:"12px 14px",fontSize:13,color:C.red,fontWeight:700}}>
+            🚫 A pending request already exists for this trip.<br/>
+            <span style={{fontWeight:400,fontSize:12}}>Cancel the existing request first, or wait for it to be marked Done.</span>
           </div>
         )}
+
+        {/* Rest of form — hidden if pending exists */}
+        {!hasPending && <>
 
         {/* Amount */}
         <Field label="Amount ₹ *" value={amount} onChange={setAmount} type="number" />
@@ -11522,8 +11540,9 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
         <Field label="Notes (optional)" value={notes} onChange={setNotes} placeholder="Any additional info…" />
 
         <Btn onClick={save} full color={C.purple} disabled={!accId||!amount||+amount<=0}>
-          📋 Submit Payment Request
+          {isEditing?"💾 Update Request":"📋 Submit Payment Request"}
         </Btn>
+        </>} {/* end !hasPending */}
       </div>
     </Sheet>
   );
@@ -11846,7 +11865,23 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
       {/* ── TRIP LIST (unpaid / paid / all) ── */}
       {filter!=="history" && filter!=="requests" && (()=>{
         const base = filter==="unpaid"?unpaidTrips:filter==="paid"?paidTrips:tripWithBalance;
-        const shown = histLR ? base.filter(t=>(t.lrNo+t.truckNo).toLowerCase().includes(histLR.toLowerCase())) : base;
+        const shown = histLR ? base.filter(t=>{
+          const q = histLR.trim().toLowerCase().replace(/\s+/g,"");
+          if(!q) return true;
+          // Exact / contains match on LR
+          const lr = (t.lrNo||"").toLowerCase().replace(/\s+/g,"");
+          if(lr.includes(q)) return true;
+          // Fuzzy: match alpha prefix + numeric value ignoring leading zeros
+          // e.g. "sklc025" matches "SKLC025", "skcl0025" also matches (typo tolerance)
+          const lrAlpha  = lr.replace(/[^a-z]/g,"");
+          const lrDigits = parseInt(lr.replace(/[^0-9]/g,""),10)||0;
+          const qAlpha   = q.replace(/[^a-z]/g,"");
+          const qDigits  = parseInt(q.replace(/[^0-9]/g,""),10)||0;
+          if(lrAlpha&&qAlpha&&lrDigits&&qDigits&&lrDigits===qDigits) return true;
+          // Truck number
+          if((t.truckNo||"").toLowerCase().replace(/\s+/g,"").includes(q)) return true;
+          return false;
+        }) : base;
         return shown.map(t=>(
         <div key={t.id} style={{background:C.card,borderRadius:14,padding:"14px 16px",borderLeft:`4px solid ${t.balance>0?C.accent:C.green}`,marginBottom:8}}>
           <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
@@ -11947,21 +11982,40 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
                 {effectiveStatus==="done" && pr.paidAt && (
                   <div style={{color:C.green,fontSize:11}}>✓ Paid on {pr.paidAt} by {pr.paidBy||"—"}</div>
                 )}
-                {effectiveStatus!=="done" && user.role==="owner" && (
-                  <div style={{display:"flex",gap:8}}>
-                    <Btn onClick={()=>{
-                      const updated={...pr,status:"done",paidAt:today(),paidBy:user.username};
-                      setPaymentRequests(prev=>(prev||[]).map(r=>r.id===pr.id?updated:r));
-                      DB.savePaymentRequest(updated).catch(e=>console.error("savePaymentRequest:",e));
-                      log("PAY REQUEST DONE",`LR:${pr.lrNo} ${pr.recipientName} ₹${fmt(pr.amount)}`);
-                    }} sm color={C.green}>✓ Mark Done</Btn>
-                    <Btn onClick={()=>{
-                      if(!window.confirm("Delete this payment request?")) return;
-                      setPaymentRequests(prev=>(prev||[]).filter(r=>r.id!==pr.id));
-                      DB.deletePaymentRequest(pr.id).catch(e=>console.error("deletePaymentRequest:",e));
-                    }} sm outline color={C.red}>🗑</Btn>
-                  </div>
-                )}
+                {effectiveStatus!=="done" && (()=>{
+                  const isOwner = user.role==="owner";
+                  const isMyRequest = pr.createdBy===user.username;
+                  const canEdit = isOwner || isMyRequest;
+                  const canDelete = isOwner || isMyRequest;
+                  if(!canEdit && !canDelete) return null;
+                  return (
+                    <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                      {isOwner && (
+                        <Btn onClick={()=>{
+                          const updated={...pr,status:"done",paidAt:today(),paidBy:user.username};
+                          setPaymentRequests(prev=>(prev||[]).map(r=>r.id===pr.id?updated:r));
+                          DB.savePaymentRequest(updated).catch(e=>console.error("savePaymentRequest:",e));
+                          log("PAY REQUEST DONE",`LR:${pr.lrNo} ${pr.recipientName} ₹${fmt(pr.amount)}`);
+                        }} sm color={C.green}>✓ Mark Done</Btn>
+                      )}
+                      {canEdit && (
+                        <Btn onClick={()=>setPayReqSheet({
+                          ...((trips||[]).find(t=>t.id===pr.tripId)||{}),
+                          _editingReqId: pr.id,
+                          _editingReq: pr,
+                        })} sm outline color={C.blue}>✏ Edit</Btn>
+                      )}
+                      {canDelete && (
+                        <Btn onClick={()=>{
+                          if(!window.confirm("Delete this payment request?")) return;
+                          setPaymentRequests(prev=>(prev||[]).filter(r=>r.id!==pr.id));
+                          DB.deletePaymentRequest(pr.id).catch(e=>console.error("deletePaymentRequest:",e));
+                          log("PAY REQUEST DELETED",`LR:${pr.lrNo}`);
+                        }} sm outline color={C.red}>🗑</Btn>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
             );
           })}
