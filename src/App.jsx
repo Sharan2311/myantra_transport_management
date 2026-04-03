@@ -541,6 +541,7 @@ function Login({onLogin}) {
           id: data.id, name: data.name, username: data.username,
           pin: data.pin, role: data.role, active: data.active,
           createdAt: data.created_at,
+          assignedClients: data.assigned_clients || [],
         };
         onLogin(u);
       }
@@ -3110,6 +3111,23 @@ Rules:
 const CLIENTS = ["Shree Cement Kodla","Shree Cement Guntur","Ultratech Malkhed"];
 const DEFAULT_CLIENT = "Shree Cement Kodla";
 
+// Get the list of clients a user is allowed to see (defined early — used throughout)
+const getUserClients = (user) => {
+  if(!user) return CLIENTS;
+  if(user.role==="owner"||user.role==="manager") return CLIENTS;
+  const ac = user.assignedClients||[];
+  return ac.length>0 ? CLIENTS.filter(c=>ac.includes(c)) : CLIENTS;
+};
+
+// Returns true if the user can see trips for the given client
+const userCanSeeClient = (user, client) => {
+  if(!user) return false;
+  if(user.role==="owner"||user.role==="manager") return true;
+  const ac = user.assignedClients||[];
+  if(ac.length===0) return true; // no restriction set → see all
+  return ac.includes(client||DEFAULT_CLIENT);
+};
+
 // ─── MATERIAL / LR SEQUENCE HELPERS ─────────────────────────────────────────
 // Maps (client, material) → LR prefix. Must match mye_lr_sequences table.
 const LR_PREFIXES = {
@@ -3145,25 +3163,6 @@ const gradeToMaterial = (grade, tripType) => {
 // Get LR prefix for a (client, material) pair
 const getLRPrefix = (client, material) => LR_PREFIXES[`${client}|${material}`] || null;
 
-// Get the list of clients a user is allowed to see
-// Owner/manager see all. Others: if assignedClients is non-empty, restricted; else all.
-const getUserClients = (user) => {
-  if(!user) return CLIENTS;
-  if(user.role==="owner"||user.role==="manager") return CLIENTS;
-  const ac = user.assignedClients||[];
-  // Empty assignedClients = no client restriction only for owner/manager (handled above)
-  // For all other roles: empty = see all (backward compat), non-empty = only those clients
-  return ac.length>0 ? CLIENTS.filter(c=>ac.includes(c)) : CLIENTS;
-};
-
-// Returns true if the user can see trips for the given client
-const userCanSeeClient = (user, client) => {
-  if(!user) return false;
-  if(user.role==="owner"||user.role==="manager") return true;
-  const ac = user.assignedClients||[];
-  if(ac.length===0) return true; // no restriction set → see all
-  return ac.includes(client||DEFAULT_CLIENT);
-};
 // Shree Cement plants (used to decide if Shree Payments tab is relevant)
 const SHREE_CLIENTS = ["Shree Cement Kodla","Shree Cement Guntur"];
 
