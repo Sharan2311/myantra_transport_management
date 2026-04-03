@@ -1800,6 +1800,12 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
         setSaving(false);
         return;
       }
+      // Race condition guard: verify LR not already in local state or DB
+      if((trips||[]).some(t=>t.lrNo===lrNo)) {
+        setLrError(`LR ${lrNo} already exists (possible parallel save). Please try again.`);
+        setSaving(false);
+        return;
+      }
 
       // ── Ensure vehicles registered ────────────────────────────────────────
       const truckNo = g.truckNo;
@@ -1863,6 +1869,13 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           sealedInvoicePath:"",
           createdBy:user.username, createdAt:nowTs(),
         };
+        // Atomic DB save — checks for duplicate DI before inserting
+        const saveResult = await DB.saveTripSafe(trip);
+        if(!saveResult.success) {
+          setLrError(`DI ${saveResult.duplicateDI} already exists in LR ${saveResult.existingLR} (${saveResult.existingTruck}). This trip was not saved — another device may have saved it first.`);
+          setSaving(false);
+          return;
+        }
         setTrips(p=>[trip,...(p||[])]);
         // Wallet advance
         if(trip.cashEmpId && trip.advance>0 && setCashTransfers) {
@@ -1942,6 +1955,13 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           sealedInvoicePath:"",
           createdBy:user.username, createdAt:nowTs(),
         };
+        // Atomic DB save — checks for duplicate DI before inserting
+        const saveResultM = await DB.saveTripSafe(trip);
+        if(!saveResultM.success) {
+          setLrError(`DI ${saveResultM.duplicateDI} already exists in LR ${saveResultM.existingLR} (${saveResultM.existingTruck}). This trip was not saved — another device may have saved it first.`);
+          setSaving(false);
+          return;
+        }
         setTrips(p=>[trip,...(p||[])]);
         // Wallet advance
         if(trip.cashEmpId && trip.advance>0 && setCashTransfers) {
@@ -11889,8 +11909,13 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
   // For each trip compute total paid and balance
   const tripWithBalance = trips.map(t => {
     const veh      = vehicles.find(v=>v.truckNo===t.truckNo);
-    const gross    = (t.qty||0)*(t.givenRate||0);
-    const deducts  = (t.advance||0)+(t.tafal||0)+(veh?.deductPerTrip||0)+(t.dieselEstimate||0)+((t.shortage||0)*(t.givenRate||0));
+    // Multi-DI: use actual per-DI gross (sum of qty×givenRate per DI line)
+    const gross    = (t.diLines&&t.diLines.length>1)
+      ? t.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
+      : (t.qty||0)*(t.givenRate||0);
+    const deducts  = (t.advance||0)+(t.tafal||0)+(veh?.deductPerTrip||0)
+                   +(t.dieselEstimate||0)+((t.shortage||0)*(t.givenRate||0))
+                   +(t.shortageRecovery||0)+(t.loanRecovery||0);
     const netDue   = Math.max(0, gross - deducts);
     const paidSoFar= (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
     const balance  = Math.max(0, netDue - paidSoFar);
@@ -12190,23 +12215,7 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
       {/* ── TRIP LIST (unpaid / paid / all) ── */}
       {filter!=="history" && filter!=="requests" && (()=>{
         const base = filter==="unpaid"?unpaidTrips:filter==="paid"?paidTrips:tripWithBalance;
-        const shown = histLR ? base.filter(t=>{
-          const q = histLR.trim().toLowerCase().replace(/\s+/g,"");
-          if(!q) return true;
-          // Exact / contains match on LR
-          const lr = (t.lrNo||"").toLowerCase().replace(/\s+/g,"");
-          if(lr.includes(q)) return true;
-          // Fuzzy: match alpha prefix + numeric value ignoring leading zeros
-          // e.g. "sklc025" matches "SKLC025", "skcl0025" also matches (typo tolerance)
-          const lrAlpha  = lr.replace(/[^a-z]/g,"");
-          const lrDigits = parseInt(lr.replace(/[^0-9]/g,""),10)||0;
-          const qAlpha   = q.replace(/[^a-z]/g,"");
-          const qDigits  = parseInt(q.replace(/[^0-9]/g,""),10)||0;
-          if(lrAlpha&&qAlpha&&lrDigits&&qDigits&&lrDigits===qDigits) return true;
-          // Truck number
-          if((t.truckNo||"").toLowerCase().replace(/\s+/g,"").includes(q)) return true;
-          return false;
-        }) : base;
+        const shown = histLR ? base.filter(t=>(t.lrNo+t.truckNo).toLowerCase().includes(histLR.toLowerCase())) : base;
         return shown.map(t=>(
         <div key={t.id} style={{background:C.card,borderRadius:14,padding:"14px 16px",borderLeft:`4px solid ${t.balance>0?C.accent:C.green}`,marginBottom:8}}>
           <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
@@ -12280,7 +12289,12 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
           {(paymentRequests||[]).length===0 && (
             <div style={{textAlign:"center",color:C.muted,padding:"30px 0",fontSize:13}}>No payment requests yet</div>
           )}
-          {(paymentRequests||[]).sort((a,b)=>a.status==="pending"?-1:1).map(pr=>{
+          {[...(paymentRequests||[])].sort((a,b)=>{
+            // Stable sort: pending first, then by createdAt desc
+            if(a.status==="pending" && b.status!=="pending") return -1;
+            if(a.status!=="pending" && b.status==="pending") return 1;
+            return (b.createdAt||"").localeCompare(a.createdAt||"");
+          }).map(pr=>{
             const trip = (trips||[]).find(t=>t.id===pr.tripId);
             const isPaid = (driverPays||[]).some(p=>p.lrNo===pr.lrNo&&p.amount>0);
             const effectiveStatus = isPaid ? "done" : pr.status;

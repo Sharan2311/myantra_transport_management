@@ -299,6 +299,44 @@ export const DB = {
     return (data||[]).map(tripFromDB);
   },
   saveTrip:       t  => upsertOne('mye_trips', tripToDB, t),
+
+  // Atomic insert that checks for duplicate DI numbers before saving
+  // Returns {success, error, duplicateDI} 
+  saveTripSafe: async (t) => {
+    // Extract all DI numbers from this trip
+    const diNos = [];
+    if(t.diLines && t.diLines.length > 0) {
+      t.diLines.forEach(d => { if(d.diNo) diNos.push(d.diNo.trim()); });
+    } else if(t.diNo) {
+      t.diNo.split('+').map(s=>s.trim()).filter(Boolean).forEach(d=>diNos.push(d));
+    }
+
+    if(diNos.length > 0) {
+      // Check each DI number against existing trips in DB
+      for(const diNo of diNos) {
+        const { data: existing } = await supabase
+          .from('mye_trips')
+          .select('id, lr_no, di_no, truck_no')
+          .or(`di_no.eq.${diNo},di_no.like.${diNo} +%,di_no.like.% + ${diNo},di_no.like.% + ${diNo} +%`)
+          .limit(1);
+        
+        if(existing && existing.length > 0) {
+          const dup = existing[0];
+          return { 
+            success: false, 
+            duplicateDI: diNo,
+            existingLR: dup.lr_no,
+            existingTruck: dup.truck_no,
+          };
+        }
+      }
+    }
+
+    // No duplicates found — safe to insert
+    const { error } = await supabase.from('mye_trips').upsert(tripToDB(t));
+    if(error) throw error;
+    return { success: true };
+  },
   deleteTrip:     id => deleteOne('mye_trips', id),
   saveManyTrips:  async (trips) => {
     const { error } = await supabase.from('mye_trips').upsert(trips.map(tripToDB))
