@@ -4154,6 +4154,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
   // Sealed invoice upload sheet
   const [sealedSheet, setSealedSheet] = useState(null); // trip object
   const [batchDISheet,  setBatchDISheet]  = useState(false); // morning batch GR scanner
+  const [manualLrMode,  setManualLrMode]  = useState(false); // allow manual LR entry for old data
 
   const blankForm = (isParty=false) => ({
     type:tripType, lrNo:"", diNo:"", truckNo:"", grNo:"", dieselIndentNo:"",
@@ -4359,16 +4360,30 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
   };
 
   const saveNew = async () => {
-    // ── Auto-assign LR from DB sequence ──────────────────────────────────────
-    // Inbound trips use "Inbound" as the sequence client key regardless of f.client
+    // ── LR assignment: auto from DB sequence, or manual entry ─────────────────
     const tripClient   = isIn ? "Inbound" : (f.client || DEFAULT_CLIENT);
     const tripMaterial = gradeToMaterial(f.grade, tripType);
     let assignedLR = "";
-    try {
-      assignedLR = await DB.getNextLR(tripClient, tripMaterial);
-    } catch(e) {
-      alert(`Could not assign LR number: ${e.message}\nCheck that a sequence exists for ${tripClient} / ${tripMaterial}.`);
-      return;
+    if(manualLrMode) {
+      // Manual mode: use what the user typed — validate it's not empty or duplicate
+      if(!f.lrNo || !f.lrNo.trim()) {
+        alert("LR Number is required in Manual LR mode.\nPlease enter the LR number from the paper LR book.");
+        return;
+      }
+      assignedLR = f.lrNo.trim().toUpperCase();
+      // Check duplicate
+      if((trips||[]).some(t=>t.lrNo===assignedLR)) {
+        alert(`LR "${assignedLR}" already exists in the system.\nPlease check the LR number and try again.`);
+        return;
+      }
+    } else {
+      // Auto mode: get next LR from DB sequence
+      try {
+        assignedLR = await DB.getNextLR(tripClient, tripMaterial);
+      } catch(e) {
+        alert(`Could not assign LR number: ${e.message}\nCheck that a sequence exists for ${tripClient} / ${tripMaterial}.`);
+        return;
+      }
     }
 
     // Validate: driver rate is mandatory
@@ -4658,12 +4673,24 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
               </button>
             ) : null;
           })()}
+          {/* Manual LR mode toggle — owner only, for entering old/historical data */}
+          {user.role==="owner" && !isIn && (
+            <button onClick={()=>setManualLrMode(p=>!p)}
+              title={manualLrMode?"Switch back to auto LR":"Enter old trips with manual LR numbers"}
+              style={{background:manualLrMode?C.orange+"33":"transparent",
+                border:`1.5px solid ${manualLrMode?C.orange:C.border}`,
+                borderRadius:10,color:manualLrMode?C.orange:C.muted,
+                padding:"8px 10px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+              {manualLrMode?"🖊 Manual LR":"🔢 Auto LR"}
+            </button>
+          )}
           <button onClick={()=>{
               if(isIn){
-                // Inbound trips: go to single scan flow as before
                 setOrderTypeStep("godown"); setF(blankForm(false)); setAddSheet(true);
+              } else if(manualLrMode) {
+                // Manual LR mode: open regular form (not batch scanner)
+                setOrderTypeStep("selecting"); setF(blankForm(false)); setAddSheet(true);
               } else {
-                // Outbound: always open BatchDIScanner (handles 1 or many DIs, auto-LR)
                 setBatchDISheet(true);
               }
             }}
@@ -5226,6 +5253,16 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
           setOrderTypeStep(null);setPartyStep("docs");setUploadingFiles(false);
           grFileRef.current=[]; invoiceFileRef.current=[];
         }}>
+          {manualLrMode && (
+            <div style={{background:C.orange+"15",border:`2px solid ${C.orange}`,borderRadius:10,
+              padding:"10px 14px",marginBottom:8,display:"flex",alignItems:"center",gap:10}}>
+              <span style={{fontSize:18}}>🖊</span>
+              <div>
+                <div style={{color:C.orange,fontWeight:800,fontSize:13}}>Manual LR Mode — Historical Data Entry</div>
+                <div style={{color:C.muted,fontSize:11}}>Enter the LR number from your paper LR book. Sequence will NOT be incremented.</div>
+              </div>
+            </div>
+          )}
 
           {/* STEP 0: Order type selection */}
           {orderTypeStep==="selecting" && !isIn && (
@@ -5266,7 +5303,8 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                   ) : (
                     <TripForm f={f} ff={ff} isIn={isIn} ac={ac} vehicles={vehicles} settings={settings} employees={employees||[]} cashTransfers={cashTransfers||[]} recentDestinations={recentDestinations} recentGrades={recentGrades}
                       onTruckChange={onTruckChange} onSubmit={saveNew} submitLabel="Save Trip"
-                      user={user} wasScanned={wasScanned} trips={trips||[]} indents={indents||[]} />
+                      user={user} wasScanned={wasScanned} trips={trips||[]} indents={indents||[]}
+                      manualLrMode={manualLrMode} />
                   )}
                 </>
               )}
@@ -5401,6 +5439,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                   {(wasScanned || user.role==="owner") ? (
                     <TripForm f={f} ff={ff} isIn={false} ac={C.accent} vehicles={vehicles} settings={settings} employees={employees||[]} cashTransfers={cashTransfers||[]} recentDestinations={recentDestinations} recentGrades={recentGrades}
                       onTruckChange={onTruckChange}
+                      manualLrMode={manualLrMode}
                       onSubmit={async ()=>{
                         // All same validations as godown saveNew
                         if(!f.givenRate||+f.givenRate<=0){alert("Driver Rate ₹/MT is mandatory.\nಡ್ರೈವರ್ ರೇಟ್ ₹/MT ಕಡ್ಡಾಯ.");return;}
@@ -5444,16 +5483,21 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                             return;
                           }
                         }
-                        // Save directly — email sent separately via Party Email button
-                        // Auto-assign LR from DB sequence
+                        // LR: manual or auto
                         const _partyClient   = f.client || DEFAULT_CLIENT;
                         const _partyMaterial = gradeToMaterial(f.grade, tripType);
                         let _partyLR = "";
-                        try {
-                          _partyLR = await DB.getNextLR(_partyClient, _partyMaterial);
-                        } catch(e) {
-                          alert(`Could not assign LR: ${e.message}`);
-                          return;
+                        if(manualLrMode) {
+                          if(!f.lrNo||!f.lrNo.trim()){alert("LR Number is required in Manual LR mode.");return;}
+                          _partyLR = f.lrNo.trim().toUpperCase();
+                          if((trips||[]).some(t=>t.lrNo===_partyLR)){alert(`LR "${_partyLR}" already exists.`);return;}
+                        } else {
+                          try {
+                            _partyLR = await DB.getNextLR(_partyClient, _partyMaterial);
+                          } catch(e) {
+                            alert(`Could not assign LR: ${e.message}`);
+                            return;
+                          }
                         }
                         setUploadingFiles(true);
                         try {
@@ -5820,7 +5864,7 @@ function FileUploadRow({ label, path, onFile, disabled }) {
 }
 
 // Shared form for add + edit
-function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit, submitLabel, user, showStatus=false, wasScanned=false, isParty=false, employees=[], cashTransfers=[], recentDestinations=[], recentGrades=[], trips=[], indents=[]}) {
+function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit, submitLabel, user, showStatus=false, wasScanned=false, isParty=false, employees=[], cashTransfers=[], recentDestinations=[], recentGrades=[], trips=[], indents=[], manualLrMode=false}) {
   // Ensure each diLine has frRate — migrate from trip-level frRate if missing
   const normalizedDiLines = (f.diLines||[]).map(d => ({...d, frRate: d.frRate || +f.frRate || 0}));
   const fWithLines = normalizedDiLines.length > 1 ? {...f, diLines: normalizedDiLines} : f;
@@ -5870,10 +5914,25 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
         </div>
       )}
 
-      {/* LR Number - auto-assigned on save (read-only display) */}
-      <div style={{background:C.bg,borderRadius:10,padding:"12px 14px",border:`1.5px solid ${C.blue}44`}}>
-        <div style={{color:C.blue,fontWeight:700,fontSize:12,marginBottom:6}}>📄 LR NUMBER (Lorry Receipt)</div>
-        {f.lrNo ? (
+      {/* LR Number - auto-assigned or manual depending on mode */}
+      <div style={{background:C.bg,borderRadius:10,padding:"12px 14px",border:`1.5px solid ${manualLrMode?C.orange:C.blue}44`}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+          <div style={{color:manualLrMode?C.orange:C.blue,fontWeight:700,fontSize:12}}>📄 LR NUMBER (Lorry Receipt)</div>
+          {manualLrMode && <div style={{fontSize:10,color:C.orange,fontWeight:700}}>🖊 Manual Entry Mode</div>}
+        </div>
+        {manualLrMode ? (
+          // Manual entry — for historical/old data
+          <div>
+            <input value={f.lrNo||""} onChange={e=>ff("lrNo")(e.target.value.toUpperCase())}
+              placeholder="e.g. SKLC020 or 2867"
+              style={{width:"100%",background:C.bg,border:`1.5px solid ${C.orange}`,borderRadius:8,
+                color:C.text,padding:"10px 12px",fontSize:15,fontWeight:700,outline:"none",
+                boxSizing:"border-box",letterSpacing:1}} />
+            <div style={{fontSize:11,color:C.muted,marginTop:4}}>
+              Enter the LR number exactly as written on the paper LR book
+            </div>
+          </div>
+        ) : f.lrNo ? (
           <div style={{background:C.blue+"11",border:`1.5px solid ${C.blue}44`,borderRadius:8,
             padding:"10px 12px",fontSize:15,fontWeight:800,color:C.blue,letterSpacing:1}}>
             {f.lrNo}
