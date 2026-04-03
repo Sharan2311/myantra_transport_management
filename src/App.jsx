@@ -11321,6 +11321,173 @@ function ShortageRecoverBtn({v, setVehicles, log}) {
   );
 }
 
+// ─── REQUEST PAYMENT SHEET ───────────────────────────────────────────────────
+function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentRequests, setPaymentRequests, user, log, onClose}) {
+  const t = trip;
+  const veh = (vehicles||[]).find(v=>v.truckNo===t.truckNo);
+
+  // Build account lists
+  const ownerAccounts = (veh?.accounts||[]).length>0
+    ? veh.accounts
+    : (veh?.accountNo ? [{id:"veh_main",name:veh.ownerName||"Owner",accountNo:veh.accountNo,ifsc:veh.ifsc||"",isPrimary:true}] : []);
+  const allEmpAccounts = (employees||[]).flatMap(e=>(e.accounts||[]).map(a=>({...a,_empId:e.id,_empName:e.name})));
+
+  const [recipType,  setRecipType]  = useState("vehicle_owner");
+  const [accId,      setAccId]      = useState("");
+  const [amount,     setAmount]     = useState(String(t.balance||t.netDue||0));
+  const [notes,      setNotes]      = useState("");
+  const [newAcc,     setNewAcc]     = useState({name:"",accountNo:"",ifsc:""});
+
+  const recipAccounts = recipType==="vehicle_owner" ? ownerAccounts : allEmpAccounts;
+  const selAcc = recipAccounts.find(a=>a.id===accId);
+
+  const hasPending = (paymentRequests||[]).some(r=>r.tripId===t.id&&r.status==="pending");
+
+  const save = () => {
+    if(!accId)              { alert("Select an account."); return; }
+    if(!amount||+amount<=0) { alert("Enter amount."); return; }
+
+    let finalAcc = selAcc;
+    if(accId==="new") {
+      if(!newAcc.name||!newAcc.accountNo||!newAcc.ifsc) {
+        alert("Fill all account fields: Name, Account No, IFSC."); return;
+      }
+      const newId = "ACC"+uid();
+      finalAcc = {...newAcc, id:newId, isPrimary:false};
+      // Persist new account to vehicle
+      if(recipType==="vehicle_owner" && veh) {
+        setVehicles(prev=>prev.map(v=>v.id===veh.id
+          ? {...v, accounts:[...(v.accounts||[]), finalAcc]} : v));
+      }
+    }
+    if(!finalAcc) { alert("Could not find selected account."); return; }
+
+    const recipientId   = recipType==="vehicle_owner" ? (veh?.id||"") : (selAcc?._empId||"");
+    const recipientName = recipType==="vehicle_owner"
+      ? (veh?.ownerName||t.truckNo)
+      : (selAcc?._empName||finalAcc.name||"—");
+
+    const pr = {
+      id:"PR"+uid(), tripId:t.id, lrNo:t.lrNo, truckNo:t.truckNo,
+      amount:+amount, recipientType:recipType,
+      recipientId, recipientName,
+      accountId:finalAcc.id, accountName:finalAcc.name,
+      accountNo:finalAcc.accountNo, ifsc:finalAcc.ifsc||"",
+      status:"pending", notes,
+      createdBy:user.username, createdAt:nowTs(),
+      paidAt:"", paidBy:"",
+    };
+    setPaymentRequests(prev=>[pr,...(prev||[])]);
+    DB.savePaymentRequest(pr).catch(e=>console.error("savePaymentRequest:",e));
+    log("PAY REQUEST",`LR:${t.lrNo} ${recipientName} ₹${Number(amount).toLocaleString("en-IN")}`);
+    onClose();
+  };
+
+  return (
+    <Sheet title={`📋 Request Payment — ${t.lrNo||t.truckNo}`} onClose={onClose}>
+      <div style={{display:"flex",flexDirection:"column",gap:14}}>
+        {/* Trip summary */}
+        <div style={{background:C.bg,borderRadius:10,padding:"12px 14px",fontSize:13}}>
+          <div><b>{t.truckNo}</b> · LR: <b style={{color:C.blue}}>{t.lrNo||"—"}</b></div>
+          <div style={{color:C.muted}}>{t.from}→{t.to} · {t.qty}MT · {t.date}</div>
+          <div style={{color:C.accent,fontWeight:800,fontSize:15,marginTop:4}}>
+            Balance: ₹{(t.balance||0).toLocaleString("en-IN")}
+          </div>
+        </div>
+
+        {hasPending && (
+          <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:8,
+            padding:"8px 12px",fontSize:12,color:C.orange,fontWeight:700}}>
+            ⚠ A pending request already exists for this trip
+          </div>
+        )}
+
+        {/* Amount */}
+        <Field label="Amount ₹ *" value={amount} onChange={setAmount} type="number" />
+
+        {/* Recipient type */}
+        <div>
+          <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",marginBottom:8}}>Pay To</div>
+          <div style={{display:"flex",gap:8}}>
+            {[{v:"vehicle_owner",l:"🚛 Truck Owner"},{v:"employee",l:"👤 Employee"}].map(opt=>(
+              <button key={opt.v} onClick={()=>{setRecipType(opt.v);setAccId("");}}
+                style={{flex:1,padding:"10px",borderRadius:10,cursor:"pointer",fontWeight:700,fontSize:13,
+                  background:recipType===opt.v?C.purple+"33":"transparent",
+                  border:`2px solid ${recipType===opt.v?C.purple:C.border}`,
+                  color:recipType===opt.v?C.purple:C.muted}}>
+                {opt.l}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Account list */}
+        <div>
+          <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",marginBottom:8}}>Bank Account</div>
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            {recipAccounts.map(acc=>(
+              <label key={acc.id} style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer",
+                background:accId===acc.id?C.purple+"11":"transparent",
+                border:`1.5px solid ${accId===acc.id?C.purple:C.border}`,
+                borderRadius:10,padding:"10px 12px"}}>
+                <input type="radio" name="reqpayacc" checked={accId===acc.id}
+                  onChange={()=>setAccId(acc.id)} style={{width:16,height:16}} />
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontWeight:700,fontSize:13}}>{acc.name}</div>
+                  <div style={{fontFamily:"monospace",fontSize:11,color:C.blue}}>{acc.accountNo}</div>
+                  <div style={{fontSize:11,color:C.muted}}>{acc.ifsc||"—"}{acc._empName?` · ${acc._empName}`:""}</div>
+                </div>
+                {acc.isPrimary&&<Badge label="Primary" color={C.teal} />}
+              </label>
+            ))}
+            {/* Add new */}
+            <label style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer",
+              background:accId==="new"?C.green+"11":"transparent",
+              border:`1.5px solid ${accId==="new"?C.green:C.border}`,
+              borderRadius:10,padding:"10px 12px"}}>
+              <input type="radio" name="reqpayacc" checked={accId==="new"}
+                onChange={()=>setAccId("new")} style={{width:16,height:16}} />
+              <div style={{color:C.green,fontWeight:700,fontSize:13}}>➕ Add New Account</div>
+            </label>
+          </div>
+        </div>
+
+        {/* New account form */}
+        {accId==="new" && (
+          <div style={{background:C.bg,borderRadius:12,padding:14,display:"flex",flexDirection:"column",gap:10}}>
+            <div style={{color:C.green,fontWeight:700,fontSize:12}}>New Account Details</div>
+            <Field label="Account Name (as per passbook) *" value={newAcc.name}
+              onChange={v=>setNewAcc(p=>({...p,name:v}))} placeholder="e.g. ISMAIL KHABULA MUJAWAR" />
+            <div style={{display:"flex",gap:10}}>
+              <Field label="Account Number *" value={newAcc.accountNo}
+                onChange={v=>setNewAcc(p=>({...p,accountNo:v}))} half />
+              <Field label="IFSC Code *" value={newAcc.ifsc}
+                onChange={v=>setNewAcc(p=>({...p,ifsc:v.toUpperCase()}))} half placeholder="e.g. SBIN0001234" />
+            </div>
+            <div style={{fontSize:11,color:C.muted}}>
+              Will be saved to {recipType==="vehicle_owner"?"vehicle owner's":"employee's"} profile.
+            </div>
+          </div>
+        )}
+
+        {recipAccounts.length===0 && accId!==="new" && (
+          <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,borderRadius:8,
+            padding:"10px 12px",fontSize:12,color:C.orange}}>
+            No saved accounts for this {recipType==="vehicle_owner"?"truck owner":"employee"} yet.
+            Select ➕ Add New Account above.
+          </div>
+        )}
+
+        <Field label="Notes (optional)" value={notes} onChange={setNotes} placeholder="Any additional info…" />
+
+        <Btn onClick={save} full color={C.purple} disabled={!accId||!amount||+amount<=0}>
+          📋 Submit Payment Request
+        </Btn>
+      </div>
+    </Sheet>
+  );
+}
+
 // ─── DRIVER PAYMENTS ──────────────────────────────────────────────────────────
 // Driver payment is separate from settlement.
 // Record bank transfers against a trip. "Balance due" auto-updates.
@@ -11761,177 +11928,19 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
       )}
 
       {/* ── REQUEST PAYMENT SHEET ── */}
-      {payReqSheet && (()=>{
-        const t = payReqSheet;
-        // Get accounts from vehicle (owner) and employee
-        const veh = vehicles.find(v=>v.truckNo===t.truckNo);
-        const ownerAccounts = (veh?.accounts||[]).length>0
-          ? veh.accounts
-          : (veh?.accountNo ? [{id:"veh_main",name:veh.ownerName||"Owner",accountNo:veh.accountNo,ifsc:veh.ifsc||"",isPrimary:true}] : []);
-        // Employee accounts — find employees linked to this truck
-        const linkedEmps = (employees||[]).filter(e=>(e.linkedTrucks||[]).includes(t.truckNo));
-        const empAccounts = linkedEmps.flatMap(e=>(e.accounts||[]).map(a=>({...a,_empId:e.id,_empName:e.name})));
-        // Also all employees (for non-linked)
-        const allEmpAccounts = (employees||[]).flatMap(e=>(e.accounts||[]).map(a=>({...a,_empId:e.id,_empName:e.name})));
-
-        const [reqRecipType, setReqRecipType] = React.useState("vehicle_owner");
-        const [reqAccId,     setReqAccId]     = React.useState("");
-        const [reqAmount,    setReqAmount]     = React.useState(String(t.balance||t.netDue||0));
-        const [reqNotes,     setReqNotes]      = React.useState("");
-        const [addingAcc,    setAddingAcc]     = React.useState(false);
-        const [newAcc,       setNewAcc]        = React.useState({name:"",accountNo:"",ifsc:""});
-
-        const recipAccounts = reqRecipType==="vehicle_owner" ? ownerAccounts : allEmpAccounts;
-        const selAcc = recipAccounts.find(a=>a.id===reqAccId) || (reqAccId==="new"?null:null);
-
-        const saveRequest = () => {
-          if(!reqAccId) { alert("Select an account."); return; }
-          if(!reqAmount || +reqAmount<=0) { alert("Enter amount."); return; }
-
-          let finalAcc = selAcc;
-          if(reqAccId==="new") {
-            if(!newAcc.name||!newAcc.accountNo||!newAcc.ifsc) {
-              alert("Fill all account fields: Name, Account No, IFSC.");
-              return;
-            }
-            const accId = "ACC"+uid();
-            finalAcc = {...newAcc, id:accId, isPrimary:false};
-            // Save new account to vehicle or employee
-            if(reqRecipType==="vehicle_owner" && veh) {
-              const updVeh = {...veh, accounts:[...(veh.accounts||[]), finalAcc]};
-              setVehicles(prev=>prev.map(v=>v.id===veh.id?updVeh:v));
-            } else if(reqRecipType==="employee") {
-              // Find which employee this account belongs to — ask user to select
-              alert("New employee account saved. Select your name from the dropdown first, then try again.");
-              return;
-            }
-          }
-
-          if(!finalAcc) { alert("Could not find selected account."); return; }
-
-          const recipientId = reqRecipType==="vehicle_owner" ? veh?.id : (selAcc?._empId||"");
-          const recipientName = reqRecipType==="vehicle_owner"
-            ? (veh?.ownerName||t.truckNo)
-            : (selAcc?._empName||finalAcc.name||"—");
-
-          const pr = {
-            id:"PR"+uid(), tripId:t.id, lrNo:t.lrNo, truckNo:t.truckNo,
-            amount:+reqAmount,
-            recipientType:reqRecipType,
-            recipientId, recipientName,
-            accountId:finalAcc.id,
-            accountName:finalAcc.name,
-            accountNo:finalAcc.accountNo,
-            ifsc:finalAcc.ifsc||"",
-            status:"pending",
-            notes:reqNotes,
-            createdBy:user.username, createdAt:nowTs(),
-            paidAt:"", paidBy:"",
-          };
-          setPaymentRequests(prev=>[pr,...(prev||[])]);
-          DB.savePaymentRequest(pr).catch(e=>console.error("savePaymentRequest:",e));
-          log("PAY REQUEST",`LR:${t.lrNo} ${recipientName} ₹${fmt(pr.amount)}`);
-          setPayReqSheet(null);
-        };
-
-        return (
-          <Sheet title={`📋 Request Payment — ${t.lrNo||t.truckNo}`} onClose={()=>setPayReqSheet(null)}>
-            <div style={{display:"flex",flexDirection:"column",gap:14}}>
-              {/* Trip summary */}
-              <div style={{background:C.bg,borderRadius:10,padding:"12px 14px",fontSize:13}}>
-                <div><b>{t.truckNo}</b> · LR: <b style={{color:C.blue}}>{t.lrNo||"—"}</b></div>
-                <div style={{color:C.muted}}>{t.from}→{t.to} · {t.qty}MT · {t.date}</div>
-                <div style={{color:C.accent,fontWeight:800,fontSize:15,marginTop:4}}>Balance: {fmt(t.balance)}</div>
-              </div>
-
-              {/* Amount */}
-              <Field label="Amount ₹ *" value={reqAmount} onChange={setReqAmount} type="number" />
-
-              {/* Recipient type */}
-              <div>
-                <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",marginBottom:8}}>Pay To</div>
-                <div style={{display:"flex",gap:8}}>
-                  {[{v:"vehicle_owner",l:"🚛 Truck Owner"},{v:"employee",l:"👤 Employee"}].map(opt=>(
-                    <button key={opt.v} onClick={()=>{setReqRecipType(opt.v);setReqAccId("");}}
-                      style={{flex:1,padding:"10px",borderRadius:10,cursor:"pointer",fontWeight:700,fontSize:13,
-                        background:reqRecipType===opt.v?C.purple+"33":"transparent",
-                        border:`2px solid ${reqRecipType===opt.v?C.purple:C.border}`,
-                        color:reqRecipType===opt.v?C.purple:C.muted}}>
-                      {opt.l}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Account selection */}
-              <div>
-                <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",marginBottom:8}}>
-                  Bank Account
-                </div>
-                <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                  {recipAccounts.map(acc=>(
-                    <label key={acc.id} style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer",
-                      background:reqAccId===acc.id?C.purple+"11":"transparent",
-                      border:`1.5px solid ${reqAccId===acc.id?C.purple:C.border}`,
-                      borderRadius:10,padding:"10px 12px"}}>
-                      <input type="radio" name="payacc" checked={reqAccId===acc.id}
-                        onChange={()=>{setReqAccId(acc.id);setAddingAcc(false);}}
-                        style={{width:16,height:16}} />
-                      <div style={{flex:1,minWidth:0}}>
-                        <div style={{fontWeight:700,fontSize:13}}>{acc.name}</div>
-                        <div style={{fontFamily:"monospace",fontSize:11,color:C.blue}}>{acc.accountNo}</div>
-                        <div style={{fontSize:11,color:C.muted}}>{acc.ifsc||"—"}{acc._empName?` · ${acc._empName}`:""}</div>
-                      </div>
-                      {acc.isPrimary&&<Badge label="Primary" color={C.teal} />}
-                    </label>
-                  ))}
-                  {/* Add new account option */}
-                  <label style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer",
-                    background:reqAccId==="new"?C.green+"11":"transparent",
-                    border:`1.5px solid ${reqAccId==="new"?C.green:C.border}`,
-                    borderRadius:10,padding:"10px 12px"}}>
-                    <input type="radio" name="payacc" checked={reqAccId==="new"}
-                      onChange={()=>{setReqAccId("new");setAddingAcc(true);}}
-                      style={{width:16,height:16}} />
-                    <div style={{color:C.green,fontWeight:700,fontSize:13}}>➕ Add New Account</div>
-                  </label>
-                </div>
-              </div>
-
-              {/* New account form */}
-              {reqAccId==="new" && (
-                <div style={{background:C.bg,borderRadius:12,padding:14,display:"flex",flexDirection:"column",gap:10}}>
-                  <div style={{color:C.green,fontWeight:700,fontSize:12,marginBottom:2}}>New Account Details</div>
-                  <Field label="Account Name (as per passbook) *" value={newAcc.name}
-                    onChange={v=>setNewAcc(p=>({...p,name:v}))} placeholder="e.g. ISMAIL KHABULA MUJAWAR" />
-                  <div style={{display:"flex",gap:10}}>
-                    <Field label="Account Number *" value={newAcc.accountNo}
-                      onChange={v=>setNewAcc(p=>({...p,accountNo:v}))} half />
-                    <Field label="IFSC Code *" value={newAcc.ifsc}
-                      onChange={v=>setNewAcc(p=>({...p,ifsc:v.toUpperCase()}))} half placeholder="e.g. SBIN0001234" />
-                  </div>
-                  <div style={{fontSize:11,color:C.muted}}>This account will be saved to the {reqRecipType==="vehicle_owner"?"vehicle owner's":"employee's"} profile for future use.</div>
-                </div>
-              )}
-
-              {/* Notes */}
-              <Field label="Notes (optional)" value={reqNotes} onChange={setReqNotes} placeholder="Any additional info…" />
-
-              {/* Existing request warning */}
-              {(paymentRequests||[]).some(r=>r.tripId===t.id&&r.status==="pending") && (
-                <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:8,padding:"8px 12px",fontSize:12,color:C.orange,fontWeight:700}}>
-                  ⚠ A pending request already exists for this trip
-                </div>
-              )}
-
-              <Btn onClick={saveRequest} full color={C.purple}
-                disabled={!reqAccId||!reqAmount||+reqAmount<=0}>
-                📋 Submit Payment Request
-              </Btn>
-            </div>
-          </Sheet>
-        );
-      })()}
+      {payReqSheet && (
+        <RequestPaymentSheet
+          trip={payReqSheet}
+          vehicles={vehicles}
+          setVehicles={setVehicles}
+          employees={employees||[]}
+          paymentRequests={paymentRequests||[]}
+          setPaymentRequests={setPaymentRequests}
+          user={user}
+          log={log}
+          onClose={()=>setPayReqSheet(null)}
+        />
+      )}
 
       {paySheet && (
         <Sheet title={`Pay Driver — ${paySheet.truckNo}`} onClose={()=>setPaySheet(null)}>
