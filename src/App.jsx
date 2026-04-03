@@ -6138,7 +6138,8 @@ function Billing({trips, setTrips, fyTrips, selectedClient, user, log}) {
 function Settlement({trips, setTrips, vehicles, setVehicles, settlements, setSettlements, indents, user, log}) {
   const [sel, setSel]   = useState(null);
   const [notes, setNotes] = useState("");
-  const unsettled = trips.filter(t => !t.driverSettled);
+  const visibleTripsS = (trips||[]).filter(t=>userCanSeeClient(user,t.client||DEFAULT_CLIENT));
+  const unsettled = visibleTripsS.filter(t => !t.driverSettled);
 
   const settle = t => {
     const v = vehicles.find(x => x.truckNo===t.truckNo);
@@ -6276,7 +6277,8 @@ function TafalMod({trips, vehicles, setVehicles, employees, settings, setSetting
   const [month, setMonth] = useState(today().slice(0,7));
   const tafalRate = settings?.tafalPerTrip || 300;
 
-  const monthTrips  = trips.filter(t => t.date.startsWith(month) && t.tafal>0);
+  const visibleTripsT = (trips||[]).filter(t=>userCanSeeClient(user,t.client||DEFAULT_CLIENT));
+  const monthTrips  = visibleTripsT.filter(t => t.date.startsWith(month) && t.tafal>0);
   const collected   = monthTrips.reduce((s,t) => s+(t.tafal||0), 0);
   const activeEmps  = employees.length || 1;
   const perEmployee = activeEmps>0 ? collected/activeEmps : 0;
@@ -6509,7 +6511,7 @@ function DieselAlertBanner({ alerts, trips, indents, user, onLink, onDismiss, on
                     outline:"none",marginBottom:6}} />
                 {(() => {
                   const q = lrSearch.trim().toLowerCase();
-                  const eligible = trips.filter(t => {
+                  const eligible = visibleTripsT.filter(t => {
                     if (t.status==="Paid") return false;
                     const alreadyLinked = indents.some(i =>
                       i.tripId===t.id && i.confirmed && !i.unmatched && !i.truckMismatch && !i.amountMismatch && i.id!==alert.id
@@ -7185,7 +7187,7 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
   });
   // Only truly confirmed = confirmed:true AND has a valid linked trip
   const confirmedIndents = Array.from(_confirmedMap.values())
-    .filter(i => i.confirmed && i.tripId && trips.some(t => t.id === i.tripId));
+    .filter(i => i.confirmed && i.tripId && visibleTripsD.some(t => t.id === i.tripId));
   // Indents with no matching trip — flagged for owner
   const unmatchedIndents = indents.filter(i => i.unmatched);
   // Red alerts = unmatched + truck mismatch + amount mismatch + indent mismatch + confirmed but no trip
@@ -7194,12 +7196,13 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
     if (i.alertDismissed) return false;
     if (i.unmatched || i.truckMismatch || i.amountMismatch || i.indentMismatch) return true;
     // Confirmed but no valid trip linked → show as NO TRIP alert
-    if (i.confirmed && (!i.tripId || !trips.some(t => t.id === i.tripId))) return true;
+    if (i.confirmed && (!i.tripId || !visibleTripsD.some(t => t.id === i.tripId))) return true;
     return false;
   });
 
   // Stale alert: trip has dieselEstimate > 0 but NO confirmed indent linked, and trip date < today
-  const staleIndentAlerts = trips.filter(t => {
+  const visibleTripsD = (trips||[]).filter(t=>userCanSeeClient(user,t.client||DEFAULT_CLIENT));
+  const staleIndentAlerts = visibleTripsD.filter(t => {
     if ((t.dieselEstimate||0) <= 0) return false;
     if (t.status === "Paid") return false;
     if (t.date >= today()) return false; // only flag if trip date is past
@@ -7215,7 +7218,7 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
   const redAlerts = Array.from(_seenAlerts.values());
 
   const linkAlertToTrip = async (alertId, tripId) => {
-    const trip    = trips.find(t => t.id === tripId);
+    const trip    = visibleTripsD.find(t => t.id === tripId);
     const alert   = indents.find(i => i.id === alertId);
     if (!trip || !alert) return;
 
@@ -7771,7 +7774,7 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
                         Confirmed Indents
                       </div>
                       {p.pIndents.slice(0,10).map(i => {
-                        const trip = trips.find(t=>t.id===i.tripId);
+                        const trip = visibleTripsD.find(t=>t.id===i.tripId);
                         return (
                           <div key={i.id} style={{display:"flex",justifyContent:"space-between",
                             padding:"6px 0",borderBottom:`1px solid ${C.border}11`,fontSize:12}}>
@@ -7821,7 +7824,7 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
           )}
           {confirmedIndents.map(i => {
             const pump = pumps.find(p=>p.id===i.pumpId);
-            const trip = trips.find(t=>t.id===i.tripId);
+            const trip = visibleTripsD.find(t=>t.id===i.tripId);
             return (
               <div key={i.id} style={{background:C.card,borderRadius:12,padding:"11px 14px",
                 borderLeft:`3px solid ${i.unmatched||i.truckMismatch||i.amountMismatch ? C.orange : C.green}`}}>
@@ -7869,7 +7872,7 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
           <div style={{color:C.muted,fontSize:12,marginBottom:4}}>
             All trips with linked diesel indents
           </div>
-          {trips.filter(t => {
+          {visibleTripsD.filter(t => {
             const ind = confirmedIndents.find(i => i.tripId === t.id);
             return !!ind;
           }).sort((a,b) => b.date.localeCompare(a.date)).map(t => {
@@ -7910,7 +7913,7 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
               </div>
             );
           })}
-          {trips.filter(t => confirmedIndents.find(i => i.tripId === t.id)).length === 0 && (
+          {visibleTripsD.filter(t => confirmedIndents.find(i => i.tripId === t.id)).length === 0 && (
             <div style={{textAlign:"center",color:C.muted,padding:40}}>
               No trips linked to indents yet
             </div>
@@ -11587,8 +11590,11 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
   const [histTo,    setHistTo]    = useState("");
   const [histLR,    setHistLR]    = useState("");
 
+  // Role-based client filter — non-owners only see their assigned clients
+  const visibleTrips = (trips||[]).filter(t=>userCanSeeClient(user,t.client||DEFAULT_CLIENT));
+
   // For each trip compute total paid and balance
-  const tripWithBalance = trips.map(t => {
+  const tripWithBalance = visibleTrips.map(t => {
     const veh      = vehicles.find(v=>v.truckNo===t.truckNo);
     const gross    = (t.qty||0)*(t.givenRate||0);
     const deducts  = (t.advance||0)+(t.tafal||0)+(veh?.deductPerTrip||0)+(t.dieselEstimate||0)+((t.shortage||0)*(t.givenRate||0));
@@ -12216,7 +12222,7 @@ function ExpensesLedger({expenses, setExpenses, payments, user, log}) {
 }
 
 // ─── REPORTS ──────────────────────────────────────────────────────────────────
-function Reports({trips, vehicles, employees, payments, settlements, indents}) {
+function Reports({trips, vehicles, employees, payments, settlements, indents, user}) {
   // ── Date range ───────────────────────────────────────────────────────────────
   const [df, setDf] = useState(() => {
     const d = new Date(); d.setDate(1);
@@ -12238,9 +12244,10 @@ function Reports({trips, vehicles, employees, payments, settlements, indents}) {
     setDf(m+"-01"); setDt(m+"-"+String(last).padStart(2,"0")); setMonthSel(m);
   };
 
-  // ── All outbound trips in date range ────────────────────────────────────────
+  // ── All outbound trips in date range (role-filtered) ────────────────────────
   const base = trips.filter(t =>
-    t.type==="outbound" && t.date>=df && t.date<=dt
+    t.type==="outbound" && t.date>=df && t.date<=dt &&
+    userCanSeeClient(user, t.client||DEFAULT_CLIENT)
   );
 
   // Apply order type filter
