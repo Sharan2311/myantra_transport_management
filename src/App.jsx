@@ -5044,6 +5044,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                           🏷️ Upload Sealed Invoice
                         </button>
                       )}
+                      {/* Single-trip GR/Invoice download */}
                       {t.grFilePath && (
                         <button onClick={async()=>{try{const url=await getSignedUrl(t.grFilePath,3600);const a=document.createElement("a");a.href=url;a.download="GR_"+(t.lrNo||t.id);a.target="_blank";document.body.appendChild(a);a.click();document.body.removeChild(a);}catch(e){alert("GR download failed: "+e.message);}}}
                           style={{background:C.teal+"22",color:C.teal,border:"1px solid "+C.teal+"44",borderRadius:20,
@@ -5057,6 +5058,32 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                             padding:"4px 12px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
                           ⬇ Invoice
                         </button>
+                      )}
+                      {/* Per-DI GR/Invoice download (multi-DI trips where files stored on diLines) */}
+                      {(t.diLines||[]).filter(dl=>dl.grFilePath||dl.invoiceFilePath).map((dl,di)=>(
+                        <React.Fragment key={dl.diNo||di}>
+                          {dl.grFilePath&&(
+                            <button onClick={async()=>{try{const url=await getSignedUrl(dl.grFilePath,3600);const a=document.createElement("a");a.href=url;a.download="GR_DI"+(dl.diNo||di)+"_"+(t.lrNo||t.id);a.target="_blank";document.body.appendChild(a);a.click();document.body.removeChild(a);}catch(e){alert("GR download failed: "+e.message);}}}
+                              style={{background:C.teal+"22",color:C.teal,border:"1px solid "+C.teal+"44",borderRadius:20,
+                                padding:"4px 12px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+                              ⬇ GR {dl.diNo?`(DI ${dl.diNo.slice(-4)})`:di+1}
+                            </button>
+                          )}
+                          {dl.invoiceFilePath&&(
+                            <button onClick={async()=>{try{const url=await getSignedUrl(dl.invoiceFilePath,3600);const a=document.createElement("a");a.href=url;a.download="Inv_DI"+(dl.diNo||di)+"_"+(t.lrNo||t.id);a.target="_blank";document.body.appendChild(a);a.click();document.body.removeChild(a);}catch(e){alert("Invoice download failed: "+e.message);}}}
+                              style={{background:C.blue+"22",color:C.blue,border:"1px solid "+C.blue+"44",borderRadius:20,
+                                padding:"4px 12px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+                              ⬇ Inv {dl.diNo?`(DI ${dl.diNo.slice(-4)})`:di+1}
+                            </button>
+                          )}
+                        </React.Fragment>
+                      ))}
+                      {/* Warning: party trip missing files — show upload hint */}
+                      {t.orderType==="party" && !t.grFilePath && !(t.diLines||[]).some(dl=>dl.grFilePath) && (
+                        <Badge label="⚠ No GR uploaded" color={C.red} />
+                      )}
+                      {t.orderType==="party" && !t.invoiceFilePath && !(t.diLines||[]).some(dl=>dl.invoiceFilePath) && (
+                        <Badge label="⚠ No Invoice uploaded" color={C.red} />
                       )}
                       {t.mergedPdfPath && (
                         <button onClick={async()=>{try{const url=await getSignedUrl(t.mergedPdfPath,3600);const a=document.createElement("a");a.href=url;a.download="MergedConfirmation_"+(t.lrNo||t.id)+".pdf";a.target="_blank";document.body.appendChild(a);a.click();document.body.removeChild(a);}catch(e){alert("Download failed: "+e.message);}}}
@@ -5291,8 +5318,11 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                       <button onClick={()=>setPartyStep("form")}
                         style={{background:"none",border:"none",color:C.muted,fontSize:12,
                           cursor:"pointer",textDecoration:"underline"}}>
-                        Skip — scan DI first, upload files after
+                        Skip for now — upload files before saving
                       </button>
+                      <div style={{fontSize:10,color:C.red,marginTop:2}}>
+                        ⚠ GR and Invoice are mandatory before saving
+                      </div>
                     </div>
                   </>
                 )}
@@ -5401,6 +5431,19 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                           else{alert("Cannot save: Est. Net to Driver is negative.\nಡ್ರೈವರ್‌ಗೆ ನಿವ್ವಳ ಮೊತ್ತ ಋಣಾತ್ಮಕ — ಸೇವ್ ಸಾಧ್ಯವಿಲ್ಲ.");return;}
                         }
                         if(!f.district||!f.state){alert("District and State are required for Party orders.\nಪಾರ್ಟಿ ಆರ್ಡರ್‌ಗೆ ಜಿಲ್ಲೆ ಮತ್ತು ರಾಜ್ಯ ಕಡ್ಡಾಯ.");return;}
+                        // Validate GR and Invoice files are present for party orders
+                        {
+                          const _grCount  = Array.isArray(grFileRef.current)  ? grFileRef.current.length  : (grFileRef.current  ? 1 : 0);
+                          const _invCount = Array.isArray(invoiceFileRef.current) ? invoiceFileRef.current.length : (invoiceFileRef.current ? 1 : 0);
+                          if(_grCount === 0) {
+                            alert("GR Copy is mandatory for Party orders.\nPlease upload the GR copy before saving.\n\nಪಾರ್ಟಿ ಆರ್ಡರ್‌ಗೆ GR Copy ಕಡ್ಡಾಯ. ಉಳಿಸುವ ಮೊದಲು GR Copy ಅಪ್‌ಲೋಡ್ ಮಾಡಿ.");
+                            return;
+                          }
+                          if(_invCount === 0) {
+                            alert("Invoice is mandatory for Party orders.\nPlease upload the Invoice before saving.\n\nಪಾರ್ಟಿ ಆರ್ಡರ್‌ಗೆ Invoice ಕಡ್ಡಾಯ. ಉಳಿಸುವ ಮೊದಲು Invoice ಅಪ್‌ಲೋಡ್ ಮಾಡಿ.");
+                            return;
+                          }
+                        }
                         // Save directly — email sent separately via Party Email button
                         // Auto-assign LR from DB sequence
                         const _partyClient   = f.client || DEFAULT_CLIENT;
