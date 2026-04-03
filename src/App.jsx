@@ -5573,6 +5573,13 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
               ))}
             </div>
           )}
+          {/* ── Party file upload section — shown when GR or Invoice is missing ── */}
+          {editSheet.orderType==="party" && (
+            <PartyFileEditSection
+              trip={editSheet}
+              onUpdate={updates => setEditSheet(p=>({...p,...updates}))}
+            />
+          )}
           <TripForm
             f={editSheet}
             ff={k=>v=>setEditSheet(p=>({...p,[k]:v}))}
@@ -5585,6 +5592,185 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
             isParty={editSheet.orderType==="party"}
           />
         </Sheet>
+      )}
+    </div>
+  );
+}
+
+// ─── PARTY FILE EDIT SECTION ─────────────────────────────────────────────────
+// Shown in Edit Trip for party orders — allows uploading GR/Invoice per DI
+// when they were skipped at save time
+function PartyFileEditSection({ trip, onUpdate }) {
+  const [uploading, setUploading] = useState(false);
+  const [status,    setStatus]    = useState("");
+  const diLines = trip.diLines && trip.diLines.length > 0
+    ? trip.diLines
+    : [{ diNo: trip.diNo, grNo: trip.grNo }];
+
+  // For single-DI trips: single GR + Invoice upload
+  // For multi-DI trips: one GR + Invoice per DI line
+
+  const uploadFile = async (tripId, role, file) => {
+    const result = await uploadPartyFile(tripId, role, file);
+    return result.path;
+  };
+
+  const handleSingleGR = async (file) => {
+    if(!file) return;
+    setUploading(true); setStatus("Uploading GR…");
+    try {
+      const path = await uploadFile(trip.id, "gr", file);
+      onUpdate({ grFilePath: path });
+      setStatus("✓ GR uploaded");
+    } catch(e) { setStatus("✗ Upload failed: " + e.message); }
+    finally { setUploading(false); }
+  };
+
+  const handleSingleInv = async (file) => {
+    if(!file) return;
+    setUploading(true); setStatus("Uploading Invoice…");
+    try {
+      const path = await uploadFile(trip.id, "invoice", file);
+      onUpdate({ invoiceFilePath: path });
+      setStatus("✓ Invoice uploaded");
+    } catch(e) { setStatus("✗ Upload failed: " + e.message); }
+    finally { setUploading(false); }
+  };
+
+  const handleDiGR = async (diLine, file) => {
+    if(!file) return;
+    setUploading(true); setStatus(`Uploading GR for DI ${diLine.diNo||"—"}…`);
+    try {
+      const role = `gr_${diLine.diNo||diLine.id||"di"}`;
+      const path = await uploadFile(trip.id, role, file);
+      // Update diLines with new grFilePath for this DI
+      const newLines = (trip.diLines||[]).map(d =>
+        d.diNo===diLine.diNo ? {...d, grFilePath: path} : d
+      );
+      onUpdate({ diLines: newLines });
+      setStatus(`✓ GR uploaded for DI ${diLine.diNo||"—"}`);
+    } catch(e) { setStatus("✗ Upload failed: " + e.message); }
+    finally { setUploading(false); }
+  };
+
+  const handleDiInv = async (diLine, file) => {
+    if(!file) return;
+    setUploading(true); setStatus(`Uploading Invoice for DI ${diLine.diNo||"—"}…`);
+    try {
+      const role = `inv_${diLine.diNo||diLine.id||"di"}`;
+      const path = await uploadFile(trip.id, role, file);
+      const newLines = (trip.diLines||[]).map(d =>
+        d.diNo===diLine.diNo ? {...d, invoiceFilePath: path} : d
+      );
+      onUpdate({ diLines: newLines });
+      setStatus(`✓ Invoice uploaded for DI ${diLine.diNo||"—"}`);
+    } catch(e) { setStatus("✗ Upload failed: " + e.message); }
+    finally { setUploading(false); }
+  };
+
+  const isMulti = diLines.length > 1;
+  const hasAllFiles = isMulti
+    ? diLines.every(d => d.grFilePath && d.invoiceFilePath)
+    : (trip.grFilePath && trip.invoiceFilePath);
+
+  if(hasAllFiles) return (
+    <div style={{background:C.green+"11",border:`1px solid ${C.green}33`,borderRadius:10,
+      padding:"10px 14px",marginBottom:8,fontSize:12,color:C.green,fontWeight:700}}>
+      ✅ GR and Invoice uploaded for all DIs
+    </div>
+  );
+
+  return (
+    <div style={{background:C.accent+"08",border:`2px solid ${C.accent}44`,borderRadius:12,
+      padding:"14px",marginBottom:12}}>
+      <div style={{color:C.accent,fontWeight:800,fontSize:13,marginBottom:10}}>
+        📎 Upload Missing Files
+      </div>
+
+      {!isMulti ? (
+        // Single DI — simple two-button upload
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          <FileUploadRow
+            label="GR Copy"
+            path={trip.grFilePath}
+            disabled={uploading}
+            onFile={handleSingleGR}
+          />
+          <FileUploadRow
+            label="Invoice"
+            path={trip.invoiceFilePath}
+            disabled={uploading}
+            onFile={handleSingleInv}
+          />
+        </div>
+      ) : (
+        // Multi-DI — one row per DI
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          {diLines.map((dl, idx) => (
+            <div key={dl.diNo||idx} style={{background:C.bg,borderRadius:8,padding:"10px 12px"}}>
+              <div style={{fontWeight:700,fontSize:12,color:C.text,marginBottom:8}}>
+                DI {dl.diNo||`#${idx+1}`} · {dl.qty||0} MT
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                <FileUploadRow
+                  label="GR Copy"
+                  path={dl.grFilePath}
+                  disabled={uploading}
+                  onFile={f=>handleDiGR(dl,f)}
+                />
+                <FileUploadRow
+                  label="Invoice"
+                  path={dl.invoiceFilePath}
+                  disabled={uploading}
+                  onFile={f=>handleDiInv(dl,f)}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {status && (
+        <div style={{marginTop:8,fontSize:12,color:status.startsWith("✓")?C.green:status.startsWith("✗")?C.red:C.muted,fontWeight:700}}>
+          {status}
+        </div>
+      )}
+      {uploading && (
+        <div style={{marginTop:6,fontSize:11,color:C.muted}}>Uploading… please wait</div>
+      )}
+    </div>
+  );
+}
+
+// Small helper — single file upload row with status indicator
+function FileUploadRow({ label, path, onFile, disabled }) {
+  const hasFile = !!path;
+  return (
+    <div style={{display:"flex",alignItems:"center",gap:8}}>
+      <label style={{flex:1,display:"flex",alignItems:"center",gap:8,cursor:disabled?"not-allowed":"pointer",
+        background:hasFile?C.green+"11":C.card,
+        border:`1.5px solid ${hasFile?C.green:C.border}`,
+        borderRadius:8,padding:"7px 10px",opacity:disabled?0.6:1}}>
+        <span style={{fontSize:14}}>{hasFile?"📄":"📎"}</span>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontSize:12,fontWeight:700,color:hasFile?C.green:C.text}}>{label}</div>
+          {hasFile
+            ? <div style={{fontSize:10,color:C.green}}>✓ Uploaded</div>
+            : <div style={{fontSize:10,color:C.muted}}>Tap to upload</div>
+          }
+        </div>
+        {!hasFile && <span style={{fontSize:11,color:C.accent,fontWeight:700}}>Upload →</span>}
+        <input type="file" accept="application/pdf,image/*" style={{display:"none"}}
+          disabled={disabled}
+          onChange={e=>e.target.files?.[0]&&onFile(e.target.files[0])} />
+      </label>
+      {hasFile && (
+        <a href={`https://rtwhmjeibvhoytakaqka.supabase.co/storage/v1/object/public/party-trip-files/${path}`}
+          target="_blank" rel="noreferrer"
+          style={{background:C.blue+"22",border:`1px solid ${C.blue}44`,borderRadius:6,
+            padding:"5px 8px",fontSize:11,color:C.blue,fontWeight:700,textDecoration:"none",whiteSpace:"nowrap"}}>
+          View
+        </a>
       )}
     </div>
   );
