@@ -809,6 +809,7 @@ export default function App() {
   const [expenses,       setExpenses,       rEx, reloadExpenses]      = useDB(DB.getExpenses,       []);
   const [gstReleases,    setGstReleases,    rGR, reloadGst]           = useDB(DB.getGstReleases,    []);
   const [cashTransfers,  setCashTransfers,  rCT, reloadCashTransfers] = useDB(DB.getCashTransfers,  []);
+  const [paymentRequests, setPaymentRequests, rPR] = useDB(DB.getPaymentRequests, []);
 
   const loading = !rU||!rT||!rV||!rE||!rP||!rS||!rPu||!rI||!rSt||!rDP||!rEx||!rGR;
   const dbError = (!rU && users.length===0) ? "Could not load users from database." : null;
@@ -990,6 +991,7 @@ export default function App() {
     expenses, setExpenses:dbSetExpenses,
     gstReleases, setGstReleases:dbSetGstReleases,
     cashTransfers, setCashTransfers:dbSetCashTransfers,
+    paymentRequests, setPaymentRequests,
     user, log,
     allTripsLoaded, loadingAllTrips, loadAllTrips,
   };
@@ -1570,13 +1572,19 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       byTruck[tn].push(item.id);
     });
     const newGroups = Object.entries(byTruck).map(([truckNo, diIds]) => {
-      // Client = detected from first item of group
       const firstItem = doneItems.find(x=>x.id===diIds[0]);
       const client = firstItem?.extracted?.client || DEFAULT_CLIENT;
+      // Auto loan recovery from owner's deductPerTrip, capped at balance
+      const vehG = (vehicles||[]).find(v=>v.truckNo===truckNo);
+      const ownerNameG = (vehG?.ownerName||"").trim();
+      const ownerVehsG = ownerNameG?(vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerNameG):(vehG?[vehG]:[]);
+      const ownerDeductG = ownerVehsG[0]?.deductPerTrip||0;
+      const ownerBalG = ownerVehsG.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
+      const autoLoanG = ownerBalG<=0 ? 0 : Math.min(ownerDeductG, ownerBalG);
       return {
         id: uid(),
         truckNo,
-        diIds,      // all checked by default
+        diIds,
         client,
         tafal: String(settings?.tafalPerTrip||300),
         diesel: "0",
@@ -1584,7 +1592,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
         advance: "0",
         cashEmpId: "",
         shortageRecovery: "0",
-        loanRecovery: "0",
+        loanRecovery: String(autoLoanG),
       };
     });
     setGroups(newGroups);
@@ -1600,13 +1608,38 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
     setGroups(prev => prev.map(g => g.id===gid ? {...g,[field]:val} : g));
 
   const toggleDI = (gid, itemId) => {
-    setGroups(prev => prev.map(g => {
-      if(g.id!==gid) return g;
+    setGroups(prev => {
+      const g = prev.find(x=>x.id===gid);
+      if(!g) return prev;
       const checked = g.diIds.includes(itemId);
-      if(checked && g.diIds.length===1) return g; // can't uncheck last one
-      const newDiIds = checked ? g.diIds.filter(id=>id!==itemId) : [...g.diIds, itemId];
-      return {...g, diIds:newDiIds};
-    }));
+      if(checked && g.diIds.length===1) return prev; // can't uncheck last — already solo
+
+      if(checked) {
+        // Uncheck: remove from group AND spawn new solo group for this DI
+        const updated = prev.map(x => x.id===gid ? {...x, diIds:x.diIds.filter(id=>id!==itemId)} : x);
+        const item = doneItems.find(x=>x.id===itemId);
+        const vehT2 = (vehicles||[]).find(v=>v.truckNo===(item?.extracted?.truckNo||"").toUpperCase().trim());
+        const ownerN2 = (vehT2?.ownerName||"").trim();
+        const ownerVs2 = ownerN2?(vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerN2):(vehT2?[vehT2]:[]);
+        const ownerDed2 = ownerVs2[0]?.deductPerTrip||0;
+        const ownerBal2 = ownerVs2.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
+        const autoLR2 = ownerBal2<=0?0:Math.min(ownerDed2,ownerBal2);
+        const solo = {
+          id:uid(), truckNo:g.truckNo, diIds:[itemId],
+          client:g.client, tafal:g.tafal,
+          diesel:"0", dieselIndentNo:"",
+          advance:"0", cashEmpId:"",
+          shortageRecovery:"0", loanRecovery:String(autoLR2),
+          _splitFrom:gid,
+        };
+        return [...updated, solo];
+      } else {
+        // Re-check: merge back into parent group, remove its solo group
+        const soloGroup = prev.find(x=>x.diIds.length===1&&x.diIds[0]===itemId&&x._splitFrom===gid);
+        const filtered = soloGroup ? prev.filter(x=>x.id!==soloGroup.id) : prev;
+        return filtered.map(x => x.id===gid ? {...x, diIds:[...x.diIds, itemId]} : x);
+      }
+    });
   };
 
   // ── Per-item helpers ──────────────────────────────────────────────────────────
@@ -2059,6 +2092,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
               <div>
                 <div style={{fontWeight:800,fontSize:15,color:C.text}}>🚛 {g.truckNo}</div>
+                {g._splitFrom&&<div style={{fontSize:10,color:C.teal,fontWeight:700,marginBottom:2}}>✂ Split into separate trip</div>}
                 <div style={{color:C.muted,fontSize:11,marginTop:2}}>
                   {groupItems.length} DI{groupItems.length>1?"s":""} selected · {totalQty} MT total
                   {allTruckItems.length>groupItems.length&&
@@ -2265,11 +2299,21 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                       borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
                 </div>
                 <div style={{flex:1}}>
-                  <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>LOAN RECOVERY ₹</div>
-                  <input type="text" inputMode="decimal" value={g.loanRecovery}
-                    onChange={e=>updateGroup(g.id,"loanRecovery",e.target.value)}
-                    style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,
-                      borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
+                  <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
+                    LOAN RECOVERY ₹{user?.role!=="owner"&&<span style={{color:C.orange,fontSize:9,marginLeft:4}}>🔒</span>}
+                  </div>
+                  {user?.role==="owner" ? (
+                    <input type="text" inputMode="decimal" value={g.loanRecovery}
+                      onChange={e=>updateGroup(g.id,"loanRecovery",e.target.value)}
+                      style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,
+                        borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
+                  ) : (
+                    <div style={{background:C.dim,border:`1.5px solid ${C.border}`,borderRadius:8,
+                      padding:"7px 8px",fontSize:13,color:C.text,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <span>₹{(+g.loanRecovery||0).toLocaleString("en-IN")}</span>
+                      <span style={{fontSize:10,color:C.muted}}>🔒</span>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -4153,13 +4197,19 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
   const onTruckChange = v => {
     const tn  = v.toUpperCase().trim();
     const veh = vehicles.find(x => x.truckNo===tn);
+    // Owner-level loan: compute auto loanRecovery from deductPerTrip capped at balance
+    const ownerNameT = (veh?.ownerName||"").trim();
+    const ownerVehsT = ownerNameT?(vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerNameT):(veh?[veh]:[]);
+    const ownerDeductT = ownerVehsT[0]?.deductPerTrip||0;
+    const ownerBalT = ownerVehsT.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
+    const autoLoanRecov = ownerBalT<=0 ? 0 : Math.min(ownerDeductT, ownerBalT);
     // Find last trip with this truck to pre-fill rate and destination
     const lastTrip = [...trips].filter(t=>t.truckNo===tn&&t.type===tripType).sort((a,b)=>b.date.localeCompare(a.date))[0];
     setF(p => ({
       ...p,
       truckNo: v,
       tafal: veh?.tafalExempt ? "0" : String(settings?.tafalPerTrip||300),
-      // Auto-fill from last trip with this truck (only if fields currently empty)
+      loanRecovery: String(autoLoanRecov),
       givenRate: p.givenRate||"" ? p.givenRate : String(lastTrip?.givenRate||""),
       frRate:    p.frRate||""    ? p.frRate    : String(lastTrip?.frRate||""),
       to:        p.to            ? p.to        : (lastTrip?.to||""),
@@ -5750,34 +5800,34 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
       )}
       <div style={{display:"flex",gap:10}}>
         <div style={{display:"flex",flexDirection:"column",gap:5,flex:"1 1 100%",minWidth:0}}>
-          <label style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Loan Recovery ₹</label>
+          <label style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>
+            Loan Recovery ₹{user?.role!=="owner"&&<span style={{color:C.orange,fontSize:10,marginLeft:6}}>🔒 Owner-set</span>}
+          </label>
           {(()=>{
             const ownerN3 = (veh?.ownerName||"").trim();
             const ownerVs3 = veh ? (ownerN3 ? (vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerN3) : [veh]) : [];
             const loanBal = ownerVs3.length > 0 ? ownerVs3.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0) : null;
             const loanLabel = ownerVs3.length>1 ? `Owner pending (${ownerVs3.length} vehs)` : "Pending";
             const overLimit = loanBal !== null && (+f.loanRecovery||0) > loanBal;
+            const isOwnerUser = user?.role==="owner";
+            if(!isOwnerUser) return (
+              <div style={{background:C.dim,border:`1.5px solid ${C.border}`,borderRadius:10,
+                padding:"13px 12px",fontSize:15,color:C.text,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span>₹{(+f.loanRecovery||0).toLocaleString("en-IN")}</span>
+                <span style={{fontSize:11,color:C.muted}}>🔒 Owner only</span>
+              </div>
+            );
             return (<>
               <input type="text" inputMode="decimal" value={f.loanRecovery===undefined||f.loanRecovery===null?"":String(f.loanRecovery)}
-                onChange={e=>{
-                  const raw = e.target.value;
-                  if(raw !== "" && !/^\d*\.?\d*$/.test(raw)) return; // block non-numeric, negatives
-                  // Only clamp against loanBal when user finishes typing (on blur), not on every keystroke
-                  ff("loanRecovery")(raw);
-                }}
-                onBlur={e=>{
-                  const val = parseFloat(e.target.value)||0;
-                  if(loanBal !== null && val > loanBal) ff("loanRecovery")(String(loanBal));
-                }}
+                onChange={e=>{const raw=e.target.value;if(raw!==""&&!/^\d*\.?\d*$/.test(raw))return;ff("loanRecovery")(raw);}}
+                onBlur={e=>{const val=parseFloat(e.target.value)||0;if(loanBal!==null&&val>loanBal)ff("loanRecovery")(String(loanBal));}}
                 style={{background:C.bg,border:`1.5px solid ${overLimit?C.red:C.border}`,borderRadius:10,color:C.text,padding:"13px 12px",fontSize:15,outline:"none",width:"100%",boxSizing:"border-box",MozAppearance:"textfield",WebkitAppearance:"none"}} />
-              {loanBal !== null && loanBal > 0 && (
+              {loanBal!==null&&loanBal>0&&(
                 <div style={{color:overLimit?C.red:C.muted,fontSize:11}}>
-                  {overLimit ? `⚠ Max allowed: ₹${loanBal.toLocaleString("en-IN")}` : `${loanLabel}: ₹${loanBal.toLocaleString("en-IN")}`}
+                  {overLimit?`⚠ Max allowed: ₹${loanBal.toLocaleString("en-IN")}`:`${loanLabel}: ₹${loanBal.toLocaleString("en-IN")}`}
                 </div>
               )}
-              {loanBal !== null && loanBal === 0 && (
-                <div style={{color:C.green,fontSize:11}}>✓ Loan fully cleared</div>
-              )}
+              {loanBal!==null&&loanBal===0&&<div style={{color:C.green,fontSize:11}}>✓ Loan fully cleared</div>}
             </>);
           })()}
         </div>
@@ -9912,8 +9962,10 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
   const applyPaymentScan = () => {
     if(!scanResult || scanResult.type!=="payment") return;
     const utr=scanResult.utr, pDate=parseDD(scanResult.paymentDate);
-    if((payments||[]).some(p=>p.utr===utr)) {
-      setScanError(`Payment advice UTR ${utr} is already uploaded. Discard this scan.`); return;
+    const dupPayment = (payments||[]).find(p=>p.utr===utr);
+    if(dupPayment) {
+      setScanError(`UTR ${utr} was already recorded on ${dupPayment.paymentDate||dupPayment.date||"—"}. This payment is already in the system — discard this scan.`);
+      return;
     }
     const invList=scanResult.invoices||[], shorts=scanResult.shortages||[], exps=scanResult.expenses||[];
 
@@ -10460,9 +10512,17 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                           const n=(i.invoiceNo||"").trim();
                           return n && !savedInvoiceNos.has(n);
                         });
-                        const dupUtr = (payments||[]).some(p=>p.utr===scanResult.utr);
+                        const dupUtr = (payments||[]).find(p=>p.utr===scanResult.utr);
                         const canApply = missingInvs.length===0 && !dupUtr;
                         return (<>
+                          {dupUtr && (
+                            <div style={{background:C.red+"11",border:`1px solid ${C.red}44`,
+                              borderRadius:10,padding:"12px 14px",marginBottom:8}}>
+                              <div style={{color:C.red,fontWeight:800,fontSize:13,marginBottom:4}}>🚫 Already Scanned</div>
+                              <div style={{color:C.text,fontSize:12}}>UTR <b>{scanResult.utr}</b> was recorded on <b>{dupUtr.paymentDate||dupUtr.date||"—"}</b></div>
+                              <div style={{color:C.muted,fontSize:11,marginTop:2}}>This payment is already in the system. Discard this scan.</div>
+                            </div>
+                          )}
                           {missingInvs.length>0 && (
                             <div style={{background:"#fffbeb",border:`1px solid ${C.orange}`,borderRadius:10,
                               padding:"12px 14px",marginBottom:8}}>
@@ -11264,9 +11324,10 @@ function ShortageRecoverBtn({v, setVehicles, log}) {
 // ─── DRIVER PAYMENTS ──────────────────────────────────────────────────────────
 // Driver payment is separate from settlement.
 // Record bank transfers against a trip. "Balance due" auto-updates.
-function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, employees, cashTransfers, setCashTransfers, user, log, viewOnly=false}) {
+function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, setVehicles, employees, cashTransfers, setCashTransfers, paymentRequests=[], setPaymentRequests, user, log, viewOnly=false}) {
   const [filter,    setFilter]    = useState("unpaid");
   const [paySheet,  setPaySheet]  = useState(null);
+  const [payReqSheet, setPayReqSheet] = useState(null); // trip for request payment
   const [splitSheet, setSplitSheet] = useState(null); // scanned multi-LR data
   const [scanningGlobal, setScanningGlobal] = useState(false);
   const [pf, setPf] = useState({amount:"", utr:"", date:today(), paidTo:"", notes:""});
@@ -11313,6 +11374,17 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, e
     setDriverPays(prev=>[...(prev||[]),p]);
     log("DRIVER PAYMENT",`LR:${t.lrNo} ${t.truckNo} — ${fmt(+pf.amount)} UTR:${pf.utr}`);
     autoSettle(t.id, +pf.amount);
+    // Auto-mark pending payment requests for this LR as done
+    const pendingReqs = (paymentRequests||[]).filter(r=>r.lrNo===t.lrNo&&r.status==="pending");
+    if(pendingReqs.length>0 && setPaymentRequests) {
+      setPaymentRequests(prev=>(prev||[]).map(r=>{
+        if(r.lrNo!==t.lrNo||r.status!=="pending") return r;
+        const updated={...r,status:"done",paidAt:today(),paidBy:user.username};
+        DB.savePaymentRequest(updated).catch(e=>console.error("savePaymentRequest:",e));
+        return updated;
+      }));
+      log("PAY REQUEST AUTO-DONE",`LR:${t.lrNo} — ${pendingReqs.length} request(s) marked done`);
+    }
     setPaySheet(null); setPf({amount:"",utr:"",date:today(),paidTo:"",notes:""});
   };
 
@@ -11451,10 +11523,11 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, e
         {id:"paid",    label:`Paid (${paidTrips.length})`,     color:C.green},
         {id:"all",     label:"All",                            color:C.blue},
         {id:"history", label:`History (${allPays.length})`,    color:C.muted},
+        {id:"requests",label:`Requests (${(paymentRequests||[]).filter(r=>r.status==="pending").length})`, color:C.purple},
       ]} active={filter} onSelect={setFilter} />
 
       {/* Search bar for trip tabs */}
-      {filter!=="history" && (
+      {filter!=="history" && filter!=="requests" && (
         <input value={histLR} onChange={e=>setHistLR(e.target.value)}
           placeholder="🔍 Search LR or truck number…"
           style={{background:C.card,border:`1.5px solid ${histLR?C.accent:C.border}`,borderRadius:10,
@@ -11618,9 +11691,246 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, e
               </div>
             </div>
           ))}
-          {t.balance>0&&!viewOnly&&<Btn onClick={()=>{setPaySheet(t);setPf({amount:String(t.balance),utr:"",date:today(),paidTo:"",notes:""});}} full sm color={C.green}>+ Record Payment</Btn>}
+          <div style={{display:"flex",gap:8,marginTop:4}}>
+            {t.balance>0&&!viewOnly&&(
+              <Btn onClick={()=>{setPaySheet(t);setPf({amount:String(t.balance),utr:"",date:today(),paidTo:"",notes:""});}} full sm color={C.green}>+ Record Payment</Btn>
+            )}
+            {t.balance>0&&(
+              <Btn onClick={()=>setPayReqSheet(t)} sm outline color={C.purple}>📋 Request Payment</Btn>
+            )}
+          </div>
         </div>
       ));
+      })()}
+
+      {/* ── REQUESTS TAB ── */}
+      {filter==="requests" && (
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          <div style={{color:C.muted,fontSize:12,textAlign:"center",padding:"4px 0"}}>
+            Employees request payment here. Owner marks done after paying.
+          </div>
+          {(paymentRequests||[]).length===0 && (
+            <div style={{textAlign:"center",color:C.muted,padding:"30px 0",fontSize:13}}>No payment requests yet</div>
+          )}
+          {(paymentRequests||[]).sort((a,b)=>a.status==="pending"?-1:1).map(pr=>{
+            const trip = (trips||[]).find(t=>t.id===pr.tripId);
+            const isPaid = (driverPays||[]).some(p=>p.lrNo===pr.lrNo&&p.amount>0);
+            const effectiveStatus = isPaid ? "done" : pr.status;
+            return (
+              <div key={pr.id} style={{background:C.card,borderRadius:14,padding:"14px 16px",
+                borderLeft:`4px solid ${effectiveStatus==="done"?C.green:C.purple}`,marginBottom:4}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
+                  <div>
+                    <div style={{fontWeight:800,fontSize:14}}>{pr.lrNo||"—"} · {pr.truckNo}</div>
+                    <div style={{color:C.muted,fontSize:11}}>{trip?`${trip.from}→${trip.to} · ${trip.qty}MT`:"—"}</div>
+                    <div style={{color:C.muted,fontSize:11}}>Requested by: {pr.createdBy||"—"} · {pr.createdAt||""}</div>
+                  </div>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{color:effectiveStatus==="done"?C.green:C.purple,fontWeight:800,fontSize:15}}>{fmt(pr.amount)}</div>
+                    <Badge label={effectiveStatus==="done"?"✓ Done":"Pending"} color={effectiveStatus==="done"?C.green:C.purple} />
+                  </div>
+                </div>
+                <div style={{background:C.bg,borderRadius:8,padding:"8px 10px",fontSize:12,marginBottom:8}}>
+                  <div><span style={{color:C.muted}}>Recipient: </span><b>{pr.recipientName||"—"}</b> ({pr.recipientType==="employee"?"Employee":"Vehicle Owner"})</div>
+                  <div><span style={{color:C.muted}}>Account: </span><b>{pr.accountName||"—"}</b></div>
+                  <div style={{fontFamily:"monospace",fontSize:11,color:C.blue}}>{pr.accountNo||"—"}{pr.ifsc?` · ${pr.ifsc}`:""}</div>
+                  {pr.notes&&<div style={{color:C.muted,marginTop:4}}>{pr.notes}</div>}
+                </div>
+                {effectiveStatus==="done" && pr.paidAt && (
+                  <div style={{color:C.green,fontSize:11}}>✓ Paid on {pr.paidAt} by {pr.paidBy||"—"}</div>
+                )}
+                {effectiveStatus!=="done" && user.role==="owner" && (
+                  <div style={{display:"flex",gap:8}}>
+                    <Btn onClick={()=>{
+                      const updated={...pr,status:"done",paidAt:today(),paidBy:user.username};
+                      setPaymentRequests(prev=>(prev||[]).map(r=>r.id===pr.id?updated:r));
+                      DB.savePaymentRequest(updated).catch(e=>console.error("savePaymentRequest:",e));
+                      log("PAY REQUEST DONE",`LR:${pr.lrNo} ${pr.recipientName} ₹${fmt(pr.amount)}`);
+                    }} sm color={C.green}>✓ Mark Done</Btn>
+                    <Btn onClick={()=>{
+                      if(!window.confirm("Delete this payment request?")) return;
+                      setPaymentRequests(prev=>(prev||[]).filter(r=>r.id!==pr.id));
+                      DB.deletePaymentRequest(pr.id).catch(e=>console.error("deletePaymentRequest:",e));
+                    }} sm outline color={C.red}>🗑</Btn>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── REQUEST PAYMENT SHEET ── */}
+      {payReqSheet && (()=>{
+        const t = payReqSheet;
+        // Get accounts from vehicle (owner) and employee
+        const veh = vehicles.find(v=>v.truckNo===t.truckNo);
+        const ownerAccounts = (veh?.accounts||[]).length>0
+          ? veh.accounts
+          : (veh?.accountNo ? [{id:"veh_main",name:veh.ownerName||"Owner",accountNo:veh.accountNo,ifsc:veh.ifsc||"",isPrimary:true}] : []);
+        // Employee accounts — find employees linked to this truck
+        const linkedEmps = (employees||[]).filter(e=>(e.linkedTrucks||[]).includes(t.truckNo));
+        const empAccounts = linkedEmps.flatMap(e=>(e.accounts||[]).map(a=>({...a,_empId:e.id,_empName:e.name})));
+        // Also all employees (for non-linked)
+        const allEmpAccounts = (employees||[]).flatMap(e=>(e.accounts||[]).map(a=>({...a,_empId:e.id,_empName:e.name})));
+
+        const [reqRecipType, setReqRecipType] = React.useState("vehicle_owner");
+        const [reqAccId,     setReqAccId]     = React.useState("");
+        const [reqAmount,    setReqAmount]     = React.useState(String(t.balance||t.netDue||0));
+        const [reqNotes,     setReqNotes]      = React.useState("");
+        const [addingAcc,    setAddingAcc]     = React.useState(false);
+        const [newAcc,       setNewAcc]        = React.useState({name:"",accountNo:"",ifsc:""});
+
+        const recipAccounts = reqRecipType==="vehicle_owner" ? ownerAccounts : allEmpAccounts;
+        const selAcc = recipAccounts.find(a=>a.id===reqAccId) || (reqAccId==="new"?null:null);
+
+        const saveRequest = () => {
+          if(!reqAccId) { alert("Select an account."); return; }
+          if(!reqAmount || +reqAmount<=0) { alert("Enter amount."); return; }
+
+          let finalAcc = selAcc;
+          if(reqAccId==="new") {
+            if(!newAcc.name||!newAcc.accountNo||!newAcc.ifsc) {
+              alert("Fill all account fields: Name, Account No, IFSC.");
+              return;
+            }
+            const accId = "ACC"+uid();
+            finalAcc = {...newAcc, id:accId, isPrimary:false};
+            // Save new account to vehicle or employee
+            if(reqRecipType==="vehicle_owner" && veh) {
+              const updVeh = {...veh, accounts:[...(veh.accounts||[]), finalAcc]};
+              setVehicles(prev=>prev.map(v=>v.id===veh.id?updVeh:v));
+            } else if(reqRecipType==="employee") {
+              // Find which employee this account belongs to — ask user to select
+              alert("New employee account saved. Select your name from the dropdown first, then try again.");
+              return;
+            }
+          }
+
+          if(!finalAcc) { alert("Could not find selected account."); return; }
+
+          const recipientId = reqRecipType==="vehicle_owner" ? veh?.id : (selAcc?._empId||"");
+          const recipientName = reqRecipType==="vehicle_owner"
+            ? (veh?.ownerName||t.truckNo)
+            : (selAcc?._empName||finalAcc.name||"—");
+
+          const pr = {
+            id:"PR"+uid(), tripId:t.id, lrNo:t.lrNo, truckNo:t.truckNo,
+            amount:+reqAmount,
+            recipientType:reqRecipType,
+            recipientId, recipientName,
+            accountId:finalAcc.id,
+            accountName:finalAcc.name,
+            accountNo:finalAcc.accountNo,
+            ifsc:finalAcc.ifsc||"",
+            status:"pending",
+            notes:reqNotes,
+            createdBy:user.username, createdAt:nowTs(),
+            paidAt:"", paidBy:"",
+          };
+          setPaymentRequests(prev=>[pr,...(prev||[])]);
+          DB.savePaymentRequest(pr).catch(e=>console.error("savePaymentRequest:",e));
+          log("PAY REQUEST",`LR:${t.lrNo} ${recipientName} ₹${fmt(pr.amount)}`);
+          setPayReqSheet(null);
+        };
+
+        return (
+          <Sheet title={`📋 Request Payment — ${t.lrNo||t.truckNo}`} onClose={()=>setPayReqSheet(null)}>
+            <div style={{display:"flex",flexDirection:"column",gap:14}}>
+              {/* Trip summary */}
+              <div style={{background:C.bg,borderRadius:10,padding:"12px 14px",fontSize:13}}>
+                <div><b>{t.truckNo}</b> · LR: <b style={{color:C.blue}}>{t.lrNo||"—"}</b></div>
+                <div style={{color:C.muted}}>{t.from}→{t.to} · {t.qty}MT · {t.date}</div>
+                <div style={{color:C.accent,fontWeight:800,fontSize:15,marginTop:4}}>Balance: {fmt(t.balance)}</div>
+              </div>
+
+              {/* Amount */}
+              <Field label="Amount ₹ *" value={reqAmount} onChange={setReqAmount} type="number" />
+
+              {/* Recipient type */}
+              <div>
+                <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",marginBottom:8}}>Pay To</div>
+                <div style={{display:"flex",gap:8}}>
+                  {[{v:"vehicle_owner",l:"🚛 Truck Owner"},{v:"employee",l:"👤 Employee"}].map(opt=>(
+                    <button key={opt.v} onClick={()=>{setReqRecipType(opt.v);setReqAccId("");}}
+                      style={{flex:1,padding:"10px",borderRadius:10,cursor:"pointer",fontWeight:700,fontSize:13,
+                        background:reqRecipType===opt.v?C.purple+"33":"transparent",
+                        border:`2px solid ${reqRecipType===opt.v?C.purple:C.border}`,
+                        color:reqRecipType===opt.v?C.purple:C.muted}}>
+                      {opt.l}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Account selection */}
+              <div>
+                <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",marginBottom:8}}>
+                  Bank Account
+                </div>
+                <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                  {recipAccounts.map(acc=>(
+                    <label key={acc.id} style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer",
+                      background:reqAccId===acc.id?C.purple+"11":"transparent",
+                      border:`1.5px solid ${reqAccId===acc.id?C.purple:C.border}`,
+                      borderRadius:10,padding:"10px 12px"}}>
+                      <input type="radio" name="payacc" checked={reqAccId===acc.id}
+                        onChange={()=>{setReqAccId(acc.id);setAddingAcc(false);}}
+                        style={{width:16,height:16}} />
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontWeight:700,fontSize:13}}>{acc.name}</div>
+                        <div style={{fontFamily:"monospace",fontSize:11,color:C.blue}}>{acc.accountNo}</div>
+                        <div style={{fontSize:11,color:C.muted}}>{acc.ifsc||"—"}{acc._empName?` · ${acc._empName}`:""}</div>
+                      </div>
+                      {acc.isPrimary&&<Badge label="Primary" color={C.teal} />}
+                    </label>
+                  ))}
+                  {/* Add new account option */}
+                  <label style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer",
+                    background:reqAccId==="new"?C.green+"11":"transparent",
+                    border:`1.5px solid ${reqAccId==="new"?C.green:C.border}`,
+                    borderRadius:10,padding:"10px 12px"}}>
+                    <input type="radio" name="payacc" checked={reqAccId==="new"}
+                      onChange={()=>{setReqAccId("new");setAddingAcc(true);}}
+                      style={{width:16,height:16}} />
+                    <div style={{color:C.green,fontWeight:700,fontSize:13}}>➕ Add New Account</div>
+                  </label>
+                </div>
+              </div>
+
+              {/* New account form */}
+              {reqAccId==="new" && (
+                <div style={{background:C.bg,borderRadius:12,padding:14,display:"flex",flexDirection:"column",gap:10}}>
+                  <div style={{color:C.green,fontWeight:700,fontSize:12,marginBottom:2}}>New Account Details</div>
+                  <Field label="Account Name (as per passbook) *" value={newAcc.name}
+                    onChange={v=>setNewAcc(p=>({...p,name:v}))} placeholder="e.g. ISMAIL KHABULA MUJAWAR" />
+                  <div style={{display:"flex",gap:10}}>
+                    <Field label="Account Number *" value={newAcc.accountNo}
+                      onChange={v=>setNewAcc(p=>({...p,accountNo:v}))} half />
+                    <Field label="IFSC Code *" value={newAcc.ifsc}
+                      onChange={v=>setNewAcc(p=>({...p,ifsc:v.toUpperCase()}))} half placeholder="e.g. SBIN0001234" />
+                  </div>
+                  <div style={{fontSize:11,color:C.muted}}>This account will be saved to the {reqRecipType==="vehicle_owner"?"vehicle owner's":"employee's"} profile for future use.</div>
+                </div>
+              )}
+
+              {/* Notes */}
+              <Field label="Notes (optional)" value={reqNotes} onChange={setReqNotes} placeholder="Any additional info…" />
+
+              {/* Existing request warning */}
+              {(paymentRequests||[]).some(r=>r.tripId===t.id&&r.status==="pending") && (
+                <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:8,padding:"8px 12px",fontSize:12,color:C.orange,fontWeight:700}}>
+                  ⚠ A pending request already exists for this trip
+                </div>
+              )}
+
+              <Btn onClick={saveRequest} full color={C.purple}
+                disabled={!reqAccId||!reqAmount||+reqAmount<=0}>
+                📋 Submit Payment Request
+              </Btn>
+            </div>
+          </Sheet>
+        );
       })()}
 
       {paySheet && (
