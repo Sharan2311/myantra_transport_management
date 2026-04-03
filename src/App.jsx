@@ -11327,9 +11327,12 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
   const veh = (vehicles||[]).find(v=>v.truckNo===t.truckNo);
 
   // Build account lists
-  const ownerAccounts = (veh?.accounts||[]).length>0
-    ? veh.accounts
-    : (veh?.accountNo ? [{id:"veh_main",name:veh.ownerName||"Owner",accountNo:veh.accountNo,ifsc:veh.ifsc||"",isPrimary:true}] : []);
+  // Merge accounts[] array with legacy single accountNo field
+  const legacyVehAcc = veh?.accountNo
+    ? [{id:"veh_main",name:veh.ownerName||"Owner",accountNo:veh.accountNo,ifsc:veh.ifsc||"",isPrimary:true}]
+    : [];
+  const rawOwnerAccounts = [...(veh?.accounts||[]), ...legacyVehAcc.filter(l=>!(veh?.accounts||[]).some(a=>a.accountNo===l.accountNo))];
+  const ownerAccounts = rawOwnerAccounts;
   const allEmpAccounts = (employees||[]).flatMap(e=>(e.accounts||[]).map(a=>({...a,_empId:e.id,_empName:e.name})));
 
   const editingReq = trip._editingReq || null;
@@ -11469,35 +11472,36 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
           </div>
         </div>
 
-        {/* Account list */}
+        {/* Account dropdown with search */}
         <div>
           <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",marginBottom:8}}>Bank Account</div>
-          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+          <select value={accId} onChange={e=>setAccId(e.target.value)}
+            style={{width:"100%",background:C.card,
+              border:`1.5px solid ${accId&&accId!=="new"?C.purple:accId==="new"?C.green:C.border}`,
+              borderRadius:10,color:accId?C.text:C.muted,
+              padding:"12px 14px",fontSize:13,outline:"none"}}>
+            <option value="">— Select account —</option>
             {recipAccounts.map(acc=>(
-              <label key={acc.id} style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer",
-                background:accId===acc.id?C.purple+"11":"transparent",
-                border:`1.5px solid ${accId===acc.id?C.purple:C.border}`,
-                borderRadius:10,padding:"10px 12px"}}>
-                <input type="radio" name="reqpayacc" checked={accId===acc.id}
-                  onChange={()=>setAccId(acc.id)} style={{width:16,height:16}} />
-                <div style={{flex:1,minWidth:0}}>
-                  <div style={{fontWeight:700,fontSize:13}}>{acc.name}</div>
-                  <div style={{fontFamily:"monospace",fontSize:11,color:C.blue}}>{acc.accountNo}</div>
-                  <div style={{fontSize:11,color:C.muted}}>{acc.ifsc||"—"}{acc._empName?` · ${acc._empName}`:""}</div>
-                </div>
-                {acc.isPrimary&&<Badge label="Primary" color={C.teal} />}
-              </label>
+              <option key={acc.id} value={acc.id}>
+                {acc.name} · {acc.accountNo} · {acc.ifsc||"—"}{acc._empName?` (${acc._empName})`:""}
+                {acc.isPrimary?" ★":""}
+              </option>
             ))}
-            {/* Add new */}
-            <label style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer",
-              background:accId==="new"?C.green+"11":"transparent",
-              border:`1.5px solid ${accId==="new"?C.green:C.border}`,
-              borderRadius:10,padding:"10px 12px"}}>
-              <input type="radio" name="reqpayacc" checked={accId==="new"}
-                onChange={()=>setAccId("new")} style={{width:16,height:16}} />
-              <div style={{color:C.green,fontWeight:700,fontSize:13}}>➕ Add New Account</div>
-            </label>
-          </div>
+            <option value="new">➕ Add New Account</option>
+          </select>
+          {/* Show selected account details */}
+          {accId&&accId!=="new"&&(()=>{
+            const acc=recipAccounts.find(a=>a.id===accId);
+            if(!acc) return null;
+            return (
+              <div style={{background:C.purple+"11",border:`1px solid ${C.purple}33`,borderRadius:8,
+                padding:"8px 12px",marginTop:6,fontSize:12}}>
+                <div style={{fontWeight:700,color:C.text}}>{acc.name}</div>
+                <div style={{fontFamily:"monospace",color:C.blue}}>{acc.accountNo}</div>
+                <div style={{color:C.muted}}>{acc.ifsc||"—"}</div>
+              </div>
+            );
+          })()}
         </div>
 
         {/* New account form */}

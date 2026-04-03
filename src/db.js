@@ -86,6 +86,7 @@ const vehicleFromDB = r => ({
   tafalExempt: r.tafal_exempt, shortageOwed: +(r.shortage_owed||0),
   shortageRecovered: +(r.shortage_recovered||0), createdBy: r.created_by,
   loanTxns: r.loan_txns||[], shortageTxns: r.shortage_txns||[],
+  accounts: r.accounts||[],
 })
 const vehicleToDB = v => ({
   id: v.id, truck_no: v.truckNo, owner_name: v.ownerName, phone: v.phone,
@@ -95,17 +96,20 @@ const vehicleToDB = v => ({
   tafal_exempt: v.tafalExempt, shortage_owed: v.shortageOwed||0,
   shortage_recovered: v.shortageRecovered||0, created_by: v.createdBy,
   loan_txns: v.loanTxns||[], shortage_txns: v.shortageTxns||[],
+  accounts: v.accounts||[],
 })
 
 const employeeFromDB = r => ({
   id: r.id, name: r.name, phone: r.phone, role: r.role,
   loan: +r.loan, loanRecovered: +r.loan_recovered,
   linkedTrucks: r.linked_trucks||[], createdBy: r.created_by,
+  accounts: r.accounts||[],
 })
 const employeeToDB = e => ({
   id: e.id, name: e.name, phone: e.phone, role: e.role,
   loan: e.loan, loan_recovered: e.loanRecovered,
   linked_trucks: e.linkedTrucks||[], created_by: e.createdBy,
+  accounts: e.accounts||[],
 })
 
 const paymentFromDB = r => ({
@@ -372,6 +376,31 @@ export const DB = {
     if (error) throw new Error(`LR sequence error: ${error.message}`)
     return data // e.g. "SKLC020"
   },
+
+  // Payment Requests
+  getPaymentRequests: async () => {
+    try { return await fetchAll('mye_payment_requests', r => ({
+      id: r.id, tripId: r.trip_id, lrNo: r.lr_no, truckNo: r.truck_no,
+      amount: +(r.amount||0), recipientType: r.recipient_type,
+      recipientId: r.recipient_id, recipientName: r.recipient_name,
+      accountId: r.account_id, accountName: r.account_name,
+      accountNo: r.account_no, ifsc: r.ifsc,
+      status: r.status||'pending', notes: r.notes||'',
+      createdBy: r.created_by, createdAt: r.created_at,
+      paidAt: r.paid_at||'', paidBy: r.paid_by||'',
+    })); } catch(e) { console.warn('mye_payment_requests not ready:', e.message); return []; }
+  },
+  savePaymentRequest: async (pr) => upsertOne('mye_payment_requests', pr => ({
+    id: pr.id, trip_id: pr.tripId, lr_no: pr.lrNo, truck_no: pr.truckNo,
+    amount: pr.amount, recipient_type: pr.recipientType,
+    recipient_id: pr.recipientId, recipient_name: pr.recipientName,
+    account_id: pr.accountId, account_name: pr.accountName,
+    account_no: pr.accountNo, ifsc: pr.ifsc,
+    status: pr.status||'pending', notes: pr.notes||'',
+    created_by: pr.createdBy, created_at: pr.createdAt,
+    paid_at: pr.paidAt||'', paid_by: pr.paidBy||'',
+  }), pr),
+  deletePaymentRequest: id => deleteOne('mye_payment_requests', id),
 
   getSettings: async () => {
     const { data } = await supabase.from('mye_settings').select('*').eq('key','app_settings').single()
