@@ -1146,7 +1146,9 @@ export default function App() {
         (trips||[]).forEach(t=>{ const fy=getFY(t.date); if(fy) fySet.add(fy); });
         const fyList = [...fySet].sort((a,b)=>b-a);
         // Build client list — always show (even single client, so user knows filter is active)
-        const clientsInData = CLIENTS.filter(c=>(trips||[]).some(t=>(t.client||DEFAULT_CLIENT)===c));
+        const clientsInData = CLIENTS.filter(c=>
+          userCanSeeClient(user,c) && (trips||[]).some(t=>(t.client||DEFAULT_CLIENT)===c)
+        );
         const showBar = fyList.length > 1 || clientsInData.length >= 1;
         if(!showBar) return null;
         return (
@@ -3149,7 +3151,18 @@ const getUserClients = (user) => {
   if(!user) return CLIENTS;
   if(user.role==="owner"||user.role==="manager") return CLIENTS;
   const ac = user.assignedClients||[];
+  // Empty assignedClients = no client restriction only for owner/manager (handled above)
+  // For all other roles: empty = see all (backward compat), non-empty = only those clients
   return ac.length>0 ? CLIENTS.filter(c=>ac.includes(c)) : CLIENTS;
+};
+
+// Returns true if the user can see trips for the given client
+const userCanSeeClient = (user, client) => {
+  if(!user) return false;
+  if(user.role==="owner"||user.role==="manager") return true;
+  const ac = user.assignedClients||[];
+  if(ac.length===0) return true; // no restriction set → see all
+  return ac.includes(client||DEFAULT_CLIENT);
 };
 // Shree Cement plants (used to decide if Shree Payments tab is relevant)
 const SHREE_CLIENTS = ["Shree Cement Kodla","Shree Cement Guntur"];
@@ -4150,7 +4163,9 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
 
   const baseTrips = fyTrips || trips; // use FY-filtered if available
   const list   = baseTrips.filter(t => t.type===tripType);
-  const olist  = orderTypeFilter==="All" ? list : orderTypeFilter==="party" ? list.filter(t=>t.orderType==="party") : list.filter(t=>!t.orderType||t.orderType==="godown");
+  // Role-based client restriction — non-owners only see their assigned clients
+  const roleList = list.filter(t => userCanSeeClient(user, t.client||DEFAULT_CLIENT));
+  const olist  = orderTypeFilter==="All" ? roleList : orderTypeFilter==="party" ? roleList.filter(t=>t.orderType==="party") : roleList.filter(t=>!t.orderType||t.orderType==="godown");
   const clist  = selectedClient ? olist.filter(t => (t.client||DEFAULT_CLIENT)===selectedClient) : (clientFilter ? olist.filter(t => (t.client||DEFAULT_CLIENT)===clientFilter) : olist);
   const dlist  = (dateFrom||dateTo) ? clist.filter(t => t.date>=(dateFrom||"2000-01-01") && t.date<=(dateTo||"2099-12-31")) : clist;
   const slist  = search ? dlist.filter(t => {
@@ -5931,7 +5946,9 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
 // ─── BILLING ──────────────────────────────────────────────────────────────────
 function Billing({trips, setTrips, fyTrips, selectedClient, user, log}) {
   const baseTrips = fyTrips || trips;
-  const filteredTrips = selectedClient ? baseTrips.filter(t=>(t.client||DEFAULT_CLIENT)===selectedClient) : baseTrips;
+  // Role-based: non-owners only see their assigned clients
+  const roleTrips = baseTrips.filter(t=>userCanSeeClient(user,t.client||DEFAULT_CLIENT));
+  const filteredTrips = selectedClient ? roleTrips.filter(t=>(t.client||DEFAULT_CLIENT)===selectedClient) : roleTrips;
   const pending = filteredTrips.filter(t => t.status==="Pending Bill");
   const billed  = filteredTrips.filter(t => t.status==="Billed");
   const paid    = filteredTrips.filter(t => t.status==="Paid");
