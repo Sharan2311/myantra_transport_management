@@ -11337,6 +11337,8 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
   const [amount,     setAmount]     = useState(String(t.balance||t.netDue||0));
   const [notes,      setNotes]      = useState("");
   const [newAcc,     setNewAcc]     = useState({name:"",accountNo:"",ifsc:""});
+  const [newAccEmpId,setNewAccEmpId]= useState(""); // which employee to save new account to
+  const [submitted,  setSubmitted]  = useState(false);
 
   const recipAccounts = recipType==="vehicle_owner" ? ownerAccounts : allEmpAccounts;
   const selAcc = recipAccounts.find(a=>a.id===accId);
@@ -11354,10 +11356,21 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
       }
       const newId = "ACC"+uid();
       finalAcc = {...newAcc, id:newId, isPrimary:false};
-      // Persist new account to vehicle
+      // Persist new account to vehicle or employee
       if(recipType==="vehicle_owner" && veh) {
         setVehicles(prev=>prev.map(v=>v.id===veh.id
           ? {...v, accounts:[...(v.accounts||[]), finalAcc]} : v));
+      } else if(recipType==="employee") {
+        if(!newAccEmpId) { alert("Select which employee this account belongs to."); return; }
+        // Save to employee — need setEmployees prop, so save via DB directly and update
+        const targetEmp = (employees||[]).find(e=>e.id===newAccEmpId);
+        if(targetEmp) {
+          const updEmp = {...targetEmp, accounts:[...(targetEmp.accounts||[]), finalAcc]};
+          DB.saveEmployee(updEmp).catch(e=>console.error("saveEmployee:",e));
+          // Update local recipientId
+          finalAcc._empId   = newAccEmpId;
+          finalAcc._empName = targetEmp.name;
+        }
       }
     }
     if(!finalAcc) { alert("Could not find selected account."); return; }
@@ -11380,8 +11393,25 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
     setPaymentRequests(prev=>[pr,...(prev||[])]);
     DB.savePaymentRequest(pr).catch(e=>console.error("savePaymentRequest:",e));
     log("PAY REQUEST",`LR:${t.lrNo} ${recipientName} ₹${Number(amount).toLocaleString("en-IN")}`);
-    onClose();
+    setSubmitted(true);
   };
+
+  if(submitted) return (
+    <Sheet title="📋 Request Submitted" onClose={onClose}>
+      <div style={{display:"flex",flexDirection:"column",gap:16,alignItems:"center",padding:"20px 0",textAlign:"center"}}>
+        <div style={{fontSize:48}}>✅</div>
+        <div style={{color:C.green,fontWeight:800,fontSize:18}}>Request Submitted!</div>
+        <div style={{color:C.text,fontSize:14}}>
+          Payment request for <b style={{color:C.blue}}>{t.lrNo}</b> has been sent.
+        </div>
+        <div style={{background:C.purple+"11",border:`1px solid ${C.purple}33`,borderRadius:12,
+          padding:"12px 16px",fontSize:13,color:C.purple,width:"100%"}}>
+          Owner can see this in <b>Driver Pay → Requests</b> tab
+        </div>
+        <Btn onClick={onClose} full color={C.purple}>Done</Btn>
+      </div>
+    </Sheet>
+  );
 
   return (
     <Sheet title={`📋 Request Payment — ${t.lrNo||t.truckNo}`} onClose={onClose}>
@@ -11456,6 +11486,17 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
         {accId==="new" && (
           <div style={{background:C.bg,borderRadius:12,padding:14,display:"flex",flexDirection:"column",gap:10}}>
             <div style={{color:C.green,fontWeight:700,fontSize:12}}>New Account Details</div>
+            {recipType==="employee" && (
+              <div>
+                <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:4}}>SAVE ACCOUNT TO EMPLOYEE *</div>
+                <select value={newAccEmpId} onChange={e=>setNewAccEmpId(e.target.value)}
+                  style={{width:"100%",background:C.card,border:`1.5px solid ${newAccEmpId?C.green:C.red}`,
+                    borderRadius:8,color:newAccEmpId?C.text:C.muted,padding:"9px 10px",fontSize:13,outline:"none"}}>
+                  <option value="">— Select employee —</option>
+                  {(employees||[]).map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
+                </select>
+              </div>
+            )}
             <Field label="Account Name (as per passbook) *" value={newAcc.name}
               onChange={v=>setNewAcc(p=>({...p,name:v}))} placeholder="e.g. ISMAIL KHABULA MUJAWAR" />
             <div style={{display:"flex",gap:10}}>
@@ -11465,7 +11506,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
                 onChange={v=>setNewAcc(p=>({...p,ifsc:v.toUpperCase()}))} half placeholder="e.g. SBIN0001234" />
             </div>
             <div style={{fontSize:11,color:C.muted}}>
-              Will be saved to {recipType==="vehicle_owner"?"vehicle owner's":"employee's"} profile.
+              Will be saved to {recipType==="vehicle_owner"?"vehicle owner's":"selected employee's"} profile for future use.
             </div>
           </div>
         )}
@@ -11803,7 +11844,7 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
       )}
 
       {/* ── TRIP LIST (unpaid / paid / all) ── */}
-      {filter!=="history" && (()=>{
+      {filter!=="history" && filter!=="requests" && (()=>{
         const base = filter==="unpaid"?unpaidTrips:filter==="paid"?paidTrips:tripWithBalance;
         const shown = histLR ? base.filter(t=>(t.lrNo+t.truckNo).toLowerCase().includes(histLR.toLowerCase())) : base;
         return shown.map(t=>(
