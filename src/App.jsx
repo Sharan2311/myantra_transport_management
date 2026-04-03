@@ -772,7 +772,12 @@ function Login({onLogin}) {
 
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
 export default function App() {
-  const [user, setUser] = useState(null);
+  const [user, setUser] = useState(() => {
+    try {
+      const saved = sessionStorage.getItem("mye_user");
+      return saved ? JSON.parse(saved) : null;
+    } catch { return null; }
+  });
   const [tab,  setTab]  = useState("dashboard");
   const [saving, setSaving] = useState(false);
   const [saveErr, setSaveErr] = useState("");
@@ -1109,7 +1114,11 @@ export default function App() {
         </div>
       </div>
     );
-    return <Login onLogin={u=>{setUser(u);log("LOGIN",`${u.name} signed in`);}} />;
+    return <Login onLogin={u=>{
+      try { sessionStorage.setItem("mye_user", JSON.stringify(u)); } catch{}
+      setUser(u);
+      log("LOGIN",`${u.name} signed in`);
+    }} />;
   }
 
   return (
@@ -1131,7 +1140,11 @@ export default function App() {
             <span style={{color:C.muted,fontSize:11}}>Live</span>
           </div>
           <Av name={user.name} role={user.role} />
-          <button onClick={()=>{log("LOGOUT",`${user.name} signed out`);setUser(null);}}
+          <button onClick={()=>{
+            log("LOGOUT",`${user.name} signed out`);
+            try { sessionStorage.removeItem("mye_user"); } catch{}
+            setUser(null);
+          }}
             style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"5px 10px",fontSize:12,cursor:"pointer"}}>Out</button>
         </div>
       </div>
@@ -11709,7 +11722,12 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
   };
 
   // Filtered payment history
-  const allPays = [...(driverPays||[])].sort((a,b)=>b.date.localeCompare(a.date));
+  // Filter history to only payments for trips this user can see (role-filtered)
+  const allowedTripIds = new Set((trips||[]).map(t=>t.id));
+  const allowedLRs     = new Set((trips||[]).map(t=>t.lrNo).filter(Boolean));
+  const allPays = [...(driverPays||[])]
+    .filter(p => allowedTripIds.has(p.tripId) || allowedLRs.has(p.lrNo))
+    .sort((a,b)=>b.date.localeCompare(a.date));
   const filteredPays = allPays.filter(p => {
     if (histFrom && p.date < histFrom) return false;
     if (histTo   && p.date > histTo)   return false;
@@ -11765,7 +11783,7 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
       </div>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
         <KPI icon="⏳" label="Balance Due"  value={fmt(totalBalance)}    color={C.accent} sub={`${unpaidTrips.length} trips`} />
-        <KPI icon="✅" label="Total Paid"   value={fmt((driverPays||[]).reduce((s,p)=>s+(p.amount||0),0))} color={C.green} />
+        <KPI icon="✅" label="Total Paid"   value={fmt(allPays.reduce((s,p)=>s+(p.amount||0),0))} color={C.green} />
       </div>
 
       <PillBar items={[
