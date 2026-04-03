@@ -1780,13 +1780,9 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
     const savedLRsThisBatch = [];
     let count = 0;
 
-    // If DI date is from a different FY than today, use today's date
-    // (e.g. a March DI scanned in April must go into current FY, not previous)
-    const safeTripDate = (diDate) => {
-      const t = today();
-      if(!diDate) return t;
-      return getFY(diDate) === getFY(t) ? diDate : t;
-    };
+    // Use DI date as-is — the FY filter in the app handles display
+    // If DI date is empty fall back to today
+    const safeTripDate = (diDate) => diDate || today();
 
     for(const g of readyGroups) {
       const groupItems = doneItems.filter(x=>g.diIds.includes(x.id));
@@ -2156,9 +2152,9 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                           🚫 DUPLICATE — Already in LR {dup.trip.lrNo} ({dup.trip.truckNo}). Will not be saved.
                         </div>}
                         {!dup && ex?.date && getFY(ex.date)!==getFY(today()) && (
-                          <div style={{color:C.orange,fontSize:11,fontWeight:700,
-                            background:C.orange+"15",borderRadius:6,padding:"4px 8px",marginTop:4}}>
-                            ⚠ DI date {ex.date} is from FY {getFY(ex.date)-1}–{String(getFY(ex.date)).slice(2)} — trip will be saved with today's date ({today()})
+                          <div style={{color:C.blue,fontSize:11,fontWeight:700,
+                            background:C.blue+"11",borderRadius:6,padding:"4px 8px",marginTop:4}}>
+                            📅 DI date {ex.date} — trip will be saved with this date (FY {getFY(ex.date)-1}–{String(getFY(ex.date)).slice(2)})
                           </div>
                         )}
                       </div>
