@@ -8696,11 +8696,15 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
   const filtered = (vehicles||[]).filter(v => {
     if(!search) return true;
     const q = search.toLowerCase();
-    return (v.truckNo||"").toLowerCase().includes(q)
-        || (v.ownerName||"").toLowerCase().includes(q)
-        || (v.driverName||"").toLowerCase().includes(q)
-        || (v.phone||"").includes(q)
-        || (v.driverPhone||"").includes(q);
+    if((v.truckNo||"").toLowerCase().includes(q))    return true;
+    if((v.ownerName||"").toLowerCase().includes(q))  return true;
+    if((v.driverName||"").toLowerCase().includes(q)) return true;
+    if((v.phone||"").includes(q))       return true;
+    if((v.driverPhone||"").includes(q)) return true;
+    if((v.accountNo||"").includes(q))   return true;
+    // Search within accounts[] array
+    if((v.accounts||[]).some(a=>(a.accountNo||"").includes(q)||(a.name||"").toLowerCase().includes(q))) return true;
+    return false;
   });
 
   const resetLoanForm = () => { setLAmt(""); setLDate(today()); setLRef(""); setLAcct(""); setLAcct2(""); setRAmt(""); setRDate(today()); setRLR(""); setRRef(""); };
@@ -11724,13 +11728,23 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
   const t = trip;
   const veh = (vehicles||[]).find(v=>v.truckNo===t.truckNo);
 
-  // Build account lists
-  // Merge accounts[] array with legacy single accountNo field
-  const legacyVehAcc = veh?.accountNo
+  // Build account lists — collect accounts from ALL vehicles of the same owner
+  const ownerNameForAcct = (veh?.ownerName||"").trim();
+  const ownerVehicles = ownerNameForAcct
+    ? (vehicles||[]).filter(v=>(v.ownerName||"").trim()===ownerNameForAcct)
+    : (veh ? [veh] : []);
+  // Merge accounts from all owner's vehicles, deduped by accountNo
+  const allOwnerRawAccounts = ownerVehicles.flatMap(v=>v.accounts||[]);
+  const seenAccNos = new Set();
+  const dedupedOwnerAccounts = allOwnerRawAccounts.filter(a=>{
+    if(seenAccNos.has(a.accountNo)) return false;
+    seenAccNos.add(a.accountNo); return true;
+  });
+  // Also include legacy single accountNo from vehicle record
+  const legacyVehAcc = veh?.accountNo && !seenAccNos.has(veh.accountNo)
     ? [{id:"veh_main",name:veh.ownerName||"Owner",accountNo:veh.accountNo,ifsc:veh.ifsc||"",isPrimary:true}]
     : [];
-  const rawOwnerAccounts = [...(veh?.accounts||[]), ...legacyVehAcc.filter(l=>!(veh?.accounts||[]).some(a=>a.accountNo===l.accountNo))];
-  const ownerAccounts = rawOwnerAccounts;
+  const ownerAccounts = [...dedupedOwnerAccounts, ...legacyVehAcc];
   const allEmpAccounts = (employees||[]).flatMap(e=>(e.accounts||[]).map(a=>({...a,_empId:e.id,_empName:e.name})));
 
   const editingReq = trip._editingReq || null;
@@ -11762,10 +11776,18 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
       }
       const newId = "ACC"+uid();
       finalAcc = {...newAcc, id:newId, isPrimary:false};
-      // Persist new account to vehicle or employee
+      // Persist new account to ALL vehicles of same owner (so it appears for all their trucks)
       if(recipType==="vehicle_owner" && veh) {
-        setVehicles(prev=>prev.map(v=>v.id===veh.id
-          ? {...v, accounts:[...(v.accounts||[]), finalAcc]} : v));
+        setVehicles(prev=>prev.map(v=>{
+          const vOwner = (v.ownerName||"").trim();
+          const shouldAdd = ownerNameForAcct
+            ? vOwner===ownerNameForAcct
+            : v.id===veh.id;
+          if(!shouldAdd) return v;
+          // Don't add if already exists (same accountNo)
+          if((v.accounts||[]).some(a=>a.accountNo===finalAcc.accountNo)) return v;
+          return {...v, accounts:[...(v.accounts||[]), finalAcc]};
+        }));
       } else if(recipType==="employee") {
         if(!newAccEmpId) { alert("Select which employee this account belongs to."); return; }
         // Save to employee — need setEmployees prop, so save via DB directly and update
