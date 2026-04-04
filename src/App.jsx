@@ -12057,7 +12057,17 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
           })()}
         </div>
 
-        {/* New account form */}
+          {/* No accounts warning */}
+          {recipAccounts.length===0 && accId!=="new" && (
+            <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,borderRadius:8,
+              padding:"10px 12px",fontSize:12,color:C.orange}}>
+              No saved accounts yet. Select ➕ Add New Account above.
+            </div>
+          )}
+          </> /* end showOther/employee dropdown */
+          )}
+
+        {/* New account form — shown regardless of showOther mode */}
         {accId==="new" && (
           <div style={{background:C.bg,borderRadius:12,padding:14,display:"flex",flexDirection:"column",gap:10}}>
             <div style={{color:C.green,fontWeight:700,fontSize:12}}>New Account Details</div>
@@ -12085,16 +12095,6 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
             </div>
           </div>
         )}
-
-        {recipAccounts.length===0 && accId!=="new" && (
-          <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,borderRadius:8,
-            padding:"10px 12px",fontSize:12,color:C.orange}}>
-            No saved accounts for this {recipType==="vehicle_owner"?"truck owner":"employee"} yet.
-            Select ➕ Add New Account above.
-          </div>
-        )}
-          </> /* end showOther/employee dropdown */
-          )}
         </div>
 
         <Field label="Notes (optional)" value={notes} onChange={setNotes} placeholder="Any additional info…" />
