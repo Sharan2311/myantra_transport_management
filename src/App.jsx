@@ -12094,7 +12094,6 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
             </div>
           </div>
         )}
-        </div>
 
         <Field label="Notes (optional)" value={notes} onChange={setNotes} placeholder="Any additional info…" />
 
