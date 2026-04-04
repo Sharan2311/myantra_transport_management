@@ -11940,6 +11940,14 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
   };
 
   const savePayment = (t) => {
+    // Check for duplicate UTR
+    if(pf.utr) {
+      const dupUtr = (driverPays||[]).find(p=>p.utr===pf.utr);
+      if(dupUtr) {
+        alert(`🚫 Duplicate UTR\n\nUTR ${pf.utr} was already recorded on ${dupUtr.date||"—"}.\nThis payment is already in the system.`);
+        return;
+      }
+    }
     const p = {id:uid(), tripId:t.id, truckNo:t.truckNo, lrNo:t.lrNo,
       amount:+pf.amount, utr:pf.utr, date:pf.date, paidTo:pf.paidTo, notes:pf.notes,
       createdBy:user.username, createdAt:nowTs()};
@@ -11961,6 +11969,16 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
   };
 
   const saveMultiPayment = async (payments) => {
+    // Check for duplicate UTR before saving
+    const utrToCheck = payments[0]?.utr;
+    if(utrToCheck) {
+      const dupUtr = (driverPays||[]).find(p=>p.utr===utrToCheck);
+      if(dupUtr) {
+        alert(`🚫 Duplicate UTR\n\nUTR ${utrToCheck} was already recorded on ${dupUtr.date||"—"}.\nThis payment is already in the system — do not save again.`);
+        setSplitSheet(null);
+        return;
+      }
+    }
     const withMeta = payments.map(p => ({...p, createdBy:user.username, createdAt:nowTs()}));
     setDriverPays(prev=>[...(prev||[]),...withMeta]);
     for (const p of withMeta) {
