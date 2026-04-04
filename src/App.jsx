@@ -11750,10 +11750,19 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
   const editingReq = trip._editingReq || null;
   const isEditing  = !!editingReq;
 
+  // Find primary account to pre-select (editing: use saved accountId; new: use first/primary account)
+  const primaryOwnerAcc = (() => {
+    if(editingReq?.accountId) return editingReq.accountId;
+    // Pre-select primary (isPrimary flag) or first account
+    const primAcc = ownerAccounts.find(a=>a.isPrimary) || ownerAccounts[0];
+    return primAcc?.id || "";
+  })();
+
   const [recipType,  setRecipType]  = useState(editingReq?.recipientType||"vehicle_owner");
-  const [accId,      setAccId]      = useState(editingReq?.accountId||"");
+  const [accId,      setAccId]      = useState(primaryOwnerAcc);
   const [accSearch,  setAccSearch]  = useState(""); // search within account list
   const [accOpen,    setAccOpen]    = useState(false); // dropdown open
+  const [showOther,  setShowOther]  = useState(!!editingReq?.accountId && editingReq.accountId!==primaryOwnerAcc); // show alternate accounts
   const [amount,     setAmount]     = useState(String(editingReq?.amount||t.balance||t.netDue||0));
   const [notes,      setNotes]      = useState(editingReq?.notes||"");
   const [newAcc,     setNewAcc]     = useState({name:"",accountNo:"",ifsc:""});
@@ -11766,17 +11775,22 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
   const hasPending = !isEditing && (paymentRequests||[]).some(r=>r.tripId===t.id&&r.status==="pending");
 
   const save = () => {
-    if(!accId)              { alert("Select an account."); return; }
+    const effectiveAccId = (!showOther && recipType==="vehicle_owner") ? (accId||primaryOwnerAcc) : accId;
+    if(!effectiveAccId)              { alert("Select an account."); return; }
     if(!amount||+amount<=0) { alert("Enter amount."); return; }
 
-    let finalAcc = selAcc;
-    if(accId==="new") {
+    // Resolve the account — when primary is shown (not showOther), use the displayed primary
+    const resolvedAccId = (!showOther && recipType==="vehicle_owner" && !accId) ? primaryOwnerAcc : accId;
+    const resolvedSelAcc = recipAccounts.find(a=>a.id===resolvedAccId);
+    let finalAcc = resolvedSelAcc || selAcc;
+    if(resolvedAccId==="new" || accId==="new") {
       if(!newAcc.name||!newAcc.accountNo||!newAcc.ifsc) {
         alert("Fill all account fields: Name, Account No, IFSC."); return;
       }
       const newId = "ACC"+uid();
       finalAcc = {...newAcc, id:newId, isPrimary:false};
       // Persist new account to ALL vehicles of same owner (so it appears for all their trucks)
+      // Also update primary accountNo/ifsc if not already set
       if(recipType==="vehicle_owner" && veh) {
         setVehicles(prev=>prev.map(v=>{
           const vOwner = (v.ownerName||"").trim();
@@ -11784,9 +11798,16 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
             ? vOwner===ownerNameForAcct
             : v.id===veh.id;
           if(!shouldAdd) return v;
-          // Don't add if already exists (same accountNo)
-          if((v.accounts||[]).some(a=>a.accountNo===finalAcc.accountNo)) return v;
-          return {...v, accounts:[...(v.accounts||[]), finalAcc]};
+          // Don't add to accounts[] if already exists (same accountNo)
+          const alreadyInAccounts = (v.accounts||[]).some(a=>a.accountNo===finalAcc.accountNo);
+          const updAccounts = alreadyInAccounts
+            ? (v.accounts||[])
+            : [...(v.accounts||[]), {...finalAcc, isPrimary: !(v.accountNo)}];
+          // Update primary accountNo/ifsc if vehicle has none yet
+          const updPrimary = !v.accountNo
+            ? {accountNo: finalAcc.accountNo, ifsc: finalAcc.ifsc||""}
+            : {};
+          return {...v, ...updPrimary, accounts: updAccounts};
         }));
       } else if(recipType==="employee") {
         if(!newAccEmpId) { alert("Select which employee this account belongs to."); return; }
@@ -11894,9 +11915,63 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
           </div>
         </div>
 
-        {/* Account dropdown with search */}
+        {/* Account section — show primary by default, toggle for other */}
         <div>
-          <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",marginBottom:8}}>Bank Account</div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+            <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase"}}>Bank Account</div>
+            {recipAccounts.length>1 && !showOther && (
+              <button onClick={()=>setShowOther(true)}
+                style={{background:"none",border:`1px solid ${C.blue}`,borderRadius:8,
+                  color:C.blue,fontSize:11,fontWeight:700,cursor:"pointer",padding:"3px 10px"}}>
+                🔄 Other Account
+              </button>
+            )}
+            {showOther && (
+              <button onClick={()=>{
+                setShowOther(false);
+                setAccId(primaryOwnerAcc);
+                setAccSearch(""); setAccOpen(false);
+              }}
+                style={{background:"none",border:`1px solid ${C.muted}`,borderRadius:8,
+                  color:C.muted,fontSize:11,fontWeight:700,cursor:"pointer",padding:"3px 10px"}}>
+                ← Primary Account
+              </button>
+            )}
+          </div>
+
+          {/* Primary account card — shown when not in "other" mode */}
+          {!showOther && recipType==="vehicle_owner" && (()=>{
+            const primAcc = recipAccounts.find(a=>a.id===accId) || recipAccounts.find(a=>a.isPrimary) || recipAccounts[0];
+            if(!primAcc) return (
+              <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,borderRadius:8,
+                padding:"10px 12px",fontSize:12,color:C.orange}}>
+                No saved accounts for this truck owner yet.
+                <button onClick={()=>setAccId("new")}
+                  style={{marginLeft:8,background:"none",border:`1px solid ${C.green}`,borderRadius:6,
+                    color:C.green,fontSize:11,fontWeight:700,cursor:"pointer",padding:"2px 8px"}}>
+                  ➕ Add Account
+                </button>
+              </div>
+            );
+            return (
+              <div style={{background:C.purple+"11",border:`2px solid ${C.purple}44`,borderRadius:10,
+                padding:"12px 14px",display:"flex",alignItems:"center",gap:10}}>
+                <div style={{flex:1}}>
+                  <div style={{fontWeight:800,fontSize:14,color:C.text}}>{primAcc.name}</div>
+                  <div style={{fontFamily:"monospace",fontSize:13,color:C.blue,marginTop:2}}>{primAcc.accountNo}</div>
+                  <div style={{fontSize:11,color:C.muted}}>{primAcc.ifsc||"—"}</div>
+                </div>
+                <div style={{color:C.purple,fontSize:20}}>✓</div>
+              </div>
+            );
+          })()}
+
+          {/* Searchable dropdown — shown in "other account" mode or for Employee */}
+          {(showOther || recipType==="employee") && (
+          <>
+          <div style={{color:C.muted,fontSize:11,marginBottom:6}}>
+            {showOther?"Select a different account:":"Select employee account:"}
+          </div>
           {/* Searchable account picker */}
           {(()=>{
             const selAcc2 = recipAccounts.find(a=>a.id===accId);
@@ -12018,6 +12093,9 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
             Select ➕ Add New Account above.
           </div>
         )}
+          </> /* end showOther/employee dropdown */
+          )}
+        </div>
 
         <Field label="Notes (optional)" value={notes} onChange={setNotes} placeholder="Any additional info…" />
 
