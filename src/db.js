@@ -281,6 +281,7 @@ const deleteOne = async (table, id) => {
 export const DB = {
   getUsers:       () => fetchAll('mye_users', userFromDB),
   saveUser:       u  => upsertOne('mye_users', userToDB, u),
+  deleteUser:     id => deleteOne('mye_users', id),
 
   // By default loads last 90 days only — pass fromDate=null to load all
   getTrips: async (fromDate) => {

@@ -839,8 +839,11 @@ export default function App() {
   const dbSetTrips = (updater) => {
     setTrips(prev => {
       const next = typeof updater === "function" ? updater(prev) : updater;
-      // Persist changed trips
       const prevIds = new Set((prev||[]).map(t=>t.id));
+      const nextIds = new Set(next.map(t=>t.id));
+      // Delete removed trips
+      (prev||[]).filter(t=>!nextIds.has(t.id)).forEach(t => DB.deleteTrip(t.id).catch(e=>setSaveErr(e.message)));
+      // Save new/changed trips
       next.forEach(t => {
         if (!prevIds.has(t.id) || JSON.stringify(t) !== JSON.stringify((prev||[]).find(x=>x.id===t.id))) {
           DB.saveTrip(t).catch(e => setSaveErr(e.message));
@@ -853,6 +856,8 @@ export default function App() {
   const dbSetVehicles = (updater) => {
     setVehicles(prev => {
       const next = typeof updater === "function" ? updater(prev) : updater;
+      const nextIds = new Set(next.map(v=>v.id));
+      (prev||[]).filter(v=>!nextIds.has(v.id)).forEach(v => DB.deleteVehicle(v.id).catch(e=>setSaveErr(e.message)));
       next.forEach(v => DB.saveVehicle(v).catch(e => setSaveErr(e.message)));
       return next;
     });
@@ -861,6 +866,8 @@ export default function App() {
   const dbSetEmployees = (updater) => {
     setEmployees(prev => {
       const next = typeof updater === "function" ? updater(prev) : updater;
+      const nextIds = new Set(next.map(e=>e.id));
+      (prev||[]).filter(e=>!nextIds.has(e.id)).forEach(e => DB.deleteEmployee(e.id).catch(err=>setSaveErr(err.message)));
       next.forEach(e => DB.saveEmployee(e).catch(err => setSaveErr(err.message)));
       return next;
     });
@@ -896,6 +903,9 @@ export default function App() {
   const dbSetIndents = (updater) => {
     setIndents(prev => {
       const next = typeof updater === "function" ? updater(prev) : updater;
+      const prevIds = new Set((prev||[]).map(i=>i.id));
+      const nextIds = new Set(next.map(i=>i.id));
+      (prev||[]).filter(i=>!nextIds.has(i.id)).forEach(i => DB.deleteIndent(i.id).catch(e=>setSaveErr(e.message)));
       next.forEach(i => DB.saveIndent(i).catch(e => setSaveErr(e.message)));
       return next;
     });
@@ -905,6 +915,8 @@ export default function App() {
     setDriverPays(prev => {
       const next = typeof updater === "function" ? updater(prev) : updater;
       const prevIds = new Set((prev||[]).map(p=>p.id));
+      const nextIds = new Set(next.map(p=>p.id));
+      (prev||[]).filter(p=>!nextIds.has(p.id)).forEach(p => DB.deleteDriverPay(p.id).catch(e=>setSaveErr(e.message)));
       next.filter(p => !prevIds.has(p.id)).forEach(p => DB.saveDriverPay(p).catch(e => setSaveErr(e.message)));
       return next;
     });
@@ -972,6 +984,8 @@ export default function App() {
   const dbSetUsers = (updater) => {
     setUsers(prev => {
       const next = typeof updater === "function" ? updater(prev) : updater;
+      const nextIds = new Set(next.map(u=>u.id));
+      (prev||[]).filter(u=>!nextIds.has(u.id)).forEach(u => DB.deleteUser(u.id).catch(e=>setSaveErr(e.message)));
       next.forEach(u => DB.saveUser(u).catch(e => setSaveErr(e.message)));
       return next;
     });
@@ -7188,11 +7202,17 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance, employees, setCas
   const scannedLRs = (scanData.lrNumbers||[]).map(lr => String(lr).trim());
 
   // Build initial rows — one per detected LR, pre-matched to a trip
+  // Prefer unsettled trips (balance > 0) over settled when multiple match same LR
   const initRows = scannedLRs.map(lr => {
-    const matched = tripWithBalance.find(t =>
-      String(t.lrNo||"").toLowerCase().includes(lr.toLowerCase()) ||
-      lr.toLowerCase().includes(String(t.lrNo||"").toLowerCase())
+    const allMatched = tripWithBalance.filter(t =>
+      String(t.lrNo||"").toLowerCase() === lr.toLowerCase()
     );
+    // Prefer: unsettled first, then by most recent date
+    const matched = allMatched.sort((a,b) => {
+      if(a.balance>0 && b.balance<=0) return -1;
+      if(a.balance<=0 && b.balance>0) return 1;
+      return (b.date||"").localeCompare(a.date||"");
+    })[0];
     return { lr, tripId: matched?.id||"", amount: "" };
   });
 
@@ -7376,11 +7396,25 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance, employees, setCas
                     value={row.lr} onChange={e=>{
                       const q = e.target.value;
                       updateRow(i,"lr",q);
-                      // auto-match
-                      const m = tripWithBalance.find(t=>
-                        (t.lrNo||"").toLowerCase().includes(q.toLowerCase()) && q.length>=2
-                      );
-                      updateRow(i,"tripId", m?.id||"");
+                      // auto-match — prefer exact LR match, then unsettled (balance>0)
+                      if(q.length>=2) {
+                        const allM = tripWithBalance.filter(t=>
+                          (t.lrNo||"").toLowerCase().includes(q.toLowerCase())
+                        ).sort((a,b)=>{
+                          // Exact match first
+                          const aExact = (a.lrNo||"").toLowerCase()===q.toLowerCase();
+                          const bExact = (b.lrNo||"").toLowerCase()===q.toLowerCase();
+                          if(aExact && !bExact) return -1;
+                          if(!aExact && bExact) return 1;
+                          // Unsettled first
+                          if(a.balance>0 && b.balance<=0) return -1;
+                          if(a.balance<=0 && b.balance>0) return 1;
+                          return 0;
+                        });
+                        updateRow(i,"tripId", allM[0]?.id||"");
+                      } else {
+                        updateRow(i,"tripId","");
+                      }
                     }}
                     placeholder="Type LR number or truck…"
                     style={{background:C.card,border:`1px solid ${row.tripId?C.green:C.border}`,borderRadius:7,
