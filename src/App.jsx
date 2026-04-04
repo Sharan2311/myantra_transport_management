@@ -11738,6 +11738,8 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
 
   const [recipType,  setRecipType]  = useState(editingReq?.recipientType||"vehicle_owner");
   const [accId,      setAccId]      = useState(editingReq?.accountId||"");
+  const [accSearch,  setAccSearch]  = useState(""); // search within account list
+  const [accOpen,    setAccOpen]    = useState(false); // dropdown open
   const [amount,     setAmount]     = useState(String(editingReq?.amount||t.balance||t.netDue||0));
   const [notes,      setNotes]      = useState(editingReq?.notes||"");
   const [newAcc,     setNewAcc]     = useState({name:"",accountNo:"",ifsc:""});
@@ -11859,7 +11861,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
           <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",marginBottom:8}}>Pay To</div>
           <div style={{display:"flex",gap:8}}>
             {[{v:"vehicle_owner",l:"🚛 Truck Owner"},{v:"employee",l:"👤 Employee"}].map(opt=>(
-              <button key={opt.v} onClick={()=>{setRecipType(opt.v);setAccId("");}}
+              <button key={opt.v} onClick={()=>{setRecipType(opt.v);setAccId("");setAccSearch("");setAccOpen(false);}}
                 style={{flex:1,padding:"10px",borderRadius:10,cursor:"pointer",fontWeight:700,fontSize:13,
                   background:recipType===opt.v?C.purple+"33":"transparent",
                   border:`2px solid ${recipType===opt.v?C.purple:C.border}`,
@@ -11873,30 +11875,86 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
         {/* Account dropdown with search */}
         <div>
           <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",marginBottom:8}}>Bank Account</div>
-          <select value={accId} onChange={e=>setAccId(e.target.value)}
-            style={{width:"100%",background:C.card,
-              border:`1.5px solid ${accId&&accId!=="new"?C.purple:accId==="new"?C.green:C.border}`,
-              borderRadius:10,color:accId?C.text:C.muted,
-              padding:"12px 14px",fontSize:13,outline:"none"}}>
-            <option value="">— Select account —</option>
-            {recipAccounts.map(acc=>(
-              <option key={acc.id} value={acc.id}>
-                {acc.name} · {acc.accountNo} · {acc.ifsc||"—"}{acc._empName?` (${acc._empName})`:""}
-                {acc.isPrimary?" ★":""}
-              </option>
-            ))}
-            <option value="new">➕ Add New Account</option>
-          </select>
-          {/* Show selected account details */}
-          {accId&&accId!=="new"&&(()=>{
-            const acc=recipAccounts.find(a=>a.id===accId);
-            if(!acc) return null;
+          {/* Searchable account picker */}
+          {(()=>{
+            const selAcc2 = recipAccounts.find(a=>a.id===accId);
+            const filtered = accSearch
+              ? recipAccounts.filter(a=>
+                  (a.name||"").toLowerCase().includes(accSearch.toLowerCase()) ||
+                  (a.accountNo||"").includes(accSearch) ||
+                  (a.ifsc||"").toLowerCase().includes(accSearch.toLowerCase()) ||
+                  (a._empName||"").toLowerCase().includes(accSearch.toLowerCase()))
+              : recipAccounts;
             return (
-              <div style={{background:C.purple+"11",border:`1px solid ${C.purple}33`,borderRadius:8,
-                padding:"8px 12px",marginTop:6,fontSize:12}}>
-                <div style={{fontWeight:700,color:C.text}}>{acc.name}</div>
-                <div style={{fontFamily:"monospace",color:C.blue}}>{acc.accountNo}</div>
-                <div style={{color:C.muted}}>{acc.ifsc||"—"}</div>
+              <div style={{position:"relative"}}>
+                {/* Trigger button — shows selection or placeholder */}
+                <div onClick={()=>setAccOpen(p=>!p)}
+                  style={{background:C.card,border:`1.5px solid ${selAcc2?C.purple:accId==="new"?C.green:C.border}`,
+                    borderRadius:10,padding:"12px 14px",cursor:"pointer",
+                    display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+                  {selAcc2 ? (
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontWeight:700,fontSize:13,color:C.text}}>{selAcc2.name}</div>
+                      <div style={{fontFamily:"monospace",fontSize:11,color:C.blue}}>{selAcc2.accountNo} · {selAcc2.ifsc||"—"}</div>
+                      {selAcc2._empName&&<div style={{fontSize:10,color:C.muted}}>{selAcc2._empName}</div>}
+                    </div>
+                  ) : accId==="new" ? (
+                    <span style={{color:C.green,fontWeight:700}}>➕ Add New Account</span>
+                  ) : (
+                    <span style={{color:C.muted}}>— Select account —</span>
+                  )}
+                  <span style={{color:C.muted,fontSize:12}}>{accOpen?"▲":"▼"}</span>
+                </div>
+
+                {/* Dropdown */}
+                {accOpen && (
+                  <div style={{position:"absolute",top:"100%",left:0,right:0,zIndex:100,
+                    background:C.card,border:`1.5px solid ${C.border}`,borderRadius:10,
+                    boxShadow:"0 4px 20px rgba(0,0,0,0.15)",marginTop:4,overflow:"hidden"}}>
+                    {/* Search input */}
+                    <div style={{padding:"8px 10px",borderBottom:`1px solid ${C.border}33`}}>
+                      <input autoFocus value={accSearch} onChange={e=>setAccSearch(e.target.value)}
+                        placeholder="🔍 Search name, account no, IFSC…"
+                        style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,
+                          borderRadius:7,color:C.text,padding:"7px 10px",fontSize:13,
+                          outline:"none",boxSizing:"border-box"}} />
+                    </div>
+                    {/* Account list */}
+                    <div style={{maxHeight:240,overflowY:"auto"}}>
+                      {filtered.length===0 && (
+                        <div style={{padding:"12px 14px",color:C.muted,fontSize:12,textAlign:"center"}}>
+                          No accounts match "{accSearch}"
+                        </div>
+                      )}
+                      {filtered.map(acc=>(
+                        <div key={acc.id}
+                          onClick={()=>{setAccId(acc.id);setAccOpen(false);setAccSearch("");}}
+                          style={{padding:"10px 14px",cursor:"pointer",
+                            background:accId===acc.id?C.purple+"11":"transparent",
+                            borderBottom:`1px solid ${C.border}22`,
+                            display:"flex",alignItems:"center",gap:10}}>
+                          <div style={{flex:1,minWidth:0}}>
+                            <div style={{fontWeight:700,fontSize:13,color:C.text}}>{acc.name}
+                              {acc.isPrimary&&<span style={{marginLeft:6,fontSize:10,color:C.teal}}>★ Primary</span>}
+                            </div>
+                            <div style={{fontFamily:"monospace",fontSize:11,color:C.blue}}>{acc.accountNo}</div>
+                            <div style={{fontSize:11,color:C.muted}}>{acc.ifsc||"—"}{acc._empName?` · ${acc._empName}`:""}</div>
+                          </div>
+                          {accId===acc.id&&<span style={{color:C.purple,fontSize:16}}>✓</span>}
+                        </div>
+                      ))}
+                      {/* Add new option */}
+                      <div onClick={()=>{setAccId("new");setAccOpen(false);setAccSearch("");}}
+                        style={{padding:"10px 14px",cursor:"pointer",
+                          background:accId==="new"?C.green+"11":"transparent",
+                          display:"flex",alignItems:"center",gap:8,
+                          borderTop:`1px solid ${C.border}33`}}>
+                        <span style={{color:C.green,fontSize:16}}>➕</span>
+                        <span style={{fontWeight:700,color:C.green,fontSize:13}}>Add New Account</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })()}
