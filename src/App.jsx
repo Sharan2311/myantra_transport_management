@@ -7204,16 +7204,24 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance, employees, setCas
   // Build initial rows — one per detected LR, pre-matched to a trip
   // Prefer unsettled trips (balance > 0) over settled when multiple match same LR
   const initRows = scannedLRs.map(lr => {
-    const allMatched = tripWithBalance.filter(t =>
-      String(t.lrNo||"").toLowerCase() === lr.toLowerCase()
-    );
+    const lrLow = lr.toLowerCase();
+    const lrD = parseInt(lrLow.replace(/[^0-9]/g,""),10)||0;
+    const lrA = lrLow.replace(/[^a-z]/g,"");
+    const allMatched = tripWithBalance.filter(t => {
+      const tLr = (t.lrNo||"").toLowerCase();
+      if(tLr === lrLow) return true;
+      // Numeric fuzzy: SKLC0021 matches SKLC021
+      const tD = parseInt(tLr.replace(/[^0-9]/g,""),10)||0;
+      const tA = tLr.replace(/[^a-z]/g,"");
+      return lrD && tD && lrD===tD && (!lrA||!tA||lrA===tA);
+    });
     // Prefer: unsettled first, then by most recent date
     const matched = allMatched.sort((a,b) => {
       if(a.balance>0 && b.balance<=0) return -1;
       if(a.balance<=0 && b.balance>0) return 1;
       return (b.date||"").localeCompare(a.date||"");
     })[0];
-    return { lr, tripId: matched?.id||"", amount: "" };
+    return { lr, tripId: matched?.id||"", amount: matched ? String(matched.balance) : "" };
   });
 
   // If no LRs detected, start with 2 blank rows
@@ -7396,22 +7404,36 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance, employees, setCas
                     value={row.lr} onChange={e=>{
                       const q = e.target.value;
                       updateRow(i,"lr",q);
-                      // auto-match — prefer exact LR match, then unsettled (balance>0)
+                      // auto-match — exact, contains, or numeric fuzzy (SKLC0021 = SKLC021)
                       if(q.length>=2) {
-                        const allM = tripWithBalance.filter(t=>
-                          (t.lrNo||"").toLowerCase().includes(q.toLowerCase())
-                        ).sort((a,b)=>{
-                          // Exact match first
-                          const aExact = (a.lrNo||"").toLowerCase()===q.toLowerCase();
-                          const bExact = (b.lrNo||"").toLowerCase()===q.toLowerCase();
+                        const qLow = q.toLowerCase();
+                        const qDigits = parseInt(qLow.replace(/[^0-9]/g,""),10)||0;
+                        const qAlpha  = qLow.replace(/[^a-z]/g,"");
+                        const allM = tripWithBalance.filter(t=>{
+                          const lr = (t.lrNo||"").toLowerCase();
+                          if(lr===qLow) return true;
+                          if(lr.includes(qLow)) return true;
+                          if((t.truckNo||"").toLowerCase().includes(qLow)) return true;
+                          // Numeric fuzzy: SKLC0021 matches SKLC021
+                          const lrDigits = parseInt(lr.replace(/[^0-9]/g,""),10)||0;
+                          const lrAlpha  = lr.replace(/[^a-z]/g,"");
+                          if(qDigits && lrDigits && qDigits===lrDigits && (!qAlpha||!lrAlpha||qAlpha===lrAlpha)) return true;
+                          return false;
+                        }).sort((a,b)=>{
+                          const aExact = (a.lrNo||"").toLowerCase()===qLow;
+                          const bExact = (b.lrNo||"").toLowerCase()===qLow;
                           if(aExact && !bExact) return -1;
                           if(!aExact && bExact) return 1;
-                          // Unsettled first
                           if(a.balance>0 && b.balance<=0) return -1;
                           if(a.balance<=0 && b.balance>0) return 1;
                           return 0;
                         });
-                        updateRow(i,"tripId", allM[0]?.id||"");
+                        const matchedTrip = allM[0];
+                        updateRow(i,"tripId", matchedTrip?.id||"");
+                        // Auto-fill amount with balance if amount is empty
+                        if(matchedTrip && !row.amount) {
+                          updateRow(i,"amount", String(matchedTrip.balance));
+                        }
                       } else {
                         updateRow(i,"tripId","");
                       }
@@ -7423,9 +7445,15 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance, employees, setCas
                   {/* Matching dropdown */}
                   {row.lr && !row.tripId && (() => {
                     const q = row.lr.toLowerCase();
-                    const matches = tripWithBalance.filter(t=>
-                      t.balance>0 && (t.lrNo||"").toLowerCase().includes(q) || (t.truckNo||"").toLowerCase().includes(q)
-                    ).slice(0,5);
+                    const qD = parseInt(q.replace(/[^0-9]/g,""),10)||0;
+                    const qA = q.replace(/[^a-z]/g,"");
+                    const matches = tripWithBalance.filter(t=>{
+                      const lr=(t.lrNo||"").toLowerCase();
+                      const lrD=parseInt(lr.replace(/[^0-9]/g,""),10)||0;
+                      const lrA=lr.replace(/[^a-z]/g,"");
+                      const numMatch = qD&&lrD&&qD===lrD&&(!qA||!lrA||qA===lrA);
+                      return t.balance>0&&(lr.includes(q)||numMatch||(t.truckNo||"").toLowerCase().includes(q));
+                    }).slice(0,5);
                     return matches.length > 0 ? (
                       <div style={{background:C.card,borderRadius:7,marginTop:3,
                         border:`1px solid ${C.border}`,overflow:"hidden"}}>
@@ -12003,12 +12031,12 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
   };
 
   const saveMultiPayment = async (payments) => {
-    // Check for duplicate UTR before saving
-    const utrToCheck = payments[0]?.utr;
+    // Check for duplicate UTR before saving (app-level)
+    const utrToCheck = (payments[0]?.utr||"").trim();
     if(utrToCheck) {
-      const dupUtr = (driverPays||[]).find(p=>p.utr===utrToCheck);
+      const dupUtr = (driverPays||[]).find(p=>(p.utr||"").trim()===utrToCheck);
       if(dupUtr) {
-        alert(`🚫 Duplicate UTR\n\nUTR ${utrToCheck} was already recorded on ${dupUtr.date||"—"}.\nThis payment is already in the system — do not save again.`);
+        alert(`🚫 Duplicate UTR\n\nUTR ${utrToCheck} was already recorded on ${dupUtr.date||"—"} for LR ${dupUtr.lrNo||"—"}.\nThis payment is already in the system — do not save again.`);
         setSplitSheet(null);
         return;
       }
@@ -12017,7 +12045,18 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
     setDriverPays(prev=>[...(prev||[]),...withMeta]);
     for (const p of withMeta) {
       log("DRIVER PAYMENT",`LR:${p.lrNo} ${p.truckNo} — ${fmt(p.amount)} UTR:${p.utr}`);
-      await DB.saveDriverPay(p);
+      try {
+        await DB.saveDriverPay(p);
+      } catch(e) {
+        // DB unique constraint violation on UTR
+        if(e.message?.includes("unique") || e.code==="23505") {
+          setDriverPays(prev=>prev.filter(x=>!withMeta.find(m=>m.id===x.id)));
+          alert(`🚫 DB Rejected: UTR ${p.utr} already exists in database.\nThis payment was not saved.`);
+          setSplitSheet(null);
+          return;
+        }
+        throw e;
+      }
       autoSettle(p.tripId, p.amount);
     }
     setSplitSheet(null);
@@ -12072,6 +12111,15 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
       });
       const data = await resp.json();
       if (data.error) throw new Error(data.error);
+      // ── UTR duplicate check before opening sheet ──────────────────────────
+      const scannedUtr = (data.referenceNo||"").trim();
+      if(scannedUtr) {
+        const dupPay = (driverPays||[]).find(p=>(p.utr||"").trim()===scannedUtr);
+        if(dupPay) {
+          alert(`🚫 Already Recorded\n\nUTR ${scannedUtr} was already saved on ${dupPay.date||"—"} for LR ${dupPay.lrNo||"—"} (${dupPay.truckNo||"—"}).\n\nThis payment is already in the system. Do not save again.`);
+          return; // don't open the sheet at all
+        }
+      }
       // Always open split sheet — handles both single and multi-LR
       setSplitSheet(data);
     } catch(e) {
