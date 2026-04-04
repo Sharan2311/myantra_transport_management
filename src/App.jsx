@@ -11956,7 +11956,9 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
 function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, setVehicles, employees, cashTransfers, setCashTransfers, paymentRequests=[], setPaymentRequests, user, log, viewOnly=false}) {
   const [filter,    setFilter]    = useState("unpaid");
   const [paySheet,  setPaySheet]  = useState(null);
-  const [payReqSheet, setPayReqSheet] = useState(null); // trip for request payment
+  const [payReqSheet,   setPayReqSheet]   = useState(null); // trip for request payment
+  const [reqSubFilter,  setReqSubFilter]  = useState("pending"); // pending|done|all
+  const [reqSearch,     setReqSearch]     = useState("");
   const [splitSheet, setSplitSheet] = useState(null); // scanned multi-LR data
   const [scanningGlobal, setScanningGlobal] = useState(false);
   const [pf, setPf] = useState({amount:"", utr:"", date:today(), paidTo:"", notes:""});
@@ -12200,7 +12202,7 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
         {id:"paid",    label:`Paid (${paidTrips.length})`,     color:C.green},
         {id:"all",     label:"All",                            color:C.blue},
         {id:"history", label:`History (${allPays.length})`,    color:C.muted},
-        {id:"requests",label:`Requests (${(paymentRequests||[]).filter(r=>r.status==="pending").length})`, color:C.purple},
+        {id:"requests",label:`Requests (${(paymentRequests||[]).length})`, color:C.purple},
       ]} active={filter} onSelect={setFilter} />
 
       {/* Search bar for trip tabs */}
@@ -12383,13 +12385,53 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
       {/* ── REQUESTS TAB ── */}
       {filter==="requests" && (
         <div style={{display:"flex",flexDirection:"column",gap:10}}>
-          <div style={{color:C.muted,fontSize:12,textAlign:"center",padding:"4px 0"}}>
-            Employees request payment here. Owner marks done after paying.
-          </div>
+          {/* Sub-filter: Pending / History */}
+          {(()=>{
+            const pendingCount = (paymentRequests||[]).filter(r=>r.status==="pending").length;
+            const doneCount    = (paymentRequests||[]).filter(r=>r.status==="done").length;
+            return (
+              <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                {[
+                  {id:"pending", label:`⏳ Pending (${pendingCount})`, color:C.purple},
+                  {id:"done",    label:`✓ History (${doneCount})`,     color:C.green},
+                  {id:"all",     label:`All (${(paymentRequests||[]).length})`, color:C.muted},
+                ].map(s=>(
+                  <button key={s.id}
+                    onClick={()=>setReqSubFilter(s.id)}
+                    style={{padding:"5px 12px",borderRadius:16,fontSize:12,fontWeight:700,cursor:"pointer",
+                      background:reqSubFilter===s.id?s.color+"22":"transparent",
+                      border:`1.5px solid ${reqSubFilter===s.id?s.color:C.border}`,
+                      color:reqSubFilter===s.id?s.color:C.muted}}>
+                    {s.label}
+                  </button>
+                ))}
+                <input value={reqSearch} onChange={e=>setReqSearch(e.target.value)}
+                  placeholder="🔍 Search LR, employee…"
+                  style={{flex:1,minWidth:120,background:C.card,border:`1px solid ${C.border}`,
+                    borderRadius:8,color:C.text,padding:"5px 10px",fontSize:12,outline:"none"}} />
+              </div>
+            );
+          })()}
           {(paymentRequests||[]).length===0 && (
             <div style={{textAlign:"center",color:C.muted,padding:"30px 0",fontSize:13}}>No payment requests yet</div>
           )}
-          {[...(paymentRequests||[])].sort((a,b)=>{
+          {[...(paymentRequests||[])].filter(pr=>{
+            // Sub-filter
+            const isPaid = (driverPays||[]).some(p=>p.lrNo===pr.lrNo&&p.amount>0);
+            const eff = isPaid?"done":pr.status;
+            if(reqSubFilter==="pending" && eff!=="pending") return false;
+            if(reqSubFilter==="done"    && eff!=="done")    return false;
+            // Search
+            if(reqSearch) {
+              const q = reqSearch.toLowerCase();
+              if(!(pr.lrNo||"").toLowerCase().includes(q) &&
+                 !(pr.truckNo||"").toLowerCase().includes(q) &&
+                 !(pr.createdBy||"").toLowerCase().includes(q) &&
+                 !(pr.recipientName||"").toLowerCase().includes(q) &&
+                 !(pr.accountNo||"").toLowerCase().includes(q)) return false;
+            }
+            return true;
+          }).sort((a,b)=>{
             // Stable sort: pending first, then by createdAt desc
             if(a.status==="pending" && b.status!=="pending") return -1;
             if(a.status!=="pending" && b.status==="pending") return 1;
@@ -12418,8 +12460,22 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
                   <div style={{fontFamily:"monospace",fontSize:11,color:C.blue}}>{pr.accountNo||"—"}{pr.ifsc?` · ${pr.ifsc}`:""}</div>
                   {pr.notes&&<div style={{color:C.muted,marginTop:4}}>{pr.notes}</div>}
                 </div>
-                {effectiveStatus==="done" && pr.paidAt && (
-                  <div style={{color:C.green,fontSize:11}}>✓ Paid on {pr.paidAt} by {pr.paidBy||"—"}</div>
+                {effectiveStatus==="done" && (
+                  <div style={{background:C.green+"11",border:`1px solid ${C.green}33`,
+                    borderRadius:8,padding:"8px 10px",fontSize:12}}>
+                    <div style={{color:C.green,fontWeight:700,marginBottom:4}}>✓ Payment Done</div>
+                    <div style={{color:C.muted}}>
+                      Requested by <b style={{color:C.text}}>{pr.createdBy||"—"}</b> on {(pr.createdAt||"").slice(0,10)}
+                    </div>
+                    {pr.paidAt && (
+                      <div style={{color:C.muted,marginTop:2}}>
+                        Marked done by <b style={{color:C.text}}>{pr.paidBy||"—"}</b> on {pr.paidAt}
+                      </div>
+                    )}
+                    <div style={{marginTop:4,fontFamily:"monospace",fontSize:11,color:C.blue}}>
+                      {pr.accountNo||"—"}{pr.ifsc?` · ${pr.ifsc}`:""}
+                    </div>
+                  </div>
                 )}
                 {effectiveStatus!=="done" && (()=>{
                   const isOwner = user.role==="owner";
