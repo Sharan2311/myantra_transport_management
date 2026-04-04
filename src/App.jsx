@@ -12055,8 +12055,6 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
               </div>
             );
           })()}
-        </div>
-
           {/* No accounts warning */}
           {recipAccounts.length===0 && accId!=="new" && (
             <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,borderRadius:8,
@@ -12066,6 +12064,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
           )}
           </> /* end showOther/employee dropdown */
           )}
+        </div>
 
         {/* New account form — shown regardless of showOther mode */}
         {accId==="new" && (
