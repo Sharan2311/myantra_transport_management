@@ -809,6 +809,7 @@ export default function App() {
   const [pumps,       setPumps,       rPu,reloadPumps]       = useDB(DB.getPumps,       []);
   const [indents,        setIndents,        rI,  reloadIndents]       = useDB(DB.getIndents,       []);
   const [pumpPayments,   setPumpPayments,   rPP, reloadPumpPayments] = useDB(DB.getPumpPayments, []);
+  const [dieselRequests, setDieselRequests, rDR, reloadDieselRequests] = useDB(DB.getDieselRequests, []);
   const dbSetPumpPayments = async (val) => { setPumpPayments(val); }; // pump payments saved individually via recordPumpPayment
   const [settings,    setSettings,    rSt,reloadSettings]    = useDB(DB.getSettings,    {tafalPerTrip:300});
   const [driverPays,  setDriverPays,  rDP,reloadDriverPays]  = useDB(DB.getDriverPays,  []);
@@ -907,6 +908,17 @@ export default function App() {
       const nextIds = new Set(next.map(i=>i.id));
       (prev||[]).filter(i=>!nextIds.has(i.id)).forEach(i => DB.deleteIndent(i.id).catch(e=>setSaveErr(e.message)));
       next.forEach(i => DB.saveIndent(i).catch(e => setSaveErr(e.message)));
+      return next;
+    });
+  };
+
+  const dbSetDieselRequests = (updater) => {
+    setDieselRequests(prev => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      const prevIds = new Set((prev||[]).map(r=>r.id));
+      const nextIds = new Set(next.map(r=>r.id));
+      (prev||[]).filter(r=>!nextIds.has(r.id)).forEach(r => DB.deleteDieselRequest(r.id).catch(e=>setSaveErr(e.message)));
+      next.forEach(r => DB.saveDieselRequest(r).catch(e => setSaveErr(e.message)));
       return next;
     });
   };
@@ -1010,6 +1022,7 @@ export default function App() {
     pumps, setPumps:dbSetPumps,
     indents, setIndents:dbSetIndents,
     pumpPayments, setPumpPayments:dbSetPumpPayments,
+    dieselRequests, setDieselRequests:dbSetDieselRequests,
     settings:settings||{tafalPerTrip:300}, setSettings:dbSetSettings,
     driverPays, setDriverPays:dbSetDriverPays,
     expenses, setExpenses:dbSetExpenses,
@@ -1465,7 +1478,7 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
 // Flow: Upload DIs → AI scans → Auto-group by vehicle → User reviews groups
 // (select which DIs merge, set order type + driver rate per DI, group-level fields)
 // → Save All → DB.getNextLR() assigns LR atomically per group
-function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user, log, onClose, employees=[], cashTransfers=[], setCashTransfers }) {
+function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user, log, onClose, employees=[], cashTransfers=[], setCashTransfers, dieselRequests=[], setDieselRequests }) {
 
   // ── Raw scanned items (one per uploaded file) ────────────────────────────────
   // item: { id, file, status, extracted, error }
@@ -1891,6 +1904,26 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           return;
         }
         setTrips(p=>[trip,...(p||[])]);
+        // ── Auto-attach open diesel request for this truck ────────────────
+        if (typeof setDieselRequests === "function") {
+          const openReq = (dieselRequests||[]).find(r => r.truckNo===truckNo && r.status==="open");
+          if (openReq) {
+            const effAmt = openReq.confirmedAmount??openReq.amount;
+            const changed = openReq.confirmedAmount!=null && openReq.confirmedAmount!==openReq.amount;
+            const attach = window.confirm(
+              `⛽ Open Diesel Request found for ${truckNo}\nIndent #${openReq.indentNo} · ₹${effAmt.toLocaleString("en-IN")}${changed?" ⚠ (AMOUNT CHANGED AT PUMP)":""}\n\nAttach to LR ${lrNo}?`
+            );
+            if (attach) {
+              const updReq = {...openReq, status:"attached", tripId:trip.id, lrNo};
+              setDieselRequests(p=>p.map(r=>r.id===openReq.id?updReq:r));
+              await DB.saveDieselRequest(updReq);
+              const updTrip = {...trip, dieselEstimate:effAmt, dieselIndentNo:String(openReq.indentNo)};
+              setTrips(p=>p.map(t=>t.id===trip.id?updTrip:t));
+              await DB.saveTrip(updTrip);
+              log("DIESEL ATTACH", `Indent #${openReq.indentNo} → LR ${lrNo} · ₹${effAmt}`);
+            }
+          }
+        }
         // Wallet advance
         if(trip.cashEmpId && trip.advance>0 && setCashTransfers) {
           const empName = employees.find(e=>e.id===trip.cashEmpId)?.name||trip.cashEmpId;
@@ -1977,6 +2010,26 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           return;
         }
         setTrips(p=>[trip,...(p||[])]);
+        // ── Auto-attach open diesel request for this truck ────────────────
+        if (typeof setDieselRequests === "function") {
+          const openReq = (dieselRequests||[]).find(r => r.truckNo===truckNo && r.status==="open");
+          if (openReq) {
+            const effAmt = openReq.confirmedAmount??openReq.amount;
+            const changed = openReq.confirmedAmount!=null && openReq.confirmedAmount!==openReq.amount;
+            const attach = window.confirm(
+              `⛽ Open Diesel Request found for ${truckNo}\nIndent #${openReq.indentNo} · ₹${effAmt.toLocaleString("en-IN")}${changed?" ⚠ (AMOUNT CHANGED AT PUMP)":""}\n\nAttach to LR ${lrNo}?`
+            );
+            if (attach) {
+              const updReq = {...openReq, status:"attached", tripId:trip.id, lrNo};
+              setDieselRequests(p=>p.map(r=>r.id===openReq.id?updReq:r));
+              await DB.saveDieselRequest(updReq);
+              const updTrip = {...trip, dieselEstimate:effAmt, dieselIndentNo:String(openReq.indentNo)};
+              setTrips(p=>p.map(t=>t.id===trip.id?updTrip:t));
+              await DB.saveTrip(updTrip);
+              log("DIESEL ATTACH", `Indent #${openReq.indentNo} → LR ${lrNo} · ₹${effAmt}`);
+            }
+          }
+        }
         // Wallet advance
         if(trip.cashEmpId && trip.advance>0 && setCashTransfers) {
           const empName = employees.find(e=>e.id===trip.cashEmpId)?.name||trip.cashEmpId;
@@ -4146,7 +4199,7 @@ function SealedInvoiceSheet({ trip, onMerge, onClose, embedded=false }) {
 }
 
 // ─── TRIPS ────────────────────────────────────────────────────────────────────
-function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles, indents, settings, tripType, user, log, driverPays, employees, cashTransfers, setCashTransfers, allTripsLoaded, loadingAllTrips, loadAllTrips}) {
+function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles, indents, settings, tripType, user, log, driverPays, employees, cashTransfers, setCashTransfers, allTripsLoaded, loadingAllTrips, loadAllTrips, dieselRequests=[], setDieselRequests}) {
   const isIn = tripType === "inbound";
   const ac   = isIn ? C.teal : C.accent;
 
@@ -5253,6 +5306,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
             trips={trips} vehicles={vehicles} setVehicles={setVehicles}
             setTrips={setTrips} settings={settings} user={user} log={log}
             employees={employees||[]} cashTransfers={cashTransfers||[]} setCashTransfers={setCashTransfers}
+            dieselRequests={dieselRequests||[]} setDieselRequests={setDieselRequests}
             onClose={()=>setBatchDISheet(false)}
           />
         </Sheet>
@@ -6605,7 +6659,7 @@ function Settlement({trips, setTrips, vehicles, setVehicles, settlements, setSet
 }
 
 // ─── TAFAL MODULE ─────────────────────────────────────────────────────────────
-function TafalMod({trips, vehicles, setVehicles, employees, settings, setSettings, user}) {
+function TafalMod({trips, vehicles, setVehicles, employees, settings, setSettings, user, dieselRequests=[]}) {
   const [month, setMonth] = useState(today().slice(0,7));
   const tafalRate = settings?.tafalPerTrip || 300;
 
@@ -6613,6 +6667,14 @@ function TafalMod({trips, vehicles, setVehicles, employees, settings, setSetting
   const collected   = monthTrips.reduce((s,t) => s+(t.tafal||0), 0);
   const activeEmps  = employees.length || 1;
   const perEmployee = activeEmps>0 ? collected/activeEmps : 0;
+
+  // Indent book range helpers
+  const ibStart = settings?.indentBookStart || null;
+  const ibEnd   = settings?.indentBookEnd   || null;
+  const usedNos = (dieselRequests||[]).map(r=>r.indentNo).filter(Boolean);
+  const maxUsed = usedNos.length > 0 ? Math.max(...usedNos) : (ibStart ? ibStart - 1 : 0);
+  const nextIndentNo = ibStart ? maxUsed + 1 : null;
+  const remaining    = ibStart && ibEnd ? ibEnd - maxUsed : null;
 
   return (
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
@@ -6628,6 +6690,45 @@ function TafalMod({trips, vehicles, setVehicles, employees, settings, setSetting
           <Field label="₹ Per Trip (all vehicles)" value={String(tafalRate)} onChange={v=>setSettings(p=>({...(p||{}),tafalPerTrip:+v}))} type="number" />
           <div style={{color:C.muted,fontSize:12,paddingBottom:14}}>applies to new trips</div>
         </div>
+      </div>
+
+      {/* Indent Book Range */}
+      <div style={{background:C.card,borderRadius:12,padding:"14px 16px"}}>
+        <div style={{color:C.muted,fontSize:12,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>⛽ Diesel Indent Book Range</div>
+        <div style={{color:C.muted,fontSize:12,marginBottom:12}}>
+          Set the serial number range from your current indent book. Numbers are assigned serially — once the range is exhausted, update to the next book's range.
+        </div>
+        <div style={{display:"flex",gap:10,marginBottom:10}}>
+          <Field label="Start Number" half value={String(ibStart||"")}
+            onChange={v=>setSettings(p=>({...(p||{}),indentBookStart:+v||null}))}
+            type="number" placeholder="e.g. 200" />
+          <Field label="End Number" half value={String(ibEnd||"")}
+            onChange={v=>setSettings(p=>({...(p||{}),indentBookEnd:+v||null}))}
+            type="number" placeholder="e.g. 300" />
+        </div>
+        {ibStart && ibEnd && (
+          <div style={{background:C.bg,borderRadius:10,padding:"10px 14px",display:"flex",flexDirection:"column",gap:6}}>
+            <div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:13}}>
+              <span style={{color:C.muted}}>Range: <b style={{color:C.text}}>{ibStart}–{ibEnd}</b></span>
+              <span style={{color:C.muted}}>Next No: <b style={{color:C.orange}}>#{nextIndentNo}</b></span>
+              <span style={{color:C.muted}}>Used: <b style={{color:C.text}}>{usedNos.length}</b></span>
+              <span style={{color:remaining<=10?C.red:C.green,fontWeight:700}}>Remaining: {remaining}</span>
+            </div>
+            {remaining <= 10 && remaining > 0 && (
+              <div style={{color:C.red,fontSize:12,fontWeight:700}}>
+                ⚠ Only {remaining} indent number{remaining!==1?"s":""} left — update range soon
+              </div>
+            )}
+            {remaining <= 0 && (
+              <div style={{color:C.red,fontSize:12,fontWeight:700}}>
+                🚫 Indent book exhausted. Update Start/End range to a new book.
+              </div>
+            )}
+          </div>
+        )}
+        {(!ibStart || !ibEnd) && (
+          <div style={{color:C.orange,fontSize:12}}>⚠ Set start and end numbers to enable auto indent numbering</div>
+        )}
       </div>
 
 
@@ -7533,8 +7634,8 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance, employees, setCas
 }
 
 // ─── DIESEL MODULE ────────────────────────────────────────────────────────────
-function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, driverPays, setDriverPays, user, log, viewOnly=false}) {
-  const [view,        setView]        = useState("pumps");
+function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, driverPays, setDriverPays, user, log, viewOnly=false, dieselRequests=[], setDieselRequests, settings}) {
+  const [view,        setView]        = useState("requests");
   const [pumpSheet,   setPumpSheet]   = useState(false);
   const [scanSheet,   setScanSheet]   = useState(false);
   const [scanResults, setScanResults] = useState(null);
@@ -7545,10 +7646,18 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
   const [payUtr,      setPayUtr]      = useState("");
   const [payPaidTo,   setPayPaidTo]   = useState("");
   const [payNote,     setPayNote]     = useState("");
-  const [expandPump,  setExpandPump]  = useState(null); // expanded pump id
+  const [expandPump,  setExpandPump]  = useState(null);
   const [filterFrom,  setFilterFrom]  = useState("");
   const [filterTo,    setFilterTo]    = useState("");
   const [showFilter,  setShowFilter]  = useState(false);
+
+  // ── Diesel Request state ──────────────────────────────────────────────────
+  const [drSheet,        setDrSheet]        = useState(false);
+  const [drTruckNo,      setDrTruckNo]      = useState("");
+  const [drAmount,       setDrAmount]       = useState("");
+  const [drPumpId,       setDrPumpId]       = useState("");
+  const [drPinDisplay,   setDrPinDisplay]   = useState(null);
+  const [drLastIndentNo, setDrLastIndentNo] = useState(null);
 
   const blankP = {name:"", contact:"", address:"", accountNo:"", ifsc:""};
   const [pf, setPf] = useState(blankP);
@@ -7983,6 +8092,7 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
       </div>
 
       <PillBar items={[
+        {id:"requests", label:`Requests (${(dieselRequests||[]).filter(r=>r.status!=="attached").length})`, color:C.teal},
         {id:"pumps",    label:"By Pump",   color:C.orange},
         {id:"payments", label:`Payments (${(pumpPayments||[]).length})`, color:C.green},
         {id:"indents",  label:`Indents (${confirmedIndents.length})`, color:C.blue},
@@ -8193,6 +8303,165 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
           )}
         </div>
       )}
+
+      {/* ── DIESEL REQUESTS VIEW ── */}
+      {view==="requests" && (()=>{
+        const ibStart = settings?.indentBookStart||null;
+        const ibEnd   = settings?.indentBookEnd||null;
+        const usedNos = (dieselRequests||[]).map(r=>r.indentNo).filter(Boolean);
+        const maxUsed = usedNos.length>0 ? Math.max(...usedNos) : (ibStart ? ibStart-1 : 0);
+        const nextNo  = ibStart ? maxUsed+1 : null;
+        const remaining = (ibStart&&ibEnd) ? ibEnd-maxUsed : null;
+
+        const createRequest = async () => {
+          if (!drTruckNo.trim()) { alert("Enter truck number"); return; }
+          if (!drAmount || +drAmount<=0) { alert("Enter indent amount"); return; }
+          if (!ibStart||!ibEnd) { alert("Set Indent Book range in Settings → TAFAL tab first."); return; }
+          if (nextNo>ibEnd) { alert(`Indent book exhausted (${ibStart}–${ibEnd}). Update range in Settings → TAFAL tab.`); return; }
+          const pin = String(Math.floor(1000+Math.random()*9000));
+          const req = {
+            id:uid(), indentNo:nextNo,
+            truckNo:drTruckNo.trim().toUpperCase(),
+            pumpId:drPumpId||null,
+            amount:+drAmount,
+            date:today(), pin, status:"open",
+            confirmedAmount:null, confirmedReason:null, confirmedAt:null,
+            tripId:null, lrNo:null,
+            createdBy:user.username, createdAt:nowTs(),
+          };
+          setDieselRequests(p=>[req,...(p||[])]);
+          await DB.saveDieselRequest(req);
+          log("DIESEL REQUEST",`Indent #${nextNo} · ${req.truckNo} · ₹${req.amount}`);
+          setDrPinDisplay(pin); setDrLastIndentNo(nextNo);
+          setDrTruckNo(""); setDrAmount(""); setDrPumpId("");
+        };
+
+        return (
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+
+            {/* Indent book status bar */}
+            {(ibStart&&ibEnd) ? (
+              <div style={{background:C.card,borderRadius:10,padding:"10px 14px",
+                display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+                <div style={{fontSize:12,color:C.muted}}>
+                  Book <b style={{color:C.text}}>{ibStart}–{ibEnd}</b>
+                  {" · "}Next: <b style={{color:C.orange}}>#{nextNo}</b>
+                  {" · "}Remaining: <b style={{color:remaining<=10?C.red:C.green}}>{remaining}</b>
+                </div>
+                {remaining<=10&&remaining>0&&<Badge label={`Only ${remaining} left!`} color={C.red}/>}
+                {remaining<=0&&<Badge label="Book Exhausted" color={C.red}/>}
+              </div>
+            ) : (
+              <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,
+                borderRadius:10,padding:"10px 14px",fontSize:12,color:C.orange}}>
+                ⚠ Set Indent Book Start/End in Settings → TAFAL tab before creating requests
+              </div>
+            )}
+
+            {/* Create request form */}
+            {!viewOnly && (
+              <div style={{background:C.card,borderRadius:12,padding:"14px 16px",
+                display:"flex",flexDirection:"column",gap:10}}>
+                <div style={{color:C.teal,fontWeight:700,fontSize:13}}>+ New Diesel Request</div>
+                <div style={{display:"flex",gap:8}}>
+                  <div style={{flex:1}}>
+                    <Field label="Truck No" value={drTruckNo} onChange={setDrTruckNo} placeholder="KA32AB1234"/>
+                  </div>
+                  <div style={{flex:1}}>
+                    <Field label="Amount ₹" value={drAmount} onChange={setDrAmount} type="number" placeholder="10000"/>
+                  </div>
+                </div>
+                <Field label="Petrol Pump (optional)"
+                  value={drPumpId} onChange={setDrPumpId}
+                  opts={[{v:"",l:"— No pump selected —"},...(pumps||[]).map(p=>({v:p.id,l:p.name}))]}/>
+                <Btn onClick={createRequest} full color={C.teal}>
+                  ⛽ Generate Indent #{nextNo||"—"} + Driver PIN
+                </Btn>
+
+                {/* PIN reveal after creation */}
+                {drPinDisplay && (
+                  <div style={{background:C.teal+"11",border:`2px solid ${C.teal}`,
+                    borderRadius:12,padding:"16px",textAlign:"center"}}>
+                    <div style={{color:C.muted,fontSize:11,marginBottom:4}}>
+                      INDENT #{drLastIndentNo} · DRIVER PIN
+                    </div>
+                    <div style={{fontFamily:"monospace",fontSize:44,fontWeight:800,
+                      color:C.teal,letterSpacing:10}}>{drPinDisplay}</div>
+                    <div style={{color:C.muted,fontSize:11,marginTop:8,lineHeight:1.5}}>
+                      Tell this PIN to the driver before he leaves.<br/>
+                      Pump must enter this PIN to change the amount.
+                    </div>
+                    <Btn onClick={()=>setDrPinDisplay(null)} sm outline color={C.muted}
+                      style={{marginTop:10}}>Dismiss</Btn>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Requests list */}
+            {(dieselRequests||[]).length===0 && (
+              <div style={{textAlign:"center",color:C.muted,padding:40}}>
+                No diesel requests yet. Create one above before dispatching a truck.
+              </div>
+            )}
+            {[...(dieselRequests||[])].sort((a,b)=>b.indentNo-a.indentNo).map(req=>{
+              const pump    = pumps.find(p=>p.id===req.pumpId);
+              const statusColor = req.status==="attached"?C.green:req.status==="confirmed"?C.teal:C.orange;
+              const effAmt  = req.confirmedAmount??req.amount;
+              const changed = req.confirmedAmount!=null && req.confirmedAmount!==req.amount;
+              return (
+                <div key={req.id} style={{background:C.card,borderRadius:12,padding:"12px 14px",
+                  borderLeft:`3px solid ${statusColor}`}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontWeight:800,fontSize:14}}>
+                        <span style={{color:C.orange}}>#{req.indentNo}</span>
+                        {" · "}{req.truckNo}
+                      </div>
+                      <div style={{color:C.muted,fontSize:12,marginTop:2}}>
+                        {req.date}{pump?" · "+pump.name:""}
+                      </div>
+                      {req.status!=="attached" && (
+                        <div style={{color:C.muted,fontSize:11,marginTop:2}}>
+                          Driver PIN: <b style={{fontFamily:"monospace",fontSize:15,color:C.teal,letterSpacing:3}}>{req.pin}</b>
+                        </div>
+                      )}
+                      {req.lrNo && (
+                        <div style={{color:C.green,fontSize:11,marginTop:2}}>✓ Attached to LR {req.lrNo}</div>
+                      )}
+                      {changed && (
+                        <div style={{color:C.orange,fontSize:11,marginTop:2}}>
+                          ⚠ Amount changed: ₹{req.amount.toLocaleString("en-IN")} → ₹{req.confirmedAmount.toLocaleString("en-IN")}
+                          {req.confirmedReason&&<span style={{color:C.muted}}> ({req.confirmedReason})</span>}
+                        </div>
+                      )}
+                    </div>
+                    <div style={{textAlign:"right",flexShrink:0,marginLeft:10}}>
+                      <div style={{fontWeight:800,fontSize:16,color:statusColor}}>
+                        {fmt(effAmt)}
+                      </div>
+                      <Badge label={req.status.toUpperCase()} color={statusColor}/>
+                      {user.role==="owner" && req.status==="open" && (
+                        <div style={{marginTop:6}}>
+                          <button onClick={async()=>{
+                            if(!window.confirm(`Delete indent #${req.indentNo} for ${req.truckNo}? This cannot be undone.`)) return;
+                            setDieselRequests(p=>p.filter(r=>r.id!==req.id));
+                            await DB.deleteDieselRequest(req.id);
+                            log("DELETE DIESEL REQUEST",`Indent #${req.indentNo} · ${req.truckNo}`);
+                          }} style={{background:"none",border:`1px solid ${C.red}55`,borderRadius:6,
+                            color:C.red,fontSize:11,padding:"3px 8px",cursor:"pointer"}}>
+                            🗑 Delete
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })()}
 
       {/* ── ALL CONFIRMED INDENTS ── */}
       {view==="indents" && (

@@ -264,6 +264,42 @@ const pumpPaymentToDB = p => ({
   created_by: p.createdBy, created_at: p.createdAt,
 })
 
+// ── Diesel Requests (pre-trip indent requests sent to pump) ──────────────────
+const dieselRequestFromDB = r => ({
+  id: r.id,
+  indentNo:        r.indent_no,           // serial number from indent book
+  truckNo:         r.truck_no,
+  pumpId:          r.pump_id||null,
+  amount:          +(r.amount||0),        // original LR amount
+  date:            r.date||"",
+  pin:             r.pin||"",             // 4-digit driver consent PIN
+  status:          r.status||"open",     // open | confirmed | attached
+  confirmedAmount: r.confirmed_amount!=null ? +(r.confirmed_amount) : null,
+  confirmedReason: r.confirmed_reason||null,
+  confirmedAt:     r.confirmed_at||null,
+  tripId:          r.trip_id||null,
+  lrNo:            r.lr_no||null,
+  createdBy:       r.created_by||"",
+  createdAt:       r.created_at||"",
+})
+const dieselRequestToDB = r => ({
+  id:               r.id,
+  indent_no:        r.indentNo,
+  truck_no:         r.truckNo,
+  pump_id:          r.pumpId||null,
+  amount:           r.amount,
+  date:             r.date||"",
+  pin:              r.pin||"",
+  status:           r.status||"open",
+  confirmed_amount: r.confirmedAmount!=null ? r.confirmedAmount : null,
+  confirmed_reason: r.confirmedReason||null,
+  confirmed_at:     r.confirmedAt||null,
+  trip_id:          r.tripId||null,
+  lr_no:            r.lrNo||null,
+  created_by:       r.createdBy||"",
+  created_at:       r.createdAt||"",
+})
+
 const fetchAll = async (table, fromDB) => {
   const { data, error } = await supabase.from(table).select('*').order('id')
   if (error) throw error
@@ -449,4 +485,21 @@ export const DB = {
     const { error } = await supabase.from('mye_settings').upsert({ key: 'app_settings', value: val })
     if (error) throw error
   },
+
+  // Diesel Requests — pre-trip indent requests sent to pump before LR is generated
+  getDieselRequests: async () => {
+    try {
+      const { data, error } = await supabase
+        .from('mye_diesel_requests')
+        .select('*')
+        .order('indent_no', { ascending: false })
+      if (error) throw error
+      return (data||[]).map(dieselRequestFromDB)
+    } catch(e) {
+      console.warn('mye_diesel_requests not ready:', e.message)
+      return []
+    }
+  },
+  saveDieselRequest:   r  => upsertOne('mye_diesel_requests', dieselRequestToDB, r),
+  deleteDieselRequest: id => deleteOne('mye_diesel_requests', id),
 }
