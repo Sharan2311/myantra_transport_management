@@ -41,6 +41,7 @@ const ROLES = {
   fleet_manager: {label:"Cement Fleet Manager",color:C.teal,    perms:["cement_trips","billing","diesel_view","driverPay_view"]},
   operator:      {label:"Trip Operator",       color:C.teal,    perms:["trips","billing","diesel"]},
   accounts:      {label:"Accounts",            color:C.purple,  perms:["billing","payments","reports","diesel","tafal"]},
+  pump_operator: {label:"Pump Operator",       color:C.orange,  perms:["pump_portal"]},
   viewer:        {label:"Viewer",              color:C.muted,   perms:["reports"]},
 };
 const can = (user, p) => {
@@ -378,7 +379,10 @@ const ErrBanner = ({msg}) => msg ? (
 const MAIN_IDS = ["dashboard","trips","billing","diesel","more"];
 function BottomNav({tab, setTab, user, trips, driverPays, vehicles}) {
   const isFleet = user?.role === "fleet_manager";
-  const items = isFleet ? [
+  const isPump  = user?.role === "pump_operator";
+  const items = isPump ? [
+    {id:"pump_portal", icon:"⛽", label:"Indents", perm:"pump_portal"},
+  ] : isFleet ? [
     {id:"dashboard", icon:"⊞", label:"Home",       perm:null},
     {id:"trips",     icon:"🚚", label:"Trips",      perm:"trips"},
     {id:"billing",   icon:"🧾", label:"Billing",    perm:"billing"},
@@ -1144,6 +1148,7 @@ export default function App() {
     return <Login onLogin={u=>{
       try { sessionStorage.setItem("mye_user", JSON.stringify(u)); } catch{}
       setUser(u);
+      if(u.role==="pump_operator") setTab("pump_portal");
       log("LOGIN",`${u.name} signed in`);
     }} />;
   }
@@ -1245,6 +1250,7 @@ export default function App() {
         {tab==="settlement" && can(user,"settlement") && <Settlement {...sp} />}
         {tab==="tafal"      && can(user,"tafal")      && <TafalMod   {...sp} />}
         {tab==="diesel"     && can(user,"diesel")     && <DieselMod  {...sp} viewOnly={!canEdit(user,"diesel")} />}
+        {tab==="pump_portal"&& can(user,"pump_portal")&& <PumpPortal {...sp} />}
         {tab==="vehicles"   && can(user,"vehicles")   && <Vehicles   {...sp} />}
         {tab==="employees"  && can(user,"employees")  && <Employees  {...sp} />}
         {tab==="payments"   && can(user,"payments")   && <Payments   {...sp} />}
@@ -6668,9 +6674,16 @@ function TafalMod({trips, vehicles, setVehicles, employees, settings, setSetting
   const activeEmps  = employees.length || 1;
   const perEmployee = activeEmps>0 ? collected/activeEmps : 0;
 
-  // Indent book range helpers
+  // Indent book range — local state so saves only on button press
   const ibStart = settings?.indentBookStart || null;
   const ibEnd   = settings?.indentBookEnd   || null;
+  const [ibStartLocal, setIbStartLocal] = useState(String(ibStart||""));
+  const [ibEndLocal,   setIbEndLocal]   = useState(String(ibEnd||""));
+  const [ibSaved,      setIbSaved]      = useState(false);
+  // Sync local state when settings load from DB
+  React.useEffect(()=>{ if(ibStart) setIbStartLocal(String(ibStart)); },[ibStart]);
+  React.useEffect(()=>{ if(ibEnd)   setIbEndLocal(String(ibEnd));     },[ibEnd]);
+
   const usedNos = (dieselRequests||[]).map(r=>r.indentNo).filter(Boolean);
   const maxUsed = usedNos.length > 0 ? Math.max(...usedNos) : (ibStart ? ibStart - 1 : 0);
   const nextIndentNo = ibStart ? maxUsed + 1 : null;
@@ -6699,17 +6712,33 @@ function TafalMod({trips, vehicles, setVehicles, employees, settings, setSetting
           Set the serial number range from your current indent book. Numbers are assigned serially — once the range is exhausted, update to the next book's range.
         </div>
         <div style={{display:"flex",gap:10,marginBottom:10}}>
-          <Field label="Start Number" half value={String(ibStart||"")}
-            onChange={v=>setSettings(p=>({...(p||{}),indentBookStart:+v||null}))}
-            type="number" placeholder="e.g. 200" />
-          <Field label="End Number" half value={String(ibEnd||"")}
-            onChange={v=>setSettings(p=>({...(p||{}),indentBookEnd:+v||null}))}
-            type="number" placeholder="e.g. 300" />
+          <div style={{flex:1}}>
+            <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:4}}>START NUMBER</div>
+            <input type="number" value={ibStartLocal} onChange={e=>setIbStartLocal(e.target.value)}
+              placeholder="e.g. 200"
+              style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,
+                color:C.text,padding:"9px 12px",fontSize:15,boxSizing:"border-box"}} />
+          </div>
+          <div style={{flex:1}}>
+            <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:4}}>END NUMBER</div>
+            <input type="number" value={ibEndLocal} onChange={e=>setIbEndLocal(e.target.value)}
+              placeholder="e.g. 300"
+              style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,
+                color:C.text,padding:"9px 12px",fontSize:15,boxSizing:"border-box"}} />
+          </div>
         </div>
+        <Btn onClick={()=>{
+          const s = parseInt(ibStartLocal,10);
+          const e = parseInt(ibEndLocal,10);
+          if(!s||!e||isNaN(s)||isNaN(e)) { alert("Enter valid start and end numbers"); return; }
+          if(s>=e) { alert("Start must be less than end"); return; }
+          setSettings(p=>({...(p||{}), indentBookStart:s, indentBookEnd:e}));
+          setIbSaved(true); setTimeout(()=>setIbSaved(false),2000);
+        }} full color={ibSaved?C.green:C.teal}>{ibSaved?"✓ Saved!":"Save Indent Book Range"}</Btn>
         {ibStart && ibEnd && (
-          <div style={{background:C.bg,borderRadius:10,padding:"10px 14px",display:"flex",flexDirection:"column",gap:6}}>
+          <div style={{background:C.bg,borderRadius:10,padding:"10px 14px",display:"flex",flexDirection:"column",gap:6,marginTop:10}}>
             <div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:13}}>
-              <span style={{color:C.muted}}>Range: <b style={{color:C.text}}>{ibStart}–{ibEnd}</b></span>
+              <span style={{color:C.muted}}>Active Range: <b style={{color:C.text}}>{ibStart}–{ibEnd}</b></span>
               <span style={{color:C.muted}}>Next No: <b style={{color:C.orange}}>#{nextIndentNo}</b></span>
               <span style={{color:C.muted}}>Used: <b style={{color:C.text}}>{usedNos.length}</b></span>
               <span style={{color:remaining<=10?C.red:C.green,fontWeight:700}}>Remaining: {remaining}</span>
@@ -6727,7 +6756,7 @@ function TafalMod({trips, vehicles, setVehicles, employees, settings, setSetting
           </div>
         )}
         {(!ibStart || !ibEnd) && (
-          <div style={{color:C.orange,fontSize:12}}>⚠ Set start and end numbers to enable auto indent numbering</div>
+          <div style={{color:C.orange,fontSize:12,marginTop:8}}>⚠ Save start and end numbers to enable auto indent numbering</div>
         )}
       </div>
 
@@ -7634,6 +7663,327 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance, employees, setCas
 }
 
 // ─── DIESEL MODULE ────────────────────────────────────────────────────────────
+// ─── PUMP PORTAL ─────────────────────────────────────────────────────────────
+// Dedicated view for pump_operator role — shows only open diesel requests
+// Pump operator can update amount + reason using driver's PIN
+// Once confirmed, PIN is invalidated and request is locked
+function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], user, log}) {
+  const [lrSearch,    setLrSearch]    = useState("");
+  const [selected,    setSelected]    = useState(null); // the request being edited
+  const [newAmount,   setNewAmount]   = useState("");
+  const [reason,      setReason]      = useState("");
+  const [pinEntry,    setPinEntry]    = useState("");
+  const [pinError,    setPinError]    = useState(false);
+  const [confirmed,   setConfirmed]   = useState(null); // last confirmed request snapshot
+  const [step,        setStep]        = useState("list"); // list | review | pin | done
+
+  const openRequests = (dieselRequests||[])
+    .filter(r => r.status==="open")
+    .filter(r => !lrSearch.trim() || r.truckNo.includes(lrSearch.trim().toUpperCase()) || String(r.indentNo).includes(lrSearch.trim()))
+    .sort((a,b)=>b.indentNo-a.indentNo);
+
+  const resetFlow = () => {
+    setSelected(null); setNewAmount(""); setReason("");
+    setPinEntry(""); setPinError(false); setStep("list");
+  };
+
+  const startEdit = (req) => {
+    setSelected(req);
+    setNewAmount(String(req.amount));
+    setReason("");
+    setPinEntry(""); setPinError(false);
+    setStep("review");
+  };
+
+  const keyPress = (k) => {
+    if(pinEntry.length >= 4) return;
+    const next = pinEntry + k;
+    setPinEntry(next);
+    setPinError(false);
+    if(next.length === 4) validatePin(next);
+  };
+
+  const keyDel = () => { setPinEntry(p=>p.slice(0,-1)); setPinError(false); };
+
+  const validatePin = async (pin) => {
+    if(!selected) return;
+    if(pin !== selected.pin) {
+      setPinError(true);
+      setPinEntry("");
+      return;
+    }
+    // PIN correct — confirm the request
+    const effAmt = newAmount && +newAmount > 0 ? +newAmount : selected.amount;
+    const changed = effAmt !== selected.amount;
+    const updReq = {
+      ...selected,
+      status: "confirmed",
+      confirmedAmount: effAmt,
+      confirmedReason: changed ? (reason||"Changed at pump") : null,
+      confirmedAt: nowTs(),
+      pin: "****",  // invalidate PIN — no further edits possible
+    };
+    setDieselRequests(p=>p.map(r=>r.id===selected.id ? updReq : r));
+    await DB.saveDieselRequest(updReq);
+    log("PUMP CONFIRM", `Indent #${selected.indentNo} · ${selected.truckNo} · ₹${effAmt}${changed?` (was ₹${selected.amount})`:""}`)
+    setConfirmed({...updReq, changed, originalAmount: selected.amount});
+    setStep("done");
+  };
+
+  const pump = selected ? pumps.find(p=>p.id===selected?.pumpId) : null;
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+
+      {/* Header */}
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}>
+        <div style={{fontSize:22}}>⛽</div>
+        <div>
+          <div style={{fontWeight:800,fontSize:16,color:C.orange}}>Diesel Indent Portal</div>
+          <div style={{color:C.muted,fontSize:12}}>{user.name} · Pump Operator</div>
+        </div>
+      </div>
+
+      {/* ── STEP: LIST ── */}
+      {step==="list" && (
+        <>
+          <div style={{background:C.card,borderRadius:10,padding:"8px 12px",
+            display:"flex",alignItems:"center",gap:8}}>
+            <span style={{color:C.muted}}>🔍</span>
+            <input value={lrSearch} onChange={e=>setLrSearch(e.target.value)}
+              placeholder="Search by truck no or indent no…"
+              style={{flex:1,background:"none",border:"none",outline:"none",
+                fontSize:14,color:C.text}} />
+            {lrSearch && <span onClick={()=>setLrSearch("")}
+              style={{color:C.muted,cursor:"pointer",fontSize:18}}>×</span>}
+          </div>
+
+          {openRequests.length===0 && (
+            <div style={{textAlign:"center",color:C.muted,padding:48,fontSize:14}}>
+              {lrSearch ? "No matching open requests" : "No open diesel requests"}
+            </div>
+          )}
+
+          {openRequests.map(req=>{
+            const p = pumps.find(x=>x.id===req.pumpId);
+            return (
+              <div key={req.id} style={{background:C.card,borderRadius:12,padding:"14px 16px",
+                borderLeft:`3px solid ${C.orange}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
+                  <div>
+                    <div style={{fontWeight:800,fontSize:15}}>
+                      <span style={{color:C.orange}}>#{req.indentNo}</span>
+                      {" · "}{req.truckNo}
+                    </div>
+                    <div style={{color:C.muted,fontSize:12,marginTop:2}}>
+                      {req.date}{p?" · "+p.name:""}
+                    </div>
+                  </div>
+                  <div style={{fontWeight:800,fontSize:18,color:C.text}}>{fmt(req.amount)}</div>
+                </div>
+                <Btn onClick={()=>startEdit(req)} full color={C.orange}>
+                  Open & Confirm
+                </Btn>
+              </div>
+            );
+          })}
+        </>
+      )}
+
+      {/* ── STEP: REVIEW ── */}
+      {step==="review" && selected && (
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          <button onClick={resetFlow}
+            style={{background:"none",border:"none",color:C.muted,fontSize:13,
+              cursor:"pointer",textAlign:"left",padding:0}}>
+            ← Back to list
+          </button>
+
+          {/* Indent details */}
+          <div style={{background:C.card,borderRadius:12,padding:"14px 16px"}}>
+            <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:10,
+              textTransform:"uppercase",letterSpacing:1}}>Indent Details</div>
+            {[
+              ["Indent No",  `#${selected.indentNo}`],
+              ["Truck",       selected.truckNo],
+              ["Date",        selected.date],
+              ["Pump",        pump?.name||"—"],
+            ].map(([k,v])=>(
+              <div key={k} style={{display:"flex",justifyContent:"space-between",
+                padding:"7px 0",borderBottom:`1px solid ${C.border}22`,fontSize:13}}>
+                <span style={{color:C.muted}}>{k}</span>
+                <span style={{fontWeight:600}}>{v}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* Authorised amount */}
+          <div style={{background:C.orange+"11",border:`2px solid ${C.orange}`,
+            borderRadius:12,padding:"16px",textAlign:"center"}}>
+            <div style={{color:C.orange,fontSize:11,fontWeight:700,
+              textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>
+              Authorised Amount
+            </div>
+            <div style={{fontWeight:800,fontSize:38,color:C.orange}}>{fmt(selected.amount)}</div>
+            <div style={{color:C.muted,fontSize:12,marginTop:4}}>
+              Fill exactly this amount OR enter the actual amount below if different
+            </div>
+          </div>
+
+          {/* Actual amount (only if different) */}
+          <div style={{background:C.card,borderRadius:12,padding:"14px 16px",
+            display:"flex",flexDirection:"column",gap:10}}>
+            <div style={{color:C.text,fontWeight:700,fontSize:13}}>
+              ⚠ Amount Different? Enter Actual
+            </div>
+            <Field label="Actual Amount Filled (₹)"
+              value={newAmount} onChange={setNewAmount} type="number"
+              placeholder={String(selected.amount)} />
+            <Field label="Reason for Change"
+              value={reason} onChange={setReason}
+              opts={[
+                {v:"",           l:"— select reason —"},
+                {v:"no_cash",    l:"No cash available at pump"},
+                {v:"partial",    l:"Partial fill only"},
+                {v:"extra_fill", l:"Extra diesel filled"},
+                {v:"driver_req", l:"Driver requested change"},
+                {v:"other",      l:"Other"},
+              ]} />
+            {newAmount && +newAmount !== selected.amount && !reason && (
+              <div style={{color:C.red,fontSize:12}}>⚠ Select a reason when amount is different</div>
+            )}
+          </div>
+
+          <Btn onClick={()=>{
+            if(newAmount && +newAmount !== selected.amount && !reason) {
+              alert("Select a reason for the amount change"); return;
+            }
+            setStep("pin");
+          }} full color={C.teal}>
+            Proceed to Driver PIN Verification →
+          </Btn>
+        </div>
+      )}
+
+      {/* ── STEP: PIN ── */}
+      {step==="pin" && selected && (
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          <button onClick={()=>setStep("review")}
+            style={{background:"none",border:"none",color:C.muted,fontSize:13,
+              cursor:"pointer",textAlign:"left",padding:0}}>
+            ← Back
+          </button>
+
+          {/* Summary of what will be confirmed */}
+          <div style={{background:C.card,borderRadius:12,padding:"14px 16px"}}>
+            <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:8,
+              textTransform:"uppercase",letterSpacing:1}}>Confirming</div>
+            <div style={{display:"flex",justifyContent:"space-between",fontSize:14,marginBottom:4}}>
+              <span style={{color:C.muted}}>Indent</span>
+              <span style={{fontWeight:700}}>#{selected.indentNo} · {selected.truckNo}</span>
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between",fontSize:14}}>
+              <span style={{color:C.muted}}>Amount</span>
+              <div style={{textAlign:"right"}}>
+                {newAmount && +newAmount !== selected.amount ? (
+                  <>
+                    <span style={{color:C.muted,textDecoration:"line-through",fontSize:12,marginRight:6}}>
+                      {fmt(selected.amount)}
+                    </span>
+                    <span style={{fontWeight:800,color:C.orange,fontSize:16}}>{fmt(+newAmount)}</span>
+                  </>
+                ) : (
+                  <span style={{fontWeight:800,fontSize:16}}>{fmt(selected.amount)}</span>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* PIN entry */}
+          <div style={{background:C.card,borderRadius:12,padding:"16px",textAlign:"center"}}>
+            <div style={{color:C.text,fontWeight:700,fontSize:14,marginBottom:4}}>
+              Driver PIN Required
+            </div>
+            <div style={{color:C.muted,fontSize:12,marginBottom:16}}>
+              Ask the driver for his 4-digit PIN to confirm this transaction
+            </div>
+
+            {/* PIN display */}
+            <div style={{display:"flex",justifyContent:"center",gap:12,marginBottom:20}}>
+              {[0,1,2,3].map(i=>(
+                <div key={i} style={{width:48,height:56,borderRadius:10,
+                  background:C.bg,border:`2px solid ${pinError?C.red:pinEntry.length>i?C.teal:C.border}`,
+                  display:"flex",alignItems:"center",justifyContent:"center",
+                  fontSize:28,fontWeight:800,color:C.teal,
+                  transition:"border-color 0.15s"}}>
+                  {pinEntry.length>i?"●":""}
+                </div>
+              ))}
+            </div>
+
+            {pinError && (
+              <div style={{color:C.red,fontWeight:700,fontSize:13,marginBottom:12}}>
+                ❌ Incorrect PIN — try again
+              </div>
+            )}
+
+            {/* Keypad */}
+            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,maxWidth:280,margin:"0 auto"}}>
+              {["1","2","3","4","5","6","7","8","9"].map(k=>(
+                <button key={k} onClick={()=>keyPress(k)}
+                  style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,
+                    padding:"16px 8px",fontSize:22,fontWeight:700,cursor:"pointer",color:C.text}}>
+                  {k}
+                </button>
+              ))}
+              <div/>
+              <button onClick={()=>keyPress("0")}
+                style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,
+                  padding:"16px 8px",fontSize:22,fontWeight:700,cursor:"pointer",color:C.text}}>
+                0
+              </button>
+              <button onClick={keyDel}
+                style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,
+                  padding:"16px 8px",fontSize:20,cursor:"pointer",color:C.red}}>
+                ⌫
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── STEP: DONE ── */}
+      {step==="done" && confirmed && (
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          <div style={{background:C.green+"11",border:`2px solid ${C.green}`,
+            borderRadius:14,padding:"24px 20px",textAlign:"center"}}>
+            <div style={{fontSize:44,marginBottom:8}}>✅</div>
+            <div style={{fontWeight:800,fontSize:18,color:C.green,marginBottom:4}}>
+              Confirmed & Locked
+            </div>
+            <div style={{fontWeight:800,fontSize:32,color:C.text,marginBottom:8}}>
+              {fmt(confirmed.confirmedAmount)}
+            </div>
+            {confirmed.changed && (
+              <div style={{color:C.orange,fontSize:13,marginBottom:8}}>
+                Original: {fmt(confirmed.originalAmount)} → Changed to {fmt(confirmed.confirmedAmount)}
+                {confirmed.confirmedReason && <div style={{color:C.muted,fontSize:12,marginTop:2}}>{confirmed.confirmedReason}</div>}
+              </div>
+            )}
+            <div style={{color:C.muted,fontSize:12,marginBottom:16}}>
+              Indent #{confirmed.indentNo} · {confirmed.truckNo}<br/>
+              This indent is now locked. PIN is no longer valid.
+            </div>
+            <Btn onClick={()=>{ setConfirmed(null); setStep("list"); }} full color={C.teal}>
+              ← Back to Requests
+            </Btn>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, driverPays, setDriverPays, user, log, viewOnly=false, dieselRequests=[], setDieselRequests, settings}) {
   const [view,        setView]        = useState("requests");
   const [pumpSheet,   setPumpSheet]   = useState(false);
@@ -8421,9 +8771,14 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
                       <div style={{color:C.muted,fontSize:12,marginTop:2}}>
                         {req.date}{pump?" · "+pump.name:""}
                       </div>
-                      {req.status!=="attached" && (
+                      {req.status==="open" && (
                         <div style={{color:C.muted,fontSize:11,marginTop:2}}>
                           Driver PIN: <b style={{fontFamily:"monospace",fontSize:15,color:C.teal,letterSpacing:3}}>{req.pin}</b>
+                        </div>
+                      )}
+                      {req.status==="confirmed" && (
+                        <div style={{color:C.teal,fontSize:11,marginTop:2}}>
+                          ✓ Confirmed by pump — PIN invalidated
                         </div>
                       )}
                       {req.lrNo && (
