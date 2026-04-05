@@ -8151,6 +8151,7 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
   const [showFilter,  setShowFilter]  = useState(false);
 
   // ── Diesel Request state ──────────────────────────────────────────────────
+  const [staleAlertsOpen, setStaleAlertsOpen] = useState(false);
   const [drSheet,        setDrSheet]        = useState(false);
   const [drTruckNo,      setDrTruckNo]      = useState("");
   const [drAmount,       setDrAmount]       = useState("");
@@ -8561,24 +8562,42 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
 
       {/* Stale indent alerts — trips with diesel estimate but no indent scanned */}
       {staleIndentAlerts.length > 0 && (
-        <div style={{background:C.orange+"11",border:`1.5px solid ${C.orange}55`,borderRadius:12,padding:"12px 14px"}}>
-          <div style={{color:C.orange,fontWeight:800,fontSize:13,marginBottom:6}}>
-            ⏰ {staleIndentAlerts.length} Trip{staleIndentAlerts.length>1?"s":""} Missing Diesel Indent
-          </div>
-          <div style={{color:C.muted,fontSize:12,marginBottom:8}}>
-            These trips have a diesel estimate but no pump slip was scanned
-          </div>
-          {staleIndentAlerts.map(t => (
-            <div key={t.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
-              padding:"6px 0",borderBottom:`1px solid ${C.orange}22`}}>
-              <div>
-                <span style={{fontWeight:700,fontSize:13}}>{t.truckNo}</span>
-                <span style={{color:C.muted,fontSize:11,marginLeft:6}}>LR {t.lrNo||"—"} · {t.date}</span>
-                {t.dieselIndentNo && <span style={{color:C.orange,fontSize:11,marginLeft:6}}>Indent#{t.dieselIndentNo}</span>}
+        <div style={{background:C.orange+"11",border:`1.5px solid ${C.orange}55`,borderRadius:12,overflow:"hidden"}}>
+          {/* Header row — always visible, tap to expand/collapse */}
+          <div onClick={()=>setStaleAlertsOpen(p=>!p)}
+            style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+              padding:"12px 14px",cursor:"pointer"}}>
+            <div>
+              <div style={{color:C.orange,fontWeight:800,fontSize:13}}>
+                ⏰ {staleIndentAlerts.length} Trip{staleIndentAlerts.length>1?"s":""} Missing Diesel Indent
               </div>
-              <span style={{color:C.orange,fontWeight:700,fontSize:13}}>₹{(t.dieselEstimate||0).toLocaleString("en-IN")}</span>
+              {!staleAlertsOpen && (
+                <div style={{color:C.muted,fontSize:11,marginTop:2}}>Tap to view details</div>
+              )}
             </div>
-          ))}
+            <div style={{color:C.orange,fontSize:18,fontWeight:700,lineHeight:1}}>
+              {staleAlertsOpen ? "▲" : "▼"}
+            </div>
+          </div>
+          {/* Collapsible list */}
+          {staleAlertsOpen && (
+            <div style={{padding:"0 14px 12px",borderTop:`1px solid ${C.orange}33`}}>
+              <div style={{color:C.muted,fontSize:12,marginBottom:8,marginTop:8}}>
+                These trips have a diesel estimate but no pump slip was scanned
+              </div>
+              {staleIndentAlerts.map(t => (
+                <div key={t.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                  padding:"6px 0",borderBottom:`1px solid ${C.orange}22`}}>
+                  <div>
+                    <span style={{fontWeight:700,fontSize:13}}>{t.truckNo}</span>
+                    <span style={{color:C.muted,fontSize:11,marginLeft:6}}>LR {t.lrNo||"—"} · {t.date}</span>
+                    {t.dieselIndentNo && <span style={{color:C.orange,fontSize:11,marginLeft:6}}>Indent#{t.dieselIndentNo}</span>}
+                  </div>
+                  <span style={{color:C.orange,fontWeight:700,fontSize:13}}>₹{(t.dieselEstimate||0).toLocaleString("en-IN")}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

@@ -417,6 +417,55 @@ export const DB = {
   saveCashTransfer:   t  => upsertOne('mye_cash_transfers', cashTransferToDB, t),
   deleteCashTransfer: id => deleteOne('mye_cash_transfers', id),
 
+  // Diesel Requests
+  getDieselRequests: async () => {
+    try {
+      const { data, error } = await supabase.from('mye_diesel_requests').select('*').order('created_at', {ascending:false});
+      if(error) throw error;
+      return (data||[]).map(r => ({
+        id: r.id,
+        indentNo: r.indent_no,
+        truckNo: r.truck_no,
+        pumpId: r.pump_id,
+        amount: +(r.amount||0),
+        date: r.date,
+        pin: r.pin,
+        status: r.status,
+        confirmedAmount: r.confirmed_amount!=null ? +(r.confirmed_amount) : null,
+        confirmedReason: r.confirmed_reason,
+        confirmedAt: r.confirmed_at,
+        tripId: r.trip_id,
+        lrNo: r.lr_no,
+        createdBy: r.created_by,
+        createdAt: r.created_at,
+      }));
+    } catch(e) { console.warn('mye_diesel_requests not ready:', e.message); return []; }
+  },
+  saveDieselRequest: async (r) => {
+    const { error } = await supabase.from('mye_diesel_requests').upsert({
+      id: r.id,
+      indent_no: r.indentNo,
+      truck_no: r.truckNo,
+      pump_id: r.pumpId||null,
+      amount: r.amount||0,
+      date: r.date,
+      pin: r.pin,
+      status: r.status||'open',
+      confirmed_amount: r.confirmedAmount??null,
+      confirmed_reason: r.confirmedReason||null,
+      confirmed_at: r.confirmedAt||null,
+      trip_id: r.tripId||null,
+      lr_no: r.lrNo||null,
+      created_by: r.createdBy,
+      created_at: r.createdAt,
+    });
+    if(error) throw error;
+  },
+  deleteDieselRequest: async (id) => {
+    const { error } = await supabase.from('mye_diesel_requests').delete().eq('id', id);
+    if(error) throw error;
+  },
+
   getActivity: async () => {
     const { data, error } = await supabase
       .from('mye_activity').select('*')
