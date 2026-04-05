@@ -1647,6 +1647,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
         shortageRecovery: "0",
         loanRecovery: String(autoLoanG),
       };
+        driverPhone: vehG?.driverPhone || "",  // pre-filled if known
     });
     setGroups(newGroups);
     setGroupsBuilt(true);
@@ -1849,11 +1850,14 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       const truckNo = g.truckNo;
       const existingVeh = vehicles.find(v=>v.truckNo===truckNo);
 
-      // Validate driver phone for new vehicles (now that truckNo is defined)
+      // Validate driver phone for new vehicles
+      const resolvedPhone = existingVeh?.driverPhone
+        || g.driverPhone
+        || groupItems.map(x=>x.extracted?.driverPhone).find(p=>p&&p.trim())
+        || "";
       if(!existingVeh || !existingVeh.driverPhone) {
-        const firstPhone = groupItems.map(x=>x.extracted?.driverPhone).find(p=>p&&p.trim());
-        if(!firstPhone) {
-          setLrError(`Truck ${truckNo}: Driver phone is mandatory. Add it in the Vehicles tab first.`);
+        if(!resolvedPhone || resolvedPhone.replace(/\D/g,"").length!==10) {
+          setLrError(`Truck ${truckNo}: Enter a valid 10-digit driver phone number.`);
           setSaving(false);
           return;
         }
@@ -1861,7 +1865,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
 
       if(truckNo && !existingVeh && !createdTrucksThisBatch.has(truckNo)) {
         const nv = { id:uid(), truckNo, ownerName:"", phone:"",
-          driverName:"", driverPhone:"", driverLicense:"",
+          driverName:"", driverPhone:resolvedPhone, driverLicense:"",
           accountNo:"", ifsc:"", loan:0, loanRecovered:0, deductPerTrip:0,
           tafalExempt:false, shortageOwed:0, shortageRecovered:0,
           loanTxns:[], shortageTxns:[], createdBy:user.username };
@@ -1870,7 +1874,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
         log("AUTO-CREATE VEHICLE", truckNo);
       } else if(existingVeh) {
         // Update driver phone if missing
-        const firstWithPhone = groupItems.find(x=>x.extracted?.driverPhone);
+        const firstWithPhone = resolvedPhone ? {extracted:{driverPhone:resolvedPhone}} : groupItems.find(x=>x.extracted?.driverPhone);
         if(firstWithPhone && !existingVeh.driverPhone) {
           setVehicles(p=>p.map(v=>v.truckNo===truckNo
             ?{...v,driverPhone:firstWithPhone.extracted.driverPhone}:v));
@@ -2375,6 +2379,34 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                   ))}
                 </div>
               </div>
+
+              {/* Driver phone — shown only when vehicle has no phone on record */}
+              {(()=>{
+                const existVeh = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
+                const needsPhone = !existVeh || !existVeh.driverPhone;
+                if(!needsPhone) return null;
+                const phoneOk = (g.driverPhone||"").replace(/\D/g,"").length===10;
+                return (
+                  <div>
+                    <div style={{fontSize:10,fontWeight:700,marginBottom:3,
+                      color:g.driverPhone&&!phoneOk?C.red:C.orange}}>
+                      📱 DRIVER PHONE * (new vehicle — not on record)
+                    </div>
+                    <input type="tel" inputMode="numeric" value={g.driverPhone||""}
+                      onChange={e=>updateGroup(g.id,"driverPhone",e.target.value.replace(/\D/g,"").slice(0,10))}
+                      placeholder="10-digit mobile number"
+                      style={{width:"100%",background:C.bg,
+                        border:`1.5px solid ${g.driverPhone&&!phoneOk?C.red:g.driverPhone?C.green:C.orange}`,
+                        borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,
+                        outline:"none",boxSizing:"border-box"}} />
+                    {g.driverPhone&&phoneOk&&(
+                      <div style={{fontSize:10,color:C.green,marginTop:2,fontWeight:700}}>
+                        ✓ Will be saved to vehicle record
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* Tafal + Diesel */}
               <div style={{display:"flex",gap:10}}>
