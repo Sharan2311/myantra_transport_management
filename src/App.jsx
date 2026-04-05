@@ -775,6 +775,33 @@ function Login({onLogin}) {
 }
 
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
+// ─── ERROR BOUNDARY ──────────────────────────────────────────────────────────
+// Catches render crashes and shows a recoverable error screen instead of blank
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { hasError:false, error:null }; }
+  static getDerivedStateFromError(error) { return { hasError:true, error }; }
+  componentDidCatch(error, info) { console.error("Render crash:", error, info); }
+  render() {
+    if(this.state.hasError) {
+      return (
+        <div style={{padding:32,textAlign:"center",fontFamily:"sans-serif"}}>
+          <div style={{fontSize:40,marginBottom:12}}>⚠️</div>
+          <div style={{fontSize:18,fontWeight:700,marginBottom:8}}>Something went wrong</div>
+          <div style={{fontSize:13,color:"#666",marginBottom:24,maxWidth:320,margin:"0 auto 24px"}}>
+            {this.state.error?.message||"A display error occurred"}
+          </div>
+          <button onClick={()=>{ this.setState({hasError:false,error:null}); window.location.reload(); }}
+            style={{background:"#2563eb",color:"#fff",border:"none",borderRadius:8,
+              padding:"10px 24px",fontSize:14,fontWeight:700,cursor:"pointer"}}>
+            Reload App
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function App() {
   const [user, setUser] = useState(() => {
     try {
@@ -1243,6 +1270,7 @@ export default function App() {
       })()}
 
       <div style={{padding:"14px 16px 8px"}}>
+        <ErrorBoundary>
         {tab==="dashboard"  && <Dashboard {...sp} setTab={setTab} />}
         {tab==="trips"      && can(user,"trips")      && <Trips      {...sp} tripType="outbound" />}
         {tab==="inbound"    && can(user,"inbound")    && <Trips      {...sp} tripType="inbound" />}
@@ -1261,6 +1289,7 @@ export default function App() {
         {tab==="activity"   && can(user,"reports")    && <ActivityLog activity={activity} />}
         {tab==="admin"      && can(user,"admin")      && <UserAdmin  users={users} setUsers={dbSetUsers} user={user} log={log} />}
         {tab==="more"       && <MoreMenu user={user} setTab={setTab} trips={roleTrips} driverPays={driverPays} vehicles={vehicles} />}
+        </ErrorBoundary>
       </div>
       <BottomNav tab={tab} setTab={setTab} user={user} trips={roleTrips} driverPays={driverPays} vehicles={vehicles} />
     </div>
@@ -4618,9 +4647,9 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     setTrips(p => [t, ...(p||[])]);
     log("ADD TRIP", `LR:${t.lrNo} ${t.truckNo}→${t.to} ${t.qty}MT`);
     // If net-to-driver is negative (advance > gross), record excess as a loan
-    {
-      const _gross = t.qty*t.givenRate;
-      const _net   = _gross-(t.advance||0)-(t.tafal||0)-(t.dieselEstimate||0)-(t.shortageRecovery||0)-(t.loanRecovery||0);
+    try {
+      const _gross = (+t.qty||0)*(+t.givenRate||0);
+      const _net   = _gross-(+t.advance||0)-(+t.tafal||0)-(+t.dieselEstimate||0)-(+t.shortageRecovery||0)-(+t.loanRecovery||0);
       if(_net < 0) {
         const overpaid = Math.abs(_net);
         const tn = (t.truckNo||"").toUpperCase().trim();
@@ -4634,7 +4663,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
           log("ADVANCE→LOAN",`LR:${t.lrNo} ${tn} — ₹${overpaid} excess added as loan`);
         }
       }
-    }
+    } catch(e) { console.error("Loan backfill error:", e); }
     // If advance linked to an employee wallet, record the deduction
     // Use t.advance (numeric, from the built trip) not f.advance (string from form state)
     if(t.cashEmpId && t.advance>0) {
