@@ -4616,6 +4616,24 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     });
     setTrips(p => [t, ...(p||[])]);
     log("ADD TRIP", `LR:${t.lrNo} ${t.truckNo}→${t.to} ${t.qty}MT`);
+    // If net-to-driver is negative (advance > gross), record excess as a loan
+    {
+      const _gross = t.qty*t.givenRate;
+      const _net   = _gross-(t.advance||0)-(t.tafal||0)-(t.dieselEstimate||0)-(t.shortageRecovery||0)-(t.loanRecovery||0);
+      if(_net < 0) {
+        const overpaid = Math.abs(_net);
+        const tn = (t.truckNo||"").toUpperCase().trim();
+        const veh = (vehicles||[]).find(v=>v.truckNo===tn);
+        if(veh) {
+          const loanTxn = { id:uid(), type:"loan", date:t.date||today(), amount:overpaid,
+            lrNo:t.lrNo, note:`Excess advance on LR ${t.lrNo} — ₹${overpaid.toLocaleString("en-IN")}` };
+          setVehicles(prev=>prev.map(v=>v.truckNo!==tn?v:{
+            ...v, loan:(v.loan||0)+overpaid, loanTxns:[...(v.loanTxns||[]),loanTxn]
+          }));
+          log("ADVANCE→LOAN",`LR:${t.lrNo} ${tn} — ₹${overpaid} excess added as loan`);
+        }
+      }
+    }
     // If advance linked to an employee wallet, record the deduction
     // Use t.advance (numeric, from the built trip) not f.advance (string from form state)
     if(t.cashEmpId && t.advance>0) {
@@ -6793,7 +6811,11 @@ function TafalMod({trips, vehicles, setVehicles, employees, settings, setSetting
       <div style={{background:C.card,borderRadius:12,padding:"14px 16px"}}>
         <div style={{color:C.muted,fontSize:12,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Global TAFAL Rate</div>
         <div style={{display:"flex",gap:10,alignItems:"flex-end"}}>
-          <Field label="₹ Per Trip (all vehicles)" value={String(tafalRate)} onChange={v=>setSettings(p=>({...(p||{}),tafalPerTrip:+v}))} type="number" />
+          <Field label="₹ Per Trip (all vehicles)" value={String(tafalRate)} onChange={v=>setSettings(p=>{
+            const updated={...(p||{}),tafalPerTrip:+v};
+            DB.saveSettings(updated).catch(e=>console.error("saveSettings:",e));
+            return updated;
+          })} type="number" />
           <div style={{color:C.muted,fontSize:12,paddingBottom:14}}>applies to new trips</div>
         </div>
       </div>
@@ -6825,7 +6847,11 @@ function TafalMod({trips, vehicles, setVehicles, employees, settings, setSetting
           const e = parseInt(ibEndLocal,10);
           if(!s||!e||isNaN(s)||isNaN(e)) { alert("Enter valid start and end numbers"); return; }
           if(s>=e) { alert("Start must be less than end"); return; }
-          setSettings(p=>({...(p||{}), indentBookStart:s, indentBookEnd:e}));
+          setSettings(p=>{
+            const updated = {...(p||{}), indentBookStart:s, indentBookEnd:e};
+            DB.saveSettings(updated).catch(e=>console.error("saveSettings:",e));
+            return updated;
+          });
           setIbSaved(true); setTimeout(()=>setIbSaved(false),2000);
         }} full color={ibSaved?C.green:C.teal}>{ibSaved?"✓ Saved!":"Save Indent Book Range"}</Btn>
         {ibStart && ibEnd && (
@@ -12867,12 +12893,42 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
   const autoSettle = (tripId, extraAmount) => {
     const tw = tripWithBalance.find(t=>t.id===tripId);
     if(!tw) return;
-    const newBalance = Math.max(0, tw.balance - extraAmount);
-    if(newBalance === 0 && !tw.driverSettled) {
+    const newBalance = tw.balance - extraAmount;
+    if(newBalance <= 0 && !tw.driverSettled) {
       setTrips(prev => prev.map(t => t.id===tripId
         ? {...t, driverSettled:true, settledBy:user.username, netPaid:tw.netDue}
         : t));
       log("AUTO SETTLED", `LR:${tw.lrNo} ${tw.truckNo} — balance reached ₹0`);
+    }
+    // ── Overpayment detection: paid more than owed → add to owner's loan ──────
+    // e.g. owed ₹30,000 but paid ₹35,000 → ₹5,000 negative balance = advance/loan
+    if(newBalance < 0) {
+      const overpaid = Math.abs(newBalance);
+      const truckNo  = tw.truckNo;
+      const veh      = (vehicles||[]).find(v=>v.truckNo===truckNo);
+      if(veh) {
+        const loanTxn = {
+          id: uid(),
+          type: "loan",
+          date: today(),
+          amount: overpaid,
+          lrNo: tw.lrNo,
+          note: `Overpayment on LR ${tw.lrNo} — ₹${overpaid.toLocaleString("en-IN")} excess paid`,
+        };
+        const updatedVeh = {
+          ...veh,
+          loan: (veh.loan||0) + overpaid,
+          loanTxns: [...(veh.loanTxns||[]), loanTxn],
+        };
+        setVehicles(prev => prev.map(v => v.truckNo===truckNo ? updatedVeh : v));
+        log("OVERPAYMENT→LOAN", `LR:${tw.lrNo} ${truckNo} — ₹${overpaid} added to loan`);
+        alert(`⚠ Overpayment Detected
+
+Paid ₹${extraAmount.toLocaleString("en-IN")} but owed ₹${tw.balance.toLocaleString("en-IN")}.
+Excess ₹${overpaid.toLocaleString("en-IN")} has been added as a loan for ${veh.ownerName||truckNo} (ref: LR ${tw.lrNo}).
+
+This will auto-recover in the next trip.`);
+      }
     }
   };
 
