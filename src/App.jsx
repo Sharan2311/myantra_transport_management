@@ -1824,6 +1824,18 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       const client     = g.client || ex0.client || DEFAULT_CLIENT;
       const material   = gradeToMaterial(ex0.grade, "outbound");
 
+      // Validate driver phone for new vehicles
+      {
+        const existVeh = (vehicles||[]).find(v=>v.truckNo===truckNo);
+        if(!existVeh || !existVeh.driverPhone) {
+          const firstPhone = groupItems.map(x=>x.extracted?.driverPhone).find(p=>p&&p.trim());
+          if(!firstPhone) {
+            alert(`Truck ${truckNo}: Driver phone number is mandatory for new vehicles.\nPlease add the phone number in the Vehicles tab first, then retry.`);
+            setSaving(false);
+            return;
+          }
+        }
+      }
       // ── Get auto-assigned LR from DB ──────────────────────────────────────
       let lrNo;
       try {
@@ -4475,6 +4487,20 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       }
     }
 
+    // Validate: driver phone mandatory when truck is new or has no phone on record
+    {
+      const existVeh = (vehicles||[]).find(v=>v.truckNo===(f.truckNo||"").toUpperCase().trim());
+      if(!existVeh || !existVeh.driverPhone) {
+        if(!f.driverPhone || !f.driverPhone.trim()) {
+          alert("Driver Phone number is mandatory for new vehicles.\nPlease enter a 10-digit mobile number.\n\nಡ್ರೈವರ್ ಫೋನ್ ನಂಬರ್ ಕಡ್ಡಾಯ.");
+          return;
+        }
+        if(f.driverPhone.replace(/\D/g,"").length !== 10) {
+          alert("Driver Phone must be a 10-digit mobile number.\n\nಡ್ರೈವರ್ ಫೋನ್ 10 ಅಂಕಿಗಳ ಮೊಬೈಲ್ ನಂಬರ್ ಆಗಿರಬೇಕು.");
+          return;
+        }
+      }
+    }
     // Validate: driver rate is mandatory
     if (!f.givenRate || +f.givenRate <= 0) {
       alert("Driver Rate ₹/MT is mandatory.\nPlease enter the rate before saving.\n\nಡ್ರೈವರ್ ರೇಟ್ ₹/MT ಕಡ್ಡಾಯ.\nಸೇವ್ ಮಾಡುವ ಮೊದಲು ದರ ನಮೂದಿಸಿ.");
@@ -5123,7 +5149,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                     </div>
                   </div>
 
-                  {(t.orderType==="party"||t.grFilePath) && (
+                  {(t.orderType==="party"||t.grFilePath||t.invoiceFilePath||(t.diLines||[]).some(dl=>dl.grFilePath||dl.invoiceFilePath)) && (
                     <div style={{padding:"5px 12px 8px",display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",
                       borderTop:"1px solid "+C.border+"33"}}>
                       <Badge label="🤝 Party" color={C.accent} />
@@ -5736,18 +5762,32 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
               </div>
             )}
           </div>
-          {/* Order type toggle in edit — owner can fix godown↔party */}
-          {user.role==="owner" && (
-            <div style={{display:"flex",gap:8,marginBottom:4}}>
-              {["godown","party"].map(ot=>(
-                <button key={ot} onClick={()=>setEditSheet(p=>({...p,orderType:ot}))}
-                  style={{flex:1,padding:"10px",borderRadius:10,cursor:"pointer",fontWeight:700,fontSize:13,
-                    background: editSheet.orderType===ot ? (ot==="party"?C.accent+"33":C.teal+"33") : C.bg,
-                    border:`2px solid ${editSheet.orderType===ot?(ot==="party"?C.accent:C.teal):C.border}`,
-                    color: editSheet.orderType===ot ? (ot==="party"?C.accent:C.teal) : C.muted}}>
-                  {ot==="party"?"🤝 Party Order":"🏭 Godown Order"}
-                </button>
-              ))}
+          {/* Order type toggle — owner switches freely; non-owner can only upgrade godown→party */}
+          {(user.role==="owner" || editSheet.orderType!=="party") && (
+            <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:4}}>
+              <div style={{display:"flex",gap:8}}>
+                {["godown","party"].map(ot=>{
+                  const canSelect = user.role==="owner" || ot==="party";
+                  const isActive  = editSheet.orderType===ot;
+                  return (
+                    <button key={ot}
+                      onClick={()=>{ if(canSelect) setEditSheet(p=>({...p,orderType:ot})); }}
+                      style={{flex:1,padding:"10px",borderRadius:10,
+                        cursor:canSelect?"pointer":"not-allowed",fontWeight:700,fontSize:13,
+                        background: isActive?(ot==="party"?C.accent+"33":C.teal+"33"):C.bg,
+                        border:`2px solid ${isActive?(ot==="party"?C.accent:C.teal):C.border}`,
+                        color: isActive?(ot==="party"?C.accent:C.teal):(canSelect?C.muted:C.border),
+                        opacity: canSelect?1:0.45}}>
+                      {ot==="party"?"🤝 Party Order":"🏭 Godown Order"}
+                    </button>
+                  );
+                })}
+              </div>
+              {user.role!=="owner" && editSheet.orderType==="godown" && (
+                <div style={{fontSize:11,color:C.orange,textAlign:"center"}}>
+                  Tap Party Order to convert — GR and Invoice upload will be required
+                </div>
+              )}
             </div>
           )}
           {/* ── Party file upload section — shown when GR or Invoice is missing ── */}
