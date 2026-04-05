@@ -264,44 +264,18 @@ const pumpPaymentToDB = p => ({
   created_by: p.createdBy, created_at: p.createdAt,
 })
 
-// ── Diesel Requests (pre-trip indent requests sent to pump) ──────────────────
-const dieselRequestFromDB = r => ({
-  id: r.id,
-  indentNo:        r.indent_no,           // serial number from indent book
-  truckNo:         r.truck_no,
-  pumpId:          r.pump_id||null,
-  amount:          +(r.amount||0),        // original LR amount
-  date:            r.date||"",
-  pin:             r.pin||"",             // 4-digit driver consent PIN
-  status:          r.status||"open",     // open | confirmed | attached
-  confirmedAmount: r.confirmed_amount!=null ? +(r.confirmed_amount) : null,
-  confirmedReason: r.confirmed_reason||null,
-  confirmedAt:     r.confirmed_at||null,
-  tripId:          r.trip_id||null,
-  lrNo:            r.lr_no||null,
-  createdBy:       r.created_by||"",
-  createdAt:       r.created_at||"",
-})
-const dieselRequestToDB = r => ({
-  id:               r.id,
-  indent_no:        r.indentNo,
-  truck_no:         r.truckNo,
-  pump_id:          r.pumpId||null,
-  amount:           r.amount,
-  date:             r.date||"",
-  pin:              r.pin||"",
-  status:           r.status||"open",
-  confirmed_amount: r.confirmedAmount!=null ? r.confirmedAmount : null,
-  confirmed_reason: r.confirmedReason||null,
-  confirmed_at:     r.confirmedAt||null,
-  trip_id:          r.tripId||null,
-  lr_no:            r.lrNo||null,
-  created_by:       r.createdBy||"",
-  created_at:       r.createdAt||"",
-})
-
 const fetchAll = async (table, fromDB) => {
   const { data, error } = await supabase.from(table).select('*').order('id')
+  if (error) throw error
+  return (data||[]).map(fromDB)
+}
+
+// Date-limited fetch — loads only last N days, ordered by date desc
+const fetchRecent = async (table, fromDB, dateCol='date', days=120) => {
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const { data, error } = await supabase.from(table).select('*')
+    .gte(dateCol, cutoff)
+    .order(dateCol, { ascending: false })
   if (error) throw error
   return (data||[]).map(fromDB)
 }
@@ -349,22 +323,32 @@ export const DB = {
     }
 
     if(diNos.length > 0) {
-      // Check each DI number against existing trips in DB
+      // Check each DI number against existing trips
+      // Use simple ilike pattern to handle "DI alone" and "DI + otherDI" cases
       for(const diNo of diNos) {
-        const { data: existing } = await supabase
+        const { data: existing, error: qErr } = await supabase
           .from('mye_trips')
           .select('id, lr_no, di_no, truck_no')
-          .or(`di_no.eq.${diNo},di_no.like.${diNo} +%,di_no.like.% + ${diNo},di_no.like.% + ${diNo} +%`)
-          .limit(1);
-        
-        if(existing && existing.length > 0) {
-          const dup = existing[0];
-          return { 
-            success: false, 
-            duplicateDI: diNo,
-            existingLR: dup.lr_no,
-            existingTruck: dup.truck_no,
-          };
+          .ilike('di_no', `%${diNo}%`)
+          .limit(5);
+
+        if(qErr) {
+          console.warn('DI check query error:', qErr.message);
+          // Don't block save if check fails — just proceed
+        } else if(existing && existing.length > 0) {
+          // Verify it's actually this DI (not a partial match like 900338 inside 9003380000)
+          const realDup = existing.find(row => {
+            const parts = (row.di_no||'').split('+').map(s=>s.trim());
+            return parts.includes(diNo);
+          });
+          if(realDup) {
+            return {
+              success: false,
+              duplicateDI: diNo,
+              existingLR: realDup.lr_no,
+              existingTruck: realDup.truck_no,
+            };
+          }
         }
       }
     }
@@ -388,24 +372,24 @@ export const DB = {
   saveEmployee:   e  => upsertOne('mye_employees', employeeToDB, e),
   deleteEmployee: id => deleteOne('mye_employees', id),
 
-  getPayments:    () => fetchAll('mye_payments', paymentFromDB),
+  getPayments:    () => fetchRecent('mye_payments', paymentFromDB, 'payment_date', 120),
   savePayment:    p  => upsertOne('mye_payments', paymentToDB, p),
   deletePayment:  id => deleteOne('mye_payments', id),
 
-  getSettlements: () => fetchAll('mye_settlements', settlementFromDB),
+  getSettlements: () => fetchRecent('mye_settlements', settlementFromDB, 'date', 120),
   saveSettlement: s  => upsertOne('mye_settlements', settlementToDB, s),
 
   getPumps:          () => fetchAll('mye_pumps', pumpFromDB),
   savePump:          p  => upsertOne('mye_pumps', pumpToDB, p),
 
   getPumpPayments: async () => {
-    try { return await fetchAll('mye_pump_payments', pumpPaymentFromDB); }
+    try { return await fetchRecent('mye_pump_payments', pumpPaymentFromDB, 'date', 120); }
     catch(e) { console.warn('mye_pump_payments not ready:', e.message); return []; }
   },
   savePumpPayment:   p  => upsertOne('mye_pump_payments', pumpPaymentToDB, p),
   deletePumpPayment: id => deleteOne('mye_pump_payments', id),
 
-  getIndents:      () => fetchAll('mye_indents', indentFromDB),
+  getIndents:      () => fetchRecent('mye_indents', indentFromDB, 'date', 90),
   saveIndent:      i  => upsertOne('mye_indents', indentToDB, i),
   deleteIndent:    id => deleteOne('mye_indents', id),
   saveManyIndents: async (indents) => {
@@ -413,21 +397,21 @@ export const DB = {
     if (error) throw error
   },
 
-  getDriverPays:   () => fetchAll('mye_driver_payments', driverPayFromDB),
+  getDriverPays:   () => fetchRecent('mye_driver_payments', driverPayFromDB, 'date', 120),
   saveDriverPay:   p  => upsertOne('mye_driver_payments', driverPayToDB, p),
   deleteDriverPay: id => deleteOne('mye_driver_payments', id),
 
-  getExpenses:     () => fetchAll('mye_expenses', expenseFromDB),
+  getExpenses:     () => fetchRecent('mye_expenses', expenseFromDB, 'date', 120),
   saveExpense:     e  => upsertOne('mye_expenses', expenseToDB, e),
   deleteExpense:   id => deleteOne('mye_expenses', id),
 
-  getGstReleases:  () => fetchAll('mye_gst_releases', gstFromDB),
+  getGstReleases:  () => fetchRecent('mye_gst_releases', gstFromDB, 'date', 120),
   saveGstRelease:  g  => upsertOne('mye_gst_releases', gstToDB, g),
   deleteGstRelease:id => deleteOne('mye_gst_releases', id),
 
   // Cash Transfers — employee wallet (credits + advance deductions)
   getCashTransfers: async () => {
-    try { return await fetchAll('mye_cash_transfers', cashTransferFromDB); }
+    try { return await fetchRecent('mye_cash_transfers', cashTransferFromDB, 'date', 120); }
     catch(e) { console.warn('mye_cash_transfers not ready:', e.message); return []; }
   },
   saveCashTransfer:   t  => upsertOne('mye_cash_transfers', cashTransferToDB, t),
@@ -485,21 +469,4 @@ export const DB = {
     const { error } = await supabase.from('mye_settings').upsert({ key: 'app_settings', value: val })
     if (error) throw error
   },
-
-  // Diesel Requests — pre-trip indent requests sent to pump before LR is generated
-  getDieselRequests: async () => {
-    try {
-      const { data, error } = await supabase
-        .from('mye_diesel_requests')
-        .select('*')
-        .order('indent_no', { ascending: false })
-      if (error) throw error
-      return (data||[]).map(dieselRequestFromDB)
-    } catch(e) {
-      console.warn('mye_diesel_requests not ready:', e.message)
-      return []
-    }
-  },
-  saveDieselRequest:   r  => upsertOne('mye_diesel_requests', dieselRequestToDB, r),
-  deleteDieselRequest: id => deleteOne('mye_diesel_requests', id),
 }

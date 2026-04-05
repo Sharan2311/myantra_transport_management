@@ -1734,6 +1734,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
   const saveAll = async () => {
     setLrError("");
     // ── Pre-validate all groups (preserve all original validations) ──────────
+    try {
     for(const g of readyGroups) {
       const groupItems = doneItems.filter(x=>g.diIds.includes(x.id));
 
@@ -1808,6 +1809,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
     }
 
     setSaving(true);
+    setLrError(""); // clear any previous error
     const tafal = settings?.tafalPerTrip||300;
     const createdTrucksThisBatch = new Set();
     const savedLRsThisBatch = [];
@@ -1824,22 +1826,13 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       const client     = g.client || ex0.client || DEFAULT_CLIENT;
       const material   = gradeToMaterial(ex0.grade, "outbound");
 
-      // Validate driver phone for new vehicles
-      {
-        const existVeh = (vehicles||[]).find(v=>v.truckNo===truckNo);
-        if(!existVeh || !existVeh.driverPhone) {
-          const firstPhone = groupItems.map(x=>x.extracted?.driverPhone).find(p=>p&&p.trim());
-          if(!firstPhone) {
-            alert(`Truck ${truckNo}: Driver phone number is mandatory for new vehicles.\nPlease add the phone number in the Vehicles tab first, then retry.`);
-            setSaving(false);
-            return;
-          }
-        }
-      }
       // ── Get auto-assigned LR from DB ──────────────────────────────────────
       let lrNo;
       try {
-        lrNo = await DB.getNextLR(client, material);
+        // Timeout after 10s to prevent infinite hang
+        const lrPromise = DB.getNextLR(client, material);
+        const timeout = new Promise((_,rej) => setTimeout(()=>rej(new Error("Timed out — check internet connection and try again")), 10000));
+        lrNo = await Promise.race([lrPromise, timeout]);
       } catch(e) {
         setLrError(`LR assignment failed for ${g.truckNo}: ${e.message}`);
         setSaving(false);
@@ -1855,6 +1848,17 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       // ── Ensure vehicles registered ────────────────────────────────────────
       const truckNo = g.truckNo;
       const existingVeh = vehicles.find(v=>v.truckNo===truckNo);
+
+      // Validate driver phone for new vehicles (now that truckNo is defined)
+      if(!existingVeh || !existingVeh.driverPhone) {
+        const firstPhone = groupItems.map(x=>x.extracted?.driverPhone).find(p=>p&&p.trim());
+        if(!firstPhone) {
+          setLrError(`Truck ${truckNo}: Driver phone is mandatory. Add it in the Vehicles tab first.`);
+          setSaving(false);
+          return;
+        }
+      }
+
       if(truckNo && !existingVeh && !createdTrucksThisBatch.has(truckNo)) {
         const nv = { id:uid(), truckNo, ownerName:"", phone:"",
           driverName:"", driverPhone:"", driverLicense:"",
@@ -1915,9 +1919,14 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           createdBy:user.username, createdAt:nowTs(),
         };
         // Atomic DB save — checks for duplicate DI before inserting
-        const saveResult = await DB.saveTripSafe(trip);
+        const saveResult = await Promise.race([
+          DB.saveTripSafe(trip),
+          new Promise((_,rej)=>setTimeout(()=>rej(new Error("Save timed out — check connection")),15000))
+        ]).catch(e=>({success:false, duplicateDI:null, existingLR:null, existingTruck:null, error:e.message}));
         if(!saveResult.success) {
-          setLrError(`DI ${saveResult.duplicateDI} already exists in LR ${saveResult.existingLR} (${saveResult.existingTruck}). This trip was not saved — another device may have saved it first.`);
+          setLrError(saveResult.duplicateDI
+            ? `DI ${saveResult.duplicateDI} already exists in LR ${saveResult.existingLR} (${saveResult.existingTruck}). This trip was not saved — another device may have saved it first.`
+            : `Save failed: ${saveResult.error||"Unknown error"}`);
           setSaving(false);
           return;
         }
@@ -2021,9 +2030,14 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           createdBy:user.username, createdAt:nowTs(),
         };
         // Atomic DB save — checks for duplicate DI before inserting
-        const saveResultM = await DB.saveTripSafe(trip);
+        const saveResultM = await Promise.race([
+          DB.saveTripSafe(trip),
+          new Promise((_,rej)=>setTimeout(()=>rej(new Error("Save timed out — check connection")),15000))
+        ]).catch(e=>({success:false, duplicateDI:null, error:e.message}));
         if(!saveResultM.success) {
-          setLrError(`DI ${saveResultM.duplicateDI} already exists in LR ${saveResultM.existingLR} (${saveResultM.existingTruck}). This trip was not saved — another device may have saved it first.`);
+          setLrError(saveResultM.duplicateDI
+            ? `DI ${saveResultM.duplicateDI} already exists in LR ${saveResultM.existingLR} (${saveResultM.existingTruck}). This trip was not saved — another device may have saved it first.`
+            : `Save failed: ${saveResultM.error||"Unknown error"}`);
           setSaving(false);
           return;
         }
@@ -2073,6 +2087,13 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       savedLRsThisBatch.push({lrNo, truckNo, qty: groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0),0), diCount: groupItems.length});
       count++;
     }
+    } catch(err) {
+      console.error("saveAll error:", err);
+      setLrError(`Error: ${err.message || "Unknown error — check internet connection"}. Please try again.`);
+      setSaving(false);
+      return;
+    }
+
 
     setSavedCount(c=>c+count);
     setSavedLRs(prev=>[...savedLRsThisBatch,...prev]);
