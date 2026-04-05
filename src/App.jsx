@@ -1633,7 +1633,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       const ownerVehsG = ownerNameG?(vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerNameG):(vehG?[vehG]:[]);
       const ownerDeductG = ownerVehsG[0]?.deductPerTrip||0;
       const ownerBalG = ownerVehsG.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
-      const autoLoanG = ownerBalG<=0 ? 0 : Math.min(ownerDeductG, ownerBalG);
+      const autoLoanG = ownerBalG<=0 ? 0 : (ownerDeductG>0 ? Math.min(ownerDeductG, ownerBalG) : ownerBalG);
       return {
         id: uid(),
         truckNo,
@@ -4388,7 +4388,8 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     const ownerVehsT = ownerNameT?(vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerNameT):(veh?[veh]:[]);
     const ownerDeductT = ownerVehsT[0]?.deductPerTrip||0;
     const ownerBalT = ownerVehsT.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
-    const autoLoanRecov = ownerBalT<=0 ? 0 : Math.min(ownerDeductT, ownerBalT);
+    // If deductPerTrip is set: cap recovery at that amount. If not set but balance exists: recover full balance.
+    const autoLoanRecov = ownerBalT<=0 ? 0 : (ownerDeductT>0 ? Math.min(ownerDeductT, ownerBalT) : ownerBalT);
     // Find last trip with this truck to pre-fill rate and destination
     const lastTrip = [...trips].filter(t=>t.truckNo===tn&&t.type===tripType).sort((a,b)=>b.date.localeCompare(a.date))[0];
     setF(p => ({
@@ -9607,6 +9608,54 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
             </Btn>
           )}
           {isOwner && <Btn onClick={()=>{setEditId(null);setF(blank);setSheet(true);}} sm>+ Add</Btn>}
+          {isOwner && (
+            <Btn sm outline color={C.red} onClick={()=>{
+              // Backfill: scan all trips for negative net and add to vehicle loan
+              // Skip trips that already have a loanTxn referencing that LR (already processed)
+              let addedCount = 0;
+              const updatedVehicles = [...(vehicles||[])];
+              (trips||[]).forEach(t => {
+                const gross = (t.diLines&&t.diLines.length>1)
+                  ? t.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
+                  : (t.qty||0)*(t.givenRate||0);
+                const net = gross-(t.advance||0)-(t.tafal||0)-(t.dieselEstimate||0)
+                           -(t.shortageRecovery||0)-(t.loanRecovery||0);
+                if(net >= 0) return; // only negative net trips
+                const overpaid = Math.abs(net);
+                const tn = (t.truckNo||"").toUpperCase().trim();
+                const vIdx = updatedVehicles.findIndex(v=>v.truckNo===tn);
+                if(vIdx<0) return;
+                const veh = updatedVehicles[vIdx];
+                // Skip if already recorded (loan txn with this LR exists)
+                if((veh.loanTxns||[]).some(tx=>tx.lrNo===t.lrNo&&tx.type==="loan")) return;
+                const loanTxn = { id:uid(), type:"loan", date:t.date||today(),
+                  amount:overpaid, lrNo:t.lrNo,
+                  note:`Backfill: negative net on LR ${t.lrNo} — ₹${overpaid.toLocaleString("en-IN")}` };
+                updatedVehicles[vIdx] = {
+                  ...veh,
+                  loan: (veh.loan||0)+overpaid,
+                  loanTxns: [...(veh.loanTxns||[]),loanTxn],
+                };
+                addedCount++;
+              });
+              if(addedCount===0){
+                alert("No unrecorded negative-net trips found. All negative balances are already in loan records.");
+                return;
+              }
+              if(!window.confirm(`Found ${addedCount} trip${addedCount>1?"s":""} with negative net balance.
+
+These will be added to the respective vehicle loan records.
+
+Proceed?`)) return;
+              setVehicles(updatedVehicles);
+              log("BACKFILL LOANS",`Added ${addedCount} negative-net trips to vehicle loans`);
+              alert(`✅ Done — ${addedCount} trip${addedCount>1?"s":""} added to vehicle loan records.
+
+The loan recovery will auto-fill on the next trip for each affected vehicle.`);
+            }}>
+              🔄 Backfill Loans
+            </Btn>
+          )}
         </div>
       </div>
 
