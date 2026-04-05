@@ -1646,8 +1646,8 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
         cashEmpId: "",
         shortageRecovery: "0",
         loanRecovery: String(autoLoanG),
+        driverPhone: vehG?.driverPhone || "",
       };
-        driverPhone: vehG?.driverPhone || "",  // pre-filled if known
     });
     setGroups(newGroups);
     setGroupsBuilt(true);
