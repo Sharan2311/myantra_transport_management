@@ -9469,6 +9469,9 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
   const [sSheet,   setSSheet]   = useState(null);  // shortage management
   const [hSheet,   setHSheet]   = useState(null);  // full history
   const [search,   setSearch]   = useState("");
+  const [pdfFrom,  setPdfFrom]  = useState("");
+  const [pdfTo,    setPdfTo]    = useState("");
+  const [showDateFilter, setShowDateFilter] = useState(false);
 
   // Loan txn form
   const [lAmt,  setLAmt]  = useState(""); const [lDate,  setLDate]  = useState(new Date().toISOString().slice(0,10));
@@ -9517,10 +9520,12 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
   const [phoneEditVal, setPhoneEditVal] = useState("");
 
   // ── PDF EXPORT ──────────────────────────────────────────────────────────────
-  const exportVehiclePDF = (v) => {
-    const vtrips = (trips||[]).filter(t => t.truckNo===v.truckNo || t.truck===v.truckNo)
+  const exportVehiclePDF = (v, pdfFrom="", pdfTo="") => {
+    const vtrips = (trips||[]).filter(t => (t.truckNo===v.truckNo || t.truck===v.truckNo)
+                               && (!pdfFrom || t.date>=pdfFrom) && (!pdfTo || t.date<=pdfTo))
                                .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
-    const pays = (driverPays||[]).filter(p => p.truckNo===v.truckNo);
+    const pays = (driverPays||[]).filter(p => p.truckNo===v.truckNo
+                               && (!pdfFrom || p.date>=pdfFrom) && (!pdfTo || p.date<=pdfTo));
     const totalPaid = pays.reduce((s,p)=>s+(p.amount||0),0);
     const ownerNamePDF = (v.ownerName||"").trim();
     const ownerVehsPDF = ownerNamePDF ? (vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerNamePDF) : [v];
@@ -9536,14 +9541,16 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
     const tripRows = vtrips.map(t => {
       const isMultiDI = t.diLines&&t.diLines.length>1;
       const gross = isMultiDI ? t.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0) : (t.qty||0)*(t.givenRate||0);
-      const net = gross-(t.advance||0)-(t.tafal||0)-(t.dieselEstimate||0);
+      // Use actual recorded values — NOT deductPerTrip (which would double-count loanRecovery)
+      const net = gross-(t.advance||0)-(t.tafal||0)-(t.dieselEstimate||0)-(t.shortageRecovery||0)-(t.loanRecovery||0);
       const shortAmt = (t.shortage||0)*(t.givenRate||0);
       return `<tr>
         <td>${t.lrNo||"—"}</td><td>${fmtD(t.date)}</td>
         <td>${t.from||"—"} → ${t.to||"—"}</td><td>${t.qty||0} MT</td>
-        <td>₹${fmt(t.billedToShree||0)}</td><td>₹${fmt(gross)}</td>
+        <td>₹${fmt(t.billedToShree||t.qty*(t.frRate||0)||0)}</td><td>₹${fmt(gross)}</td>
         <td>${(t.shortage||0)>0?`${t.shortage}MT (₹${fmt(shortAmt)})`:"—"}</td>
-        <td>₹${fmt(net)}</td>
+        <td>${t.loanRecovery>0?`-₹${fmt(t.loanRecovery||0)} loan`:""}</td>
+        <td>₹${fmt(Math.max(0,net))}</td>
         <td style="color:${t.driverSettled?"#1a7f37":"#b45309"}">${t.driverSettled?"Settled":"Pending"}</td>
       </tr>`;
     }).join("");
@@ -9574,25 +9581,35 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
 
     const payRows = pays.map(p=>`<tr>
       <td>${fmtD(p.date)}</td><td>${p.lrNo||"—"}</td>
-      <td>${p.referenceNo||"—"}</td><td>₹${fmt(p.amount)}</td><td>${p.note||"—"}</td>
+      <td>${p.utr||p.referenceNo||"—"}</td><td>₹${fmt(p.amount)}</td>
+      <td>${p.paidTo||"—"}</td><td>${p.notes||p.note||"—"}</td>
     </tr>`).join("");
 
     const html = `<style>
       body{font-family:'Segoe UI',Arial,sans-serif;font-size:11px;color:#111;margin:20px}
-      h1{font-size:18px;margin-bottom:2px} h2{font-size:13px;color:#333;margin:18px 0 5px;border-bottom:2px solid #eee;padding-bottom:4px}
+      h1{font-size:18px;margin-bottom:2px;display:flex;align-items:center}
+      h2{font-size:13px;color:#333;margin:18px 0 5px;border-bottom:2px solid #eee;padding-bottom:4px}
       .meta{display:grid;grid-template-columns:1fr 1fr;gap:4px 20px;margin:10px 0 16px;font-size:11px}
       .meta span{color:#555} .meta b{color:#111}
       .kpis{display:flex;gap:12px;margin:12px 0;flex-wrap:wrap}
       .kpi{border:1px solid #ddd;border-radius:6px;padding:8px 14px;min-width:90px;text-align:center}
       .kpi .val{font-size:15px;font-weight:800} .kpi .lbl{font-size:9px;color:#888;margin-top:2px}
       table{width:100%;border-collapse:collapse;margin-bottom:10px;font-size:10px}
-      th{background:#f4f4f4;padding:5px 7px;text-align:left;border:1px solid #ccc;font-size:9px;text-transform:uppercase}
-      td{padding:4px 7px;border:1px solid #e0e0e0} tr:nth-child(even){background:#fafafa}
+      th{background:#1565c0;color:white;padding:5px 7px;text-align:left;border:1px solid #1565c0;font-size:9px;text-transform:uppercase}
+      td{padding:4px 7px;border:1px solid #e0e0e0} tr:nth-child(even){background:#f0f6fc}
       .footer{margin-top:20px;font-size:9px;color:#aaa;border-top:1px solid #eee;padding-top:8px}
       .empty{color:#999;font-style:italic;font-size:11px;padding:6px 0}
     </style>
-    <h1>🚛 Vehicle Report — ${v.truckNo}</h1>
-    <div style="font-size:11px;color:#888">Generated by M Yantra Enterprises · ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}</div>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px">
+      <svg width="42" height="42" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">
+        <rect width="48" height="48" rx="8" fill="#1565c0"/>
+        <text x="24" y="32" font-family="Arial,sans-serif" font-size="20" font-weight="800" fill="white" text-anchor="middle">MY</text>
+      </svg>
+      <div>
+        <div style="font-size:18px;font-weight:800">Vehicle Report — ${v.truckNo}</div>
+        <div style="font-size:11px;color:#888">M Yantra Enterprises · Generated ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}${pdfFrom||pdfTo ? ` · Period: ${pdfFrom||"start"} to ${pdfTo||"today"}` : ""}</div>
+      </div>
+    </div>
     <div class="meta">
       <div><span>Owner: </span><b>${v.ownerName||"—"}</b></div>
       <div><span>Owner Phone: </span><b>${v.phone||"—"}</b></div>
@@ -9610,10 +9627,10 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
     </div>
 
     <h2>📦 Trip History (${vtrips.length})</h2>
-    ${vtrips.length===0?'<div class="empty">No trips recorded.</div>':`<table><tr><th>LR No</th><th>Date</th><th>Route</th><th>Qty</th><th>Billed</th><th>Gross</th><th>Shortage</th><th>Net</th><th>Status</th></tr>${tripRows}</table>`}
+    ${vtrips.length===0?'<div class="empty">No trips recorded.</div>':`<table><tr><th>LR No</th><th>Date</th><th>Route</th><th>Qty</th><th>Billed</th><th>Gross</th><th>Shortage</th><th>Loan Recov.</th><th>Net Pay</th><th>Status</th></tr>${tripRows}</table>`}
 
     <h2>💳 Driver Payment History (${pays.length})</h2>
-    ${pays.length===0?'<div class="empty">No payments recorded.</div>':`<table><tr><th>Date</th><th>LR No</th><th>Reference</th><th>Amount</th><th>Note</th></tr>${payRows}</table>`}
+    ${pays.length===0?'<div class="empty">No payments recorded.</div>':`<table><tr><th>Date</th><th>LR No</th><th>UTR / Reference</th><th>Amount</th><th>Paid To</th><th>Note</th></tr>${payRows}</table>`}
 
     <h2>🏦 ${isMultiVehOwner?"Owner ":""}Loan Ledger — Given (${loanTxns.filter(x=>x.type==="given").length})</h2>
     ${loanGivenRows?`<table><tr><th>Date</th><th>Amount</th><th>Reference</th><th>Account</th>${isMultiVehOwner?"<th>Vehicle</th>":""}<th>Note</th></tr>${loanGivenRows}</table>`:'<div class="empty">No loan disbursements recorded.</div>'}
@@ -9723,7 +9740,8 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
         <KPI icon="🚛" label="Total Vehicles"  value={(vehicles||[]).length} color={C.blue} />
       </div>
 
-      {/* Search */}
+      {/* Search + Date Filter */}
+      <div style={{display:"flex",flexDirection:"column",gap:8}}>
       <div style={{position:"relative"}}>
         <span style={{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)",fontSize:14,color:C.muted,pointerEvents:"none"}}>🔍</span>
         <input value={search} onChange={e=>setSearch(e.target.value)}
@@ -9736,6 +9754,43 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
       </div>
       {search&&<div style={{fontSize:11,color:C.muted}}>{filtered.length} of {(vehicles||[]).length} vehicles</div>}
 
+
+      {/* Date filter for PDF export */}
+      <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+        <button onClick={()=>setShowDateFilter(p=>!p)}
+          style={{background:showDateFilter?C.blue+"22":"transparent",border:`1px solid ${showDateFilter?C.blue:C.border}`,
+            borderRadius:8,color:showDateFilter?C.blue:C.muted,fontSize:11,fontWeight:700,
+            cursor:"pointer",padding:"5px 10px"}}>
+          📅 {showDateFilter?"Hide Date Filter":"PDF Date Filter"}
+        </button>
+        {(pdfFrom||pdfTo) && (
+          <span style={{fontSize:11,color:C.orange,fontWeight:700}}>
+            {pdfFrom||"start"} → {pdfTo||"today"}
+            <button onClick={()=>{setPdfFrom("");setPdfTo("");}}
+              style={{marginLeft:6,background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:12}}>✕</button>
+          </span>
+        )}
+      </div>
+      {showDateFilter && (
+        <div style={{background:C.card,borderRadius:10,padding:"10px 14px",display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
+          <div style={{flex:1,minWidth:120}}>
+            <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>FROM DATE</div>
+            <input type="date" value={pdfFrom} onChange={e=>setPdfFrom(e.target.value)}
+              onClick={e=>e.target.showPicker?.()}
+              style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,
+                color:pdfFrom?C.text:C.muted,padding:"7px 8px",fontSize:12,boxSizing:"border-box"}} />
+          </div>
+          <div style={{flex:1,minWidth:120}}>
+            <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>TO DATE</div>
+            <input type="date" value={pdfTo} onChange={e=>setPdfTo(e.target.value)}
+              onClick={e=>e.target.showPicker?.()}
+              style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,
+                color:pdfTo?C.text:C.muted,padding:"7px 8px",fontSize:12,boxSizing:"border-box"}} />
+          </div>
+          <div style={{fontSize:10,color:C.muted,fontStyle:"italic"}}>PDF will filter trips/payments by date range</div>
+        </div>
+      )}
+      </div>
       {/* ── PHONE-ONLY EDIT SHEET (non-owner) ── */}
       {phoneEditId && (()=>{
         const v = vehicles.find(x=>x.id===phoneEditId);
@@ -10346,7 +10401,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
               <Btn onClick={()=>{resetLoanForm();setLSheet(v.id);}} sm outline color={C.blue}>🏦 Loan</Btn>
               <Btn onClick={()=>{resetShForm();setSSheet(v.id);}} sm outline color={C.red}>⚠ Shortage</Btn>
               <Btn onClick={()=>setHSheet(v.id)} sm outline color={C.purple}>📋 History</Btn>
-              <Btn onClick={()=>exportVehiclePDF(v)} sm outline color={C.orange}>📄 PDF</Btn>
+              <Btn onClick={()=>exportVehiclePDF(v,pdfFrom,pdfTo)} sm outline color={C.orange}>📄 PDF</Btn>
               {v.driverPhone&&(
                 <Btn onClick={()=>window.open(`https://wa.me/91${v.driverPhone.replace(/\D/g,"")}?text=${encodeURIComponent(`Dear ${v.driverName||"Driver"}, this is M Yantra Enterprises. - 9606477257`)}`,`_blank`)} sm outline color={C.teal}>📲 Driver</Btn>
               )}
@@ -10398,7 +10453,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                 </div>
               </div>
 
-              <Btn onClick={()=>exportVehiclePDF(v)} full outline color={C.orange}>📄 Export Full PDF Report</Btn>
+              <Btn onClick={()=>exportVehiclePDF(v,pdfFrom,pdfTo)} full outline color={C.orange}>📄 Export {pdfFrom||pdfTo?"Filtered":"Full"} PDF Report</Btn>
 
               {/* Trips */}
               <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1}}>TRIPS ({vt.length})</div>
