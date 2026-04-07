@@ -6739,7 +6739,7 @@ function Settlement({trips, setTrips, vehicles, setVehicles, settlements, setSet
                 {l:"Gross Pay (Qty × Driver Rate)",           v:calc.gross,              c:C.green,  s:""},
                 {l:"(−) Advance Given",                         v:calc.advance,            c:C.red,    s:"−"},
                 {l:"(−) TAFAL",                                 v:calc.tafal,              c:C.purple, s:"−"},
-                {l:"(−) Loan Deduction / Trip",                 v:calc.loanDeduct,         c:C.red,    s:"−"},
+                ...(calc.loanDeduct>0 && calc.loanDeduct!==calc.loanRecovery ? [{l:"(−) Loan Deduction / Trip", v:calc.loanDeduct, c:C.red, s:"−"}] : []),
                 {l:`(−) Diesel ${usingConfirmed?"(confirmed indents)":"(estimate)"}`,      v:calc.diesel,  c:C.orange, s:"−"},
                 {l:"(−) Shortage Recovery (Shree deduction)",   v:calc.shortageRecovery,   c:calc.shortageRecovery>0?C.red:C.muted, s:"−"},
                 {l:"(−) Loan Recovery (trip deduction)",        v:calc.loanRecovery,       c:calc.loanRecovery>0?C.red:C.muted, s:"−"},
@@ -7462,7 +7462,13 @@ function ScanPaymentBtn({ onResult }) {
 
 // ─── SPLIT PAYMENT SHEET ──────────────────────────────────────────────────────
 // Shown when a scanned payment contains multiple LR numbers
-function SplitPaymentSheet({ scanData, trips, tripWithBalance, employees, setCashTransfers, user, log, onSave, onCancel }) {
+function SplitPaymentSheet({ scanData, trips, tripWithBalance: tripWithBalanceProp, driverPays=[], employees, setCashTransfers, user, log, onSave, onCancel }) {
+  // Recompute live balance using current driverPays (tripWithBalance prop may be stale)
+  const tripWithBalance = React.useMemo(() => (tripWithBalanceProp||[]).map(t => {
+    const paidSoFar = driverPays.filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
+    const balance   = Math.max(0, (t.netDue||0) - paidSoFar);
+    return {...t, paidSoFar, balance};
+  }), [tripWithBalanceProp, driverPays]);
   const totalAmount = +(scanData.amount||0);
   const utr = scanData.referenceNo||"";
   const date = scanData.date||today();
@@ -7525,8 +7531,8 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance, employees, setCas
   const canSave = rows.every(r => r.tripId && +r.amount > 0) &&
     rows.every(r => {
       const t = tripWithBalance.find(x=>x.id===r.tripId);
-      return !t || +r.amount <= t.balance;
-    }) && rows.length > 0 && remaining === 0;
+      return !t || Math.round(+r.amount) <= Math.round(t.balance) + 1;
+    }) && rows.length > 0 && Math.abs(remaining) <= 1;
 
   const handleSave = () => {
     const payments = rows.map(r => {
@@ -7766,12 +7772,12 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance, employees, setCas
                   placeholder={trip ? `Max balance: ${trip.balance}` : "Amount ₹"}
                   style={{background:C.card,border:`1.5px solid ${
                     !row.amount ? C.border :
-                    trip && +row.amount > trip.balance ? C.red :
+                    trip && Math.round(+row.amount) > Math.round(trip.balance) ? C.red :
                     +row.amount > 0 ? C.green : C.border
                   }`,borderRadius:7,
                     color:C.text,padding:"8px 10px",fontSize:14,width:"100%",
                     boxSizing:"border-box",outline:"none"}} />
-                {trip && +row.amount > trip.balance && (
+                {trip && Math.round(+row.amount) > Math.round(trip.balance) + 1 && (
                   <div style={{color:C.red,fontSize:11,marginTop:3,fontWeight:700}}>
                     ⚠ Exceeds balance of {fmt(trip.balance)} — reduce amount
                   </div>
@@ -12996,7 +13002,38 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
 
   const unpaidTrips  = tripWithBalance.filter(t=>t.balance>0);
   const paidTrips    = tripWithBalance.filter(t=>t.balance<=0 && t.netDue>0);
+
+  // "My Requests" — trips in last 4 days where employee has NOT yet sent a payment request
+  // (non-owners only; helps employee know which trips still need a request)
+  const fourDaysAgo = new Date(Date.now()-4*24*60*60*1000).toISOString().split("T")[0];
+  const myReqTrips = user.role!=="owner" ? tripWithBalance.filter(t=>{
+    if(t.date < fourDaysAgo) return false;        // only last 4 days
+    if(t.balance<=0) return false;                // already fully paid
+    if(t.netDue<=0)  return false;                // nothing owed
+    const hasPendingReq = (paymentRequests||[]).some(r=>r.tripId===t.id&&r.status==="pending");
+    const hasDoneReq    = (paymentRequests||[]).some(r=>r.tripId===t.id&&r.status==="done");
+    return !hasPendingReq && !hasDoneReq;          // no request sent yet
+  }) : [];
   const totalBalance = unpaidTrips.reduce((s,t)=>s+t.balance,0);
+
+  // Auto-settle: trips with balance=0 but not marked settled
+  React.useEffect(() => {
+    const toSettle = tripWithBalance.filter(t=>
+      t.balance<=0 && t.netDue>0 && !t.driverSettled && t.paidSoFar>0
+    );
+    if(toSettle.length>0) {
+      setTrips(prev=>prev.map(t=>{
+        const tw = toSettle.find(x=>x.id===t.id);
+        if(!tw) return t;
+        return {...t, driverSettled:true, settledBy:"auto", netPaid:tw.netDue};
+      }));
+      toSettle.forEach(tw=>{
+        const updated = {...tw, driverSettled:true, settledBy:"auto", netPaid:tw.netDue};
+        DB.saveTrip(updated).catch(e=>console.warn("auto-settle saveTrip:",e));
+      });
+    }
+  // eslint-disable-next-line
+  }, [JSON.stringify(tripWithBalance.map(t=>({id:t.id,balance:t.balance,settled:t.driverSettled})))]);
 
   // Auto-settle: called after any payment save — marks trip settled if balance reaches 0
   const autoSettle = (tripId, extraAmount) => {
@@ -13237,6 +13274,7 @@ This will auto-recover in the next trip.`);
       </div>
 
       <PillBar items={[
+        ...(user.role!=="owner" && myReqTrips.length>0 ? [{id:"myreqs", label:`📋 Send Request (${myReqTrips.length})`, color:C.orange}] : []),
         {id:"unpaid",  label:`Unpaid (${unpaidTrips.length})`, color:C.accent},
         {id:"paid",    label:`Paid (${paidTrips.length})`,     color:C.green},
         {id:"all",     label:"All",                            color:C.blue},
@@ -13353,11 +13391,19 @@ This will auto-recover in the next trip.`);
         </div>
       )}
 
-      {/* ── TRIP LIST (unpaid / paid / all) ── */}
+      {/* ── TRIP LIST (unpaid / paid / all / myreqs) ── */}
       {filter!=="history" && filter!=="requests" && (()=>{
-        const base = filter==="unpaid"?unpaidTrips:filter==="paid"?paidTrips:tripWithBalance;
+        const base = filter==="myreqs"?myReqTrips:filter==="unpaid"?unpaidTrips:filter==="paid"?paidTrips:tripWithBalance;
         const shown = histLR ? base.filter(t=>(t.lrNo+t.truckNo).toLowerCase().includes(histLR.toLowerCase())) : base;
-        return shown.map(t=>(
+        return (<>
+          {filter==="myreqs" && (
+            <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,borderRadius:10,
+              padding:"10px 14px",fontSize:12,color:C.orange,marginBottom:4}}>
+              📋 <b>Trips from the last 4 days</b> with no payment request sent yet.<br/>
+              Tap <b>Request Payment</b> on each trip to notify the owner.
+            </div>
+          )}
+          {shown.map(t=>(
         <div key={t.id} style={{background:C.card,borderRadius:14,padding:"14px 16px",borderLeft:`4px solid ${t.balance>0?C.accent:C.green}`,marginBottom:8}}>
           <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
             <div>
@@ -13418,7 +13464,8 @@ This will auto-recover in the next trip.`);
             )}
           </div>
         </div>
-      ));
+          ))}
+        </>);
       })()}
 
       {/* ── REQUESTS TAB ── */}
@@ -13605,6 +13652,7 @@ This will auto-recover in the next trip.`);
           scanData={splitSheet}
           trips={trips}
           tripWithBalance={tripWithBalance}
+          driverPays={driverPays||[]}
           employees={employees||[]}
           setCashTransfers={setCashTransfers}
           user={user}
