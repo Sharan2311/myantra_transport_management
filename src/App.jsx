@@ -133,12 +133,15 @@ function calcNet(t, vehicle, confirmedDiesel) {
     ? t.diLines.reduce((s,d) => s + (d.qty||0) * (d.frRate || t.frRate || 0), 0)
     : (t.qty||0) * (t.frRate||0);
   const tafal            = t.tafal || 0;
+  // loanDeduct = deductPerTrip is only for display reference — NOT subtracted from net
+  // The actual per-trip deduction is recorded as loanRecovery on the trip itself
   const loanDeduct       = vehicle ? (vehicle.deductPerTrip||0) : 0;
   const diesel           = confirmedDiesel != null ? confirmedDiesel : (t.dieselEstimate||0);
   const advance          = t.advance || 0;
   const shortageRecovery = t.shortageRecovery || 0;
   const loanRecovery     = t.loanRecovery || 0;
-  const net              = gross - advance - tafal - loanDeduct - diesel - shortageRecovery - loanRecovery;
+  // Do NOT subtract loanDeduct — it's already captured in loanRecovery on the saved trip
+  const net              = gross - advance - tafal - diesel - shortageRecovery - loanRecovery;
   return {gross, billed, tafal, loanDeduct, diesel, advance, shortageRecovery, loanRecovery, net};
 }
 
@@ -403,7 +406,7 @@ function BottomNav({tab, setTab, user, trips, driverPays, vehicles}) {
     if(t.driverSettled) return false;
     const veh = (vehicles||[]).find(v=>v.truckNo===t.truckNo);
     const gross = (t.qty||0)*(t.givenRate||0);
-    const deducts = (t.advance||0)+(t.tafal||0)+(veh?.deductPerTrip||0)+(t.dieselEstimate||0);
+    const deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)+(t.shortageRecovery||0)+(t.loanRecovery||0);
     const netDue = Math.max(0, gross-deducts);
     const paid = (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
     return netDue>0 && paid<netDue;
@@ -458,7 +461,7 @@ function MoreMenu({user, setTab, trips, driverPays, vehicles}) {
   const unsettled = (trips||[]).filter(t=>{
     if(t.driverSettled) return false;
     const veh=(vehicles||[]).find(v=>v.truckNo===t.truckNo);
-    const netDue=Math.max(0,(t.qty||0)*(t.givenRate||0)-(t.advance||0)-(t.tafal||0)-(veh?.deductPerTrip||0)-(t.dieselEstimate||0)-(t.shortageRecovery||0)-(t.loanRecovery||0));
+    const netDue=Math.max(0,(t.qty||0)*(t.givenRate||0)-(t.advance||0)-(t.tafal||0)-(t.dieselEstimate||0)-(t.shortageRecovery||0)-(t.loanRecovery||0));
     return netDue>0 && (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0)<netDue;
   }).length;
   const tabBadge = {driverPay:unsettled||null, settlement:unsettled||null};
@@ -1073,7 +1076,7 @@ export default function App() {
       if(t.driverSettled) return false;                    // already settled
       const veh = vehicles.find(v=>v.truckNo===t.truckNo);
       const gross   = (t.qty||0)*(t.givenRate||0);
-      const deducts = (t.advance||0)+(t.tafal||0)+(veh?.deductPerTrip||0)+(t.dieselEstimate||0)+((t.shortage||0)*(t.givenRate||0))+(t.shortageRecovery||0)+(t.loanRecovery||0);
+      const deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)+((t.shortage||0)*(t.givenRate||0))+(t.shortageRecovery||0)+(t.loanRecovery||0);
       const netDue  = Math.max(0, gross - deducts);
       if(netDue <= 0) return false;                        // nothing due — not a real trip payment
       const paid = (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
@@ -1084,7 +1087,7 @@ export default function App() {
       if(!toSettle.find(s=>s.id===t.id)) return t;
       const veh = vehicles.find(v=>v.truckNo===t.truckNo);
       const gross   = (t.qty||0)*(t.givenRate||0);
-      const deducts = (t.advance||0)+(t.tafal||0)+(veh?.deductPerTrip||0)+(t.dieselEstimate||0)+((t.shortage||0)*(t.givenRate||0))+(t.shortageRecovery||0)+(t.loanRecovery||0);
+      const deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)+((t.shortage||0)*(t.givenRate||0))+(t.shortageRecovery||0)+(t.loanRecovery||0);
       const netDue  = Math.max(0, gross - deducts);
       return {...t, driverSettled:true, settledBy:"auto", netPaid:netDue};
     }));
@@ -12982,7 +12985,7 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
     const gross    = (t.diLines&&t.diLines.length>1)
       ? t.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
       : (t.qty||0)*(t.givenRate||0);
-    const deducts  = (t.advance||0)+(t.tafal||0)+(veh?.deductPerTrip||0)
+    const deducts  = (t.advance||0)+(t.tafal||0)
                    +(t.dieselEstimate||0)+((t.shortage||0)*(t.givenRate||0))
                    +(t.shortageRecovery||0)+(t.loanRecovery||0);
     const netDue   = Math.max(0, gross - deducts);
@@ -13113,8 +13116,9 @@ This will auto-recover in the next trip.`);
       if(trip && trip.driverSettled) {
         const veh = (vehicles||[]).find(v=>v.truckNo===trip.truckNo);
         const gross   = (trip.qty||0)*(trip.givenRate||0);
-        const deducts = (trip.advance||0)+(trip.tafal||0)+(veh?.deductPerTrip||0)
-                       +(trip.dieselEstimate||0)+((trip.shortage||0)*(trip.givenRate||0));
+        const deducts = (trip.advance||0)+(trip.tafal||0)
+                       +(trip.dieselEstimate||0)+((trip.shortage||0)*(trip.givenRate||0))
+                       +(trip.shortageRecovery||0)+(trip.loanRecovery||0);
         const netDue  = Math.max(0, gross - deducts);
         const paidNow = updatedPays.filter(p=>p.tripId===trip.id).reduce((s,p)=>s+(p.amount||0),0);
         const newBal  = Math.max(0, netDue - paidNow);
@@ -13373,7 +13377,7 @@ This will auto-recover in the next trip.`);
               {l:"Gross (Qty×Rate)",   v:t.gross,      c:C.orange},
               {l:"(−) Advance",        v:t.advance||0, c:C.red},
               {l:"(−) TAFAL",          v:t.tafal||0,   c:C.purple},
-              {l:"(−) Loan/Trip",      v:t.veh?.deductPerTrip||0, c:C.red},
+              {l:"(−) Loan Recovery",  v:t.loanRecovery||0, c:C.red},
               {l:"(−) Diesel est.",    v:t.dieselEstimate||0, c:C.orange},
               {l:"Net Due",            v:t.netDue,     c:C.blue},
               {l:"Paid so far",        v:t.paidSoFar,  c:C.green},
