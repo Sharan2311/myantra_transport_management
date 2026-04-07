@@ -4392,8 +4392,9 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     if((t.truckNo||"").toLowerCase() === q) return true;
     // GR: exact or contains full query
     if((t.grNo||"").toLowerCase().includes(q)) return true;
-    // DI: exact or contains full query (DI numbers are long, substring is fine)
+    // DI: check diNo field AND all diLines for multi-DI trips
     if((t.diNo||"").toLowerCase().includes(q)) return true;
+    if((t.diLines||[]).some(d=>(d.diNo||"").toLowerCase().includes(q))) return true;
     // Destination: word-start match
     if((t.to||"").toLowerCase().startsWith(q)) return true;
     if((t.to||"").toLowerCase().split(/\s+/).some(w=>w.startsWith(q))) return true;
@@ -12564,9 +12565,17 @@ function ShortageRecoverBtn({v, setVehicles, log}) {
 }
 
 // ─── REQUEST PAYMENT SHEET ───────────────────────────────────────────────────
-function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentRequests, setPaymentRequests, user, log, onClose}) {
+function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentRequests, setPaymentRequests, driverPays=[], user, log, onClose}) {
   const t = trip;
   const veh = (vehicles||[]).find(v=>v.truckNo===t.truckNo);
+  // Compute actual balance (trip may not have .balance if coming from raw trips array)
+  const _diGross = (t.diLines&&t.diLines.length>1)
+    ? t.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
+    : (t.qty||0)*(t.givenRate||0);
+  const _deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)+(t.shortageRecovery||0)+(t.loanRecovery||0);
+  const _netDue  = Math.max(0, _diGross - _deducts);
+  const _paidSoFar = (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
+  const _balance = Math.max(0, _netDue - _paidSoFar);
 
   // Build account lists — collect accounts from ALL vehicles of the same owner
   const ownerNameForAcct = (veh?.ownerName||"").trim();
@@ -12603,7 +12612,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
   const [accSearch,  setAccSearch]  = useState(""); // search within account list
   const [accOpen,    setAccOpen]    = useState(false); // dropdown open
   const [showOther,  setShowOther]  = useState(!!editingReq?.accountId && editingReq.accountId!==primaryOwnerAcc); // show alternate accounts
-  const [amount,     setAmount]     = useState(String(editingReq?.amount||t.balance||t.netDue||0));
+  const [amount,     setAmount]     = useState(String(editingReq?.amount||_balance||0));
   const [notes,      setNotes]      = useState(editingReq?.notes||"");
   const [newAcc,     setNewAcc]     = useState({name:"",accountNo:"",ifsc:""});
   const [newAccEmpId,setNewAccEmpId]= useState(""); // which employee to save new account to
@@ -12721,7 +12730,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
           <div><b>{t.truckNo}</b> · LR: <b style={{color:C.blue}}>{t.lrNo||"—"}</b></div>
           <div style={{color:C.muted}}>{t.from}→{t.to} · {t.qty}MT · {t.date}</div>
           <div style={{color:C.accent,fontWeight:800,fontSize:15,marginTop:4}}>
-            Balance: ₹{(t.balance||0).toLocaleString("en-IN")}
+            Balance: ₹{_balance.toLocaleString("en-IN")}
           </div>
         </div>
 
@@ -12759,11 +12768,11 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
         <div>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
             <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase"}}>Bank Account</div>
-            {recipAccounts.length>1 && !showOther && (
+            {!showOther && recipType==="vehicle_owner" && (
               <button onClick={()=>setShowOther(true)}
                 style={{background:"none",border:`1px solid ${C.blue}`,borderRadius:8,
                   color:C.blue,fontSize:11,fontWeight:700,cursor:"pointer",padding:"3px 10px"}}>
-                🔄 Other Account
+                {recipAccounts.length>1 ? "🔄 Other Account" : "➕ Add Account"}
               </button>
             )}
             {showOther && (
@@ -13552,6 +13561,7 @@ This will auto-recover in the next trip.`);
           employees={employees||[]}
           paymentRequests={paymentRequests||[]}
           setPaymentRequests={setPaymentRequests}
+          driverPays={driverPays||[]}
           user={user}
           log={log}
           onClose={()=>setPayReqSheet(null)}

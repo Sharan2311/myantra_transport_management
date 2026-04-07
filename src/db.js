@@ -458,8 +458,8 @@ export const DB = {
       lr_no: r.lrNo||null,
       created_by: r.createdBy,
       created_at: r.createdAt,
-    });
-    if(error) throw error;
+    }, { onConflict: 'id', ignoreDuplicates: false });
+    if(error && !error.message?.includes('duplicate key')) throw error;
   },
   deleteDieselRequest: async (id) => {
     const { error } = await supabase.from('mye_diesel_requests').delete().eq('id', id);
