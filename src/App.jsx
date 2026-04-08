@@ -8620,7 +8620,7 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
       {redAlerts.length > 0 && (
         <DieselAlertBanner
           alerts={redAlerts} trips={trips} indents={indents} user={user}
-          viewOnly={viewOnly}
+          viewOnly={user.role==="fleet_manager" || viewOnly}
           onLink={(alertId, tripId) => linkAlertToTrip(alertId, tripId)}
           onDismiss={(alertId, reason) => dismissAlert(alertId, reason)}
           onDelete={deleteAlert}
