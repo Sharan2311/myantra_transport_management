@@ -1679,6 +1679,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
         shortageRecovery: "0",
         loanRecovery: String(autoLoanG),
         driverPhone: vehG?.driverPhone || "",
+        assignedEmpId: "",
       };
     });
     setGroups(newGroups);
@@ -1768,6 +1769,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
   const saveAll = async () => {
     setLrError("");
     // ── Pre-validate all groups (preserve all original validations) ──────────
+    try {
     try {
     for(const g of readyGroups) {
       const groupItems = doneItems.filter(x=>g.diIds.includes(x.id));
@@ -1949,6 +1951,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           dieselIndentNo:g.dieselIndentNo.trim()||"",
           cashEmpId:g.cashEmpId||"",
           orderType:item.orderType||"godown", diLines:[],
+          assignedEmpId:g.assignedEmpId||"",
           grFilePath:grUrl, invoiceFilePath:invUrl,
           emailSentAt:"", partyEmail:"", batchId:"",
           mergedPdfPath:"", receiptFilePath:"", receiptUploadedAt:"",
@@ -2062,6 +2065,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           // Trip is "party" if ANY DI is party (mixed trips handled correctly)
           orderType: diLines.some(d=>d.orderType==="party") ? "party" : "godown",
           diLines,
+          assignedEmpId:g.assignedEmpId||"",
           emailSentAt:"", partyEmail:"", batchId:"",
           mergedPdfPath:"", receiptFilePath:"", receiptUploadedAt:"",
           sealedInvoicePath:"",
@@ -2541,6 +2545,23 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                   </div>
                 );
               })()}
+
+              {/* Employee assignment */}
+              {(employees||[]).length>0 && (
+                <div>
+                  <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3,textTransform:"uppercase"}}>
+                    👤 Assign Employee (optional)
+                  </div>
+                  <select value={g.assignedEmpId||""} onChange={e=>updateGroup(g.id,"assignedEmpId",e.target.value)}
+                    style={{width:"100%",background:C.bg,border:`1.5px solid ${g.assignedEmpId?C.teal:C.border}`,
+                      borderRadius:8,color:g.assignedEmpId?C.text:C.muted,padding:"7px 8px",fontSize:13,outline:"none"}}>
+                    <option value="">— No employee —</option>
+                    {(employees||[]).map(e=>(
+                      <option key={e.id} value={e.id}>{e.name}{e.role?` (${e.role})`:""}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               {/* Ready indicator */}
               {(()=>{
