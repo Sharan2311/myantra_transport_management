@@ -8221,6 +8221,10 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
   const [drPumpId,       setDrPumpId]       = useState("");
   const [drPinDisplay,   setDrPinDisplay]   = useState(null);
   const [drLastIndentNo, setDrLastIndentNo] = useState(null);
+  const [editReqId,      setEditReqId]      = useState(null); // id of request being edited
+  const [editTruckNo,    setEditTruckNo]    = useState("");
+  const [editAmount,     setEditAmount]     = useState("");
+  const [editPumpId,     setEditPumpId]     = useState("");
 
   const blankP = {name:"", contact:"", address:"", accountNo:"", ifsc:""};
   const [pf, setPf] = useState(blankP);
@@ -8995,9 +8999,11 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
               const statusColor = req.status==="attached"?C.green:req.status==="confirmed"?C.teal:C.orange;
               const effAmt  = req.confirmedAmount??req.amount;
               const changed = req.confirmedAmount!=null && req.confirmedAmount!==req.amount;
+              const isEditing = editReqId===req.id;
+              const canEditReq = (user.role==="owner"||user.role==="fleet_manager"||user.role==="manager") && req.status==="open";
               return (
                 <div key={req.id} style={{background:C.card,borderRadius:12,padding:"12px 14px",
-                  borderLeft:`3px solid ${statusColor}`}}>
+                  borderLeft:`3px solid ${isEditing?C.blue:statusColor}`}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
                     <div style={{flex:1,minWidth:0}}>
                       <div style={{fontWeight:800,fontSize:14}}>
@@ -9032,8 +9038,19 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
                         {fmt(effAmt)}
                       </div>
                       <Badge label={req.status.toUpperCase()} color={statusColor}/>
-                      {user.role==="owner" && (
-                        <div style={{marginTop:6,display:"flex",flexDirection:"column",gap:4}}>
+                      <div style={{marginTop:6,display:"flex",flexDirection:"column",gap:4,alignItems:"flex-end"}}>
+                        {canEditReq && !isEditing && (
+                          <button onClick={()=>{
+                            setEditReqId(req.id);
+                            setEditTruckNo(req.truckNo);
+                            setEditAmount(String(req.amount));
+                            setEditPumpId(req.pumpId||"");
+                          }} style={{background:C.blue+"22",border:`1px solid ${C.blue}55`,borderRadius:6,
+                            color:C.blue,fontSize:11,padding:"3px 8px",cursor:"pointer",fontWeight:700}}>
+                            ✏ Edit
+                          </button>
+                        )}
+                        {user.role==="owner" && !isEditing && (
                           <button onClick={async()=>{
                             const msg = req.status==="open"
                               ? `Delete indent #${req.indentNo} for ${req.truckNo}?\nThe number will be reused for the next request.`
@@ -9046,10 +9063,66 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
                             color:C.red,fontSize:11,padding:"3px 8px",cursor:"pointer"}}>
                             🗑 Delete
                           </button>
-                        </div>
-                      )}
+                        )}
+                      </div>
                     </div>
                   </div>
+
+                  {/* Inline edit form — expands when ✏ Edit is tapped */}
+                  {isEditing && (
+                    <div style={{marginTop:12,paddingTop:12,borderTop:`1px solid ${C.border}`,
+                      display:"flex",flexDirection:"column",gap:10}}>
+                      <div style={{color:C.blue,fontWeight:700,fontSize:12}}>✏ Edit Indent #{req.indentNo}</div>
+                      <div style={{display:"flex",gap:8}}>
+                        <div style={{flex:1}}>
+                          <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>TRUCK NO</div>
+                          <input value={editTruckNo} onChange={e=>setEditTruckNo(e.target.value.toUpperCase())}
+                            style={{width:"100%",boxSizing:"border-box",background:C.bg,
+                              border:`1.5px solid ${C.border}`,borderRadius:8,color:C.text,
+                              padding:"8px 10px",fontSize:13,outline:"none"}} />
+                        </div>
+                        <div style={{flex:1}}>
+                          <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>AMOUNT ₹</div>
+                          <input type="number" value={editAmount} onChange={e=>setEditAmount(e.target.value)}
+                            style={{width:"100%",boxSizing:"border-box",background:C.bg,
+                              border:`1.5px solid ${C.border}`,borderRadius:8,color:C.text,
+                              padding:"8px 10px",fontSize:13,outline:"none"}} />
+                        </div>
+                      </div>
+                      <div>
+                        <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>PETROL PUMP</div>
+                        <select value={editPumpId} onChange={e=>setEditPumpId(e.target.value)}
+                          style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,
+                            borderRadius:8,color:editPumpId?C.text:C.muted,padding:"8px 10px",fontSize:13,outline:"none"}}>
+                          <option value="">— No pump selected —</option>
+                          {(pumps||[]).map(p=>(<option key={p.id} value={p.id}>{p.name}</option>))}
+                        </select>
+                      </div>
+                      <div style={{display:"flex",gap:8}}>
+                        <button onClick={async()=>{
+                          if(!editTruckNo.trim()){alert("Enter truck number");return;}
+                          if(!editAmount||+editAmount<=0){alert("Enter valid amount");return;}
+                          const updated = {...req,
+                            truckNo:editTruckNo.trim().toUpperCase(),
+                            amount:+editAmount,
+                            pumpId:editPumpId||null,
+                          };
+                          setDieselRequests(p=>p.map(r=>r.id===req.id?updated:r));
+                          await DB.saveDieselRequest(updated);
+                          log("EDIT DIESEL REQUEST",`Indent #${req.indentNo} · ${updated.truckNo} · ₹${updated.amount}`);
+                          setEditReqId(null);
+                        }} style={{flex:1,background:C.blue,color:"#fff",border:"none",borderRadius:8,
+                          padding:"9px",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+                          💾 Save Changes
+                        </button>
+                        <button onClick={()=>setEditReqId(null)}
+                          style={{flex:1,background:"none",border:`1.5px solid ${C.border}`,borderRadius:8,
+                            color:C.muted,padding:"9px",fontSize:13,cursor:"pointer"}}>
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               );
             })}
