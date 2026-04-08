@@ -1855,7 +1855,6 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
     // If DI date is empty fall back to today
     const safeTripDate = (diDate) => diDate || today();
 
-    try {
     for(const g of readyGroups) {
       const groupItems = doneItems.filter(x=>g.diIds.includes(x.id));
       const primary    = groupItems[0];
@@ -2129,12 +2128,6 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       }
       savedLRsThisBatch.push({lrNo, truckNo, qty: groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0),0), diCount: groupItems.length});
       count++;
-    }
-    } catch(err) {
-      console.error("saveAll error:", err);
-      setLrError(`Error: ${err.message || "Unknown error — check internet connection"}. Please try again.`);
-      setSaving(false);
-      return;
     }
 
 
