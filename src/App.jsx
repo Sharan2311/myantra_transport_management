@@ -6881,9 +6881,10 @@ function TafalMod({trips, vehicles, setVehicles, employees, settings, setSetting
   React.useEffect(()=>{ if(ibStart) setIbStartLocal(String(ibStart)); },[ibStart]);
   React.useEffect(()=>{ if(ibEnd)   setIbEndLocal(String(ibEnd));     },[ibEnd]);
 
-  const usedNos = (dieselRequests||[]).map(r=>r.indentNo).filter(Boolean);
-  const maxUsed = usedNos.length > 0 ? Math.max(...usedNos) : (ibStart ? ibStart - 1 : 0);
-  const nextIndentNo = ibStart ? maxUsed + 1 : null;
+  const usedNosSet = new Set((dieselRequests||[]).map(r=>r.indentNo).filter(Boolean));
+  let nextIndentNo = ibStart || null;
+  if(ibStart) { while(nextIndentNo && usedNosSet.has(nextIndentNo)) nextIndentNo++; }
+  const maxUsed = usedNosSet.size > 0 ? Math.max(...usedNosSet) : (ibStart ? ibStart - 1 : 0);
   const remaining    = ibStart && ibEnd ? ibEnd - maxUsed : null;
 
   return (
@@ -8888,10 +8889,15 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
       {view==="requests" && (()=>{
         const ibStart = settings?.indentBookStart||null;
         const ibEnd   = settings?.indentBookEnd||null;
-        const usedNos = (dieselRequests||[]).map(r=>r.indentNo).filter(Boolean);
-        const maxUsed = usedNos.length>0 ? Math.max(...usedNos) : (ibStart ? ibStart-1 : 0);
-        const nextNo  = ibStart ? maxUsed+1 : null;
-        const remaining = (ibStart&&ibEnd) ? ibEnd-maxUsed : null;
+        const usedNos = new Set((dieselRequests||[]).map(r=>r.indentNo).filter(Boolean));
+        // Find lowest available number — fills gaps left by deleted indents
+        let nextNo = ibStart || null;
+        if(ibStart) {
+          while(nextNo && usedNos.has(nextNo)) nextNo++;
+          if(ibEnd && nextNo > ibEnd) nextNo = null; // exhausted
+        }
+        const maxUsed = usedNos.size>0 ? Math.max(...usedNos) : (ibStart ? ibStart-1 : 0);
+        const remaining = (ibStart&&ibEnd) ? ibEnd - maxUsed - (nextNo && nextNo <= maxUsed ? 0 : 0) : null;
 
         const createRequest = async () => {
           if (!drTruckNo.trim()) { alert("Enter truck number"); return; }
@@ -9026,13 +9032,16 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
                         {fmt(effAmt)}
                       </div>
                       <Badge label={req.status.toUpperCase()} color={statusColor}/>
-                      {user.role==="owner" && req.status==="open" && (
-                        <div style={{marginTop:6}}>
+                      {user.role==="owner" && (
+                        <div style={{marginTop:6,display:"flex",flexDirection:"column",gap:4}}>
                           <button onClick={async()=>{
-                            if(!window.confirm(`Delete indent #${req.indentNo} for ${req.truckNo}? This cannot be undone.`)) return;
+                            const msg = req.status==="open"
+                              ? `Delete indent #${req.indentNo} for ${req.truckNo}?\nThe number will be reused for the next request.`
+                              : `Delete confirmed indent #${req.indentNo} for ${req.truckNo}?\nThis was already dispensed — only delete if it was recorded in error.`;
+                            if(!window.confirm(msg)) return;
                             setDieselRequests(p=>p.filter(r=>r.id!==req.id));
                             await DB.deleteDieselRequest(req.id);
-                            log("DELETE DIESEL REQUEST",`Indent #${req.indentNo} · ${req.truckNo}`);
+                            log("DELETE DIESEL REQUEST",`Indent #${req.indentNo} · ${req.truckNo} (${req.status})`);
                           }} style={{background:"none",border:`1px solid ${C.red}55`,borderRadius:6,
                             color:C.red,fontSize:11,padding:"3px 8px",cursor:"pointer"}}>
                             🗑 Delete
