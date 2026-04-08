@@ -3,6 +3,7 @@ import { supabase } from './supabase.js'
 
 const tripFromDB = r => ({
   id: r.id, type: r.type, lrNo: r.lr_no, diNo: r.di_no, truckNo: r.truck_no,
+  assignedEmpId: r.assigned_emp_id||'',
   grNo: r.gr_no, consignee: r.consignee, from: r.from, to: r.to, grade: r.grade,
   client: r.client || 'Shree Cement Kodla',
   qty: +r.qty, bags: +r.bags, frRate: +r.fr_rate, givenRate: +r.given_rate,
@@ -41,6 +42,7 @@ const tripFromDB = r => ({
 })
 const tripToDB = t => ({
   id: t.id, type: t.type, lr_no: t.lrNo, di_no: t.diNo, truck_no: t.truckNo,
+  assigned_emp_id: t.assignedEmpId||'',
   gr_no: t.grNo, consignee: t.consignee, from: t.from, to: t.to, grade: t.grade,
   client: t.client || 'Shree Cement Kodla',
   qty: t.qty, bags: t.bags, fr_rate: t.frRate, given_rate: t.givenRate,
@@ -193,11 +195,13 @@ const indentToDB = i => ({
 const driverPayFromDB = r => ({
   id: r.id, tripId: r.trip_id, truckNo: r.truck_no, lrNo: r.lr_no,
   amount: +r.amount, utr: r.utr, date: r.date, notes: r.notes,
+  paidTo: r.paid_to||'',
   createdBy: r.created_by, createdAt: r.created_at,
 })
 const driverPayToDB = p => ({
   id: p.id, trip_id: p.tripId, truck_no: p.truckNo, lr_no: p.lrNo,
   amount: p.amount, utr: p.utr, date: p.date, notes: p.notes,
+  paid_to: p.paidTo||'',
   created_by: p.createdBy, created_at: p.createdAt,
 })
 

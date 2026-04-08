@@ -152,7 +152,7 @@ const mkTrip = (o) => ({
   shortageRecovery:0, loanRecovery:0,
   status:"Pending Bill", invoiceNo:"", paymentStatus:"Unpaid",
   driverSettled:false, dieselEstimate:0,
-  dieselIndentNo:"", // indent number from pump slip — given before loading
+  dieselIndentNo:"", assignedEmpId:"",
   diLines:[], // [{diNo, grNo, qty, bags, givenRate}] — for multi-DI trips
   createdBy:"system", createdAt:nowTs(), ...o
 });
@@ -1752,7 +1752,8 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       if(!item.givenRate || +item.givenRate<=0) return false;
       const frRate = +item.extracted?.frRate||0;
       if(frRate - (+item.givenRate) < 30) return false;
-      if(item.orderType==="party" && (!item.grFile||!item.invoiceFile)) return false;
+      // Only require GR/Invoice for DIs explicitly set as party order
+      if(item.orderType==="party" && checked && (!item.grFile||!item.invoiceFile)) return false;
       // Block if DI already exists in saved trips
       if(checkDupDI(item.extracted?.diNo)) return false;
     }
@@ -2058,7 +2059,8 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           shortageRecovery:+g.shortageRecovery||0,
           loanRecovery:+g.loanRecovery||0,
           cashEmpId:g.cashEmpId||"",
-          orderType:primary.orderType||"godown",
+          // Trip is "party" if ANY DI is party (mixed trips handled correctly)
+          orderType: diLines.some(d=>d.orderType==="party") ? "party" : "godown",
           diLines,
           emailSentAt:"", partyEmail:"", batchId:"",
           mergedPdfPath:"", receiptFilePath:"", receiptUploadedAt:"",
@@ -2595,8 +2597,9 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
 // No manual LR entry — LR is auto-assigned on save.
 // If truck has existing unsettled same-vehicle trips, offer to merge.
 // onConfirm(existingTripOrNull, driverPhone)
-function AskLRSheet({ extracted, trips, vehicles, onConfirm, onCancel }) {
+function AskLRSheet({ extracted, trips, vehicles, employees=[], onConfirm, onCancel }) {
   const [driverPhone, setDriverPhone] = useState("");
+  const [assignedEmpId, setAssignedEmpId] = useState("");
   const [selectedMerge, setSelectedMerge] = useState(null); // trip id to merge into, or "new"
   const truckNo = (extracted.truckNo||"").toUpperCase().trim();
   const existingVehicle = vehicles ? vehicles.find(v => v.truckNo === truckNo) : null;
@@ -2748,8 +2751,30 @@ function AskLRSheet({ extracted, trips, vehicles, onConfirm, onCancel }) {
         </div>
       )}
 
+      {/* Employee assignment — optional, links trip to a driver/employee */}
+      {!duplicateDI && employees.length>0 && (
+        <div>
+          <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",marginBottom:6}}>
+            👤 Assign Employee (optional)
+          </div>
+          <select value={assignedEmpId} onChange={e=>setAssignedEmpId(e.target.value)}
+            style={{width:"100%",background:C.card,border:`1.5px solid ${C.border}`,
+              borderRadius:10,color:assignedEmpId?C.text:C.muted,padding:"10px 12px",fontSize:13,outline:"none"}}>
+            <option value="">— No employee assigned —</option>
+            {employees.map(e=>(
+              <option key={e.id} value={e.id}>{e.name}{e.role?` (${e.role})`:""}</option>
+            ))}
+          </select>
+          {assignedEmpId && (
+            <div style={{fontSize:11,color:C.teal,marginTop:4}}>
+              ✓ Trip will be linked to this employee in Driver Pay
+            </div>
+          )}
+        </div>
+      )}
+
       {!duplicateDI&&(
-        <Btn onClick={()=>onConfirm(selectedTrip||null, driverPhone)} full color={C.blue}
+        <Btn onClick={()=>onConfirm(selectedTrip||null, driverPhone, assignedEmpId)} full color={C.blue}
           disabled={!canConfirm}>
           {selectedTrip ? "Continue → Merge into LR "+selectedTrip.lrNo : "Continue → Fill trip details"}
         </Btn>
@@ -4062,8 +4087,10 @@ function ReceiptUploadSheet({ trip, onMerge, onClose }) {
 
   const handleMerge = async () => {
     if(!receiptFile){setError("Please upload the reply email PDF first.");return;}
-    if(!trip.grFilePath||!trip.invoiceFilePath){
-      setError("GR Copy or Invoice path missing on this trip. Cannot merge.");return;
+    const grPathBatch  = trip.grFilePath  || (trip.diLines||[]).find(d=>d.grFilePath)?.grFilePath;
+    const invPathBatch = trip.invoiceFilePath || (trip.diLines||[]).find(d=>d.invoiceFilePath)?.invoiceFilePath;
+    if(!grPathBatch||!invPathBatch){
+      setError("GR Copy or Invoice missing on this trip. Please upload via Edit Trip first.");return;
     }
     setMerging(true); setError("");
     try {
@@ -4073,8 +4100,8 @@ function ReceiptUploadSheet({ trip, onMerge, onClose }) {
       // Fetch all three source PDFs from Supabase Storage
       const [receiptBuf, grBuf, invoiceBuf] = await Promise.all([
         fetchStorageFile(receiptResult.path),
-        fetchStorageFile(trip.grFilePath),
-        fetchStorageFile(trip.invoiceFilePath),
+        fetchStorageFile(grPathBatch),
+        fetchStorageFile(invPathBatch),
       ]);
 
       // Merge: Receipt Reply (page 1) → GR Copy → Invoice
@@ -4179,8 +4206,11 @@ function SealedInvoiceSheet({ trip, onMerge, onClose, embedded=false }) {
 
   const handleMerge = async () => {
     if(files.length===0){setError("Please upload at least one sealed invoice file.");return;}
-    if(!trip.grFilePath||!trip.invoiceFilePath){
-      setError("GR Copy or Invoice missing on this trip.");return;
+    // For multi-DI trips, GR/Invoice may be on diLines not on trip root
+    const anyGR  = trip.grFilePath || (trip.diLines||[]).find(d=>d.grFilePath)?.grFilePath;
+    const anyInv = trip.invoiceFilePath || (trip.diLines||[]).find(d=>d.invoiceFilePath)?.invoiceFilePath;
+    if(!anyGR||!anyInv){
+      setError("GR Copy or Invoice missing on this trip. Please upload via Edit Trip first.");return;
     }
     setMerging(true); setError("");
     try {
@@ -4207,10 +4237,12 @@ function SealedInvoiceSheet({ trip, onMerge, onClose, embedded=false }) {
       // Upload sealed invoice PDF
       const sealedResult = await uploadPartyFile(trip.id, "sealed_invoice", sealedFile);
 
-      // Fetch GR + original invoice from storage
+      // Fetch GR + original invoice — check diLines for multi-DI trips
+      const grPath  = trip.grFilePath  || (trip.diLines||[]).find(d=>d.grFilePath)?.grFilePath;
+      const invPath = trip.invoiceFilePath || (trip.diLines||[]).find(d=>d.invoiceFilePath)?.invoiceFilePath;
       const [grBuf, invBuf] = await Promise.all([
-        fetchStorageFile(trip.grFilePath),
-        fetchStorageFile(trip.invoiceFilePath),
+        fetchStorageFile(grPath),
+        fetchStorageFile(invPath),
       ]);
 
       // Final merge: Sealed Invoice → GR Copy → Original Invoice
@@ -4476,7 +4508,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
   };
 
   // Called when user confirms after scanning — existingTrip is non-null if merging, null for new trip
-  const onLRConfirmed = (existingTrip, driverPhone) => {
+  const onLRConfirmed = (existingTrip, driverPhone, assignedEmpId="") => {
     const { extracted } = diConflict;
 
     // Auto-create/update vehicle record
@@ -4646,6 +4678,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       dieselEstimate:+f.dieselEstimate,
       dieselIndentNo: (f.dieselIndentNo||"").trim(),
       cashEmpId: f.cashEmpId||"",
+      assignedEmpId: f.assignedEmpId||"",
       createdBy:user.username, createdAt:nowTs(),
     });
     setTrips(p => [t, ...(p||[])]);
@@ -5254,7 +5287,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                     </div>
                   </div>
 
-                  {(t.orderType==="party"||t.grFilePath||t.invoiceFilePath||(t.diLines||[]).some(dl=>dl.grFilePath||dl.invoiceFilePath)) && (
+                  {(t.orderType==="party"||t.grFilePath||t.invoiceFilePath||(t.diLines||[]).some(dl=>dl.grFilePath||dl.invoiceFilePath||(dl.orderType==="party"))) && (
                     <div style={{padding:"5px 12px 8px",display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",
                       borderTop:"1px solid "+C.border+"33"}}>
                       <Badge label="🤝 Party" color={C.accent} />
@@ -5326,10 +5359,13 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                         </React.Fragment>
                       ))}
                       {/* Warning: party trip missing files — show upload hint */}
-                      {t.orderType==="party" && !t.grFilePath && !(t.diLines||[]).some(dl=>dl.grFilePath) && (
+                      {/* Warn only if there are party DIs with missing GR/Invoice */}
+                      {(t.orderType==="party" || (t.diLines||[]).some(d=>d.orderType==="party")) &&
+                       !t.grFilePath && !(t.diLines||[]).some(dl=>dl.grFilePath) && (
                         <Badge label="⚠ No GR uploaded" color={C.red} />
                       )}
-                      {t.orderType==="party" && !t.invoiceFilePath && !(t.diLines||[]).some(dl=>dl.invoiceFilePath) && (
+                      {(t.orderType==="party" || (t.diLines||[]).some(d=>d.orderType==="party")) &&
+                       !t.invoiceFilePath && !(t.diLines||[]).some(dl=>dl.invoiceFilePath) && (
                         <Badge label="⚠ No Invoice uploaded" color={C.red} />
                       )}
                       {t.mergedPdfPath && (
@@ -5505,6 +5541,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
               {diConflict ? (
                 diConflict.askLR ? (
                   <AskLRSheet extracted={diConflict.extracted} trips={trips} vehicles={vehicles}
+                    employees={employees||[]}
                     onConfirm={onLRConfirmed} onCancel={()=>setDiConflict(null)} />
                 ) : (
                   <MergeDISheet conflict={diConflict} onMerge={addDIToExisting}
@@ -5925,9 +5962,11 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
 function PartyFileEditSection({ trip, onUpdate }) {
   const [uploading, setUploading] = useState(false);
   const [status,    setStatus]    = useState("");
-  const diLines = trip.diLines && trip.diLines.length > 0
+  // Only show upload for DIs that are party type (mixed trips: some godown, some party)
+  const allDiLines = trip.diLines && trip.diLines.length > 0
     ? trip.diLines
-    : [{ diNo: trip.diNo, grNo: trip.grNo }];
+    : [{ diNo: trip.diNo, grNo: trip.grNo, orderType: trip.orderType }];
+  const diLines = allDiLines.filter(d => d.orderType==="party" || trip.orderType==="party" || allDiLines.length===1);
 
   // For single-DI trips: single GR + Invoice upload
   // For multi-DI trips: one GR + Invoice per DI line
@@ -5992,7 +6031,7 @@ function PartyFileEditSection({ trip, onUpdate }) {
 
   const isMulti = diLines.length > 1;
   const hasAllFiles = isMulti
-    ? diLines.every(d => d.grFilePath && d.invoiceFilePath)
+    ? diLines.filter(d=>d.orderType==="party"||trip.orderType==="party").every(d => d.grFilePath && d.invoiceFilePath)
     : (trip.grFilePath && trip.invoiceFilePath);
 
   if(hasAllFiles) return (
@@ -9562,12 +9601,18 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
       <td>${x.note||"—"}</td>
     </tr>`).join("");
 
-    const loanRecoveryRows = loanTxns.filter(x=>x.type==="recovery").map(x=>`<tr>
-      <td>${fmtD(x.date)}</td><td>₹${fmt(x.amount)}</td>
-      <td>${x.lrNo||"—"}</td><td>${x.ref||"—"}</td>
-      ${isMultiVehOwner?`<td>${x._truckNo||"—"}</td>`:""}
-      <td>${x.note||"—"}</td>
-    </tr>`).join("");
+    // Use actual loanRecovery from trip if available (more accurate than loanTxns which store deductPerTrip)
+    const loanRecoveryRows = loanTxns.filter(x=>x.type==="recovery").map(x=>{
+      // Find the trip this recovery was linked to for the actual amount
+      const linkedTrip = x.lrNo ? vtrips.find(t=>t.lrNo===x.lrNo) : null;
+      const actualAmount = linkedTrip?.loanRecovery || x.amount;
+      return `<tr>
+        <td>${fmtD(x.date)}</td><td>₹${fmt(actualAmount)}</td>
+        <td>${x.lrNo||"—"}</td><td>${x.ref||"—"}</td>
+        ${isMultiVehOwner?`<td>${x._truckNo||"—"}</td>`:""}
+        <td>${x.note||"—"}${actualAmount!==x.amount?` (recorded: ₹${fmt(x.amount)})`:""}</td>
+      </tr>`;
+    }).join("");
 
     const shortageRows = shortageTxns.filter(x=>x.type==="shortage").map(x=>`<tr>
       <td>${fmtD(x.date)}</td><td>${x.qty||0} MT</td>
@@ -9599,11 +9644,13 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
       td{padding:4px 7px;border:1px solid #e0e0e0} tr:nth-child(even){background:#f0f6fc}
       .footer{margin-top:20px;font-size:9px;color:#aaa;border-top:1px solid #eee;padding-top:8px}
       .empty{color:#999;font-style:italic;font-size:11px;padding:6px 0}
-      @media print { * { -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; } }
+      .logo-box{width:48px;height:48px;background:#1565c0;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;margin-right:10px}
+      .logo-box span{color:white;font-size:17px;font-weight:900;font-family:Arial,sans-serif;letter-spacing:-1px}
+      @media print { * { -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; } .logo-box{background:#1565c0 !important;} }
     </style>
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;padding-bottom:8px;border-bottom:2px solid #1565c0">
-      <div style="width:48px;height:48px;background:#1565c0;border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0;print-color-adjust:exact;-webkit-print-color-adjust:exact">
-        <span style="color:white;font-size:18px;font-weight:900;font-family:Arial,sans-serif;letter-spacing:-1px">MY</span>
+      <div class="logo-box">
+        <span>MY</span>
       </div>
       <div>
         <div style="font-size:7px;text-transform:uppercase;letter-spacing:2px;color:#1565c0;font-weight:700">M Yantra Enterprises</div>
@@ -13023,6 +13070,105 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
 // ─── DRIVER PAYMENTS ──────────────────────────────────────────────────────────
 // Driver payment is separate from settlement.
 // Record bank transfers against a trip. "Balance due" auto-updates.
+// ─── EMPLOYEE TRIP GROUP ─────────────────────────────────────────────────────
+// Groups all unpaid trips for one employee — can request payment for each or all together
+function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPayReqSheet, vehicles, fmt }) {
+  const [open, setOpen] = useState(true);
+  const [selected, setSelected] = useState(new Set(empTrips.map(t=>t.id)));
+  const C = window._MY_COLORS || {};
+
+  const selectedTrips = empTrips.filter(t=>selected.has(t.id));
+  const selectedTotal = selectedTrips.reduce((s,t)=>s+t.balance,0);
+
+  const hasPendingReq = tripId => (paymentRequests||[]).some(r=>r.tripId===tripId&&r.status==="pending");
+
+  const toggleAll = () => {
+    if(selected.size===empTrips.length) setSelected(new Set());
+    else setSelected(new Set(empTrips.map(t=>t.id)));
+  };
+
+  return (
+    <div style={{background:"var(--card,#fff)",borderRadius:14,overflow:"hidden",
+      border:`2px solid ${"#0d9488"}33`}}>
+      {/* Header */}
+      <div onClick={()=>setOpen(p=>!p)}
+        style={{padding:"12px 16px",display:"flex",justifyContent:"space-between",
+          alignItems:"center",cursor:"pointer",background:"#0d948811"}}>
+        <div>
+          <div style={{fontWeight:800,fontSize:14}}>
+            {emp?.name||"Unassigned"} {empId==="unassigned"&&<span style={{fontSize:10,color:"#888"}}>(no employee linked)</span>}
+          </div>
+          <div style={{fontSize:11,color:"#666",marginTop:2}}>
+            {empTrips.length} trip{empTrips.length>1?"s":""} · Balance due: <b style={{color:"#dc2626"}}>₹{totalBal.toLocaleString("en-IN")}</b>
+          </div>
+        </div>
+        <div style={{fontSize:18}}>{open?"▲":"▼"}</div>
+      </div>
+
+      {open && (
+        <div style={{padding:"10px 14px",display:"flex",flexDirection:"column",gap:8}}>
+          {/* Select all */}
+          <div style={{display:"flex",alignItems:"center",gap:8,fontSize:12}}>
+            <input type="checkbox" checked={selected.size===empTrips.length}
+              onChange={toggleAll} style={{width:15,height:15}} />
+            <span style={{color:"#666"}}>Select all for group request</span>
+          </div>
+
+          {/* Trip rows */}
+          {empTrips.map(t=>(
+            <div key={t.id} style={{display:"flex",alignItems:"center",gap:10,
+              background:"#f8fafc",borderRadius:8,padding:"8px 10px",
+              border:`1px solid ${hasPendingReq(t.id)?"#a855f733":"#e2e8f0"}`}}>
+              <input type="checkbox" checked={selected.has(t.id)}
+                onChange={()=>setSelected(p=>{const n=new Set(p); n.has(t.id)?n.delete(t.id):n.add(t.id); return n;})}
+                style={{width:15,height:15,flexShrink:0}} />
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontWeight:700,fontSize:13}}>{t.truckNo} · <span style={{color:"#2563eb"}}>{t.lrNo}</span></div>
+                <div style={{fontSize:11,color:"#888"}}>{t.from}→{t.to} · {t.qty}MT · {t.date}</div>
+              </div>
+              <div style={{textAlign:"right",flexShrink:0}}>
+                <div style={{fontWeight:800,fontSize:14,color:"#dc2626"}}>₹{t.balance.toLocaleString("en-IN")}</div>
+                {hasPendingReq(t.id) && <div style={{fontSize:9,color:"#7c3aed",fontWeight:700}}>REQ SENT</div>}
+              </div>
+            </div>
+          ))}
+
+          {/* Action buttons */}
+          <div style={{display:"flex",gap:8,marginTop:4,flexWrap:"wrap"}}>
+            {selectedTrips.length===1 && !hasPendingReq(selectedTrips[0].id) && (
+              <button onClick={()=>setPayReqSheet(selectedTrips[0])}
+                style={{flex:1,background:"#7c3aed22",border:"1.5px solid #7c3aed44",borderRadius:10,
+                  color:"#7c3aed",padding:"9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+                📋 Request Payment — LR {selectedTrips[0].lrNo}
+              </button>
+            )}
+            {selectedTrips.length>1 && (
+              <button onClick={()=>{
+                // Open request for first trip with total amount pre-filled across all selected
+                const combined = {...selectedTrips[0],
+                  balance: selectedTotal,
+                  _groupedLRs: selectedTrips.map(t=>t.lrNo).join(" + "),
+                  _groupedTotal: selectedTotal,
+                };
+                setPayReqSheet(combined);
+              }}
+                style={{flex:1,background:"#7c3aed22",border:"1.5px solid #7c3aed44",borderRadius:10,
+                  color:"#7c3aed",padding:"9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+                📋 Group Request — {selectedTrips.length} trips · ₹{selectedTotal.toLocaleString("en-IN")} total
+              </button>
+            )}
+            {selectedTrips.length===0 && (
+              <div style={{flex:1,textAlign:"center",color:"#888",fontSize:12,padding:"8px"}}>
+                Select trips above to request payment
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, setVehicles, employees, cashTransfers, setCashTransfers, paymentRequests=[], setPaymentRequests, user, log, viewOnly=false}) {
   const [filter,    setFilter]    = useState("unpaid");
   const [paySheet,  setPaySheet]  = useState(null);
@@ -13332,6 +13478,7 @@ This will auto-recover in the next trip.`);
       <PillBar items={[
         ...(user.role!=="owner" && myReqTrips.length>0 ? [{id:"myreqs", label:`📋 Send Request (${myReqTrips.length})`, color:C.orange}] : []),
         {id:"unpaid",  label:`Unpaid (${unpaidTrips.length})`, color:C.accent},
+        {id:"byemp",   label:"By Employee",                    color:C.teal},
         {id:"paid",    label:`Paid (${paidTrips.length})`,     color:C.green},
         {id:"all",     label:"All",                            color:C.blue},
         {id:"history", label:`History (${allPays.length})`,    color:C.muted},
@@ -13447,8 +13594,38 @@ This will auto-recover in the next trip.`);
         </div>
       )}
 
+      {/* ── BY EMPLOYEE TAB ── */}
+      {filter==="byemp" && (()=>{
+        // Group unpaid trips by assigned employee
+        const empGroups = {};
+        unpaidTrips.forEach(t => {
+          const empId = t.assignedEmpId||"unassigned";
+          if(!empGroups[empId]) empGroups[empId] = [];
+          empGroups[empId].push(t);
+        });
+        const empList = Object.entries(empGroups).sort(([a],[b])=>a==="unassigned"?1:b==="unassigned"?-1:0);
+        return (
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            {empList.length===0 && <div style={{textAlign:"center",color:C.muted,padding:30}}>No unpaid trips</div>}
+            {empList.map(([empId, empTrips])=>{
+              const emp = (employees||[]).find(e=>e.id===empId);
+              const totalBal = empTrips.reduce((s,t)=>s+t.balance,0);
+              const [empGroupOpen, setEmpGroupOpen] = [null,null]; // handled per-instance below
+              return (
+                <EmpTripGroup key={empId}
+                  empId={empId} emp={emp} empTrips={empTrips} totalBal={totalBal}
+                  paymentRequests={paymentRequests||[]}
+                  setPayReqSheet={setPayReqSheet}
+                  vehicles={vehicles} fmt={fmt}
+                />
+              );
+            })}
+          </div>
+        );
+      })()}
+
       {/* ── TRIP LIST (unpaid / paid / all / myreqs) ── */}
-      {filter!=="history" && filter!=="requests" && (()=>{
+      {filter!=="history" && filter!=="requests" && filter!=="byemp" && (()=>{
         const base = filter==="myreqs"?myReqTrips:filter==="unpaid"?unpaidTrips:filter==="paid"?paidTrips:tripWithBalance;
         const shown = histLR ? base.filter(t=>(t.lrNo+t.truckNo).toLowerCase().includes(histLR.toLowerCase())) : base;
         return (<>
