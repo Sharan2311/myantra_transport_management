@@ -9599,15 +9599,16 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
       td{padding:4px 7px;border:1px solid #e0e0e0} tr:nth-child(even){background:#f0f6fc}
       .footer{margin-top:20px;font-size:9px;color:#aaa;border-top:1px solid #eee;padding-top:8px}
       .empty{color:#999;font-style:italic;font-size:11px;padding:6px 0}
+      @media print { * { -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; } }
     </style>
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px">
-      <svg width="42" height="42" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">
-        <rect width="48" height="48" rx="8" fill="#1565c0"/>
-        <text x="24" y="32" font-family="Arial,sans-serif" font-size="20" font-weight="800" fill="white" text-anchor="middle">MY</text>
-      </svg>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;padding-bottom:8px;border-bottom:2px solid #1565c0">
+      <div style="width:48px;height:48px;background:#1565c0;border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0;print-color-adjust:exact;-webkit-print-color-adjust:exact">
+        <span style="color:white;font-size:18px;font-weight:900;font-family:Arial,sans-serif;letter-spacing:-1px">MY</span>
+      </div>
       <div>
-        <div style="font-size:18px;font-weight:800">Vehicle Report — ${v.truckNo}</div>
-        <div style="font-size:11px;color:#888">M Yantra Enterprises · Generated ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}${pdfFrom||pdfTo ? ` · Period: ${pdfFrom||"start"} to ${pdfTo||"today"}` : ""}</div>
+        <div style="font-size:7px;text-transform:uppercase;letter-spacing:2px;color:#1565c0;font-weight:700">M Yantra Enterprises</div>
+        <div style="font-size:20px;font-weight:800;line-height:1.2">Vehicle Report — ${v.truckNo}</div>
+        <div style="font-size:10px;color:#888">Generated ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}${pdfFrom||pdfTo ? ` &nbsp;·&nbsp; Period: <b>${pdfFrom||"start"}</b> to <b>${pdfTo||"today"}</b>` : ""}</div>
       </div>
     </div>
     <div class="meta">
