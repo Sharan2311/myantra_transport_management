@@ -1855,6 +1855,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
     // If DI date is empty fall back to today
     const safeTripDate = (diDate) => diDate || today();
 
+    try {
     for(const g of readyGroups) {
       const groupItems = doneItems.filter(x=>g.diIds.includes(x.id));
       const primary    = groupItems[0];
