@@ -1769,8 +1769,6 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
   const saveAll = async () => {
     setLrError("");
     // ── Pre-validate all groups (preserve all original validations) ──────────
-    try {
-    try {
     for(const g of readyGroups) {
       const groupItems = doneItems.filter(x=>g.diIds.includes(x.id));
 
