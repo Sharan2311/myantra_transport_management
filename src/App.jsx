@@ -14304,6 +14304,11 @@ function Reports({trips, vehicles, employees, payments, settlements, indents, us
   const [orderFilter,  setOrderFilter]  = useState("All"); // All|godown|party
   const [reportTab,    setReportTab]    = useState("dispatch"); // dispatch|csv
 
+  // ── Destination Summary ──────────────────────────────────────────────────────
+  const DEFAULT_DESTS = ["Latur","Osmanabad","Solapur","Nanded","Beed","Parbhani","Hingoli","Sangli","Kolhapur","Satara"];
+  const [destList, setDestList] = useState(DEFAULT_DESTS.join("\n"));
+  const [showDestEditor, setShowDestEditor] = useState(false);
+
   // Quick month picker
   const applyMonth = m => {
     if(!m) return;
@@ -14587,6 +14592,159 @@ function Reports({trips, vehicles, employees, payments, settlements, indents, us
           </button>
         ))}
       </div>
+
+      {/* ── DESTINATION SUMMARY ──────────────────────────────────────────────── */}
+      {(user.role==="owner"||user.role==="manager") && (()=>{
+        // Parse destination list
+        const dests = destList.split(/[\n,]/).map(d=>d.trim()).filter(Boolean);
+        // For each destination, sum up tons in date range
+        const summary = dests.map(dest=>{
+          const matched = base.filter(t=>{
+            const to = (t.to||"").toLowerCase();
+            return to.includes(dest.toLowerCase());
+          });
+          return {
+            dest,
+            tons: matched.reduce((s,t)=>s+(+t.qty||0),0),
+            trips: matched.length,
+          };
+        }).filter(r=>r.trips>0||dests.length<=20);
+        const totalTons = summary.reduce((s,r)=>s+r.tons,0);
+        const totalTrips = summary.reduce((s,r)=>s+r.trips,0);
+        return (
+          <div style={{background:C.card,borderRadius:14,padding:"14px 16px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+              <div style={{color:C.teal,fontWeight:800,fontSize:13}}>
+                📍 Destination Summary
+                <span style={{color:C.muted,fontWeight:400,fontSize:11,marginLeft:8}}>
+                  {df} → {dt}
+                </span>
+              </div>
+              <button onClick={()=>setShowDestEditor(p=>!p)}
+                style={{background:C.teal+"22",border:`1px solid ${C.teal}55`,borderRadius:8,
+                  color:C.teal,fontSize:11,fontWeight:700,cursor:"pointer",padding:"4px 10px"}}>
+                ✏ Edit List
+              </button>
+            </div>
+
+            {/* Destination editor */}
+            {showDestEditor && (
+              <div style={{marginBottom:12}}>
+                <div style={{fontSize:11,color:C.muted,marginBottom:4}}>
+                  One destination per line (partial match — "Latur" matches "LATUR", "MAHABUBNAGAR LATUR")
+                </div>
+                <textarea value={destList} onChange={e=>setDestList(e.target.value)}
+                  rows={8}
+                  style={{width:"100%",boxSizing:"border-box",background:C.bg,
+                    border:`1.5px solid ${C.border}`,borderRadius:10,color:C.text,
+                    padding:"10px 12px",fontSize:13,fontFamily:"monospace",outline:"none",resize:"vertical"}}
+                />
+                <div style={{display:"flex",gap:8,marginTop:6}}>
+                  <button onClick={()=>setDestList(DEFAULT_DESTS.join("\n"))}
+                    style={{background:"none",border:`1px solid ${C.border}`,borderRadius:8,
+                      color:C.muted,fontSize:11,padding:"4px 10px",cursor:"pointer"}}>
+                    ↺ Reset to defaults
+                  </button>
+                  <button onClick={()=>setShowDestEditor(false)}
+                    style={{background:C.teal+"22",border:`1px solid ${C.teal}55`,borderRadius:8,
+                      color:C.teal,fontSize:11,fontWeight:700,padding:"4px 10px",cursor:"pointer"}}>
+                    ✓ Done
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Summary table */}
+            {summary.length===0 ? (
+              <div style={{color:C.muted,fontSize:13,textAlign:"center",padding:16}}>
+                No trips found for these destinations in this period
+              </div>
+            ) : (
+              <>
+                <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                  {summary.map(r=>{
+                    const pct = totalTons>0 ? (r.tons/totalTons)*100 : 0;
+                    return (
+                      <div key={r.dest} style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                          <span style={{fontWeight:700,fontSize:13,color:r.tons>0?C.text:C.muted}}>
+                            {r.dest}
+                            {r.tons===0 && <span style={{fontSize:10,color:C.muted,marginLeft:6}}>(no trips)</span>}
+                          </span>
+                          <div style={{textAlign:"right"}}>
+                            <span style={{fontWeight:800,fontSize:14,color:r.tons>0?C.teal:C.muted}}>
+                              {r.tons>0?`${r.tons.toLocaleString("en-IN")} MT`:"—"}
+                            </span>
+                            {r.trips>0&&<span style={{color:C.muted,fontSize:11,marginLeft:6}}>{r.trips} trip{r.trips>1?"s":""}</span>}
+                          </div>
+                        </div>
+                        {r.tons>0 && (
+                          <div style={{height:4,background:C.border,borderRadius:2,overflow:"hidden"}}>
+                            <div style={{height:"100%",width:`${pct}%`,background:C.teal,borderRadius:2,
+                              transition:"width 0.3s"}} />
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Totals row */}
+                <div style={{marginTop:10,padding:"10px 12px",background:C.teal+"11",
+                  border:`1.5px solid ${C.teal}33`,borderRadius:10,
+                  display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <span style={{fontWeight:800,fontSize:13,color:C.teal}}>
+                    Total — {summary.filter(r=>r.tons>0).length} destinations
+                  </span>
+                  <div style={{textAlign:"right"}}>
+                    <span style={{fontWeight:800,fontSize:15,color:C.teal}}>
+                      {totalTons.toLocaleString("en-IN")} MT
+                    </span>
+                    <span style={{color:C.muted,fontSize:11,marginLeft:6}}>{totalTrips} trips</span>
+                  </div>
+                </div>
+
+                {/* PDF/Print button */}
+                <button onClick={()=>{
+                  const rows = summary.filter(r=>r.tons>0).map(r=>
+                    `<tr><td>${r.dest}</td><td style="text-align:right;font-weight:800">${r.tons.toLocaleString("en-IN")} MT</td><td style="text-align:right">${r.trips}</td></tr>`
+                  ).join("");
+                  const html = `<!DOCTYPE html><html><head><title>Destination Summary</title>
+                    <style>body{font-family:Arial,sans-serif;font-size:12px;margin:24px}
+                    table{width:100%;border-collapse:collapse;margin-top:12px}
+                    th{background:#0d9488;color:white;padding:7px 10px;text-align:left;font-size:10px;text-transform:uppercase}
+                    td{padding:6px 10px;border:1px solid #e0e0e0} tr:nth-child(even){background:#f0fdfa}
+                    .logo{width:40px;height:40px;background:#1565c0;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;margin-right:10px}
+                    .logo span{color:white;font-size:15px;font-weight:900;font-family:Arial}
+                    @media print{*{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}}
+                    </style></head><body onload="window.print()">
+                    <div style="display:flex;align-items:center;border-bottom:2px solid #1565c0;padding-bottom:8px;margin-bottom:16px">
+                      <div class="logo"><span>MY</span></div>
+                      <div>
+                        <div style="font-size:18px;font-weight:800">Destination-wise Tonnage Summary</div>
+                        <div style="font-size:10px;color:#888">M Yantra Enterprises · Period: ${df} to ${dt} · Generated ${new Date().toLocaleDateString("en-IN")}</div>
+                      </div>
+                    </div>
+                    <table><thead><tr><th>Destination</th><th style="text-align:right">Total MT</th><th style="text-align:right">Trips</th></tr></thead>
+                    <tbody>${rows}</tbody>
+                    <tfoot><tr style="font-weight:800;background:#0d9488;color:white">
+                      <td>TOTAL</td>
+                      <td style="text-align:right">${totalTons.toLocaleString("en-IN")} MT</td>
+                      <td style="text-align:right">${totalTrips}</td>
+                    </tr></tfoot></table>
+                    </body></html>`;
+                  const w=window.open("","_blank"); w.document.write(html); w.document.close();
+                }} style={{marginTop:10,width:"100%",background:C.teal+"22",
+                  border:`1px solid ${C.teal}44`,borderRadius:10,padding:"9px",
+                  color:C.teal,fontWeight:700,fontSize:12,cursor:"pointer"}}>
+                  🖨 Print Destination Report
+                </button>
+              </>
+            )}
+          </div>
+        );
+      })()}
+
     </div>
   );
 }
