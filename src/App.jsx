@@ -14300,7 +14300,7 @@ function Reports({trips, vehicles, employees, payments, settlements, indents, us
   const [monthSel, setMonthSel] = useState(""); // "YYYY-MM" quick picker
 
   // ── Filters ──────────────────────────────────────────────────────────────────
-  const [stateFilter,  setStateFilter]  = useState("All"); // All|Karnataka|Telangana|Other
+  const [stateFilter,  setStateFilter]  = useState(null); // null=all collapsed, state name = expanded
   const [orderFilter,  setOrderFilter]  = useState("All"); // All|godown|party
   const [reportTab,    setReportTab]    = useState("dispatch"); // dispatch|csv
 
@@ -14325,6 +14325,7 @@ function Reports({trips, vehicles, employees, payments, settlements, indents, us
   const afterOrder = orderFilter==="All" ? base
     : orderFilter==="party"  ? base.filter(t=>t.orderType==="party")
     : base.filter(t=>!t.orderType||t.orderType==="godown");
+  // For state filter — null means show all (but collapsed), string = one state open
 
   // Clinker trips (separate)
   const clinkerTrips = afterOrder.filter(t=>(t.grade||"").toLowerCase().includes("clinker"));
@@ -14333,18 +14334,271 @@ function Reports({trips, vehicles, employees, payments, settlements, indents, us
   const cementBase = afterOrder.filter(t=>!(t.grade||"").toLowerCase().includes("clinker"));
 
   // Helper: get state from trip (party trips have state field; godown trips derive from 'to')
+  // ── Place → District + State lookup ──────────────────────────────────────────
+  // Maps partial place name (lowercase) → {district, state}
+  // Covers all common destinations from Kodla cement fleet
+  const PLACE_MAP = [
+    // ── Maharashtra ─────────────────────────────────────────────────────────────
+    // Sangli district
+    {k:"kupwad",       d:"Sangli",     s:"Maharashtra"},
+    {k:"miraj",        d:"Sangli",     s:"Maharashtra"},
+    {k:"islampur",     d:"Sangli",     s:"Maharashtra"},
+    {k:"sangli",       d:"Sangli",     s:"Maharashtra"},
+    {k:"vita",         d:"Sangli",     s:"Maharashtra"},
+    {k:"ashta",        d:"Sangli",     s:"Maharashtra"},
+    {k:"atpadi",       d:"Sangli",     s:"Maharashtra"},
+    {k:"tasgaon",      d:"Sangli",     s:"Maharashtra"},
+    {k:"kavathemahankal",d:"Sangli",   s:"Maharashtra"},
+    // Solapur district
+    {k:"solapur",      d:"Solapur",    s:"Maharashtra"},
+    {k:"barshi",       d:"Solapur",    s:"Maharashtra"},
+    {k:"pandharpur",   d:"Solapur",    s:"Maharashtra"},
+    {k:"mangalvedha",  d:"Solapur",    s:"Maharashtra"},
+    {k:"akkalkot",     d:"Solapur",    s:"Maharashtra"},
+    {k:"mohol",        d:"Solapur",    s:"Maharashtra"},
+    {k:"malshiras",    d:"Solapur",    s:"Maharashtra"},
+    {k:"karmala",      d:"Solapur",    s:"Maharashtra"},
+    // Kolhapur district
+    {k:"kolhapur",     d:"Kolhapur",   s:"Maharashtra"},
+    {k:"ichalkaranji", d:"Kolhapur",   s:"Maharashtra"},
+    {k:"kagal",        d:"Kolhapur",   s:"Maharashtra"},
+    {k:"hatkanangle",  d:"Kolhapur",   s:"Maharashtra"},
+    {k:"shirol",       d:"Kolhapur",   s:"Maharashtra"},
+    {k:"karvir",       d:"Kolhapur",   s:"Maharashtra"},
+    {k:"radhanagari",  d:"Kolhapur",   s:"Maharashtra"},
+    // Satara district
+    {k:"satara",       d:"Satara",     s:"Maharashtra"},
+    {k:"karad",        d:"Satara",     s:"Maharashtra"},
+    {k:"phaltan",      d:"Satara",     s:"Maharashtra"},
+    {k:"wai",          d:"Satara",     s:"Maharashtra"},
+    {k:"mahabaleshwar",d:"Satara",     s:"Maharashtra"},
+    {k:"khandala",     d:"Satara",     s:"Maharashtra"},
+    // Latur district
+    {k:"latur",        d:"Latur",      s:"Maharashtra"},
+    {k:"udgir",        d:"Latur",      s:"Maharashtra"},
+    {k:"nilanga",      d:"Latur",      s:"Maharashtra"},
+    {k:"ausa",         d:"Latur",      s:"Maharashtra"},
+    {k:"chakur",       d:"Latur",      s:"Maharashtra"},
+    {k:"shirur anantpal",d:"Latur",    s:"Maharashtra"},
+    {k:"deoni",        d:"Latur",      s:"Maharashtra"},
+    // Osmanabad (Dharashiv) district
+    {k:"osmanabad",    d:"Osmanabad",  s:"Maharashtra"},
+    {k:"dharashiv",    d:"Osmanabad",  s:"Maharashtra"},
+    {k:"tuljapur",     d:"Osmanabad",  s:"Maharashtra"},
+    {k:"omerga",       d:"Osmanabad",  s:"Maharashtra"},
+    {k:"kalamb",       d:"Osmanabad",  s:"Maharashtra"},
+    {k:"umarga",       d:"Osmanabad",  s:"Maharashtra"},
+    // Nanded district
+    {k:"nanded",       d:"Nanded",     s:"Maharashtra"},
+    {k:"biloli",       d:"Nanded",     s:"Maharashtra"},
+    {k:"mudkhed",      d:"Nanded",     s:"Maharashtra"},
+    {k:"deglur",       d:"Nanded",     s:"Maharashtra"},
+    {k:"mukhed",       d:"Nanded",     s:"Maharashtra"},
+    {k:"hadgaon",      d:"Nanded",     s:"Maharashtra"},
+    {k:"loha",         d:"Nanded",     s:"Maharashtra"},
+    {k:"kinwat",       d:"Nanded",     s:"Maharashtra"},
+    {k:"naigaon",      d:"Nanded",     s:"Maharashtra"},
+    // Beed district
+    {k:"beed",         d:"Beed",       s:"Maharashtra"},
+    {k:"bid",          d:"Beed",       s:"Maharashtra"},
+    {k:"ambajogai",    d:"Beed",       s:"Maharashtra"},
+    {k:"georai",       d:"Beed",       s:"Maharashtra"},
+    {k:"parli",        d:"Beed",       s:"Maharashtra"},
+    {k:"majalgaon",    d:"Beed",       s:"Maharashtra"},
+    {k:"kaij",         d:"Beed",       s:"Maharashtra"},
+    {k:"ashti",        d:"Beed",       s:"Maharashtra"},
+    // Parbhani district
+    {k:"parbhani",     d:"Parbhani",   s:"Maharashtra"},
+    {k:"selu",         d:"Parbhani",   s:"Maharashtra"},
+    {k:"gangakhed",    d:"Parbhani",   s:"Maharashtra"},
+    {k:"jintur",       d:"Parbhani",   s:"Maharashtra"},
+    {k:"pathari",      d:"Parbhani",   s:"Maharashtra"},
+    // Hingoli district
+    {k:"hingoli",      d:"Hingoli",    s:"Maharashtra"},
+    {k:"basmath",      d:"Hingoli",    s:"Maharashtra"},
+    {k:"sengaon",      d:"Hingoli",    s:"Maharashtra"},
+    {k:"aundha",       d:"Hingoli",    s:"Maharashtra"},
+    {k:"kalamnuri",    d:"Hingoli",    s:"Maharashtra"},
+    // Pune district
+    {k:"pune",         d:"Pune",       s:"Maharashtra"},
+    {k:"patas",        d:"Pune",       s:"Maharashtra"},
+    {k:"daund",        d:"Pune",       s:"Maharashtra"},
+    {k:"indapur",      d:"Pune",       s:"Maharashtra"},
+    {k:"baramati",     d:"Pune",       s:"Maharashtra"},
+    {k:"shirur",       d:"Pune",       s:"Maharashtra"},
+    // Nashik district
+    {k:"nashik",       d:"Nashik",     s:"Maharashtra"},
+    {k:"sinnar",       d:"Nashik",     s:"Maharashtra"},
+    // Aurangabad (Chhatrapati Sambhajinagar) district
+    {k:"aurangabad",   d:"Aurangabad", s:"Maharashtra"},
+    {k:"sambhajinagar",d:"Aurangabad", s:"Maharashtra"},
+    {k:"jalna",        d:"Jalna",      s:"Maharashtra"},
+    // Buldhana district
+    {k:"buldhana",     d:"Buldhana",   s:"Maharashtra"},
+    {k:"khamgaon",     d:"Buldhana",   s:"Maharashtra"},
+    // Akola district
+    {k:"akola",        d:"Akola",      s:"Maharashtra"},
+    // Amravati district
+    {k:"amravati",     d:"Amravati",   s:"Maharashtra"},
+    // Yavatmal
+    {k:"yavatmal",     d:"Yavatmal",   s:"Maharashtra"},
+    // Washim
+    {k:"washim",       d:"Washim",     s:"Maharashtra"},
+    // Nandurbar
+    {k:"nandurbar",    d:"Nandurbar",  s:"Maharashtra"},
+    // Dhule
+    {k:"dhule",        d:"Dhule",      s:"Maharashtra"},
+    // Wardha
+    {k:"wardha",       d:"Wardha",     s:"Maharashtra"},
+    // Nagpur
+    {k:"nagpur",       d:"Nagpur",     s:"Maharashtra"},
+    // Chandrapur
+    {k:"chandrapur",   d:"Chandrapur", s:"Maharashtra"},
+
+    // ── Telangana ────────────────────────────────────────────────────────────────
+    {k:"hyderabad",    d:"Hyderabad",  s:"Telangana"},
+    {k:"rangareddy",   d:"Rangareddy", s:"Telangana"},
+    {k:"medchal",      d:"Medchal",    s:"Telangana"},
+    {k:"warangal",     d:"Warangal",   s:"Telangana"},
+    {k:"karimnagar",   d:"Karimnagar", s:"Telangana"},
+    {k:"nizamabad",    d:"Nizamabad",  s:"Telangana"},
+    {k:"mahabubnagar", d:"Mahabubnagar",s:"Telangana"},
+    {k:"nagarkurnool", d:"Nagarkurnool",s:"Telangana"},
+    {k:"wanaparthy",   d:"Wanaparthy", s:"Telangana"},
+    {k:"gadwal",       d:"Gadwal",     s:"Telangana"},
+    {k:"jogulamba",    d:"Gadwal",     s:"Telangana"},
+    {k:"nalgonda",     d:"Nalgonda",   s:"Telangana"},
+    {k:"suryapet",     d:"Suryapet",   s:"Telangana"},
+    {k:"khammam",      d:"Khammam",    s:"Telangana"},
+    {k:"bhadradri",    d:"Khammam",    s:"Telangana"},
+    {k:"shadnagar",    d:"Rangareddy", s:"Telangana"},
+    {k:"jadcherla",    d:"Mahabubnagar",s:"Telangana"},
+    {k:"achampet",     d:"Nagarkurnool",s:"Telangana"},
+    {k:"kodad",        d:"Suryapet",   s:"Telangana"},
+    {k:"kothagudem",   d:"Khammam",    s:"Telangana"},
+    {k:"pogullapalli", d:"Khammam",    s:"Telangana"},
+    {k:"mancherial",   d:"Mancherial", s:"Telangana"},
+    {k:"adilabad",     d:"Adilabad",   s:"Telangana"},
+    {k:"nirmal",       d:"Nirmal",     s:"Telangana"},
+    {k:"medak",        d:"Medak",      s:"Telangana"},
+    {k:"sangareddy",   d:"Sangareddy", s:"Telangana"},
+    {k:"vikarabad",    d:"Vikarabad",  s:"Telangana"},
+    {k:"bhuvanagiri",  d:"Yadadri",    s:"Telangana"},
+    {k:"yadadri",      d:"Yadadri",    s:"Telangana"},
+    {k:"miryalaguda",  d:"Nalgonda",   s:"Telangana"},
+    {k:"devarakonda",  d:"Nalgonda",   s:"Telangana"},
+    {k:"ramagundam",   d:"Peddapalli", s:"Telangana"},
+    {k:"peddapalli",   d:"Peddapalli", s:"Telangana"},
+    {k:"kamareddy",    d:"Kamareddy",  s:"Telangana"},
+    {k:"siddipet",     d:"Siddipet",   s:"Telangana"},
+    {k:"jangaon",      d:"Jangaon",    s:"Telangana"},
+    {k:"bhongir",      d:"Yadadri",    s:"Telangana"},
+    {k:"tandur",       d:"Vikarabad",  s:"Telangana"},
+    {k:"pargi",        d:"Vikarabad",  s:"Telangana"},
+    {k:"narayanpet",   d:"Narayanpet", s:"Telangana"},
+    {k:"kollapur",     d:"Narayanpet", s:"Telangana"},
+    {k:"dindi",        d:"Nalgonda",   s:"Telangana"},
+    {k:"miryalguda",   d:"Nalgonda",   s:"Telangana"},
+    {k:"turkayamjal",  d:"Rangareddy", s:"Telangana"},
+
+    // ── Karnataka ────────────────────────────────────────────────────────────────
+    {k:"kodla",        d:"Yadgir",     s:"Karnataka"},
+    {k:"yadgir",       d:"Yadgir",     s:"Karnataka"},
+    {k:"raichur",      d:"Raichur",    s:"Karnataka"},
+    {k:"koppal",       d:"Koppal",     s:"Karnataka"},
+    {k:"hospet",       d:"Vijayanagara",s:"Karnataka"},
+    {k:"gangavathi",   d:"Koppal",     s:"Karnataka"},
+    {k:"sindhanur",    d:"Raichur",    s:"Karnataka"},
+    {k:"gulbarga",     d:"Kalaburagi", s:"Karnataka"},
+    {k:"kalaburagi",   d:"Kalaburagi", s:"Karnataka"},
+    {k:"bidar",        d:"Bidar",      s:"Karnataka"},
+    {k:"bijapur",      d:"Vijayapura", s:"Karnataka"},
+    {k:"vijayapura",   d:"Vijayapura", s:"Karnataka"},
+    {k:"bagalkot",     d:"Bagalkot",   s:"Karnataka"},
+    {k:"gadag",        d:"Gadag",      s:"Karnataka"},
+    {k:"dharwad",      d:"Dharwad",    s:"Karnataka"},
+    {k:"hubli",        d:"Dharwad",    s:"Karnataka"},
+    {k:"belgaum",      d:"Belagavi",   s:"Karnataka"},
+    {k:"belagavi",     d:"Belagavi",   s:"Karnataka"},
+    {k:"haveri",       d:"Haveri",     s:"Karnataka"},
+    {k:"davangere",    d:"Davangere",  s:"Karnataka"},
+    {k:"chitradurga",  d:"Chitradurga",s:"Karnataka"},
+    {k:"tumkur",       d:"Tumkur",     s:"Karnataka"},
+    {k:"bangalor",     d:"Bangalore",  s:"Karnataka"},
+    {k:"mysuru",       d:"Mysuru",     s:"Karnataka"},
+    {k:"mysore",       d:"Mysuru",     s:"Karnataka"},
+    {k:"mandya",       d:"Mandya",     s:"Karnataka"},
+    {k:"hassan",       d:"Hassan",     s:"Karnataka"},
+    {k:"mangalore",    d:"Dakshina Kannada",s:"Karnataka"},
+    {k:"shimoga",      d:"Shivamogga", s:"Karnataka"},
+    {k:"shivamogga",   d:"Shivamogga", s:"Karnataka"},
+    {k:"dapoli",       d:"Ratnagiri",  s:"Maharashtra"},
+
+    // ── Andhra Pradesh ──────────────────────────────────────────────────────────
+    {k:"kurnool",      d:"Kurnool",    s:"Andhra Pradesh"},
+    {k:"nandyal",      d:"Nandyal",    s:"Andhra Pradesh"},
+    {k:"anantapur",    d:"Anantapur",  s:"Andhra Pradesh"},
+    {k:"kadapa",       d:"Kadapa",     s:"Andhra Pradesh"},
+    {k:"tirupati",     d:"Tirupati",   s:"Andhra Pradesh"},
+    {k:"guntur",       d:"Guntur",     s:"Andhra Pradesh"},
+    {k:"nellore",      d:"Nellore",    s:"Andhra Pradesh"},
+    {k:"vijayawada",   d:"Krishna",    s:"Andhra Pradesh"},
+    {k:"vizag",        d:"Visakhapatnam",s:"Andhra Pradesh"},
+    {k:"visakhapatnam",d:"Visakhapatnam",s:"Andhra Pradesh"},
+    {k:"rajahmundry",  d:"East Godavari",s:"Andhra Pradesh"},
+    {k:"ongole",       d:"Prakasam",   s:"Andhra Pradesh"},
+    {k:"hindupur",     d:"Sri Sathya Sai",s:"Andhra Pradesh"},
+    {k:"dhone",        d:"Kurnool",    s:"Andhra Pradesh"},
+    {k:"adoni",        d:"Kurnool",    s:"Andhra Pradesh"},
+    {k:"yemmiganur",   d:"Kurnool",    s:"Andhra Pradesh"},
+    {k:"atmakur",      d:"Nandyal",    s:"Andhra Pradesh"},
+    {k:"allagadda",    d:"Nandyal",    s:"Andhra Pradesh"},
+    {k:"srisailam",    d:"Nandyal",    s:"Andhra Pradesh"},
+    {k:"nandikotkur",  d:"Nandyal",    s:"Andhra Pradesh"},
+    {k:"giddalur",     d:"Prakasam",   s:"Andhra Pradesh"},
+    {k:"markapur",     d:"Prakasam",   s:"Andhra Pradesh"},
+    {k:"narasaraopet", d:"Palnadu",    s:"Andhra Pradesh"},
+    {k:"macherla",     d:"Palnadu",    s:"Andhra Pradesh"},
+    {k:"palnadu",      d:"Palnadu",    s:"Andhra Pradesh"},
+
+    // ── Madhya Pradesh ──────────────────────────────────────────────────────────
+    {k:"ratnagiri",    d:"Ratnagiri",  s:"Maharashtra"},
+
+    // Generic state-name keywords (catch-all, lower priority)
+    {k:"maharashtra",  d:"",           s:"Maharashtra"},
+    {k:"telangana",    d:"",           s:"Telangana"},
+    {k:"karnataka",    d:"",           s:"Karnataka"},
+    {k:"andhra",       d:"",           s:"Andhra Pradesh"},
+  ];
+
+  // Lookup place → {district, state}
+  const lookupPlace = (to) => {
+    if(!to) return null;
+    const toLower = to.toLowerCase();
+    // Try exact word match first (longer keys take priority)
+    const sorted = [...PLACE_MAP].sort((a,b)=>b.k.length-a.k.length);
+    for(const entry of sorted) {
+      if(toLower.includes(entry.k)) return entry;
+    }
+    return null;
+  };
+
   const getState = t => {
     if(t.state&&t.state.trim()) return t.state.trim();
-    // Fallback: try to guess from destination
-    const to = (t.to||"").toLowerCase();
-    if(to.includes("maharashtra")||to.includes("pune")||to.includes("patas")||to.includes("nashik")) return "Maharashtra";
-    if(to.includes("telangana")||to.includes("hyderabad")||to.includes("rangareddy")||to.includes("warangal")) return "Telangana";
-    if(to.includes("karnataka")||to.includes("raichur")||to.includes("gulbarga")||to.includes("kalaburagi")||to.includes("kodla")) return "Karnataka";
+    const found = lookupPlace(t.to);
+    if(found) return found.s;
     return "Other";
   };
 
+  const getDistrict = t => {
+    if(t.district&&t.district.trim()) return t.district.trim();
+    const found = lookupPlace(t.to);
+    if(found && found.d) return found.d;
+    return "";
+  };
+
   // Apply state filter to cement trips
-  const cementFiltered = stateFilter==="All" ? cementBase
+  const cementFiltered = (!stateFilter||stateFilter==="All") ? cementBase
     : stateFilter==="Other" ? cementBase.filter(t=>!["Karnataka","Telangana","Maharashtra"].includes(getState(t)))
     : cementBase.filter(t=>getState(t)===stateFilter);
 
@@ -14366,7 +14620,7 @@ function Reports({trips, vehicles, employees, payments, settlements, indents, us
   const dispatchTableHTML = (rows, title) => {
     if(!rows.length) return "";
     const trs = rows.map(t=>
-      "<tr><td>"+t.date+"</td><td>"+(t.lrNo||"—")+"</td><td>"+(t.diNo||"—")+"</td><td>"+t.truckNo+"</td><td>"+(t.to||"—")+"</td><td>"+getState(t)+"</td><td>"+t.qty+"</td><td>"+(t.grade||"—")+"</td><td>"+(t.orderType==="party"?"🤝 Party":"🏭 Godown")+"</td><td>"+(t.status||"—")+"</td></tr>"
+      "<tr><td>"+t.date+"</td><td>"+(t.lrNo||"—")+"</td><td>"+(t.diNo||"—")+"</td><td>"+t.truckNo+"</td><td>"+(t.to||"—")+"</td><td>"+(getDistrict(t)||"—")+" · "+getState(t)+"</td><td>"+t.qty+"</td><td>"+(t.grade||"—")+"</td><td>"+(t.orderType==="party"?"🤝 Party":"🏭 Godown")+"</td><td>"+(t.status||"—")+"</td></tr>"
     ).join("");
     return "<div class='section'>"+title+" ("+rows.length+" trips · "+fmtN(rows.reduce((s,t)=>s+(+t.qty||0),0))+" MT)</div>"
       +"<table><thead><tr><th>Date</th><th>LR</th><th>DI</th><th>Truck</th><th>To</th><th>State</th><th>MT</th><th>Grade</th><th>Order</th><th>Status</th></tr></thead><tbody>"+trs+"</tbody></table>";
@@ -14451,10 +14705,10 @@ function Reports({trips, vehicles, employees, payments, settlements, indents, us
         {/* State filter */}
         <div style={{display:"flex",gap:6,background:C.card,borderRadius:10,padding:"4px",flexWrap:"wrap"}}>
           {["All","Karnataka","Telangana","Maharashtra","Other"].map(s=>(
-            <button key={s} onClick={()=>setStateFilter(s)} style={{
-              background:stateFilter===s?C.teal+"33":"transparent",
+            <button key={s} onClick={()=>setStateFilter(s==="All"?null:s)} style={{
+              background:(s==="All"?!stateFilter:stateFilter===s)?C.teal+"33":"transparent",
               border:"none",borderRadius:8,padding:"5px 10px",
-              color:stateFilter===s?C.teal:C.muted,
+              color:(s==="All"?!stateFilter:stateFilter===s)?C.teal:C.muted,
               fontSize:11,fontWeight:700,cursor:"pointer"}}>
               {s}
             </button>
@@ -14471,56 +14725,98 @@ function Reports({trips, vehicles, employees, payments, settlements, indents, us
           </span>
         </div>
 
-        {/* State breakdown cards — always All */}
-        <div style={{display:"flex",gap:6,marginBottom:12,flexWrap:"wrap"}}>
-          {stateBreakdown.map(s=>(
-            <StatCard key={s.state}
-              state={s.state} qty={s.qty} trips={s.trips}
-              color={s.state==="Karnataka"?C.green:s.state==="Telangana"?C.blue:s.state==="Maharashtra"?C.orange:C.muted}
-              onClick={()=>setStateFilter(stateFilter===s.state?"All":s.state)}
-              active={stateFilter===s.state} />
-          ))}
+        {/* Per-state collapsible sections */}
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {stateBreakdown.map(s=>{
+            const color = s.state==="Karnataka"?C.green:s.state==="Telangana"?C.blue:s.state==="Maharashtra"?C.orange:C.muted;
+            const isOpen = stateFilter===s.state;
+            const stateTrips = s.rows.filter(t=>
+              orderFilter==="All" || t.orderType===orderFilter || (orderFilter==="godown"&&!t.orderType)
+            );
+            return (
+              <div key={s.state} style={{borderRadius:12,overflow:"hidden",
+                border:`2px solid ${isOpen?color:C.border}`}}>
+                {/* Header — click to expand/collapse */}
+                <div onClick={()=>setStateFilter(isOpen?null:s.state)}
+                  style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                    padding:"12px 14px",cursor:"pointer",
+                    background:isOpen?color+"18":C.bg}}>
+                  <div style={{display:"flex",alignItems:"center",gap:10}}>
+                    <div style={{width:10,height:10,borderRadius:"50%",background:color,flexShrink:0}} />
+                    <div>
+                      <div style={{fontWeight:800,fontSize:14,color:isOpen?color:C.text}}>{s.state}</div>
+                      <div style={{fontSize:11,color:C.muted,marginTop:1}}>
+                        {stateTrips.length} trip{stateTrips.length!==1?"s":""} · <b style={{color}}>{fmtN(stateTrips.reduce((a,t)=>a+(+t.qty||0),0))} MT</b>
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <span style={{fontWeight:900,fontSize:18,color}}>{fmtN(stateTrips.reduce((a,t)=>a+(+t.qty||0),0))}</span>
+                    <span style={{color:C.muted,fontSize:14}}>{isOpen?"▲":"▼"}</span>
+                  </div>
+                </div>
+                {/* Trip list — only shown when expanded */}
+                {isOpen && (
+                  <div style={{borderTop:`1px solid ${color}33`}}>
+                    {stateTrips.length===0 ? (
+                      <div style={{padding:"14px",color:C.muted,fontSize:13,textAlign:"center"}}>No trips</div>
+                    ) : (
+                      <div style={{display:"flex",flexDirection:"column",gap:0}}>
+                        {stateTrips.map((t,idx)=>(
+                          <div key={t.id} style={{padding:"10px 14px",
+                            borderBottom:idx<stateTrips.length-1?`1px solid ${C.border}`:undefined,
+                            background:idx%2===0?C.card:C.card2}}>
+                            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                              <div>
+                                <span style={{fontWeight:700,fontSize:13}}>{t.truckNo}</span>
+                                <span style={{color:C.blue,fontSize:11,marginLeft:6}}>LR:{t.lrNo||"—"}</span>
+                                <span style={{color:C.muted,fontSize:11,marginLeft:6}}>DI:{t.diNo||"—"}</span>
+                              </div>
+                              <div style={{display:"flex",gap:5,alignItems:"center"}}>
+                                {t.orderType==="party"&&<Badge label="🤝" color={C.accent}/>}
+                                <span style={{color:C.orange,fontWeight:800,fontSize:13}}>{t.qty} MT</span>
+                              </div>
+                            </div>
+                            <div style={{color:C.muted,fontSize:11,marginTop:3}}>
+                              {t.to||"—"}
+                              {getDistrict(t) && <span style={{color:C.teal,fontWeight:600}}> · {getDistrict(t)}</span>}
+                               · {t.date} · {t.grade||"—"}
+                            </div>
+                          </div>
+                        ))}
+                        {/* State subtotal */}
+                        <div style={{padding:"8px 14px",background:color+"18",
+                          display:"flex",justifyContent:"space-between",
+                          borderTop:`1px solid ${color}33`}}>
+                          <span style={{color,fontWeight:700,fontSize:12}}>{s.state} Total</span>
+                          <span style={{color,fontWeight:900,fontSize:13}}>
+                            {fmtN(stateTrips.reduce((a,t)=>a+(+t.qty||0),0))} MT · {stateTrips.length} trips
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          {/* Grand total bar */}
           {stateBreakdown.length>0 && (
-            <StatCard key="total" state="TOTAL"
-              qty={cementBase.reduce((s,t)=>s+(+t.qty||0),0)}
-              trips={cementBase.length}
-              color={C.accent}
-              onClick={()=>setStateFilter("All")}
-              active={stateFilter==="All"} />
+            <div style={{background:C.accent+"18",border:`2px solid ${C.accent}44`,borderRadius:12,
+              padding:"12px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontWeight:800,fontSize:14,color:C.accent}}>📦 TOTAL</span>
+              <span style={{fontWeight:900,fontSize:16,color:C.accent}}>
+                {fmtN(cementBase.reduce((s,t)=>s+(+t.qty||0),0))} MT · {cementBase.length} trips
+              </span>
+            </div>
           )}
         </div>
-
-        {/* Trip list */}
-        {cementFiltered.length===0 ? (
-          <div style={{color:C.muted,fontSize:13,textAlign:"center",padding:"20px 0"}}>No trips in this period</div>
-        ) : (
-          <div style={{display:"flex",flexDirection:"column",gap:6}}>
-            {cementFiltered.map(t=>(
-              <div key={t.id} style={{background:C.bg,borderRadius:10,padding:"10px 12px",
-                borderLeft:"3px solid "+(getState(t)==="Karnataka"?C.green:getState(t)==="Telangana"?C.blue:getState(t)==="Maharashtra"?C.orange:C.muted)}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
-                  <div>
-                    <span style={{fontWeight:700,fontSize:13}}>{t.truckNo}</span>
-                    <span style={{color:C.blue,fontSize:11,marginLeft:6}}>LR:{t.lrNo||"—"}</span>
-                    <span style={{color:C.muted,fontSize:11,marginLeft:6}}>DI:{t.diNo||"—"}</span>
-                  </div>
-                  <div style={{display:"flex",gap:5,alignItems:"center"}}>
-                    {t.orderType==="party"&&<Badge label="🤝" color={C.accent} />}
-                    <span style={{color:C.orange,fontWeight:800,fontSize:13}}>{t.qty} MT</span>
-                  </div>
-                </div>
-                <div style={{color:C.muted,fontSize:11,marginTop:3}}>
-                  {t.to||"—"} · <span style={{color:C.teal,fontWeight:700}}>{getState(t)}</span> · {t.date} · {t.grade||"—"}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
 
         {/* Print cement dispatch */}
         <button onClick={()=>{
           let html="<h2>M.YANTRA — Cement Dispatch Report</h2><div>Period: "+df+" to "+dt+" | State: "+stateFilter+" | Orders: "+orderFilter+"</div>";
-          if(stateFilter==="All"){
+          if(!stateFilter||stateFilter==="All"){
             stateBreakdown.forEach(s=>{ html+=dispatchTableHTML(s.rows.filter(t=>orderFilter==="All"||t.orderType===orderFilter||(orderFilter==="godown"&&!t.orderType)), s.state); });
           } else {
             html+=dispatchTableHTML(cementFiltered,"Cement — "+stateFilter);
@@ -14601,7 +14897,10 @@ function Reports({trips, vehicles, employees, payments, settlements, indents, us
         const summary = dests.map(dest=>{
           const matched = base.filter(t=>{
             const to = (t.to||"").toLowerCase();
-            return to.includes(dest.toLowerCase());
+            const dist = getDistrict(t).toLowerCase();
+            // Match by destination name OR district name
+            return to.includes(dest.toLowerCase()) || dist.includes(dest.toLowerCase()) ||
+                   dist === dest.toLowerCase();
           });
           return {
             dest,
