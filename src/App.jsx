@@ -14762,6 +14762,35 @@ function Reports({trips, vehicles, employees, payments, settlements, indents, us
                       <div style={{padding:"14px",color:C.muted,fontSize:13,textAlign:"center"}}>No trips</div>
                     ) : (
                       <div style={{display:"flex",flexDirection:"column",gap:0}}>
+                        {/* For "Other" — show grouped by unique destination first */}
+                        {s.state==="Other" && (()=>{
+                          const destGroups = {};
+                          stateTrips.forEach(t=>{
+                            const key = (t.to||"Unknown").trim();
+                            if(!destGroups[key]) destGroups[key]={to:key,trips:[],qty:0};
+                            destGroups[key].trips.push(t);
+                            destGroups[key].qty += (+t.qty||0);
+                          });
+                          const sorted = Object.values(destGroups).sort((a,b)=>b.qty-a.qty);
+                          return (
+                            <div style={{padding:"10px 14px",background:C.orange+"08",
+                              borderBottom:`1px solid ${C.border}`}}>
+                              <div style={{fontSize:10,color:C.orange,fontWeight:700,
+                                textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>
+                                ⚠ Unrecognised Destinations — {sorted.length} unique
+                              </div>
+                              {sorted.map(g=>(
+                                <div key={g.to} style={{display:"flex",justifyContent:"space-between",
+                                  padding:"4px 0",borderBottom:`1px solid ${C.border}44`,fontSize:12}}>
+                                  <span style={{color:C.text,fontWeight:600}}>{g.to}</span>
+                                  <span style={{color:C.orange,fontWeight:800}}>
+                                    {fmtN(g.qty)} MT · {g.trips.length} trip{g.trips.length>1?"s":""}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          );
+                        })()}
                         {stateTrips.map((t,idx)=>(
                           <div key={t.id} style={{padding:"10px 14px",
                             borderBottom:idx<stateTrips.length-1?`1px solid ${C.border}`:undefined,
