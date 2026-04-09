@@ -11096,6 +11096,13 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
   const [searchTrip,  setSearchTrip]  = useState("");
   const [expandedInv, setExpandedInv] = useState(null);
   const [expandedAdv, setExpandedAdv] = useState(null);
+  // Date filters
+  const [invFrom,   setInvFrom]   = useState("");
+  const [invTo,     setInvTo]     = useState("");
+  const [advFrom,   setAdvFrom]   = useState("");
+  const [advTo,     setAdvTo]     = useState("");
+  const [showInvDateFilter, setShowInvDateFilter] = useState(false);
+  const [showAdvDateFilter, setShowAdvDateFilter] = useState(false);
   const isOwner = user?.role === "owner";
 
   // GST Payments — stored in localStorage under key "mye_gst_payments"
@@ -11239,15 +11246,22 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
   // filtered lists
   const filteredInvoices = shreeInvoices.filter(inv => {
     const q = searchInv.toLowerCase();
-    return !q || inv.invoiceNo?.toLowerCase().includes(q)
-              || inv.trips.some(t=>(t.lr||t.lrNo||"").toLowerCase().includes(q))
-              || fmtDate(inv.invoiceDate).toLowerCase().includes(q);
+    if(q && !inv.invoiceNo?.toLowerCase().includes(q)
+         && !inv.trips.some(t=>(t.lr||t.lrNo||"").toLowerCase().includes(q))
+         && !fmtDate(inv.invoiceDate).toLowerCase().includes(q)) return false;
+    if(invFrom && (inv.invoiceDate||"") < invFrom) return false;
+    if(invTo   && (inv.invoiceDate||"") > invTo)   return false;
+    return true;
   });
   const filteredAdvices = shreePayments.filter(p => {
     const q = searchAdv.toLowerCase();
-    return !q || (p.utr||"").toLowerCase().includes(q)
-              || fmtDate(p.paymentDate||p.date).toLowerCase().includes(q)
-              || (p.invoices||[]).some(i=>(i.invoiceNo||"").toLowerCase().includes(q));
+    const pd = p.paymentDate||p.date||"";
+    if(q && !(p.utr||"").toLowerCase().includes(q)
+         && !fmtDate(pd).toLowerCase().includes(q)
+         && !(p.invoices||[]).some(i=>(i.invoiceNo||"").toLowerCase().includes(q))) return false;
+    if(advFrom && pd < advFrom) return false;
+    if(advTo   && pd > advTo)   return false;
+    return true;
   });
   const filteredShortages = allShortages.filter(s => {
     const q = searchShort.toLowerCase();
@@ -12052,9 +12066,81 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
         {activeTab==="invoices"&&(
           <div>
             <SearchBar value={searchInv} onChange={setSearchInv} placeholder="Search invoice no, LR, date…"/>
+            {/* Date filter + PDF */}
+            <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:8,flexWrap:"wrap"}}>
+              <button onClick={()=>setShowInvDateFilter(p=>!p)}
+                style={{background:showInvDateFilter?C.blue+"22":"transparent",border:`1px solid ${showInvDateFilter?C.blue:C.border}`,
+                  borderRadius:8,color:showInvDateFilter?C.blue:C.muted,fontSize:11,fontWeight:700,
+                  cursor:"pointer",padding:"5px 10px"}}>
+                📅 {showInvDateFilter?"Hide Dates":"Filter by Date"}
+              </button>
+              {(invFrom||invTo)&&(
+                <span style={{fontSize:11,color:C.orange,fontWeight:700}}>
+                  {invFrom||"start"} → {invTo||"today"}
+                  <button onClick={()=>{setInvFrom("");setInvTo("");}}
+                    style={{marginLeft:5,background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:12}}>✕</button>
+                </span>
+              )}
+              <button onClick={()=>{
+                const rows = filteredInvoices.map(inv=>`
+                  <tr>
+                    <td>${inv.invoiceNo}</td>
+                    <td>${fmtDate(inv.invoiceDate)}</td>
+                    <td>${inv.trips.length}</td>
+                    <td style="text-align:right">₹${fmtINR(inv.totalAmt)}</td>
+                    <td>${inv.status==='paid'?'<span style="color:#1a7f37">✓ Paid</span>':'<span style="color:#b45309">Billed</span>'}</td>
+                  </tr>`).join("");
+                const total = filteredInvoices.reduce((s,i)=>s+i.totalAmt,0);
+                const html = `<!DOCTYPE html><html><head><title>Invoice Report</title>
+                  <style>body{font-family:Arial,sans-serif;font-size:11px;margin:20px}
+                  h1{font-size:16px} h2{font-size:12px;color:#555}
+                  table{width:100%;border-collapse:collapse;margin-top:12px}
+                  th{background:#1565c0;color:white;padding:6px 8px;text-align:left;font-size:10px;text-transform:uppercase}
+                  td{padding:5px 8px;border:1px solid #e0e0e0} tr:nth-child(even){background:#f0f6fc}
+                  .logo{width:40px;height:40px;background:#1565c0;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;margin-right:10px}
+                  .logo span{color:white;font-size:16px;font-weight:900}
+                  @media print{*{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}}
+                  </style></head><body onload="window.print()">
+                  <div style="display:flex;align-items:center;border-bottom:2px solid #1565c0;padding-bottom:8px;margin-bottom:12px">
+                    <div class="logo"><span>MY</span></div>
+                    <div><div style="font-size:18px;font-weight:800">Invoice Report</div>
+                    <div style="font-size:10px;color:#888">M Yantra Enterprises${invFrom||invTo?` · ${invFrom||"start"} to ${invTo||"today"}`:""}  · Generated ${new Date().toLocaleDateString("en-IN")}</div></div>
+                  </div>
+                  <table><thead><tr><th>Invoice No</th><th>Date</th><th>Trips</th><th>Amount</th><th>Status</th></tr></thead>
+                  <tbody>${rows}</tbody>
+                  <tfoot><tr style="font-weight:800;background:#1565c0;color:white">
+                    <td colspan="3">Total (${filteredInvoices.length} invoices)</td>
+                    <td style="text-align:right">₹${fmtINR(total)}</td><td></td>
+                  </tr></tfoot></table>
+                  </body></html>`;
+                const w=window.open("","_blank"); w.document.write(html); w.document.close();
+              }} style={{background:C.orange+"22",border:`1px solid ${C.orange}55`,borderRadius:8,
+                color:C.orange,fontSize:11,fontWeight:700,cursor:"pointer",padding:"5px 10px"}}>
+                📄 PDF Report
+              </button>
+            </div>
+            {showInvDateFilter&&(
+              <div style={{background:C.card,borderRadius:10,padding:"10px 14px",
+                display:"flex",gap:10,flexWrap:"wrap",marginBottom:10}}>
+                <div style={{flex:1,minWidth:120}}>
+                  <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>FROM</div>
+                  <input type="date" value={invFrom} onChange={e=>setInvFrom(e.target.value)}
+                    onClick={e=>e.target.showPicker?.()}
+                    style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,
+                      color:invFrom?C.text:C.muted,padding:"7px 8px",fontSize:12,boxSizing:"border-box"}} />
+                </div>
+                <div style={{flex:1,minWidth:120}}>
+                  <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>TO</div>
+                  <input type="date" value={invTo} onChange={e=>setInvTo(e.target.value)}
+                    onClick={e=>e.target.showPicker?.()}
+                    style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,
+                      color:invTo?C.text:C.muted,padding:"7px 8px",fontSize:12,boxSizing:"border-box"}} />
+                </div>
+              </div>
+            )}
             <div style={{fontSize:11,color:C.muted,marginBottom:10}}>
               {filteredInvoices.length} of {shreeInvoices.length} invoice{shreeInvoices.length!==1?"s":""}
-              {searchInv&&` · "${searchInv}"`}
+              {searchInv&&` · "${searchInv}"`}{(invFrom||invTo)?" (date filtered)":""}
             </div>
             {filteredInvoices.length===0
               ? <EmptyState icon="🧾" text={searchInv?"No invoices match your search.":"No invoices yet. Upload an invoice PDF."}/>
@@ -12129,9 +12215,88 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
         {activeTab==="payments"&&(
           <div>
             <SearchBar value={searchAdv} onChange={setSearchAdv} placeholder="Search UTR, invoice no, date…"/>
+            {/* Date filter + PDF */}
+            <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:8,flexWrap:"wrap"}}>
+              <button onClick={()=>setShowAdvDateFilter(p=>!p)}
+                style={{background:showAdvDateFilter?C.blue+"22":"transparent",border:`1px solid ${showAdvDateFilter?C.blue:C.border}`,
+                  borderRadius:8,color:showAdvDateFilter?C.blue:C.muted,fontSize:11,fontWeight:700,
+                  cursor:"pointer",padding:"5px 10px"}}>
+                📅 {showAdvDateFilter?"Hide Dates":"Filter by Date"}
+              </button>
+              {(advFrom||advTo)&&(
+                <span style={{fontSize:11,color:C.orange,fontWeight:700}}>
+                  {advFrom||"start"} → {advTo||"today"}
+                  <button onClick={()=>{setAdvFrom("");setAdvTo("");}}
+                    style={{marginLeft:5,background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:12}}>✕</button>
+                </span>
+              )}
+              <button onClick={()=>{
+                const rows = filteredAdvices.map(p=>{
+                  const frtInvs=(p.invoices||[]).filter(i=>i.invoiceNo&&!i.invoiceNo.startsWith("KR"));
+                  return `<tr>
+                    <td style="font-family:monospace">${p.utr||"—"}</td>
+                    <td>${fmtDate(p.paymentDate||p.date)}</td>
+                    <td>${frtInvs.map(i=>i.invoiceNo).join(", ")||"—"}</td>
+                    <td style="text-align:right">₹${fmtINR(p.totalBilled||p.totalBill||0)}</td>
+                    <td style="text-align:right;color:#c67c00">₹${fmtINR(p.tdsDeducted||p.tds||0)}</td>
+                    <td style="text-align:right;color:#c67c00">₹${fmtINR(p.holdAmount||p.gstHold||0)}</td>
+                    <td style="text-align:right;color:#1a7f37;font-weight:800">₹${fmtINR(p.totalPaid||p.paid||0)}</td>
+                  </tr>`;
+                }).join("");
+                const totalPaid = filteredAdvices.reduce((s,p)=>s+(p.totalPaid||p.paid||0),0);
+                const totalBilled = filteredAdvices.reduce((s,p)=>s+(p.totalBilled||p.totalBill||0),0);
+                const html = `<!DOCTYPE html><html><head><title>Payment Advice Report</title>
+                  <style>body{font-family:Arial,sans-serif;font-size:11px;margin:20px}
+                  h1{font-size:16px}
+                  table{width:100%;border-collapse:collapse;margin-top:12px}
+                  th{background:#1565c0;color:white;padding:6px 8px;text-align:left;font-size:9px;text-transform:uppercase}
+                  td{padding:5px 8px;border:1px solid #e0e0e0;font-size:11px} tr:nth-child(even){background:#f0f6fc}
+                  .logo{width:40px;height:40px;background:#1565c0;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;margin-right:10px}
+                  .logo span{color:white;font-size:16px;font-weight:900}
+                  @media print{*{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}}
+                  </style></head><body onload="window.print()">
+                  <div style="display:flex;align-items:center;border-bottom:2px solid #1565c0;padding-bottom:8px;margin-bottom:12px">
+                    <div class="logo"><span>MY</span></div>
+                    <div><div style="font-size:18px;font-weight:800">Payment Advice Report</div>
+                    <div style="font-size:10px;color:#888">M Yantra Enterprises${advFrom||advTo?` · ${advFrom||"start"} to ${advTo||"today"}`:""}  · Generated ${new Date().toLocaleDateString("en-IN")}</div></div>
+                  </div>
+                  <table><thead><tr><th>UTR / Reference</th><th>Date</th><th>Invoices</th><th>Billed</th><th>TDS</th><th>Hold</th><th>Net Paid</th></tr></thead>
+                  <tbody>${rows}</tbody>
+                  <tfoot><tr style="font-weight:800;background:#1565c0;color:white">
+                    <td colspan="3">Total (${filteredAdvices.length} advices)</td>
+                    <td style="text-align:right">₹${fmtINR(totalBilled)}</td>
+                    <td></td><td></td>
+                    <td style="text-align:right">₹${fmtINR(totalPaid)}</td>
+                  </tr></tfoot></table>
+                  </body></html>`;
+                const w=window.open("","_blank"); w.document.write(html); w.document.close();
+              }} style={{background:C.orange+"22",border:`1px solid ${C.orange}55`,borderRadius:8,
+                color:C.orange,fontSize:11,fontWeight:700,cursor:"pointer",padding:"5px 10px"}}>
+                📄 PDF Report
+              </button>
+            </div>
+            {showAdvDateFilter&&(
+              <div style={{background:C.card,borderRadius:10,padding:"10px 14px",
+                display:"flex",gap:10,flexWrap:"wrap",marginBottom:10}}>
+                <div style={{flex:1,minWidth:120}}>
+                  <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>FROM</div>
+                  <input type="date" value={advFrom} onChange={e=>setAdvFrom(e.target.value)}
+                    onClick={e=>e.target.showPicker?.()}
+                    style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,
+                      color:advFrom?C.text:C.muted,padding:"7px 8px",fontSize:12,boxSizing:"border-box"}} />
+                </div>
+                <div style={{flex:1,minWidth:120}}>
+                  <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>TO</div>
+                  <input type="date" value={advTo} onChange={e=>setAdvTo(e.target.value)}
+                    onClick={e=>e.target.showPicker?.()}
+                    style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,
+                      color:advTo?C.text:C.muted,padding:"7px 8px",fontSize:12,boxSizing:"border-box"}} />
+                </div>
+              </div>
+            )}
             <div style={{fontSize:11,color:C.muted,marginBottom:10}}>
               {filteredAdvices.length} of {shreePayments.length} advice{shreePayments.length!==1?"s":""}
-              {searchAdv&&` · "${searchAdv}"`}
+              {searchAdv&&` · "${searchAdv}"`}{(advFrom||advTo)?" (date filtered)":""}
             </div>
             {filteredAdvices.length===0
               ? <EmptyState icon="💳" text={searchAdv?"No advices match your search.":"No payment advices yet."}/>
@@ -13177,9 +13342,10 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPayR
 
   const hasPendingReq = tripId => (paymentRequests||[]).some(r=>r.tripId===tripId&&r.status==="pending");
 
+  const MAX_GROUP = 2;
   const toggleAll = () => {
-    if(selected.size===empTrips.length) setSelected(new Set());
-    else setSelected(new Set(empTrips.map(t=>t.id)));
+    if(selected.size>0) setSelected(new Set());
+    else setSelected(new Set(empTrips.slice(0,MAX_GROUP).map(t=>t.id)));
   };
 
   return (
@@ -13204,9 +13370,16 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPayR
         <div style={{padding:"10px 14px",display:"flex",flexDirection:"column",gap:8}}>
           {/* Select all */}
           <div style={{display:"flex",alignItems:"center",gap:8,fontSize:12}}>
-            <input type="checkbox" checked={selected.size===empTrips.length}
+            <input type="checkbox" checked={selected.size>0 && selected.size<=MAX_GROUP}
               onChange={toggleAll} style={{width:15,height:15}} />
-            <span style={{color:"#666"}}>Select all for group request</span>
+            <span style={{color:"#666"}}>
+              {selected.size===0 ? "Select trips (max 2 to group)" : `${selected.size} selected`}
+            </span>
+            {empTrips.length>MAX_GROUP && (
+              <span style={{fontSize:10,color:"#d97706",fontWeight:600,marginLeft:4}}>
+                ⚠ Max {MAX_GROUP} per request
+              </span>
+            )}
           </div>
 
           {/* Trip rows */}
@@ -13215,7 +13388,12 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPayR
               background:"#f8fafc",borderRadius:8,padding:"8px 10px",
               border:`1px solid ${hasPendingReq(t.id)?"#a855f733":"#e2e8f0"}`}}>
               <input type="checkbox" checked={selected.has(t.id)}
-                onChange={()=>setSelected(p=>{const n=new Set(p); n.has(t.id)?n.delete(t.id):n.add(t.id); return n;})}
+                onChange={()=>setSelected(p=>{
+                const n=new Set(p);
+                if(n.has(t.id)) { n.delete(t.id); return n; }
+                if(n.size>=MAX_GROUP) { alert(`Max ${MAX_GROUP} trips can be grouped in one request.`); return p; }
+                n.add(t.id); return n;
+              })}
                 style={{width:15,height:15,flexShrink:0}} />
               <div style={{flex:1,minWidth:0}}>
                 <div style={{fontWeight:700,fontSize:13}}>{t.truckNo} · <span style={{color:"#2563eb"}}>{t.lrNo}</span></div>
@@ -13237,9 +13415,8 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPayR
                 📋 Request Payment — LR {selectedTrips[0].lrNo}
               </button>
             )}
-            {selectedTrips.length>1 && (
+            {selectedTrips.length>1 && selectedTrips.length<=MAX_GROUP && (
               <button onClick={()=>{
-                // Open request for first trip with total amount pre-filled across all selected
                 const combined = {...selectedTrips[0],
                   balance: selectedTotal,
                   _groupedLRs: selectedTrips.map(t=>t.lrNo).join(" + "),
@@ -13249,8 +13426,14 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPayR
               }}
                 style={{flex:1,background:"#7c3aed22",border:"1.5px solid #7c3aed44",borderRadius:10,
                   color:"#7c3aed",padding:"9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
-                📋 Group Request — {selectedTrips.length} trips · ₹{selectedTotal.toLocaleString("en-IN")} total
+                📋 Group Request — {selectedTrips.map(t=>t.lrNo).join(" + ")} · ₹{selectedTotal.toLocaleString("en-IN")}
               </button>
+            )}
+            {selectedTrips.length>MAX_GROUP && (
+              <div style={{flex:1,textAlign:"center",background:"#fef3c7",border:"1px solid #d97706",
+                borderRadius:10,padding:"9px",fontSize:12,color:"#d97706",fontWeight:700}}>
+                ⚠ Max {MAX_GROUP} trips per group request — deselect some
+              </div>
             )}
             {selectedTrips.length===0 && (
               <div style={{flex:1,textAlign:"center",color:"#888",fontSize:12,padding:"8px"}}>
@@ -13388,6 +13571,7 @@ This will auto-recover in the next trip.`);
       amount:+pf.amount, utr:pf.utr, date:pf.date, paidTo:pf.paidTo, notes:pf.notes,
       createdBy:user.username, createdAt:nowTs()};
     setDriverPays(prev=>[...(prev||[]),p]);
+    DB.saveDriverPay(p).catch(e=>console.error("saveDriverPay error:",e));
     log("DRIVER PAYMENT",`LR:${t.lrNo} ${t.truckNo} — ${fmt(+pf.amount)} UTR:${pf.utr}`);
     autoSettle(t.id, +pf.amount);
     // Auto-mark pending payment requests for this LR as done
@@ -13415,7 +13599,7 @@ This will auto-recover in the next trip.`);
         return;
       }
     }
-    const withMeta = payments.map(p => ({...p, createdBy:user.username, createdAt:nowTs()}));
+    const withMeta = payments.map(p => ({...p, paidTo:p.paidTo||"", createdBy:user.username, createdAt:nowTs()}));
     setDriverPays(prev=>[...(prev||[]),...withMeta]);
     for (const p of withMeta) {
       log("DRIVER PAYMENT",`LR:${p.lrNo} ${p.truckNo} — ${fmt(p.amount)} UTR:${p.utr}`);
