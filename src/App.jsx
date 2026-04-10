@@ -1754,7 +1754,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       const frRate = +item.extracted?.frRate||0;
       if(frRate - (+item.givenRate) < 30) return false;
       // Only require GR/Invoice for DIs explicitly set as party order
-      if(item.orderType==="party" && checked && (!item.grFile||!item.invoiceFile)) return false;
+      if(item.orderType==="party" && (!item.grFile||!item.invoiceFile)) return false;
       // Block if DI already exists in saved trips
       if(checkDupDI(item.extracted?.diNo)) return false;
     }
@@ -6946,7 +6946,7 @@ function TafalMod({trips, vehicles, setVehicles, employees, settings, setSetting
             <div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:13}}>
               <span style={{color:C.muted}}>Active Range: <b style={{color:C.text}}>{ibStart}–{ibEnd}</b></span>
               <span style={{color:C.muted}}>Next No: <b style={{color:C.orange}}>#{nextIndentNo}</b></span>
-              <span style={{color:C.muted}}>Used: <b style={{color:C.text}}>{usedNos.length}</b></span>
+              <span style={{color:C.muted}}>Used: <b style={{color:C.text}}>{usedNosSet.size}</b></span>
               <span style={{color:remaining<=10?C.red:C.green,fontWeight:700}}>Remaining: {remaining}</span>
             </div>
             {remaining <= 10 && remaining > 0 && (
@@ -8320,8 +8320,26 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
       };
       setDriverPays(prev => [deduction, ...(prev||[])]);
       await DB.saveDriverPay(deduction);
+
+      // Also add to vehicle loan so it auto-recovers in the next trip's loanRecovery field
+      if(vehicle) {
+        const loanTxn = {
+          id: uid(), type:"loan", date:today(),
+          amount: deductAmt, lrNo: trip.lrNo||"",
+          note: `Diesel over-deduct: LR ${trip.lrNo||"—"} — Est ₹${oldEst} → Actual ₹${newDiesel}. Recover in next trip.`
+        };
+        const updatedVeh = {
+          ...vehicle,
+          loan: (vehicle.loan||0) + deductAmt,
+          loanTxns: [...(vehicle.loanTxns||[]), loanTxn],
+        };
+        setVehicles(prev => prev.map(v => v.truckNo===trip.truckNo ? updatedVeh : v));
+        DB.saveVehicle(updatedVeh).catch(e=>console.warn("saveVehicle diesel adj:", e));
+        log("DIESEL ADJ → LOAN", `${trip.truckNo} ₹${deductAmt} added to loan for auto-recovery in next trip`);
+      }
+
       log("DIESEL ADJ DEDUCTION", `LR ${trip.lrNo} ₹${deductAmt} deducted — diesel est was ₹${oldEst}, actual ₹${newDiesel}`);
-      window.alert(`⚠ Trip LR ${trip.lrNo||"—"} was already settled.\nDiesel updated: ₹${oldEst} → ₹${newDiesel}.\nDeduction of ₹${deductAmt} created in driver payments for next settlement.`);
+      window.alert(`⚠ Trip LR ${trip.lrNo||"—"} was already settled.\nDiesel updated: ₹${oldEst} → ₹${newDiesel}.\nDeduction ₹${deductAmt} added to ${vehicle?.ownerName||trip.truckNo} loan ledger — will auto-recover in the next trip's Loan Recovery field.`);
     }
 
     // 4. WhatsApp alert if amount mismatch
