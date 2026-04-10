@@ -11890,7 +11890,15 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
                               <div style={{flex:1,minWidth:0}}>
                                 <span style={{fontFamily:"monospace",color:"#bbb",fontSize:11}}>
-                                  DI: {st.diNo||"—"}
+                                  DI: <span style={{
+                                    color: (st.diNo||"").replace(/[^0-9]/g,"").length===10 ? "#bbb" : "#dc2626",
+                                    fontWeight: (st.diNo||"").replace(/[^0-9]/g,"").length!==10 ? "800" : "normal"
+                                  }}>{st.diNo||"—"}</span>
+                                  {(st.diNo||"").replace(/[^0-9]/g,"").length>0 && (st.diNo||"").replace(/[^0-9]/g,"").length!==10 && (
+                                    <span style={{color:"#dc2626",fontSize:10,marginLeft:4}}>
+                                      ⚠ {(st.diNo||"").replace(/[^0-9]/g,"").length} digits — expected 10!
+                                    </span>
+                                  )}
                                 </span>
                                 {st.grNo && <span style={{fontFamily:"monospace",color:C.muted,fontSize:10,marginLeft:8}}>GR: {st.grNo}</span>}
                               </div>
