@@ -11352,27 +11352,50 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
   // We compare the invoice line amount against what's stored on the matched diLine (or full trip).
   const checkAmount = (st, trip) => {
     const invoiceAmt = Number(st.frtAmt||0);
-    if(invoiceAmt === 0) return {ok:true, diff:0}; // can't validate if no amount
+    if(invoiceAmt === 0) return {ok:true, diff:0, invoiceAmt:0, expectedAmt:0};
 
     const stDi = (st.diNo||"").trim();
+    const stGr = (st.grNo||"").trim();
     let expectedAmt = 0;
 
-    if(stDi && (trip.diLines||[]).length > 0) {
-      // Multi-DI: find the specific diLine and compute its billed amount
-      const diLine = trip.diLines.find(d=>(d.diNo||"").trim()===stDi);
+    if((trip.diLines||[]).length > 1) {
+      // ── Multi-DI trip: compute per-DI expected = DI qty × DI frRate ──────────
+      const diLine = stDi
+        ? trip.diLines.find(d=>(d.diNo||"").trim()===stDi)
+        : stGr ? trip.diLines.find(d=>(d.grNo||"").trim()===stGr) : null;
+
       if(diLine) {
-        expectedAmt = (diLine.qty||0) * (diLine.frRate||trip.frRate||0);
+        // Priority: diLine.frRate → trip.frRate (blended) → back-calc from billedToShree
+        const diRate = diLine.frRate || 0;
+        const tripRate = trip.frRate || 0;
+
+        if(diRate > 0) {
+          // Best case: frRate stored per DI line
+          expectedAmt = (diLine.qty||0) * diRate;
+        } else if(tripRate > 0) {
+          // Fallback: use trip-level frRate (blended rate applies to each DI)
+          expectedAmt = (diLine.qty||0) * tripRate;
+        } else {
+          // Last resort: proportion of total billedToShree by this DI's qty
+          const totalQty = trip.diLines.reduce((s,d)=>s+(d.qty||0),0);
+          const totalBilled = trip.billedToShree || 0;
+          if(totalQty > 0 && totalBilled > 0) {
+            expectedAmt = Math.round((diLine.qty||0) / totalQty * totalBilled);
+          } else {
+            return {ok:true, diff:0, invoiceAmt, expectedAmt:invoiceAmt, note:"unverifiable"};
+          }
+        }
       } else {
-        // DI matched at trip level but no diLine — use full trip billing
-        expectedAmt = trip.billedToShree || (trip.qty||0)*(trip.frRate||0);
+        // DI not found in diLines (shouldn't happen if matchInvoiceLine succeeded)
+        return {ok:true, diff:0, invoiceAmt, expectedAmt:invoiceAmt, note:"unmatched-di"};
       }
     } else {
-      // Single DI trip — compare against full billedToShree or qty×frRate
+      // ── Single DI trip: compare against full billedToShree or qty×frRate ─────
       expectedAmt = trip.billedToShree || (trip.qty||0)*(trip.frRate||0);
     }
 
     const diff = invoiceAmt - expectedAmt;
-    const ok = Math.abs(diff) < 2; // allow ₹2 rounding tolerance
+    const ok = Math.abs(diff) < 2; // ₹2 rounding tolerance
     return {ok, diff, invoiceAmt, expectedAmt};
   };
 
@@ -11403,20 +11426,37 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
       return;
     }
 
-    // Block if any amount mismatches
+    // Check amount mismatches — distinguish hard mismatches from unverifiable multi-DI lines
     const mismatches = scTrips.filter(st=>{
       const m = matchInvoiceLine(st, allTrips);
       if(!m) return false;
-      return !checkAmount(st, m.trip).ok;
+      const check = checkAmount(st, m.trip);
+      return !check.ok && !check.note; // skip "unverifiable" and "unmatched-di" notes
     });
+    const unverifiable = scTrips.filter(st=>{
+      const m = matchInvoiceLine(st, allTrips);
+      if(!m) return false;
+      const check = checkAmount(st, m.trip);
+      return check.note === "unverifiable"; // multi-DI without frRate per line
+    });
+
     if(mismatches.length > 0) {
       const details = mismatches.map(st=>{
         const m = matchInvoiceLine(st, allTrips);
         const {invoiceAmt, expectedAmt} = checkAmount(st, m.trip);
-        return "DI "+( st.diNo||st.grNo)+": invoice ₹"+invoiceAmt.toLocaleString("en-IN")+" vs trip ₹"+expectedAmt.toLocaleString("en-IN");
+        return "DI "+(st.diNo||st.grNo)+": invoice ₹"+invoiceAmt.toLocaleString("en-IN")+" vs trip ₹"+expectedAmt.toLocaleString("en-IN");
       }).join("\n");
       setScanError("Amount mismatch on "+mismatches.length+" line(s):\n\n"+details+"\n\nFix the trip freight rate first, then scan again.");
       return;
+    }
+
+    // Warn about unverifiable multi-DI lines but allow proceeding
+    if(unverifiable.length > 0) {
+      const diNos = unverifiable.map(st=>st.diNo||st.grNo).join(", ");
+      const proceed = window.confirm(
+        `⚠ ${unverifiable.length} DI line(s) in this invoice belong to multi-DI trips where per-DI freight rate is not stored:\n${diNos}\n\nCannot verify individual DI amounts. The invoice total will still be saved correctly.\n\nProceed anyway?`
+      );
+      if(!proceed) return;
     }
 
     // All matched and amounts OK — apply
@@ -11867,10 +11907,15 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                                 <span style={{color:C.muted}}>Amount:</span>
                                 {amtCheck?.ok
                                   ? <span style={{color:"#1b6e3a"}}>✓ matches (₹{fmtINR(amtCheck.expectedAmt)} in trip)</span>
-                                  : <span style={{color:"#c67c00"}}>
-                                      ⚠ mismatch — invoice ₹{fmtINR(amtCheck?.invoiceAmt)} vs trip ₹{fmtINR(amtCheck?.expectedAmt)}
-                                      {" "}<span style={{color:"#b91c1c"}}>(diff ₹{fmtINR(Math.abs(amtCheck?.diff||0))})</span>
-                                    </span>}
+                                  : amtCheck?.note==="unverifiable"
+                                    ? <span style={{color:"#2563eb",fontSize:10}}>
+                                        ℹ multi-DI trip — per-DI rate not stored, cannot verify individually
+                                        <span style={{color:"#888"}}> (invoice ₹{fmtINR(amtCheck?.invoiceAmt)})</span>
+                                      </span>
+                                    : <span style={{color:"#c67c00"}}>
+                                        ⚠ mismatch — invoice ₹{fmtINR(amtCheck?.invoiceAmt)} vs trip ₹{fmtINR(amtCheck?.expectedAmt)}
+                                        {" "}<span style={{color:"#b91c1c"}}>(diff ₹{fmtINR(Math.abs(amtCheck?.diff||0))})</span>
+                                      </span>}
                               </div>
                             )}
                             {/* No match guidance */}
