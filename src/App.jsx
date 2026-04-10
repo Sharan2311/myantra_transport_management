@@ -14056,9 +14056,18 @@ This will auto-recover in the next trip.`);
             const trip = (trips||[]).find(t=>t.id===pr.tripId);
             const isPaid = (driverPays||[]).some(p=>p.lrNo===pr.lrNo&&p.amount>0);
             const effectiveStatus = isPaid ? "done" : pr.status;
+            // ── Compute current balance to detect stale amount ──────────────────
+            const tripVeh = trip ? (vehicles||[]).find(v=>v.truckNo===trip.truckNo) : null;
+            const tripIndentsC = trip ? (indents||[]).filter(i=>i.tripId===trip.id&&i.confirmed) : [];
+            const confirmedDieselC = tripIndentsC.reduce((s,i)=>s+(i.amount||0),0);
+            const calcC = trip ? calcNet(trip, tripVeh, confirmedDieselC>0?confirmedDieselC:null) : null;
+            const paidSoFarC = (driverPays||[]).filter(p=>p.tripId===pr.tripId).reduce((s,p)=>s+(p.amount||0),0);
+            const currentBalance = calcC ? Math.max(0, calcC.net - paidSoFarC) : null;
+            const amountStale = effectiveStatus!=="done" && currentBalance!==null &&
+              Math.abs(currentBalance - pr.amount) >= 1; // >₹1 difference
             return (
               <div key={pr.id} style={{background:C.card,borderRadius:14,padding:"14px 16px",
-                borderLeft:`4px solid ${effectiveStatus==="done"?C.green:C.purple}`,marginBottom:4}}>
+                borderLeft:`4px solid ${effectiveStatus==="done"?C.green:amountStale?C.orange:C.purple}`,marginBottom:4}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
                   <div>
                     <div style={{fontWeight:800,fontSize:14}}>{pr.lrNo||"—"} · {pr.truckNo}</div>
@@ -14066,10 +14075,34 @@ This will auto-recover in the next trip.`);
                     <div style={{color:C.muted,fontSize:11}}>Requested by: {pr.createdBy||"—"} · {pr.createdAt||""}</div>
                   </div>
                   <div style={{textAlign:"right"}}>
-                    <div style={{color:effectiveStatus==="done"?C.green:C.purple,fontWeight:800,fontSize:15}}>{fmt(pr.amount)}</div>
-                    <Badge label={effectiveStatus==="done"?"✓ Done":"Pending"} color={effectiveStatus==="done"?C.green:C.purple} />
+                    <div style={{color:effectiveStatus==="done"?C.green:amountStale?C.orange:C.purple,fontWeight:800,fontSize:15}}>
+                      {fmt(pr.amount)}
+                      {amountStale&&<span style={{fontSize:10,color:C.orange,display:"block"}}>⚠ outdated</span>}
+                    </div>
+                    <Badge label={effectiveStatus==="done"?"✓ Done":"Pending"} color={effectiveStatus==="done"?C.green:amountStale?C.orange:C.purple} />
                   </div>
                 </div>
+                {/* Stale amount warning banner */}
+                {amountStale && (
+                  <div style={{background:C.orange+"15",border:`1px solid ${C.orange}44`,borderRadius:8,
+                    padding:"8px 10px",marginBottom:8,display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+                    <div style={{fontSize:12}}>
+                      <div style={{color:C.orange,fontWeight:700}}>⚠ Amount has changed</div>
+                      <div style={{color:C.muted,fontSize:11}}>
+                        Requested: <b>{fmt(pr.amount)}</b> · Current balance: <b style={{color:C.teal}}>{fmt(currentBalance)}</b>
+                      </div>
+                    </div>
+                    <button onClick={()=>{
+                      const updated = {...pr, amount: currentBalance};
+                      setPaymentRequests(prev=>(prev||[]).map(r=>r.id===pr.id?updated:r));
+                      DB.savePaymentRequest(updated).catch(e=>console.error("savePaymentRequest:",e));
+                      log("PAY REQUEST UPDATED",`LR:${pr.lrNo} amount ${fmt(pr.amount)}→${fmt(currentBalance)}`);
+                    }} style={{flexShrink:0,background:C.teal,color:"#fff",border:"none",
+                      borderRadius:8,padding:"6px 12px",fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+                      🔄 Update to {fmt(currentBalance)}
+                    </button>
+                  </div>
+                )}
                 <div style={{background:C.bg,borderRadius:8,padding:"8px 10px",fontSize:12,marginBottom:8}}>
                   <div><span style={{color:C.muted}}>Recipient: </span><b>{pr.recipientName||"—"}</b> ({pr.recipientType==="employee"?"Employee":"Vehicle Owner"})</div>
                   <div><span style={{color:C.muted}}>Account: </span><b>{pr.accountName||"—"}</b></div>
