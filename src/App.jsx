@@ -5141,11 +5141,11 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
 
       {/* TRIP CARDS — date-grouped, LR-prominent, sorted newest first */}
       {(() => {
-        // Sort shown by date desc, then LR desc within same date
+        // Sort shown by date desc, then LR asc within same date
         const sorted = [...shown].sort((a,b) => {
           const dc = (b.date||"").localeCompare(a.date||"");
           if(dc!==0) return dc;
-          return (+b.lrNo||0) - (+a.lrNo||0);
+          return (+a.lrNo||0) - (+b.lrNo||0);
         });
 
         // Group by date
@@ -11877,48 +11877,84 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                         <span>{scanResult.invoiceDate||"—"}</span>
                         <span style={{color:"#1565c0",fontWeight:700}}>₹{fmtINR(scanResult.totalAmount)}</span>
                       </div>
-                      {/* Per-line: Step 1 identity + Step 2 amount */}
+                      {/* Per-line: editable DI/GR + identity match + amount check */}
                       {(scanResult.trips||[]).map((st,i)=>{
                         const m   = matchInvoiceLine(st, trips||[]);
                         const trip = m?.trip;
                         const amtCheck = trip ? checkAmount(st, trip) : null;
-                        const rowOk = trip && amtCheck?.ok;
-                        const rowWarn = trip && !amtCheck?.ok;
+                        const diDigits = (st.diNo||"").replace(/[^0-9]/g,"");
+                        const diOk = diDigits.length === 10;
                         return (
-                          <div key={i} style={{padding:"8px 0",borderBottom:"1px solid #ccddf0",fontSize:12}}>
-                            {/* Identity row */}
-                            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
-                              <div style={{flex:1,minWidth:0}}>
-                                <span style={{fontFamily:"monospace",color:"#bbb",fontSize:11}}>
-                                  DI: <span style={{
-                                    color: (st.diNo||"").replace(/[^0-9]/g,"").length===10 ? "#bbb" : "#dc2626",
-                                    fontWeight: (st.diNo||"").replace(/[^0-9]/g,"").length!==10 ? "800" : "normal"
-                                  }}>{st.diNo||"—"}</span>
-                                  {(st.diNo||"").replace(/[^0-9]/g,"").length>0 && (st.diNo||"").replace(/[^0-9]/g,"").length!==10 && (
-                                    <span style={{color:"#dc2626",fontSize:10,marginLeft:4}}>
-                                      ⚠ {(st.diNo||"").replace(/[^0-9]/g,"").length} digits — expected 10!
-                                    </span>
-                                  )}
-                                </span>
-                                {st.grNo && <span style={{fontFamily:"monospace",color:C.muted,fontSize:10,marginLeft:8}}>GR: {st.grNo}</span>}
+                          <div key={i} style={{padding:"10px 0",borderBottom:"1px solid #ccddf0",fontSize:12}}>
+                            {/* Editable DI + GR row */}
+                            <div style={{display:"flex",gap:6,alignItems:"flex-start",marginBottom:6,flexWrap:"wrap"}}>
+                              <div style={{flex:"1 1 140px"}}>
+                                <div style={{fontSize:9,color:"#888",fontWeight:700,marginBottom:2}}>
+                                  DI NO {!diOk&&<span style={{color:"#dc2626"}}>⚠ {diDigits.length}/10 digits</span>}
+                                </div>
+                                <input
+                                  value={st.diNo||""}
+                                  onChange={e=>{
+                                    const val = e.target.value.replace(/\D/g,"").slice(0,10);
+                                    setScanResult(prev=>({...prev,
+                                      trips:(prev.trips||[]).map((x,j)=>j===i?{...x,diNo:val}:x)
+                                    }));
+                                  }}
+                                  placeholder="10-digit DI"
+                                  maxLength={10}
+                                  style={{
+                                    width:"100%",boxSizing:"border-box",
+                                    fontFamily:"monospace",fontSize:13,fontWeight:700,
+                                    padding:"5px 7px",borderRadius:6,outline:"none",
+                                    border:`1.5px solid ${diOk?"#1b6e3a":"#dc2626"}`,
+                                    background: diOk?"#f0fdf4":"#fef2f2",
+                                    color: diOk?"#1a4a2a":"#b91c1c",
+                                  }}
+                                />
                               </div>
-                              <span style={{fontFamily:"monospace",color:C.text,flexShrink:0}}>₹{fmtINR(st.frtAmt)}</span>
-                              <span style={{flexShrink:0,fontSize:11}}>
-                                {trip
-                                  ? <span style={{color:"#1b6e3a"}}>✓ LR {trip.lrNo||trip.lr}</span>
-                                  : <span style={{color:"#b91c1c"}}>✗ no trip</span>}
-                              </span>
+                              <div style={{flex:"1 1 120px"}}>
+                                <div style={{fontSize:9,color:"#888",fontWeight:700,marginBottom:2}}>GR NO</div>
+                                <input
+                                  value={st.grNo||""}
+                                  onChange={e=>{
+                                    const val = e.target.value;
+                                    setScanResult(prev=>({...prev,
+                                      trips:(prev.trips||[]).map((x,j)=>j===i?{...x,grNo:val}:x)
+                                    }));
+                                  }}
+                                  placeholder="1070/MYE/XXXX"
+                                  style={{
+                                    width:"100%",boxSizing:"border-box",
+                                    fontFamily:"monospace",fontSize:12,
+                                    padding:"5px 7px",borderRadius:6,outline:"none",
+                                    border:`1.5px solid ${C.border}`,
+                                    background:C.bg,color:C.text,
+                                  }}
+                                />
+                              </div>
+                              <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",flexShrink:0}}>
+                                <div style={{fontSize:9,color:"#888",fontWeight:700,marginBottom:2}}>AMOUNT</div>
+                                <span style={{fontFamily:"monospace",fontSize:13,fontWeight:700,color:C.text}}>
+                                  ₹{fmtINR(st.frtAmt)}
+                                </span>
+                                <span style={{fontSize:11,marginTop:2}}>
+                                  {trip
+                                    ? <span style={{color:"#1b6e3a"}}>✓ LR {trip.lrNo||trip.lr}</span>
+                                    : diOk
+                                      ? <span style={{color:"#b91c1c"}}>✗ no trip found</span>
+                                      : <span style={{color:"#c67c00"}}>✎ fix DI to match</span>}
+                                </span>
+                              </div>
                             </div>
                             {/* Amount validation row */}
                             {trip && (
-                              <div style={{display:"flex",alignItems:"center",gap:6,marginTop:3,fontSize:11}}>
+                              <div style={{display:"flex",alignItems:"center",gap:6,fontSize:11}}>
                                 <span style={{color:C.muted}}>Amount:</span>
                                 {amtCheck?.ok
                                   ? <span style={{color:"#1b6e3a"}}>✓ matches (₹{fmtINR(amtCheck.expectedAmt)} in trip)</span>
                                   : amtCheck?.note==="unverifiable"
                                     ? <span style={{color:"#2563eb",fontSize:10}}>
-                                        ℹ multi-DI trip — per-DI rate not stored, cannot verify individually
-                                        <span style={{color:"#888"}}> (invoice ₹{fmtINR(amtCheck?.invoiceAmt)})</span>
+                                        ℹ multi-DI trip — cannot verify per-DI (invoice ₹{fmtINR(amtCheck?.invoiceAmt)})
                                       </span>
                                     : <span style={{color:"#c67c00"}}>
                                         ⚠ mismatch — invoice ₹{fmtINR(amtCheck?.invoiceAmt)} vs trip ₹{fmtINR(amtCheck?.expectedAmt)}
@@ -11926,10 +11962,9 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                                       </span>}
                               </div>
                             )}
-                            {/* No match guidance */}
-                            {!trip && (
-                              <div style={{color:"#c67c00",fontSize:10,marginTop:3}}>
-                                ↳ Go to Trips tab, add this trip (DI: {st.diNo||"—"}) first, then scan invoice again
+                            {!trip && diOk && (
+                              <div style={{color:"#c67c00",fontSize:10,marginTop:2}}>
+                                ↳ Go to Trips tab, add this trip (DI: {st.diNo}) first, then scan invoice again
                               </div>
                             )}
                           </div>
