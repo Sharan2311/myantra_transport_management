@@ -143,7 +143,7 @@ If a field is missing use empty string or 0.`;
         "anthropic-beta": "pdfs-2024-09-25",
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-5-20250514",
+        model: "claude-sonnet-4-5-20250929",
         max_tokens: 2048,
         messages: [{ role: "user", content: [contentBlock, { type: "text", text: prompt }] }],
       }),
