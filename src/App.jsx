@@ -1755,20 +1755,28 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       const ownerDeductG = ownerVehsG[0]?.deductPerTrip||0;
       const ownerBalG = ownerVehsG.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
       const autoLoanG = ownerBalG<=0 ? 0 : (ownerDeductG>0 ? Math.min(ownerDeductG, ownerBalG) : ownerBalG);
+      // Auto-attach confirmed/open diesel request for this truck
+      const openReqsG = (dieselRequests||[])
+        .filter(r => r.truckNo===truckNo && (r.status==="open"||r.status==="confirmed"))
+        .sort((a,b)=>(b.status==="confirmed"?1:0)-(a.status==="confirmed"?1:0));
+      const autoReqG = openReqsG.length===1 ? openReqsG[0] : openReqsG.find(r=>r.status==="confirmed");
+      const autoIndentNo = autoReqG ? String(autoReqG.indentNo) : "";
+      const autoDiesel   = autoReqG ? String(autoReqG.confirmedAmount??autoReqG.amount) : "0";
       return {
         id: uid(),
         truckNo,
         diIds,
         client,
         tafal: String(settings?.tafalPerTrip||300),
-        diesel: "0",
-        dieselIndentNo: "",
+        diesel: autoDiesel,
+        dieselIndentNo: autoIndentNo,
         advance: "0",
         cashEmpId: "",
         shortageRecovery: "0",
         loanRecovery: String(autoLoanG),
         driverPhone: vehG?.driverPhone || "",
         assignedEmpId: "",
+        _autoAttachedReqId: autoReqG?.id || null,
       };
     });
     setGroups(newGroups);
@@ -1800,13 +1808,19 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
         const ownerDed2 = ownerVs2[0]?.deductPerTrip||0;
         const ownerBal2 = ownerVs2.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
         const autoLR2 = ownerBal2<=0?0:Math.min(ownerDed2,ownerBal2);
+        const openReqsS = (dieselRequests||[])
+          .filter(r => r.truckNo===g.truckNo && (r.status==="open"||r.status==="confirmed"))
+          .sort((a,b)=>(b.status==="confirmed"?1:0)-(a.status==="confirmed"?1:0));
+        const autoReqS = openReqsS.length===1 ? openReqsS[0] : openReqsS.find(r=>r.status==="confirmed");
         const solo = {
           id:uid(), truckNo:g.truckNo, diIds:[itemId],
           client:g.client, tafal:g.tafal,
-          diesel:"0", dieselIndentNo:"",
+          diesel: autoReqS ? String(autoReqS.confirmedAmount??autoReqS.amount) : "0",
+          dieselIndentNo: autoReqS ? String(autoReqS.indentNo) : "",
           advance:"0", cashEmpId:"",
           shortageRecovery:"0", loanRecovery:String(autoLR2),
           _splitFrom:gid,
+          _autoAttachedReqId: autoReqS?.id || null,
         };
         return [...updated, solo];
       } else {
@@ -2575,19 +2589,52 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                 </div>
               </div>
 
-              {/* Diesel indent */}
-              {+g.diesel>0&&(
-                <div>
-                  <div style={{fontSize:10,color:+g.diesel>0&&!g.dieselIndentNo.trim()?C.red:C.muted,fontWeight:700,marginBottom:3}}>
-                    DIESEL INDENT NO {+g.diesel>0&&!g.dieselIndentNo.trim()&&"* required"}
+              {/* Diesel indent — auto-attached from open request if available */}
+              {+g.diesel>0&&(()=>{
+                const attachedReq = g._autoAttachedReqId
+                  ? (dieselRequests||[]).find(r=>r.id===g._autoAttachedReqId)
+                  : null;
+                const manualMatchReq = !attachedReq && g.dieselIndentNo.trim()
+                  ? (dieselRequests||[]).find(r=>String(r.indentNo)===g.dieselIndentNo.trim())
+                  : null;
+                const displayReq = attachedReq || manualMatchReq;
+                const missing = +g.diesel>0 && !g.dieselIndentNo.trim();
+                return (
+                  <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                    <div style={{fontSize:10,color:missing?C.red:C.muted,fontWeight:700}}>
+                      DIESEL INDENT NO {missing&&"* required"}
+                    </div>
+                    {displayReq&&(
+                      <div style={{background:C.teal+"11",border:`1px solid ${C.teal}44`,
+                        borderRadius:7,padding:"5px 8px",fontSize:11,color:C.teal,fontWeight:600,
+                        display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                        <span>
+                          {displayReq.status==="confirmed"?"✓":"⏳"} #{displayReq.indentNo} · ₹{(displayReq.confirmedAmount??displayReq.amount).toLocaleString("en-IN")}
+                          {attachedReq?" · auto-attached":""}
+                        </span>
+                        <span onClick={()=>{
+                          updateGroup(g.id,"dieselIndentNo","");
+                          updateGroup(g.id,"diesel","0");
+                          updateGroup(g.id,"_autoAttachedReqId",null);
+                        }} style={{cursor:"pointer",color:C.muted,marginLeft:8,fontSize:13}}>×</span>
+                      </div>
+                    )}
+                    <input type="text" value={g.dieselIndentNo}
+                      onChange={e=>{
+                        updateGroup(g.id,"dieselIndentNo",e.target.value);
+                        updateGroup(g.id,"_autoAttachedReqId",null);
+                        // If typed value matches a request, auto-fill diesel estimate
+                        const req=(dieselRequests||[]).find(r=>String(r.indentNo)===e.target.value.trim());
+                        if(req) updateGroup(g.id,"diesel",String(req.confirmedAmount??req.amount));
+                      }}
+                      placeholder={displayReq?"Override indent number…":"Indent number"}
+                      style={{width:"100%",background:C.bg,
+                        border:`1.5px solid ${missing?C.red:g.dieselIndentNo.trim()?C.teal:C.border}`,
+                        borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,
+                        outline:"none",boxSizing:"border-box"}} />
                   </div>
-                  <input type="text" value={g.dieselIndentNo}
-                    onChange={e=>updateGroup(g.id,"dieselIndentNo",e.target.value)}
-                    placeholder="Indent number"
-                    style={{width:"100%",background:C.bg,border:`1.5px solid ${+g.diesel>0&&!g.dieselIndentNo.trim()?C.red:C.border}`,
-                      borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
-                </div>
-              )}
+                );
+              })()}
 
               {/* Advance */}
               <div style={{display:"flex",gap:10}}>
