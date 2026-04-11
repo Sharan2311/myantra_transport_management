@@ -9641,13 +9641,41 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
                         )}
                         {user.role==="owner" && !isEditing && (
                           <button onClick={async()=>{
+                            const indentStr = String(req.indentNo);
+                            // Find any trips that reference this indent
+                            const linkedTrips = (trips||[]).filter(t =>
+                              t.dieselIndentNo && t.dieselIndentNo.trim() === indentStr
+                            );
+                            const linkedLRs = linkedTrips.map(t=>t.lrNo||t.truckNo).join(", ");
                             const msg = req.status==="open"
-                              ? `Delete indent #${req.indentNo} for ${req.truckNo}?\nThe number will be reused for the next request.`
-                              : `Delete confirmed indent #${req.indentNo} for ${req.truckNo}?\nThis was already dispensed — only delete if it was recorded in error.`;
+                              ? `Delete indent #${req.indentNo} for ${req.truckNo}?
+The number will be reused for the next request.`
+                              : linkedTrips.length>0
+                                ? `Delete confirmed indent #${req.indentNo} for ${req.truckNo}?
+
+⚠ This indent is linked to LR: ${linkedLRs}
+Deleting will clear the Diesel Estimate and Indent No from that trip.
+
+Only delete if recorded in error.`
+                                : `Delete confirmed indent #${req.indentNo} for ${req.truckNo}?
+This was already dispensed — only delete if it was recorded in error.`;
                             if(!window.confirm(msg)) return;
+                            // Cascade: clear dieselEstimate + dieselIndentNo on any linked trips
+                            if(linkedTrips.length>0) {
+                              const updatedTrips = (trips||[]).map(t => {
+                                if(t.dieselIndentNo && t.dieselIndentNo.trim()===indentStr) {
+                                  const cleared = {...t, dieselEstimate:0, dieselIndentNo:""};
+                                  DB.saveTrip(cleared).catch(e=>console.error("cascade saveTrip:",e));
+                                  log("INDENT CASCADE CLEAR", `LR ${t.lrNo||t.truckNo} — diesel cleared (indent #${req.indentNo} deleted)`);
+                                  return cleared;
+                                }
+                                return t;
+                              });
+                              setTrips(updatedTrips);
+                            }
                             setDieselRequests(p=>p.filter(r=>r.id!==req.id));
                             await DB.deleteDieselRequest(req.id);
-                            log("DELETE DIESEL REQUEST",`Indent #${req.indentNo} · ${req.truckNo} (${req.status})`);
+                            log("DELETE DIESEL REQUEST",`Indent #${req.indentNo} · ${req.truckNo} (${req.status})${linkedTrips.length>0?` — cleared from ${linkedTrips.length} trip(s)`:""}`);
                           }} style={{background:"none",border:`1px solid ${C.red}55`,borderRadius:6,
                             color:C.red,fontSize:11,padding:"3px 8px",cursor:"pointer"}}>
                             🗑 Delete
