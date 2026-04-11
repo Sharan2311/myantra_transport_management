@@ -6593,68 +6593,134 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
         <Field label="Diesel Estimate ₹" value={f.dieselEstimate||""} onChange={ff("dieselEstimate")} type="number" half
           note="Driver's estimate (update later via Indent)" placeholder="0" />
       </div>
-      {/* ⛽ Diesel Indent No — smart dropdown from open requests */}
+      {/* ⛽ Diesel Indent No — auto-attach + manual entry */}
       {(()=>{
         const truck = (f.truckNo||"").trim().toUpperCase();
         const allOpen = (dieselRequests||[]).filter(r=>r.status==="open"||r.status==="confirmed");
-        const truckReqs = allOpen.filter(r=>r.truckNo===truck);
-        const showList = truckReqs.length>0 ? truckReqs : allOpen;
+        // Requests for this truck — confirmed first
+        const truckReqs = allOpen
+          .filter(r=>r.truckNo===truck)
+          .sort((a,b)=>(b.status==="confirmed"?1:0)-(a.status==="confirmed"?1:0));
+        const otherReqs = allOpen.filter(r=>r.truckNo!==truck);
         const val = (f.dieselIndentNo||"").trim();
         const matchedReq = allOpen.find(r=>String(r.indentNo)===val);
         const dupTrip = trips.find(t=>t.id!==f.id&&t.dieselIndentNo&&t.dieselIndentNo.trim()===val);
         const dupIndent = indents.find(i=>i.indentNo&&String(i.indentNo).trim()===val);
+
+        const attachReq = (r) => {
+          ff("dieselIndentNo")(String(r.indentNo));
+          ff("dieselEstimate")(String(r.confirmedAmount??r.amount));
+        };
+        const clearReq = () => { ff("dieselIndentNo")(""); ff("dieselEstimate")("0"); };
+
+        // Auto-attach: if truck has exactly 1 confirmed request and nothing yet selected, attach silently
+        if(!val && truckReqs.length===1) {
+          setTimeout(()=>{
+            if(!(f.dieselIndentNo)) attachReq(truckReqs[0]);
+          }, 0);
+        }
+
         return (
           <div style={{display:"flex",flexDirection:"column",gap:6}}>
-            <div style={{fontSize:11,color:C.muted,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>⛽ Diesel Indent No</div>
-            {allOpen.length>0 && (
+            <div style={{fontSize:11,color:C.muted,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>
+              ⛽ Diesel Indent No
+            </div>
+
+            {/* Requests for this truck — tap-to-attach cards */}
+            {truckReqs.length>0 && (
+              <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                {truckReqs.map(r=>{
+                  const amt = r.confirmedAmount??r.amount;
+                  const isSel = val===String(r.indentNo);
+                  const isConf = r.status==="confirmed";
+                  return (
+                    <div key={r.id} onClick={()=>isSel?clearReq():attachReq(r)}
+                      style={{
+                        background:isSel?(isConf?C.teal+"22":C.orange+"18"):(isConf?C.teal+"11":C.bg),
+                        border:`1.5px solid ${isSel?(isConf?C.teal:C.orange):(isConf?C.teal+"66":C.border)}`,
+                        borderRadius:8,padding:"9px 12px",cursor:"pointer",
+                        display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontWeight:700,fontSize:13,color:isConf?C.teal:C.text}}>
+                          #{r.indentNo}
+                          <span style={{marginLeft:6,fontSize:11,fontWeight:600,
+                            background:isConf?C.teal:C.orange,color:"#fff",
+                            borderRadius:4,padding:"1px 6px"}}>
+                            {isConf?"✓ CONFIRMED":"OPEN"}
+                          </span>
+                        </div>
+                        <div style={{fontSize:11,color:C.muted,marginTop:2}}>
+                          {"₹"}{amt.toLocaleString("en-IN")}
+                          {r.dieselAmount?<span style={{marginLeft:8}}>Diesel {"₹"}{r.dieselAmount.toLocaleString("en-IN")}</span>:null}
+                          {r.cashAmount?<span style={{marginLeft:6}}>Cash {"₹"}{r.cashAmount.toLocaleString("en-IN")}</span>:null}
+                          {(r.requestedBy||r.createdBy)?<span style={{marginLeft:6}}> · By: {r.requestedBy||r.createdBy}</span>:null}
+                        </div>
+                      </div>
+                      <div style={{fontSize:12,fontWeight:700,flexShrink:0,
+                        color:isSel?C.red:(isConf?C.teal:C.muted)}}>
+                        {isSel?"Remove":"Attach"}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* No requests for this truck but others exist — show a small dropdown */}
+            {truckReqs.length===0 && otherReqs.length>0 && (
               <select value={val||""} onChange={e=>{
                 const sel=e.target.value;
-                if(sel==="__manual__"){ff("dieselIndentNo")("");return;}
+                if(!sel){clearReq();return;}
                 ff("dieselIndentNo")(sel);
-                if(sel){
-                  const req=allOpen.find(r=>String(r.indentNo)===sel);
-                  if(req) ff("dieselEstimate")(String(req.confirmedAmount??req.amount));
-                } else { ff("dieselEstimate")("0"); }
+                const req=allOpen.find(r=>String(r.indentNo)===sel);
+                if(req) ff("dieselEstimate")(String(req.confirmedAmount??req.amount));
               }} style={{width:"100%",background:C.bg,border:`1.5px solid ${val?C.teal:C.border}`,
-                borderRadius:10,color:val?C.text:C.muted,padding:"12px 12px",fontSize:14,outline:"none"}}>
-                <option value="">— Select indent{truck?` for ${truck}`:""}… —</option>
-                {showList.map(r=>{
+                borderRadius:8,color:val?C.text:C.muted,padding:"10px 12px",fontSize:13,outline:"none"}}>
+                <option value="">— No request for {truck||"this truck"} — pick from others —</option>
+                {otherReqs.map(r=>{
                   const amt=r.confirmedAmount??r.amount;
                   return <option key={r.id} value={String(r.indentNo)}>
-                    #{r.indentNo} · {r.truckNo} · ₹{amt.toLocaleString("en-IN")}
-                    {r.dieselAmount?` ⛽₹${r.dieselAmount.toLocaleString("en-IN")}`:""}{r.cashAmount?` 💵₹${r.cashAmount.toLocaleString("en-IN")}`:""}{r.status==="confirmed"?" ✓":""}
-                    {r.requestedBy||r.createdBy?" | By: "+(r.requestedBy||r.createdBy):""}
+                    #{r.indentNo} {r.truckNo} {"₹"}{amt.toLocaleString("en-IN")} {r.status==="confirmed"?"(confirmed)":"(open)"}
                   </option>;
                 })}
-                <option value="__manual__">✏ Enter manually…</option>
               </select>
             )}
-            {(allOpen.length===0||(val&&!allOpen.find(r=>String(r.indentNo)===val)&&val!=="__manual__")) && (
-              <input value={val} onChange={e=>ff("dieselIndentNo")(e.target.value)}
-                placeholder="e.g. 25748 — from pump slip"
-                style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,
-                  color:C.text,padding:"12px 12px",fontSize:14,outline:"none",
-                  width:"100%",boxSizing:"border-box"}} />
-            )}
+
+            {/* Manual entry — always visible */}
+            <div style={{display:"flex",alignItems:"center",gap:6}}>
+              <input value={val} onChange={e=>{
+                  const v=e.target.value;
+                  ff("dieselIndentNo")(v);
+                  if(v.trim()){
+                    const req=allOpen.find(r=>String(r.indentNo)===v.trim());
+                    if(req) ff("dieselEstimate")(String(req.confirmedAmount??req.amount));
+                  } else ff("dieselEstimate")("0");
+                }}
+                placeholder={truckReqs.length>0?"Or type indent number manually…":"Type indent number…"}
+                style={{flex:1,background:C.bg,
+                  border:`1.5px solid ${matchedReq?C.teal:C.border}`,
+                  borderRadius:8,color:C.text,padding:"9px 12px",fontSize:13,
+                  outline:"none",boxSizing:"border-box"}} />
+              {val && <button onClick={clearReq}
+                style={{background:"none",border:"none",color:C.muted,
+                  cursor:"pointer",fontSize:20,padding:"0 4px",lineHeight:1}}>x</button>}
+            </div>
+
+            {/* Matched / error messages */}
             {matchedReq&&(
               <div style={{background:C.teal+"11",border:`1px solid ${C.teal}33`,borderRadius:8,
-                padding:"8px 12px",fontSize:12,color:C.teal,fontWeight:600}}>
-                ✅ #{matchedReq.indentNo} · {matchedReq.truckNo} · ₹{(matchedReq.confirmedAmount??matchedReq.amount).toLocaleString("en-IN")}
-                {matchedReq.dieselAmount?` · ⛽₹${matchedReq.dieselAmount.toLocaleString("en-IN")}`:""}
-                {matchedReq.cashAmount?` · 💵₹${matchedReq.cashAmount.toLocaleString("en-IN")}`:""}
-                {matchedReq.status==="confirmed"?" · ✓ Pump confirmed":" · ⏳ Awaiting pump"}
-                {(matchedReq.requestedBy||matchedReq.createdBy)?` · By: ${matchedReq.requestedBy||matchedReq.createdBy}`:""}
+                padding:"7px 12px",fontSize:12,color:C.teal,fontWeight:600}}>
+                Indent #{matchedReq.indentNo} attached — {"₹"}{(matchedReq.confirmedAmount??matchedReq.amount).toLocaleString("en-IN")} · {matchedReq.status==="confirmed"?"Pump confirmed":"Awaiting pump"}
               </div>
             )}
             {matchedReq&&matchedReq.truckNo!==truck&&truck&&(
               <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,borderRadius:8,
-                padding:"8px 12px",fontSize:12,color:C.orange,fontWeight:600}}>
-                ⚠ This indent was for {matchedReq.truckNo} — current trip truck is {truck}
+                padding:"7px 12px",fontSize:12,color:C.orange,fontWeight:600}}>
+                This indent was for {matchedReq.truckNo} — trip truck is {truck}
               </div>
             )}
-            {dupTrip&&<div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,padding:"8px 12px",fontSize:12,color:C.red,fontWeight:600}}>⚠ Indent No already used on LR {dupTrip.lrNo||"—"} ({dupTrip.truckNo} · {dupTrip.date})</div>}
-            {dupIndent&&!dupTrip&&<div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,padding:"8px 12px",fontSize:12,color:C.red,fontWeight:600}}>⚠ Indent No already exists in Diesel records ({dupIndent.truckNo} · {dupIndent.date})</div>}
-            <div style={{color:C.muted,fontSize:11}}>Selecting from list auto-fills Diesel Estimate</div>
+            {dupTrip&&<div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,padding:"7px 12px",fontSize:12,color:C.red,fontWeight:600}}>Indent already used on LR {dupTrip.lrNo||"—"} ({dupTrip.truckNo} · {dupTrip.date})</div>}
+            {dupIndent&&!dupTrip&&<div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,padding:"7px 12px",fontSize:12,color:C.red,fontWeight:600}}>Indent already in Diesel records ({dupIndent.truckNo} · {dupIndent.date})</div>}
           </div>
         );
       })()}
@@ -8313,28 +8379,40 @@ ${rows.map(r=>`<tr>
                 </div>
               </div>
             </div>
-            <div style={{background:C.card,borderRadius:12,padding:"16px",textAlign:"center"}}>
+            <div style={{background:C.card,borderRadius:12,padding:"20px 16px",textAlign:"center"}}>
               <div style={{color:C.text,fontWeight:700,fontSize:14,marginBottom:4}}>Driver PIN Required</div>
-              <div style={{color:C.muted,fontSize:12,marginBottom:16}}>Ask the driver for his 4-digit PIN to confirm this transaction</div>
-              <div style={{display:"flex",justifyContent:"center",gap:12,marginBottom:20}}>
-                {[0,1,2,3].map(i=>(
-                  <div key={i} style={{width:48,height:56,borderRadius:10,background:C.bg,
-                    border:`2px solid ${pinError?C.red:pinEntry.length>i?C.teal:C.border}`,
-                    display:"flex",alignItems:"center",justifyContent:"center",fontSize:28,fontWeight:800,color:C.teal,transition:"border-color 0.15s"}}>
-                    {pinEntry.length>i?"●":""}
-                  </div>
-                ))}
+              <div style={{color:C.muted,fontSize:12,marginBottom:20}}>
+                Ask the driver for his 4-digit PIN and type it below
               </div>
-              {pinError && <div style={{color:C.red,fontWeight:700,fontSize:13,marginBottom:12}}>❌ Incorrect PIN — try again</div>}
-              <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,maxWidth:280,margin:"0 auto"}}>
-                {["1","2","3","4","5","6","7","8","9"].map(k=>(
-                  <button key={k} onClick={()=>keyPress(k)}
-                    style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,padding:"16px 8px",fontSize:22,fontWeight:700,cursor:"pointer",color:C.text}}>{k}</button>
-                ))}
-                <div/>
-                <button onClick={()=>keyPress("0")} style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,padding:"16px 8px",fontSize:22,fontWeight:700,cursor:"pointer",color:C.text}}>0</button>
-                <button onClick={keyDel} style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,padding:"16px 8px",fontSize:20,cursor:"pointer",color:C.red}}>⌫</button>
-              </div>
+              <input
+                type="password"
+                inputMode="numeric"
+                maxLength={4}
+                value={pinEntry}
+                autoFocus
+                onChange={e=>{
+                  const v = e.target.value.replace(/\D/g,"").slice(0,4);
+                  setPinEntry(v);
+                  setPinError(false);
+                  if(v.length===4) validatePin(v);
+                }}
+                placeholder="••••"
+                style={{
+                  width:160,textAlign:"center",letterSpacing:12,
+                  fontSize:32,fontWeight:800,padding:"14px 16px",
+                  background:C.bg,outline:"none",
+                  border:`2px solid ${pinError?C.red:pinEntry.length>0?C.teal:C.border}`,
+                  borderRadius:12,color:C.text,
+                  boxSizing:"border-box",
+                  WebkitTextSecurity:"disc",
+                  transition:"border-color 0.15s"
+                }}
+              />
+              {pinError && (
+                <div style={{color:C.red,fontWeight:700,fontSize:13,marginTop:12}}>
+                  ❌ Incorrect PIN — try again
+                </div>
+              )}
             </div>
           </div>
         )}
