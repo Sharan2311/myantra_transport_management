@@ -198,6 +198,95 @@ const Field = ({label, value, onChange, type="text", placeholder="", opts=null, 
   );
 };
 
+// ─── TRUCKSEARCH — type-to-search truck input with live suggestions ──────────
+function TruckSearch({value, onChange, vehicles=[], label="TRUCK NO", placeholder="Type truck number…"}) {
+  const [query,    setQuery]    = useState(value||"");
+  const [open,     setOpen]     = useState(false);
+  const [focused,  setFocused]  = useState(false);
+
+  // Sync external value changes (e.g. edit form pre-population)
+  React.useEffect(() => { setQuery(value||""); }, [value]);
+
+  const q = query.trim().toUpperCase();
+  const exact = (vehicles||[]).find(v => v.truckNo === q);
+  const suggestions = q.length >= 2
+    ? (vehicles||[]).filter(v => v.truckNo.includes(q) && v.truckNo !== q)
+        .sort((a,b) => a.truckNo.localeCompare(b.truckNo))
+        .slice(0, 8)
+    : [];
+  const showDropdown = focused && q.length >= 2 && (exact || suggestions.length > 0);
+  const isNew = q.length >= 6 && !exact;
+
+  const commit = (truckNo) => {
+    setQuery(truckNo);
+    onChange(truckNo);
+    setOpen(false);
+    setFocused(false);
+  };
+
+  const handleChange = (e) => {
+    const v = e.target.value.toUpperCase();
+    setQuery(v);
+    onChange(v);        // propagate immediately so parent state stays in sync
+    setFocused(true);
+  };
+
+  const borderColor = exact ? C.teal : isNew ? C.orange : C.border;
+  const statusText  = exact
+    ? `✅ ${exact.driverName ? exact.driverName + " · " : ""}Known vehicle`
+    : isNew ? "🆕 New truck — will be added to vehicles on save"
+    : null;
+
+  return (
+    <div style={{position:"relative"}}>
+      <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3,textTransform:"uppercase",letterSpacing:1}}>{label}</div>
+      <input
+        value={query}
+        onChange={handleChange}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setTimeout(()=>setFocused(false), 150)}
+        placeholder={placeholder}
+        autoComplete="off"
+        style={{width:"100%",boxSizing:"border-box",background:C.bg,
+          border:`1.5px solid ${borderColor}`,borderRadius:8,color:C.text,
+          padding:"9px 12px",fontSize:14,outline:"none",
+          transition:"border-color 0.15s"}}
+      />
+      {statusText && (
+        <div style={{fontSize:11,marginTop:3,color:exact?C.teal:C.orange,fontWeight:600}}>
+          {statusText}
+        </div>
+      )}
+      {/* Suggestions dropdown */}
+      {showDropdown && (
+        <div style={{position:"absolute",top:"100%",left:0,right:0,zIndex:200,
+          background:C.card,border:`1.5px solid ${C.border}`,borderRadius:8,
+          boxShadow:"0 4px 16px rgba(0,0,0,0.15)",overflow:"hidden",marginTop:2}}>
+          {exact && (
+            <div
+              onMouseDown={()=>commit(exact.truckNo)}
+              style={{padding:"9px 12px",cursor:"pointer",background:C.teal+"11",
+                borderBottom:`1px solid ${C.border}22`,fontSize:13}}>
+              <b style={{color:C.teal}}>{exact.truckNo}</b>
+              {exact.driverName && <span style={{color:C.muted,marginLeft:8}}>{exact.driverName}</span>}
+              <span style={{float:"right",color:C.teal,fontSize:11,fontWeight:700}}>✓ Select</span>
+            </div>
+          )}
+          {suggestions.map(v => (
+            <div key={v.truckNo}
+              onMouseDown={()=>commit(v.truckNo)}
+              style={{padding:"9px 12px",cursor:"pointer",fontSize:13,
+                borderBottom:`1px solid ${C.border}11`}}>
+              <b>{v.truckNo}</b>
+              {v.driverName && <span style={{color:C.muted,marginLeft:8,fontSize:12}}>{v.driverName}</span>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── SEARCHSELECT — searchable dropdown for LR/trip lists ─────────────────────
 function SearchSelect({label, value, onChange, opts=[], half=false, placeholder="Search…", note=""}) {
   const [open,  setOpen]  = useState(false);
@@ -9139,11 +9228,13 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
         };
 
         const createRequest = async () => {
-          if (!drTruckNo.trim()) { alert("Enter truck number"); return; }
+          if (!drTruckNo.trim() || drTruckNo.trim().length < 6) { alert("Enter complete truck number (min 6 characters)"); return; }
           const dieselComp = +drDieselAmt || 0;
           const cashComp   = +drCashAmt   || 0;
           const totalAmt   = dieselComp + cashComp;
-          if (totalAmt <= 0) { alert("Enter Diesel amount and/or Cash amount"); return; }
+          if (dieselComp <= 0) { alert("Diesel amount is required and must be greater than ₹0"); return; }
+          if (drCashAmt === "") { alert("Cash amount is required — enter 0 if no cash is being given"); return; }
+          if (!drPumpId)       { alert("Select a Petrol Pump — it is mandatory for diesel requests"); return; }
           if (!ibStart||!ibEnd) { alert("Set Indent Book range in Settings → TAFAL tab first."); return; }
           if (nextNo>ibEnd) { alert(`Indent book exhausted (${ibStart}–${ibEnd}). Update range in Settings → TAFAL tab.`); return; }
           const pin = genUniquePinForTruck(drTruckNo);
@@ -9205,77 +9296,101 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
               <div style={{background:C.card,borderRadius:12,padding:"14px 16px",
                 display:"flex",flexDirection:"column",gap:10}}>
                 <div style={{color:C.teal,fontWeight:700,fontSize:13}}>+ New Diesel Request</div>
-                {/* Truck — vehicle dropdown + manual fallback */}
-                {(()=>{
-                  const inDropdown = (vehicles||[]).some(v=>v.truckNo===drTruckNo);
-                  const selectVal  = drTruckNo==="" ? "" : inDropdown ? drTruckNo : "__manual__";
-                  return (
-                  <div>
-                    <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>TRUCK NO</div>
-                    <select value={selectVal}
-                      onChange={e=>{
-                        if(e.target.value==="") { setDrTruckNo(""); }
-                        else if(e.target.value==="__manual__") { setDrTruckNo(""); }
-                        else { setDrTruckNo(e.target.value); }
-                      }}
-                      style={{width:"100%",background:C.bg,
-                        border:`1.5px solid ${drTruckNo&&inDropdown?C.teal:C.border}`,
-                        borderRadius:8,color:drTruckNo&&inDropdown?C.text:C.muted,
-                        padding:"9px 12px",fontSize:13,outline:"none",marginBottom:4}}>
-                      <option value="">— Select truck —</option>
-                      {[...(vehicles||[])].sort((a,b)=>a.truckNo.localeCompare(b.truckNo)).map(v=>(
-                        <option key={v.truckNo} value={v.truckNo}>{v.truckNo}{v.driverName?" · "+v.driverName:""}</option>
-                      ))}
-                      <option value="__manual__">✏ Enter new truck number…</option>
-                    </select>
-                    {/* Manual text input — shown when "Enter manually" chosen or typing a new truck */}
-                    {(selectVal==="__manual__"||(!inDropdown&&drTruckNo!=="")) && (
-                      <input value={drTruckNo} onChange={e=>setDrTruckNo(e.target.value.toUpperCase())}
-                        placeholder="Type complete truck number e.g. KA32B1234"
-                        style={{width:"100%",boxSizing:"border-box",background:C.bg,
-                          border:`1.5px solid ${C.orange}`,borderRadius:8,color:C.text,
-                          padding:"9px 12px",fontSize:13,outline:"none"}} />
-                    )}
-                  </div>
-                  );
-                })()}
+                {/* Truck — search-as-you-type with suggestions */}
+                <TruckSearch
+                  value={drTruckNo}
+                  onChange={setDrTruckNo}
+                  vehicles={vehicles||[]}
+                  placeholder="Type truck number e.g. KA32B1234"
+                />
                 {/* Diesel + Cash — total auto-computed */}
+                {/* ── Diesel + Cash (both mandatory) ── */}
                 <div style={{display:"flex",gap:8}}>
                   <div style={{flex:1}}>
-                    <Field label="⛽ Diesel ₹" value={drDieselAmt} onChange={setDrDieselAmt} type="number" placeholder="0"/>
+                    <div style={{fontSize:10,fontWeight:700,marginBottom:3,
+                      color:(+drDieselAmt||0)>0?C.teal:C.red,textTransform:"uppercase",letterSpacing:1}}>
+                      ⛽ Diesel ₹ *
+                    </div>
+                    <input type="number" value={drDieselAmt}
+                      onChange={e=>setDrDieselAmt(e.target.value)}
+                      placeholder="Required"
+                      style={{width:"100%",boxSizing:"border-box",background:C.bg,
+                        border:`1.5px solid ${(+drDieselAmt||0)>0?C.teal:drDieselAmt===""?C.border:C.red}`,
+                        borderRadius:8,color:C.text,padding:"9px 12px",fontSize:14,outline:"none"}}/>
                   </div>
                   <div style={{flex:1}}>
-                    <Field label="💵 Cash ₹" value={drCashAmt} onChange={setDrCashAmt} type="number" placeholder="0"/>
+                    <div style={{fontSize:10,fontWeight:700,marginBottom:3,
+                      color:drCashAmt!==""?C.teal:C.red,textTransform:"uppercase",letterSpacing:1}}>
+                      💵 Cash ₹ *
+                    </div>
+                    <input type="number" value={drCashAmt}
+                      onChange={e=>setDrCashAmt(e.target.value)}
+                      placeholder="Enter 0 if none"
+                      style={{width:"100%",boxSizing:"border-box",background:C.bg,
+                        border:`1.5px solid ${drCashAmt!==""?C.teal:C.border}`,
+                        borderRadius:8,color:C.text,padding:"9px 12px",fontSize:14,outline:"none"}}/>
                   </div>
                 </div>
+                {/* Total preview */}
                 {((+drDieselAmt||0)+(+drCashAmt||0)) > 0 && (
                   <div style={{background:C.teal+"11",border:`1px solid ${C.teal}33`,borderRadius:7,
                     padding:"7px 12px",fontSize:13,color:C.teal,fontWeight:700}}>
                     Total: ₹{((+drDieselAmt||0)+(+drCashAmt||0)).toLocaleString("en-IN")}
                   </div>
                 )}
-                <Field label="Petrol Pump (optional)"
-                  value={drPumpId} onChange={setDrPumpId}
-                  opts={[{v:"",l:"— No pump selected —"},...(pumps||[]).map(p=>({v:p.id,l:p.name}))]}/>
+                {/* ── Petrol Pump (mandatory) ── */}
+                <div>
+                  <div style={{fontSize:10,fontWeight:700,marginBottom:3,
+                    color:drPumpId?C.teal:C.red,textTransform:"uppercase",letterSpacing:1}}>
+                    ⛽ Petrol Pump *
+                  </div>
+                  <select value={drPumpId} onChange={e=>setDrPumpId(e.target.value)}
+                    style={{width:"100%",background:C.bg,
+                      border:`1.5px solid ${drPumpId?C.teal:C.border}`,
+                      borderRadius:8,color:drPumpId?C.text:C.muted,
+                      padding:"9px 12px",fontSize:13,outline:"none"}}>
+                    <option value="">— Select pump (required) —</option>
+                    {(pumps||[]).map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+                  </select>
+                  {(pumps||[]).length===0 && (
+                    <div style={{color:C.orange,fontSize:11,marginTop:3}}>
+                      ⚠ No pumps added yet — go to Diesel → Pumps tab to add one first
+                    </div>
+                  )}
+                </div>
+                {/* ── Validation checklist + Generate button ── */}
                 {(()=>{
-                  const _total = (+drDieselAmt||0)+(+drCashAmt||0);
-                  const _truckOk = drTruckNo.trim().length >= 6; // minimum valid truck no
-                  const _ready = _truckOk && _total > 0;
+                  const _truck   = drTruckNo.trim().length >= 6;
+                  const _diesel  = (+drDieselAmt||0) > 0;
+                  const _cash    = drCashAmt !== "";
+                  const _pump    = !!drPumpId;
+                  const _ready   = _truck && _diesel && _cash && _pump;
+                  const checks = [
+                    {ok:_truck,  msg:"Truck number (min 6 chars)"},
+                    {ok:_diesel, msg:"Diesel amount > ₹0"},
+                    {ok:_cash,   msg:"Cash amount (enter 0 if none)"},
+                    {ok:_pump,   msg:"Petrol pump selected"},
+                  ];
                   return (
                     <>
-                      {!_truckOk && drTruckNo.trim().length>0 && drTruckNo.trim().length<6 && (
-                        <div style={{color:C.orange,fontSize:12,fontWeight:600}}>
-                          ⚠ Enter complete truck number (e.g. KA32B1234)
+                      {!_ready && (
+                        <div style={{background:C.bg,borderRadius:8,padding:"8px 12px",
+                          display:"flex",flexDirection:"column",gap:4}}>
+                          {checks.map(c=>(
+                            <div key={c.msg} style={{display:"flex",alignItems:"center",gap:6,
+                              fontSize:12,color:c.ok?C.teal:C.muted}}>
+                              <span style={{fontSize:14}}>{c.ok?"✅":"○"}</span>
+                              <span style={{textDecoration:c.ok?"line-through":"none",
+                                opacity:c.ok?0.5:1}}>{c.msg}</span>
+                            </div>
+                          ))}
                         </div>
                       )}
-                      {_truckOk && _total<=0 && (
-                        <div style={{color:C.muted,fontSize:12}}>
-                          Enter Diesel ₹ and/or Cash ₹ to continue
-                        </div>
-                      )}
-                      <Btn onClick={createRequest} full color={_ready?C.teal:C.muted}
+                      <Btn onClick={createRequest} full
+                        color={_ready?C.teal:C.muted}
                         disabled={!_ready}
-                        style={{opacity:_ready?1:0.45,cursor:_ready?"pointer":"not-allowed"}}>
+                        style={{opacity:_ready?1:0.4,cursor:_ready?"pointer":"not-allowed",
+                          transition:"opacity 0.2s"}}>
                         ⛽ Generate Indent #{nextNo||"—"} + Driver PIN
                       </Btn>
                     </>
@@ -9410,38 +9525,13 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
                     <div style={{marginTop:12,paddingTop:12,borderTop:`1px solid ${C.border}`,
                       display:"flex",flexDirection:"column",gap:10}}>
                       <div style={{color:C.blue,fontWeight:700,fontSize:12}}>✏ Edit Indent #{req.indentNo}</div>
-                      {/* Truck — vehicle dropdown */}
-                      {(()=>{
-                        const inDrop = (vehicles||[]).some(v=>v.truckNo===editTruckNo);
-                        const selVal = editTruckNo==="" ? "" : inDrop ? editTruckNo : "__manual__";
-                        return (
-                        <div>
-                          <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>TRUCK NO</div>
-                          <select value={selVal}
-                            onChange={e=>{
-                              if(e.target.value===""||e.target.value==="__manual__") setEditTruckNo("");
-                              else setEditTruckNo(e.target.value);
-                            }}
-                            style={{width:"100%",background:C.bg,
-                              border:`1.5px solid ${editTruckNo&&inDrop?C.teal:C.border}`,
-                              borderRadius:8,color:editTruckNo&&inDrop?C.text:C.muted,
-                              padding:"8px 10px",fontSize:13,outline:"none",marginBottom:4}}>
-                            <option value="">— Select truck —</option>
-                            {[...(vehicles||[])].sort((a,b)=>a.truckNo.localeCompare(b.truckNo)).map(v=>(
-                              <option key={v.truckNo} value={v.truckNo}>{v.truckNo}{v.driverName?" · "+v.driverName:""}</option>
-                            ))}
-                            <option value="__manual__">✏ Enter manually…</option>
-                          </select>
-                          {(selVal==="__manual__"||(!inDrop&&editTruckNo!=="")) && (
-                            <input value={editTruckNo} onChange={e=>setEditTruckNo(e.target.value.toUpperCase())}
-                              placeholder="Type complete truck number"
-                              style={{width:"100%",boxSizing:"border-box",background:C.bg,
-                                border:`1.5px solid ${C.orange}`,borderRadius:8,color:C.text,
-                                padding:"8px 10px",fontSize:13,outline:"none"}} />
-                          )}
-                        </div>
-                        );
-                      })()}
+                      {/* Truck — search-as-you-type */}
+                      <TruckSearch
+                        value={editTruckNo}
+                        onChange={setEditTruckNo}
+                        vehicles={vehicles||[]}
+                        placeholder="Type truck number…"
+                      />
                       {/* Diesel + Cash — total auto-computed */}
                       <div style={{display:"flex",gap:8}}>
                         <div style={{flex:1}}>
