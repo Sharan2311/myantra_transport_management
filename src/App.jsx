@@ -2572,13 +2572,30 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
               })()}
 
               {/* Tafal + Diesel */}
+              {(()=>{
+                const gVeh = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
+                const isExempt = gVeh?.tafalExempt;
+                const isOwnerU = user?.role==="owner";
+                return (
               <div style={{display:"flex",gap:10}}>
                 <div style={{flex:1}}>
-                  <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>TAFAL ₹</div>
+                  <div style={{fontSize:10,fontWeight:700,marginBottom:3,
+                    color:isExempt&&!isOwnerU?C.green:C.muted}}>
+                    TAFAL ₹{isExempt?" 🔒 EXEMPT":""}
+                  </div>
+                  {isExempt && !isOwnerU ? (
+                    <div style={{background:C.dim,border:`1.5px solid ${C.border}`,borderRadius:8,
+                      color:C.muted,padding:"7px 8px",fontSize:13,
+                      display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <span style={{color:C.text}}>0</span>
+                      <span style={{fontSize:10,color:C.green,fontWeight:700}}>Exempt</span>
+                    </div>
+                  ) : (
                   <input type="text" inputMode="decimal" value={g.tafal}
                     onChange={e=>updateGroup(g.id,"tafal",e.target.value)}
                     style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,
                       borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
+                  )}
                 </div>
                 <div style={{flex:1}}>
                   <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>DIESEL EST. ₹</div>
@@ -2588,6 +2605,8 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                       borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
                 </div>
               </div>
+                );
+              })()}
 
               {/* Diesel indent — auto-attached from open request if available */}
               {+g.diesel>0&&(()=>{
@@ -6654,8 +6673,26 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
         </div>
       )}
       <div style={{display:"flex",gap:10}}>
-        <Field label="TAFAL ₹" value={f.tafal||""} onChange={ff("tafal")} type="number" half
-          placeholder="0" note={veh?.tafalExempt?"This vehicle is exempt":""} />
+        {/* TAFAL — locked to 0 for non-owners when vehicle is exempt */}
+        {veh?.tafalExempt && !isOwner ? (
+          <div style={{flex:"1 1 45%",minWidth:0,display:"flex",flexDirection:"column",gap:5}}>
+            <label style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>
+              TAFAL ₹
+            </label>
+            <div style={{background:C.dim,border:`1.5px solid ${C.border}`,borderRadius:10,
+              color:C.muted,padding:"13px 12px",fontSize:15,
+              display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{color:C.text}}>0</span>
+              <span style={{fontSize:11,color:C.green,fontWeight:700}}>🔒 Exempt</span>
+            </div>
+            <div style={{color:C.green,fontSize:11}}>This vehicle is TAFAL exempt</div>
+          </div>
+        ) : (
+          <Field label={`TAFAL ₹${veh?.tafalExempt?" (Exempt — Owner override)":""}`}
+            value={f.tafal||""} onChange={ff("tafal")} type="number" half
+            placeholder="0"
+            note={veh?.tafalExempt?"⚠ Exempt vehicle — only owner can change this":""}/>
+        )}
         <Field label="Diesel Estimate ₹" value={f.dieselEstimate||""} onChange={ff("dieselEstimate")} type="number" half
           note="Driver's estimate (update later via Indent)" placeholder="0" />
       </div>
