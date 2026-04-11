@@ -1274,7 +1274,7 @@ export default function App() {
 
       <div style={{padding:"14px 16px 8px"}}>
         <ErrorBoundary>
-        {tab==="dashboard"  && <Dashboard {...sp} setTab={setTab} />}
+        {tab==="dashboard"  && user?.role!=="pump_operator" && <Dashboard {...sp} setTab={setTab} />}
         {tab==="trips"      && can(user,"trips")      && <Trips      {...sp} tripType="outbound" />}
         {tab==="inbound"    && can(user,"inbound")    && <Trips      {...sp} tripType="inbound" />}
         {tab==="billing"    && can(user,"billing")    && <Billing    {...sp} />}
@@ -7746,44 +7746,35 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance: tripWithBalancePr
                     value={row.lr} onChange={e=>{
                       const q = e.target.value;
                       updateRow(i,"lr",q);
-                      // auto-match — only commit on EXACT or numeric-fuzzy match (SKLC0021 = SKLC021)
-                      // Partial/contains matches just show the dropdown; do NOT auto-select
+                      // auto-match — exact, contains, or numeric fuzzy (SKLC0021 = SKLC021)
                       if(q.length>=2) {
                         const qLow = q.toLowerCase();
                         const qDigits = parseInt(qLow.replace(/[^0-9]/g,""),10)||0;
                         const qAlpha  = qLow.replace(/[^a-z]/g,"");
-                        // Only auto-commit if it's an exact LR match or numeric-fuzzy exact
-                        const exactMatch = tripWithBalance.find(t=>{
+                        const allM = tripWithBalance.filter(t=>{
                           const lr = (t.lrNo||"").toLowerCase();
                           if(lr===qLow) return true;
-                          // Numeric fuzzy: SKLC0021 matches SKLC021 (full number must match)
+                          if(lr.includes(qLow)) return true;
+                          if((t.truckNo||"").toLowerCase().includes(qLow)) return true;
+                          // Numeric fuzzy: SKLC0021 matches SKLC021
                           const lrDigits = parseInt(lr.replace(/[^0-9]/g,""),10)||0;
                           const lrAlpha  = lr.replace(/[^a-z]/g,"");
-                          if(qDigits && lrDigits && qDigits===lrDigits && qAlpha && lrAlpha && qAlpha===lrAlpha) return true;
+                          if(qDigits && lrDigits && qDigits===lrDigits && (!qAlpha||!lrAlpha||qAlpha===lrAlpha)) return true;
                           return false;
+                        }).sort((a,b)=>{
+                          const aExact = (a.lrNo||"").toLowerCase()===qLow;
+                          const bExact = (b.lrNo||"").toLowerCase()===qLow;
+                          if(aExact && !bExact) return -1;
+                          if(!aExact && bExact) return 1;
+                          if(a.balance>0 && b.balance<=0) return -1;
+                          if(a.balance<=0 && b.balance>0) return 1;
+                          return 0;
                         });
-                        if(exactMatch) {
-                          // Prefer unsettled trip if multiple share same LR
-                          const allExact = tripWithBalance.filter(t=>{
-                            const lr=(t.lrNo||"").toLowerCase();
-                            if(lr===qLow) return true;
-                            const lrD=parseInt(lr.replace(/[^0-9]/g,""),10)||0;
-                            const lrA=lr.replace(/[^a-z]/g,"");
-                            return qDigits&&lrD&&qDigits===lrD&&qAlpha&&lrA&&qAlpha===lrA;
-                          }).sort((a,b)=>{
-                            if(a.balance>0&&b.balance<=0) return -1;
-                            if(a.balance<=0&&b.balance>0) return 1;
-                            return (b.date||"").localeCompare(a.date||"");
-                          });
-                          const best = allExact[0];
-                          updateRow(i,"tripId", best?.id||"");
-                          // Auto-fill amount with balance only on exact match
-                          if(best && !row.amount) {
-                            updateRow(i,"amount", String(best.balance));
-                          }
-                        } else {
-                          // Partial input — clear any stale tripId so dropdown shows
-                          updateRow(i,"tripId","");
+                        const matchedTrip = allM[0];
+                        updateRow(i,"tripId", matchedTrip?.id||"");
+                        // Auto-fill amount with balance if amount is empty
+                        if(matchedTrip && !row.amount) {
+                          updateRow(i,"amount", String(matchedTrip.balance));
                         }
                       } else {
                         updateRow(i,"tripId","");
@@ -7809,7 +7800,7 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance: tripWithBalancePr
                       <div style={{background:C.card,borderRadius:7,marginTop:3,
                         border:`1px solid ${C.border}`,overflow:"hidden"}}>
                         {matches.map(t=>(
-                          <div key={t.id} onClick={()=>{updateRow(i,"tripId",t.id);updateRow(i,"lr",`LR ${t.lrNo} · ${t.truckNo}`);if(!row.amount)updateRow(i,"amount",String(t.balance));}}
+                          <div key={t.id} onClick={()=>{updateRow(i,"tripId",t.id);updateRow(i,"lr",`LR ${t.lrNo} · ${t.truckNo}`);}}
                             style={{padding:"7px 10px",cursor:"pointer",fontSize:12,
                               borderBottom:`1px solid ${C.border}22`}}>
                             <b>LR {t.lrNo}</b> · {t.truckNo} · Balance: <span style={{color:C.accent}}>{fmt(t.balance)}</span>
@@ -7888,74 +7879,121 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance: tripWithBalancePr
 // Dedicated view for pump_operator role — shows only open diesel requests
 // Pump operator can update amount + reason using driver's PIN
 // Once confirmed, PIN is invalidated and request is locked
-function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], user, log}) {
+function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayments=[], user, log}) {
+  const [activeTab,   setActiveTab]   = useState("open");   // open | history | payments
   const [lrSearch,    setLrSearch]    = useState("");
-  const [selected,    setSelected]    = useState(null); // the request being edited
+  const [selected,    setSelected]    = useState(null);
   const [newAmount,   setNewAmount]   = useState("");
   const [reason,      setReason]      = useState("");
   const [pinEntry,    setPinEntry]    = useState("");
   const [pinError,    setPinError]    = useState(false);
-  const [confirmed,   setConfirmed]   = useState(null); // last confirmed request snapshot
+  const [confirmed,   setConfirmed]   = useState(null);
   const [step,        setStep]        = useState("list"); // list | review | pin | done
+
+  // History date filter
+  const [histFrom,    setHistFrom]    = useState("");
+  const [histTo,      setHistTo]      = useState("");
 
   const openRequests = (dieselRequests||[])
     .filter(r => r.status==="open")
     .filter(r => !lrSearch.trim() || r.truckNo.includes(lrSearch.trim().toUpperCase()) || String(r.indentNo).includes(lrSearch.trim()))
     .sort((a,b)=>b.indentNo-a.indentNo);
 
+  const historyRequests = (dieselRequests||[])
+    .filter(r => r.status!=="open")
+    .filter(r => !histFrom || r.date>=histFrom)
+    .filter(r => !histTo   || r.date<=histTo)
+    .sort((a,b)=>b.indentNo-a.indentNo);
+
+  // Payment summary
+  const totalIndentAmt  = (dieselRequests||[]).filter(r=>r.status==="confirmed"||r.status==="attached").reduce((s,r)=>s+(r.confirmedAmount??r.amount),0);
+  const totalPaid       = (pumpPayments||[]).reduce((s,p)=>s+(+(p.amount)||0),0);
+  const pendingAmt      = Math.max(0, totalIndentAmt - totalPaid);
+
   const resetFlow = () => {
     setSelected(null); setNewAmount(""); setReason("");
     setPinEntry(""); setPinError(false); setStep("list");
   };
-
   const startEdit = (req) => {
-    setSelected(req);
-    setNewAmount(String(req.amount));
-    setReason("");
-    setPinEntry(""); setPinError(false);
-    setStep("review");
+    setSelected(req); setNewAmount(String(req.amount)); setReason("");
+    setPinEntry(""); setPinError(false); setStep("review");
   };
-
   const keyPress = (k) => {
     if(pinEntry.length >= 4) return;
     const next = pinEntry + k;
-    setPinEntry(next);
-    setPinError(false);
+    setPinEntry(next); setPinError(false);
     if(next.length === 4) validatePin(next);
   };
-
   const keyDel = () => { setPinEntry(p=>p.slice(0,-1)); setPinError(false); };
 
   const validatePin = async (pin) => {
     if(!selected) return;
-    if(pin !== selected.pin) {
-      setPinError(true);
-      setPinEntry("");
-      return;
-    }
-    // PIN correct — confirm the request
+    if(pin !== selected.pin) { setPinError(true); setPinEntry(""); return; }
     const effAmt = newAmount && +newAmount > 0 ? +newAmount : selected.amount;
     const changed = effAmt !== selected.amount;
     const updReq = {
-      ...selected,
-      status: "confirmed",
-      confirmedAmount: effAmt,
+      ...selected, status:"confirmed",
+      confirmedAmount:effAmt,
       confirmedReason: changed ? (reason||"Changed at pump") : null,
-      confirmedAt: nowTs(),
-      pin: "****",  // invalidate PIN — no further edits possible
+      confirmedAt:nowTs(), pin:"****",
     };
     setDieselRequests(p=>p.map(r=>r.id===selected.id ? updReq : r));
     await DB.saveDieselRequest(updReq);
-    log("PUMP CONFIRM", `Indent #${selected.indentNo} · ${selected.truckNo} · ₹${effAmt}${changed?` (was ₹${selected.amount})`:""}`)
-    setConfirmed({...updReq, changed, originalAmount: selected.amount});
+    log("PUMP CONFIRM",`Indent #${selected.indentNo} · ${selected.truckNo} · ₹${effAmt}${changed?` (was ₹${selected.amount})`:""}`);
+    setConfirmed({...updReq, changed, originalAmount:selected.amount});
     setStep("done");
   };
 
   const pump = selected ? pumps.find(p=>p.id===selected?.pumpId) : null;
 
+  // PDF download for history
+  const downloadHistoryPDF = () => {
+    const rows = historyRequests;
+    if(!rows.length){ alert("No history records in selected date range."); return; }
+    const fromLabel = histFrom||"All";
+    const toLabel   = histTo  ||"All";
+    const lines = rows.map(r=>{
+      const effAmt = r.confirmedAmount??r.amount;
+      const diesel = r.dieselAmount ? `D:₹${r.dieselAmount.toLocaleString("en-IN")}` : "";
+      const cash   = r.cashAmount   ? `C:₹${r.cashAmount.toLocaleString("en-IN")}` : "";
+      const breakdown = [diesel,cash].filter(Boolean).join(" ");
+      return `#${r.indentNo} | ${r.truckNo} | ${r.date} | ₹${effAmt.toLocaleString("en-IN")} ${breakdown} | ${r.status.toUpperCase()}`;
+    }).join("\n");
+    const total = rows.reduce((s,r)=>s+(r.confirmedAmount??r.amount),0);
+    const content = `DIESEL INDENT HISTORY — ${fromLabel} to ${toLabel}\n${"─".repeat(60)}\n${lines}\n${"─".repeat(60)}\nTOTAL: ₹${total.toLocaleString("en-IN")} (${rows.length} indents)`;
+    // Build HTML for print-to-PDF
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Indent History</title>
+<style>body{font-family:monospace;font-size:13px;padding:20px;color:#000;}
+h2{font-size:15px;margin-bottom:4px;}p{margin:2px 0;color:#555;}
+table{width:100%;border-collapse:collapse;margin-top:12px;}
+th{background:#f0f0f0;padding:6px 10px;text-align:left;font-size:12px;}
+td{padding:5px 10px;border-bottom:1px solid #eee;font-size:12px;}
+.total{font-weight:bold;font-size:13px;margin-top:10px;}
+</style></head><body>
+<h2>⛽ Diesel Indent History</h2>
+<p>Period: <b>${fromLabel}</b> to <b>${toLabel}</b> &nbsp;|&nbsp; ${rows.length} records</p>
+<table><thead><tr><th>#</th><th>Truck</th><th>Date</th><th>Amount</th><th>Diesel</th><th>Cash</th><th>Status</th></tr></thead><tbody>
+${rows.map(r=>`<tr>
+  <td>#${r.indentNo}</td>
+  <td>${r.truckNo}</td>
+  <td>${r.date}</td>
+  <td>₹${(r.confirmedAmount??r.amount).toLocaleString("en-IN")}</td>
+  <td>${r.dieselAmount ? "₹"+r.dieselAmount.toLocaleString("en-IN") : "—"}</td>
+  <td>${r.cashAmount   ? "₹"+r.cashAmount.toLocaleString("en-IN")   : "—"}</td>
+  <td>${r.status.toUpperCase()}</td>
+</tr>`).join("")}
+</tbody></table>
+<div class="total">TOTAL: ₹${total.toLocaleString("en-IN")}</div>
+</body></html>`;
+    const blob = new Blob([html], {type:"text/html"});
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href = url; a.download = `indent_history_${fromLabel}_${toLabel}.html`;
+    a.click(); URL.revokeObjectURL(url);
+  };
+
   return (
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
-
       {/* Header */}
       <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}>
         <div style={{fontSize:22}}>⛽</div>
@@ -7965,240 +8003,291 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], user, log})
         </div>
       </div>
 
-      {/* ── STEP: LIST ── */}
-      {step==="list" && (
-        <>
-          <div style={{background:C.card,borderRadius:10,padding:"8px 12px",
-            display:"flex",alignItems:"center",gap:8}}>
+      {/* Tabs */}
+      <div style={{display:"flex",gap:0,background:C.card,borderRadius:10,padding:3,border:`1px solid ${C.border}`}}>
+        {[
+          {id:"open",     label:`Open (${openRequests.length})`},
+          {id:"history",  label:"History"},
+          {id:"payments", label:"Payments"},
+        ].map(t=>(
+          <button key={t.id} onClick={()=>{setActiveTab(t.id);resetFlow();}}
+            style={{flex:1,padding:"7px 4px",borderRadius:8,border:"none",cursor:"pointer",
+              fontWeight:700,fontSize:12,
+              background:activeTab===t.id?C.orange:"transparent",
+              color:activeTab===t.id?"#fff":C.muted,transition:"all 0.15s"}}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* ── OPEN INDENTS TAB ── */}
+      {activeTab==="open" && (<>
+        {step==="list" && (<>
+          <div style={{background:C.card,borderRadius:10,padding:"8px 12px",display:"flex",alignItems:"center",gap:8}}>
             <span style={{color:C.muted}}>🔍</span>
             <input value={lrSearch} onChange={e=>setLrSearch(e.target.value)}
-              placeholder="Search by truck no or indent no…"
-              style={{flex:1,background:"none",border:"none",outline:"none",
-                fontSize:14,color:C.text}} />
-            {lrSearch && <span onClick={()=>setLrSearch("")}
-              style={{color:C.muted,cursor:"pointer",fontSize:18}}>×</span>}
+              placeholder="Search by truck or indent no…"
+              style={{flex:1,background:"none",border:"none",outline:"none",fontSize:14,color:C.text}}/>
+            {lrSearch && <span onClick={()=>setLrSearch("")} style={{color:C.muted,cursor:"pointer",fontSize:18}}>×</span>}
           </div>
-
           {openRequests.length===0 && (
             <div style={{textAlign:"center",color:C.muted,padding:48,fontSize:14}}>
               {lrSearch ? "No matching open requests" : "No open diesel requests"}
             </div>
           )}
-
           {openRequests.map(req=>{
             const p = pumps.find(x=>x.id===req.pumpId);
             return (
-              <div key={req.id} style={{background:C.card,borderRadius:12,padding:"14px 16px",
-                borderLeft:`3px solid ${C.orange}`}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
+              <div key={req.id} style={{background:C.card,borderRadius:12,padding:"14px 16px",borderLeft:`3px solid ${C.orange}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
                   <div>
                     <div style={{fontWeight:800,fontSize:15}}>
-                      <span style={{color:C.orange}}>#{req.indentNo}</span>
-                      {" · "}{req.truckNo}
+                      <span style={{color:C.orange}}>#{req.indentNo}</span>{" · "}{req.truckNo}
                     </div>
-                    <div style={{color:C.muted,fontSize:12,marginTop:2}}>
-                      {req.date}{p?" · "+p.name:""}
-                    </div>
+                    <div style={{color:C.muted,fontSize:12,marginTop:2}}>{req.date}{p?" · "+p.name:""}</div>
+                    {(req.dieselAmount||req.cashAmount) ? (
+                      <div style={{display:"flex",gap:12,marginTop:4}}>
+                        {req.dieselAmount ? <span style={{fontSize:12,color:C.muted}}>⛽ <b style={{color:C.text}}>₹{req.dieselAmount.toLocaleString("en-IN")}</b></span> : null}
+                        {req.cashAmount   ? <span style={{fontSize:12,color:C.muted}}>💵 <b style={{color:C.text}}>₹{req.cashAmount.toLocaleString("en-IN")}</b></span>   : null}
+                      </div>
+                    ) : null}
                   </div>
                   <div style={{fontWeight:800,fontSize:18,color:C.text}}>{fmt(req.amount)}</div>
                 </div>
-                <Btn onClick={()=>startEdit(req)} full color={C.orange}>
-                  Open & Confirm
-                </Btn>
+                <Btn onClick={()=>startEdit(req)} full color={C.orange}>Open & Confirm</Btn>
               </div>
             );
           })}
-        </>
-      )}
+        </>)}
 
-      {/* ── STEP: REVIEW ── */}
-      {step==="review" && selected && (
-        <div style={{display:"flex",flexDirection:"column",gap:12}}>
-          <button onClick={resetFlow}
-            style={{background:"none",border:"none",color:C.muted,fontSize:13,
-              cursor:"pointer",textAlign:"left",padding:0}}>
-            ← Back to list
-          </button>
-
-          {/* Indent details */}
-          <div style={{background:C.card,borderRadius:12,padding:"14px 16px"}}>
-            <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:10,
-              textTransform:"uppercase",letterSpacing:1}}>Indent Details</div>
-            {[
-              ["Indent No",  `#${selected.indentNo}`],
-              ["Truck",       selected.truckNo],
-              ["Date",        selected.date],
-              ["Pump",        pump?.name||"—"],
-            ].map(([k,v])=>(
-              <div key={k} style={{display:"flex",justifyContent:"space-between",
-                padding:"7px 0",borderBottom:`1px solid ${C.border}22`,fontSize:13}}>
-                <span style={{color:C.muted}}>{k}</span>
-                <span style={{fontWeight:600}}>{v}</span>
-              </div>
-            ))}
-          </div>
-
-          {/* Authorised amount */}
-          <div style={{background:C.orange+"11",border:`2px solid ${C.orange}`,
-            borderRadius:12,padding:"16px",textAlign:"center"}}>
-            <div style={{color:C.orange,fontSize:11,fontWeight:700,
-              textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>
-              Authorised Amount
-            </div>
-            <div style={{fontWeight:800,fontSize:38,color:C.orange}}>{fmt(selected.amount)}</div>
-            <div style={{color:C.muted,fontSize:12,marginTop:4}}>
-              Fill exactly this amount OR enter the actual amount below if different
-            </div>
-          </div>
-
-          {/* Actual amount (only if different) */}
-          <div style={{background:C.card,borderRadius:12,padding:"14px 16px",
-            display:"flex",flexDirection:"column",gap:10}}>
-            <div style={{color:C.text,fontWeight:700,fontSize:13}}>
-              ⚠ Amount Different? Enter Actual
-            </div>
-            <Field label="Actual Amount Filled (₹)"
-              value={newAmount} onChange={setNewAmount} type="number"
-              placeholder={String(selected.amount)} />
-            <Field label="Reason for Change"
-              value={reason} onChange={setReason}
-              opts={[
-                {v:"",           l:"— select reason —"},
-                {v:"no_cash",    l:"No cash available at pump"},
-                {v:"partial",    l:"Partial fill only"},
-                {v:"extra_fill", l:"Extra diesel filled"},
-                {v:"driver_req", l:"Driver requested change"},
-                {v:"other",      l:"Other"},
-              ]} />
-            {newAmount && +newAmount !== selected.amount && !reason && (
-              <div style={{color:C.red,fontSize:12}}>⚠ Select a reason when amount is different</div>
-            )}
-          </div>
-
-          <Btn onClick={()=>{
-            if(newAmount && +newAmount !== selected.amount && !reason) {
-              alert("Select a reason for the amount change"); return;
-            }
-            setStep("pin");
-          }} full color={C.teal}>
-            Proceed to Driver PIN Verification →
-          </Btn>
-        </div>
-      )}
-
-      {/* ── STEP: PIN ── */}
-      {step==="pin" && selected && (
-        <div style={{display:"flex",flexDirection:"column",gap:12}}>
-          <button onClick={()=>setStep("review")}
-            style={{background:"none",border:"none",color:C.muted,fontSize:13,
-              cursor:"pointer",textAlign:"left",padding:0}}>
-            ← Back
-          </button>
-
-          {/* Summary of what will be confirmed */}
-          <div style={{background:C.card,borderRadius:12,padding:"14px 16px"}}>
-            <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:8,
-              textTransform:"uppercase",letterSpacing:1}}>Confirming</div>
-            <div style={{display:"flex",justifyContent:"space-between",fontSize:14,marginBottom:4}}>
-              <span style={{color:C.muted}}>Indent</span>
-              <span style={{fontWeight:700}}>#{selected.indentNo} · {selected.truckNo}</span>
-            </div>
-            <div style={{display:"flex",justifyContent:"space-between",fontSize:14}}>
-              <span style={{color:C.muted}}>Amount</span>
-              <div style={{textAlign:"right"}}>
-                {newAmount && +newAmount !== selected.amount ? (
-                  <>
-                    <span style={{color:C.muted,textDecoration:"line-through",fontSize:12,marginRight:6}}>
-                      {fmt(selected.amount)}
-                    </span>
-                    <span style={{fontWeight:800,color:C.orange,fontSize:16}}>{fmt(+newAmount)}</span>
-                  </>
-                ) : (
-                  <span style={{fontWeight:800,fontSize:16}}>{fmt(selected.amount)}</span>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* PIN entry */}
-          <div style={{background:C.card,borderRadius:12,padding:"16px",textAlign:"center"}}>
-            <div style={{color:C.text,fontWeight:700,fontSize:14,marginBottom:4}}>
-              Driver PIN Required
-            </div>
-            <div style={{color:C.muted,fontSize:12,marginBottom:16}}>
-              Ask the driver for his 4-digit PIN to confirm this transaction
-            </div>
-
-            {/* PIN display */}
-            <div style={{display:"flex",justifyContent:"center",gap:12,marginBottom:20}}>
-              {[0,1,2,3].map(i=>(
-                <div key={i} style={{width:48,height:56,borderRadius:10,
-                  background:C.bg,border:`2px solid ${pinError?C.red:pinEntry.length>i?C.teal:C.border}`,
-                  display:"flex",alignItems:"center",justifyContent:"center",
-                  fontSize:28,fontWeight:800,color:C.teal,
-                  transition:"border-color 0.15s"}}>
-                  {pinEntry.length>i?"●":""}
+        {step==="review" && selected && (
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <button onClick={resetFlow} style={{background:"none",border:"none",color:C.muted,fontSize:13,cursor:"pointer",textAlign:"left",padding:0}}>← Back to list</button>
+            <div style={{background:C.card,borderRadius:12,padding:"14px 16px"}}>
+              <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:10,textTransform:"uppercase",letterSpacing:1}}>Indent Details</div>
+              {[
+                ["Indent No", `#${selected.indentNo}`],
+                ["Truck",     selected.truckNo],
+                ["Date",      selected.date],
+                ["Pump",      pump?.name||"—"],
+                ...(selected.dieselAmount ? [["⛽ Diesel", `₹${selected.dieselAmount.toLocaleString("en-IN")}`]] : []),
+                ...(selected.cashAmount   ? [["💵 Cash",   `₹${selected.cashAmount.toLocaleString("en-IN")}`]]   : []),
+              ].map(([k,v])=>(
+                <div key={k} style={{display:"flex",justifyContent:"space-between",padding:"7px 0",borderBottom:`1px solid ${C.border}22`,fontSize:13}}>
+                  <span style={{color:C.muted}}>{k}</span>
+                  <span style={{fontWeight:600}}>{v}</span>
                 </div>
               ))}
             </div>
+            <div style={{background:C.orange+"11",border:`2px solid ${C.orange}`,borderRadius:12,padding:"16px",textAlign:"center"}}>
+              <div style={{color:C.orange,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Authorised Amount</div>
+              <div style={{fontWeight:800,fontSize:38,color:C.orange}}>{fmt(selected.amount)}</div>
+              <div style={{color:C.muted,fontSize:12,marginTop:4}}>Fill exactly this amount OR enter actual below if different</div>
+            </div>
+            <div style={{background:C.card,borderRadius:12,padding:"14px 16px",display:"flex",flexDirection:"column",gap:10}}>
+              <div style={{color:C.text,fontWeight:700,fontSize:13}}>⚠ Amount Different? Enter Actual</div>
+              <Field label="Actual Amount Filled (₹)" value={newAmount} onChange={setNewAmount} type="number" placeholder={String(selected.amount)}/>
+              <Field label="Reason for Change" value={reason} onChange={setReason}
+                opts={[
+                  {v:"",           l:"— select reason —"},
+                  {v:"no_cash",    l:"No cash available at pump"},
+                  {v:"partial",    l:"Partial fill only"},
+                  {v:"extra_fill", l:"Extra diesel filled"},
+                  {v:"driver_req", l:"Driver requested change"},
+                  {v:"other",      l:"Other"},
+                ]}/>
+              {newAmount && +newAmount !== selected.amount && !reason && (
+                <div style={{color:C.red,fontSize:12}}>⚠ Select a reason when amount is different</div>
+              )}
+            </div>
+            <Btn onClick={()=>{ if(newAmount && +newAmount !== selected.amount && !reason){alert("Select a reason for the amount change");return;} setStep("pin"); }} full color={C.teal}>
+              Proceed to Driver PIN Verification →
+            </Btn>
+          </div>
+        )}
 
-            {pinError && (
-              <div style={{color:C.red,fontWeight:700,fontSize:13,marginBottom:12}}>
-                ❌ Incorrect PIN — try again
+        {step==="pin" && selected && (
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <button onClick={()=>setStep("review")} style={{background:"none",border:"none",color:C.muted,fontSize:13,cursor:"pointer",textAlign:"left",padding:0}}>← Back</button>
+            <div style={{background:C.card,borderRadius:12,padding:"14px 16px"}}>
+              <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:8,textTransform:"uppercase",letterSpacing:1}}>Confirming</div>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:14,marginBottom:4}}>
+                <span style={{color:C.muted}}>Indent</span>
+                <span style={{fontWeight:700}}>#{selected.indentNo} · {selected.truckNo}</span>
               </div>
-            )}
-
-            {/* Keypad */}
-            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,maxWidth:280,margin:"0 auto"}}>
-              {["1","2","3","4","5","6","7","8","9"].map(k=>(
-                <button key={k} onClick={()=>keyPress(k)}
-                  style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,
-                    padding:"16px 8px",fontSize:22,fontWeight:700,cursor:"pointer",color:C.text}}>
-                  {k}
-                </button>
-              ))}
-              <div/>
-              <button onClick={()=>keyPress("0")}
-                style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,
-                  padding:"16px 8px",fontSize:22,fontWeight:700,cursor:"pointer",color:C.text}}>
-                0
-              </button>
-              <button onClick={keyDel}
-                style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,
-                  padding:"16px 8px",fontSize:20,cursor:"pointer",color:C.red}}>
-                ⌫
-              </button>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:14}}>
+                <span style={{color:C.muted}}>Amount</span>
+                <div style={{textAlign:"right"}}>
+                  {newAmount && +newAmount !== selected.amount ? (
+                    <><span style={{color:C.muted,textDecoration:"line-through",fontSize:12,marginRight:6}}>{fmt(selected.amount)}</span>
+                    <span style={{fontWeight:800,color:C.orange,fontSize:16}}>{fmt(+newAmount)}</span></>
+                  ) : <span style={{fontWeight:800,fontSize:16}}>{fmt(selected.amount)}</span>}
+                </div>
+              </div>
+            </div>
+            <div style={{background:C.card,borderRadius:12,padding:"16px",textAlign:"center"}}>
+              <div style={{color:C.text,fontWeight:700,fontSize:14,marginBottom:4}}>Driver PIN Required</div>
+              <div style={{color:C.muted,fontSize:12,marginBottom:16}}>Ask the driver for his 4-digit PIN to confirm this transaction</div>
+              <div style={{display:"flex",justifyContent:"center",gap:12,marginBottom:20}}>
+                {[0,1,2,3].map(i=>(
+                  <div key={i} style={{width:48,height:56,borderRadius:10,background:C.bg,
+                    border:`2px solid ${pinError?C.red:pinEntry.length>i?C.teal:C.border}`,
+                    display:"flex",alignItems:"center",justifyContent:"center",fontSize:28,fontWeight:800,color:C.teal,transition:"border-color 0.15s"}}>
+                    {pinEntry.length>i?"●":""}
+                  </div>
+                ))}
+              </div>
+              {pinError && <div style={{color:C.red,fontWeight:700,fontSize:13,marginBottom:12}}>❌ Incorrect PIN — try again</div>}
+              <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,maxWidth:280,margin:"0 auto"}}>
+                {["1","2","3","4","5","6","7","8","9"].map(k=>(
+                  <button key={k} onClick={()=>keyPress(k)}
+                    style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,padding:"16px 8px",fontSize:22,fontWeight:700,cursor:"pointer",color:C.text}}>{k}</button>
+                ))}
+                <div/>
+                <button onClick={()=>keyPress("0")} style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,padding:"16px 8px",fontSize:22,fontWeight:700,cursor:"pointer",color:C.text}}>0</button>
+                <button onClick={keyDel} style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,padding:"16px 8px",fontSize:20,cursor:"pointer",color:C.red}}>⌫</button>
+              </div>
             </div>
           </div>
+        )}
+
+        {step==="done" && confirmed && (
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <div style={{background:C.green+"11",border:`2px solid ${C.green}`,borderRadius:14,padding:"24px 20px",textAlign:"center"}}>
+              <div style={{fontSize:44,marginBottom:8}}>✅</div>
+              <div style={{fontWeight:800,fontSize:18,color:C.green,marginBottom:4}}>Confirmed & Locked</div>
+              <div style={{fontWeight:800,fontSize:32,color:C.text,marginBottom:8}}>{fmt(confirmed.confirmedAmount)}</div>
+              {confirmed.changed && (
+                <div style={{color:C.orange,fontSize:13,marginBottom:8}}>
+                  Original: {fmt(confirmed.originalAmount)} → Changed to {fmt(confirmed.confirmedAmount)}
+                  {confirmed.confirmedReason && <div style={{color:C.muted,fontSize:12,marginTop:2}}>{confirmed.confirmedReason}</div>}
+                </div>
+              )}
+              <div style={{color:C.muted,fontSize:12,marginBottom:16}}>
+                Indent #{confirmed.indentNo} · {confirmed.truckNo}<br/>This indent is now locked. PIN is no longer valid.
+              </div>
+              <Btn onClick={()=>{ setConfirmed(null); setStep("list"); setActiveTab("open"); }} full color={C.teal}>← Back to Requests</Btn>
+            </div>
+          </div>
+        )}
+      </>)}
+
+      {/* ── HISTORY TAB ── */}
+      {activeTab==="history" && (
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          {/* Date filter */}
+          <div style={{background:C.card,borderRadius:10,padding:"12px 14px",display:"flex",flexDirection:"column",gap:8}}>
+            <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Filter by Date</div>
+            <div style={{display:"flex",gap:8,alignItems:"center"}}>
+              <div style={{flex:1}}>
+                <div style={{color:C.muted,fontSize:10,marginBottom:2}}>FROM</div>
+                <input type="date" value={histFrom} onChange={e=>setHistFrom(e.target.value)}
+                  onClick={e=>e.target.showPicker?.()}
+                  style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:7,color:C.text,padding:"7px 10px",fontSize:12,width:"100%",colorScheme:"light",boxSizing:"border-box"}}/>
+              </div>
+              <div style={{flex:1}}>
+                <div style={{color:C.muted,fontSize:10,marginBottom:2}}>TO</div>
+                <input type="date" value={histTo} onChange={e=>setHistTo(e.target.value)}
+                  onClick={e=>e.target.showPicker?.()}
+                  style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:7,color:C.text,padding:"7px 10px",fontSize:12,width:"100%",colorScheme:"light",boxSizing:"border-box"}}/>
+              </div>
+              {(histFrom||histTo) && (
+                <button onClick={()=>{setHistFrom("");setHistTo("");}}
+                  style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:13,marginTop:14,padding:"0 4px"}}>✕</button>
+              )}
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <Btn onClick={downloadHistoryPDF} full color={C.teal} sm>
+                ⬇ Download PDF Report
+              </Btn>
+            </div>
+          </div>
+
+          {/* Summary */}
+          <div style={{background:C.card,borderRadius:10,padding:"10px 14px",display:"flex",justifyContent:"space-between"}}>
+            <span style={{color:C.muted,fontSize:12}}>{historyRequests.length} records</span>
+            <span style={{color:C.text,fontWeight:800}}>₹{historyRequests.reduce((s,r)=>s+(r.confirmedAmount??r.amount),0).toLocaleString("en-IN")}</span>
+          </div>
+
+          {historyRequests.length===0 && (
+            <div style={{textAlign:"center",color:C.muted,padding:48,fontSize:14}}>No history records{(histFrom||histTo)?" in selected range":""}</div>
+          )}
+
+          {historyRequests.map(req=>{
+            const effAmt = req.confirmedAmount??req.amount;
+            const changed = req.confirmedAmount!=null && req.confirmedAmount!==req.amount;
+            const statusColor = req.status==="attached"?C.green:req.status==="confirmed"?C.teal:C.orange;
+            const p = pumps.find(x=>x.id===req.pumpId);
+            return (
+              <div key={req.id} style={{background:C.card,borderRadius:12,padding:"12px 14px",borderLeft:`3px solid ${statusColor}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                  <div style={{flex:1}}>
+                    <div style={{fontWeight:800,fontSize:14}}>
+                      <span style={{color:C.orange}}>#{req.indentNo}</span>{" · "}{req.truckNo}
+                    </div>
+                    <div style={{color:C.muted,fontSize:12,marginTop:2}}>{req.date}{p?" · "+p.name:""}</div>
+                    {(req.dieselAmount||req.cashAmount) ? (
+                      <div style={{display:"flex",gap:10,marginTop:3}}>
+                        {req.dieselAmount ? <span style={{fontSize:11,color:C.muted}}>⛽ <b style={{color:C.text}}>₹{req.dieselAmount.toLocaleString("en-IN")}</b></span> : null}
+                        {req.cashAmount   ? <span style={{fontSize:11,color:C.muted}}>💵 <b style={{color:C.text}}>₹{req.cashAmount.toLocaleString("en-IN")}</b></span>   : null}
+                      </div>
+                    ) : null}
+                    {changed && <div style={{color:C.orange,fontSize:11,marginTop:2}}>⚠ Changed: ₹{req.amount.toLocaleString("en-IN")} → ₹{effAmt.toLocaleString("en-IN")}</div>}
+                    {req.lrNo && <div style={{color:C.green,fontSize:11,marginTop:2}}>✓ LR {req.lrNo}</div>}
+                  </div>
+                  <div style={{textAlign:"right",flexShrink:0,marginLeft:10}}>
+                    <div style={{fontWeight:800,fontSize:16,color:statusColor}}>{fmt(effAmt)}</div>
+                    <Badge label={req.status.toUpperCase()} color={statusColor}/>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
 
-      {/* ── STEP: DONE ── */}
-      {step==="done" && confirmed && (
-        <div style={{display:"flex",flexDirection:"column",gap:12}}>
-          <div style={{background:C.green+"11",border:`2px solid ${C.green}`,
-            borderRadius:14,padding:"24px 20px",textAlign:"center"}}>
-            <div style={{fontSize:44,marginBottom:8}}>✅</div>
-            <div style={{fontWeight:800,fontSize:18,color:C.green,marginBottom:4}}>
-              Confirmed & Locked
+      {/* ── PAYMENTS TAB ── */}
+      {activeTab==="payments" && (
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          {/* Summary card */}
+          <div style={{background:C.card,borderRadius:12,padding:"16px",display:"flex",flexDirection:"column",gap:10}}>
+            <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Payment Summary</div>
+            <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0",borderBottom:`1px solid ${C.border}22`}}>
+              <span style={{color:C.muted,fontSize:13}}>Total Confirmed Indents</span>
+              <span style={{fontWeight:800,color:C.text}}>{fmt(totalIndentAmt)}</span>
             </div>
-            <div style={{fontWeight:800,fontSize:32,color:C.text,marginBottom:8}}>
-              {fmt(confirmed.confirmedAmount)}
+            <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0",borderBottom:`1px solid ${C.border}22`}}>
+              <span style={{color:C.muted,fontSize:13}}>Total Paid</span>
+              <span style={{fontWeight:800,color:C.green}}>{fmt(totalPaid)}</span>
             </div>
-            {confirmed.changed && (
-              <div style={{color:C.orange,fontSize:13,marginBottom:8}}>
-                Original: {fmt(confirmed.originalAmount)} → Changed to {fmt(confirmed.confirmedAmount)}
-                {confirmed.confirmedReason && <div style={{color:C.muted,fontSize:12,marginTop:2}}>{confirmed.confirmedReason}</div>}
-              </div>
-            )}
-            <div style={{color:C.muted,fontSize:12,marginBottom:16}}>
-              Indent #{confirmed.indentNo} · {confirmed.truckNo}<br/>
-              This indent is now locked. PIN is no longer valid.
+            <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0"}}>
+              <span style={{fontWeight:700,fontSize:14}}>Pending Amount</span>
+              <span style={{fontWeight:900,fontSize:18,color:pendingAmt>0?C.red:C.green}}>{fmt(pendingAmt)}</span>
             </div>
-            <Btn onClick={()=>{ setConfirmed(null); setStep("list"); }} full color={C.teal}>
-              ← Back to Requests
-            </Btn>
           </div>
+
+          {/* Payments list */}
+          <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginTop:4}}>
+            Payment History ({(pumpPayments||[]).length})
+          </div>
+          {(pumpPayments||[]).length===0 && (
+            <div style={{textAlign:"center",color:C.muted,padding:40,fontSize:14}}>No payments recorded yet</div>
+          )}
+          {[...(pumpPayments||[])].sort((a,b)=>(b.date||"").localeCompare(a.date||"")).map(pp=>{
+            const p = pumps.find(x=>x.id===pp.pumpId);
+            return (
+              <div key={pp.id} style={{background:C.card,borderRadius:12,padding:"12px 14px",borderLeft:`3px solid ${C.green}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                  <div>
+                    <div style={{fontWeight:800,fontSize:14,color:C.green}}>{fmt(pp.amount)}</div>
+                    <div style={{color:C.muted,fontSize:12,marginTop:2}}>{pp.date}{p?" · "+p.name:""}</div>
+                    {pp.note && <div style={{color:C.muted,fontSize:11,marginTop:2}}>{pp.note}</div>}
+                  </div>
+                  <Badge label="PAID" color={C.green}/>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
@@ -8227,6 +8316,8 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
   const [drSheet,        setDrSheet]        = useState(false);
   const [drTruckNo,      setDrTruckNo]      = useState("");
   const [drAmount,       setDrAmount]       = useState("");
+  const [drDieselAmt,    setDrDieselAmt]    = useState(""); // diesel component
+  const [drCashAmt,      setDrCashAmt]      = useState(""); // cash component
   const [drPumpId,       setDrPumpId]       = useState("");
   const [drPinDisplay,   setDrPinDisplay]   = useState(null);
   const [drLastIndentNo, setDrLastIndentNo] = useState(null);
@@ -8930,17 +9021,43 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
         const maxUsed = usedNos.size>0 ? Math.max(...usedNos) : (ibStart ? ibStart-1 : 0);
         const remaining = (ibStart&&ibEnd) ? ibEnd - maxUsed - (nextNo && nextNo <= maxUsed ? 0 : 0) : null;
 
+        // Generate a unique PIN per truck — different from any existing open PIN for that truck
+        const genUniquePinForTruck = (truckNo) => {
+          const existingPins = new Set(
+            (dieselRequests||[])
+              .filter(r => r.truckNo===truckNo.trim().toUpperCase() && r.status==="open" && r.pin && r.pin!=="****")
+              .map(r => r.pin)
+          );
+          let attempts = 0;
+          while(attempts < 100) {
+            const candidate = String(Math.floor(1000+Math.random()*9000));
+            if(!existingPins.has(candidate)) return candidate;
+            attempts++;
+          }
+          return String(Math.floor(1000+Math.random()*9000)); // fallback
+        };
+
         const createRequest = async () => {
           if (!drTruckNo.trim()) { alert("Enter truck number"); return; }
           if (!drAmount || +drAmount<=0) { alert("Enter indent amount"); return; }
           if (!ibStart||!ibEnd) { alert("Set Indent Book range in Settings → TAFAL tab first."); return; }
           if (nextNo>ibEnd) { alert(`Indent book exhausted (${ibStart}–${ibEnd}). Update range in Settings → TAFAL tab.`); return; }
-          const pin = String(Math.floor(1000+Math.random()*9000));
+          const dieselComp = +drDieselAmt || 0;
+          const cashComp   = +drCashAmt   || 0;
+          const totalAmt   = +drAmount;
+          // If diesel+cash provided, validate they sum to total
+          if((dieselComp||cashComp) && Math.round(dieselComp+cashComp) !== Math.round(totalAmt)) {
+            alert(`Diesel (₹${dieselComp}) + Cash (₹${cashComp}) = ₹${dieselComp+cashComp}, but Total Amount is ₹${totalAmt}. They must match.`);
+            return;
+          }
+          const pin = genUniquePinForTruck(drTruckNo);
           const req = {
             id:uid(), indentNo:nextNo,
             truckNo:drTruckNo.trim().toUpperCase(),
             pumpId:drPumpId||null,
-            amount:+drAmount,
+            amount:totalAmt,
+            dieselAmount: dieselComp||null,
+            cashAmount:   cashComp||null,
             date:today(), pin, status:"open",
             confirmedAmount:null, confirmedReason:null, confirmedAt:null,
             tripId:null, lrNo:null,
@@ -8948,9 +9065,9 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
           };
           setDieselRequests(p=>[req,...(p||[])]);
           await DB.saveDieselRequest(req);
-          log("DIESEL REQUEST",`Indent #${nextNo} · ${req.truckNo} · ₹${req.amount}`);
+          log("DIESEL REQUEST",`Indent #${nextNo} · ${req.truckNo} · ₹${req.amount}${dieselComp?` (Diesel:₹${dieselComp} Cash:₹${cashComp})`:"" }`);
           setDrPinDisplay(pin); setDrLastIndentNo(nextNo);
-          setDrTruckNo(""); setDrAmount(""); setDrPumpId("");
+          setDrTruckNo(""); setDrAmount(""); setDrDieselAmt(""); setDrCashAmt(""); setDrPumpId("");
         };
 
         return (
@@ -8985,9 +9102,35 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
                     <Field label="Truck No" value={drTruckNo} onChange={setDrTruckNo} placeholder="KA32AB1234"/>
                   </div>
                   <div style={{flex:1}}>
-                    <Field label="Amount ₹" value={drAmount} onChange={setDrAmount} type="number" placeholder="10000"/>
+                    <Field label="Total Amount ₹" value={drAmount} onChange={v=>{
+                      setDrAmount(v);
+                      // auto-fill diesel if cash is blank, or cash if diesel is blank
+                      if(!drCashAmt && !drDieselAmt) return;
+                      if(drDieselAmt && !drCashAmt) setDrCashAmt(String(Math.max(0,(+v||0)-(+drDieselAmt||0))||""));
+                      if(drCashAmt && !drDieselAmt) setDrDieselAmt(String(Math.max(0,(+v||0)-(+drCashAmt||0))||""));
+                    }} type="number" placeholder="10000"/>
                   </div>
                 </div>
+                {/* Diesel + Cash breakdown */}
+                <div style={{display:"flex",gap:8}}>
+                  <div style={{flex:1}}>
+                    <Field label="⛽ Diesel ₹" value={drDieselAmt} onChange={v=>{
+                      setDrDieselAmt(v);
+                      if(+drAmount>0) setDrCashAmt(String(Math.max(0,(+drAmount||0)-(+v||0))||""));
+                    }} type="number" placeholder="optional"/>
+                  </div>
+                  <div style={{flex:1}}>
+                    <Field label="💵 Cash ₹" value={drCashAmt} onChange={v=>{
+                      setDrCashAmt(v);
+                      if(+drAmount>0) setDrDieselAmt(String(Math.max(0,(+drAmount||0)-(+v||0))||""));
+                    }} type="number" placeholder="optional"/>
+                  </div>
+                </div>
+                {(+drDieselAmt||+drCashAmt) && (+drDieselAmt||0)+(+drCashAmt||0) !== (+drAmount||0) ? (
+                  <div style={{color:C.orange,fontSize:12}}>
+                    ⚠ Diesel + Cash = ₹{((+drDieselAmt||0)+(+drCashAmt||0)).toLocaleString("en-IN")} — must equal Total ₹{(+drAmount||0).toLocaleString("en-IN")}
+                  </div>
+                ) : null}
                 <Field label="Petrol Pump (optional)"
                   value={drPumpId} onChange={setDrPumpId}
                   opts={[{v:"",l:"— No pump selected —"},...(pumps||[]).map(p=>({v:p.id,l:p.name}))]}/>
@@ -9040,6 +9183,12 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
                       <div style={{color:C.muted,fontSize:12,marginTop:2}}>
                         {req.date}{pump?" · "+pump.name:""}
                       </div>
+                      {(req.dieselAmount||req.cashAmount) ? (
+                        <div style={{color:C.muted,fontSize:11,marginTop:2,display:"flex",gap:8}}>
+                          {req.dieselAmount ? <span>⛽ <b style={{color:C.text}}>₹{req.dieselAmount.toLocaleString("en-IN")}</b></span> : null}
+                          {req.cashAmount   ? <span>💵 <b style={{color:C.text}}>₹{req.cashAmount.toLocaleString("en-IN")}</b></span>   : null}
+                        </div>
+                      ) : null}
                       {req.status==="open" && (
                         <div style={{color:C.muted,fontSize:11,marginTop:2}}>
                           Driver PIN: <b style={{fontFamily:"monospace",fontSize:15,color:C.teal,letterSpacing:3}}>{req.pin}</b>
