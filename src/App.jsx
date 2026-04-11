@@ -1290,7 +1290,7 @@ export default function App() {
         {tab==="reports"    && can(user,"reports")    && <Reports    {...sp} />}
         {tab==="reminders"  && can(user,"reminders")  && <Reminders  {...sp} />}
         {tab==="activity"   && can(user,"reports")    && <ActivityLog activity={activity} />}
-        {tab==="admin"      && can(user,"admin")      && <UserAdmin  users={users} setUsers={dbSetUsers} user={user} log={log} />}
+        {tab==="admin"      && can(user,"admin")      && <UserAdmin  users={users} setUsers={dbSetUsers} user={user} log={log} pumps={pumps||[]} />}
         {tab==="more"       && <MoreMenu user={user} setTab={setTab} trips={roleTrips} driverPays={driverPays} vehicles={vehicles} />}
         </ErrorBoundary>
       </div>
@@ -1971,21 +1971,36 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
         setTrips(p=>[trip,...(p||[])]);
         // ── Auto-attach open diesel request for this truck ────────────────
         if (typeof setDieselRequests === "function") {
-          const openReq = (dieselRequests||[]).find(r => r.truckNo===truckNo && r.status==="open");
-          if (openReq) {
-            const effAmt = openReq.confirmedAmount??openReq.amount;
-            const changed = openReq.confirmedAmount!=null && openReq.confirmedAmount!==openReq.amount;
+          const openReqs = (dieselRequests||[]).filter(r => r.status==="open" || r.status==="confirmed");
+          const truckMatch = openReqs.find(r => r.truckNo===truckNo);
+          let chosenReq = truckMatch;
+          if (!truckMatch && openReqs.length > 0) {
+            // Truck mismatch — let user pick from open requests
+            const listStr = openReqs.map(r=>`  #${r.indentNo} · ${r.truckNo} · ₹${(r.confirmedAmount??r.amount).toLocaleString("en-IN")}`).join("\n");
+            const sel = window.prompt(
+              `⛽ No open Diesel Request found for ${truckNo}.\n\nAvailable open requests:\n${listStr}\n\nEnter Indent # to attach (or Cancel to skip):`, ""
+            );
+            if (sel && sel.trim()) {
+              const selNo = parseInt(sel.trim(), 10);
+              chosenReq = openReqs.find(r => r.indentNo===selNo);
+              if (!chosenReq) alert(`No open request found with Indent #${selNo}.`);
+            }
+          }
+          if (chosenReq) {
+            const effAmt = chosenReq.confirmedAmount??chosenReq.amount;
+            const changed = chosenReq.confirmedAmount!=null && chosenReq.confirmedAmount!==chosenReq.amount;
+            const truckWarn = chosenReq.truckNo!==truckNo ? `\n⚠ Request was for ${chosenReq.truckNo}, attaching to ${truckNo}` : "";
             const attach = window.confirm(
-              `⛽ Open Diesel Request found for ${truckNo}\nIndent #${openReq.indentNo} · ₹${effAmt.toLocaleString("en-IN")}${changed?" ⚠ (AMOUNT CHANGED AT PUMP)":""}\n\nAttach to LR ${lrNo}?`
+              `⛽ Indent #${chosenReq.indentNo} · ${chosenReq.truckNo}\n₹${effAmt.toLocaleString("en-IN")}${changed?" ⚠ (AMOUNT CHANGED AT PUMP)":""}${truckWarn}\n\nAttach to LR ${lrNo} and fill Diesel column?`
             );
             if (attach) {
-              const updReq = {...openReq, status:"attached", tripId:trip.id, lrNo};
-              setDieselRequests(p=>p.map(r=>r.id===openReq.id?updReq:r));
+              const updReq = {...chosenReq, status:"attached", tripId:trip.id, lrNo};
+              setDieselRequests(p=>p.map(r=>r.id===chosenReq.id?updReq:r));
               await DB.saveDieselRequest(updReq);
-              const updTrip = {...trip, dieselEstimate:effAmt, dieselIndentNo:String(openReq.indentNo)};
+              const updTrip = {...trip, dieselEstimate:effAmt, dieselIndentNo:String(chosenReq.indentNo)};
               setTrips(p=>p.map(t=>t.id===trip.id?updTrip:t));
               await DB.saveTrip(updTrip);
-              log("DIESEL ATTACH", `Indent #${openReq.indentNo} → LR ${lrNo} · ₹${effAmt}`);
+              log("DIESEL ATTACH", `Indent #${chosenReq.indentNo} → LR ${lrNo} · ₹${effAmt}${chosenReq.truckNo!==truckNo?" (truck mismatch: "+chosenReq.truckNo+"→"+truckNo+")":""}`);
             }
           }
         }
@@ -2084,21 +2099,36 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
         setTrips(p=>[trip,...(p||[])]);
         // ── Auto-attach open diesel request for this truck ────────────────
         if (typeof setDieselRequests === "function") {
-          const openReq = (dieselRequests||[]).find(r => r.truckNo===truckNo && r.status==="open");
-          if (openReq) {
-            const effAmt = openReq.confirmedAmount??openReq.amount;
-            const changed = openReq.confirmedAmount!=null && openReq.confirmedAmount!==openReq.amount;
+          const openReqs = (dieselRequests||[]).filter(r => r.status==="open" || r.status==="confirmed");
+          const truckMatch = openReqs.find(r => r.truckNo===truckNo);
+          let chosenReq = truckMatch;
+          if (!truckMatch && openReqs.length > 0) {
+            // Truck mismatch — let user pick from open requests
+            const listStr = openReqs.map(r=>`  #${r.indentNo} · ${r.truckNo} · ₹${(r.confirmedAmount??r.amount).toLocaleString("en-IN")}`).join("\n");
+            const sel = window.prompt(
+              `⛽ No open Diesel Request found for ${truckNo}.\n\nAvailable open requests:\n${listStr}\n\nEnter Indent # to attach (or Cancel to skip):`, ""
+            );
+            if (sel && sel.trim()) {
+              const selNo = parseInt(sel.trim(), 10);
+              chosenReq = openReqs.find(r => r.indentNo===selNo);
+              if (!chosenReq) alert(`No open request found with Indent #${selNo}.`);
+            }
+          }
+          if (chosenReq) {
+            const effAmt = chosenReq.confirmedAmount??chosenReq.amount;
+            const changed = chosenReq.confirmedAmount!=null && chosenReq.confirmedAmount!==chosenReq.amount;
+            const truckWarn = chosenReq.truckNo!==truckNo ? `\n⚠ Request was for ${chosenReq.truckNo}, attaching to ${truckNo}` : "";
             const attach = window.confirm(
-              `⛽ Open Diesel Request found for ${truckNo}\nIndent #${openReq.indentNo} · ₹${effAmt.toLocaleString("en-IN")}${changed?" ⚠ (AMOUNT CHANGED AT PUMP)":""}\n\nAttach to LR ${lrNo}?`
+              `⛽ Indent #${chosenReq.indentNo} · ${chosenReq.truckNo}\n₹${effAmt.toLocaleString("en-IN")}${changed?" ⚠ (AMOUNT CHANGED AT PUMP)":""}${truckWarn}\n\nAttach to LR ${lrNo} and fill Diesel column?`
             );
             if (attach) {
-              const updReq = {...openReq, status:"attached", tripId:trip.id, lrNo};
-              setDieselRequests(p=>p.map(r=>r.id===openReq.id?updReq:r));
+              const updReq = {...chosenReq, status:"attached", tripId:trip.id, lrNo};
+              setDieselRequests(p=>p.map(r=>r.id===chosenReq.id?updReq:r));
               await DB.saveDieselRequest(updReq);
-              const updTrip = {...trip, dieselEstimate:effAmt, dieselIndentNo:String(openReq.indentNo)};
+              const updTrip = {...trip, dieselEstimate:effAmt, dieselIndentNo:String(chosenReq.indentNo)};
               setTrips(p=>p.map(t=>t.id===trip.id?updTrip:t));
               await DB.saveTrip(updTrip);
-              log("DIESEL ATTACH", `Indent #${openReq.indentNo} → LR ${lrNo} · ₹${effAmt}`);
+              log("DIESEL ATTACH", `Indent #${chosenReq.indentNo} → LR ${lrNo} · ₹${effAmt}${chosenReq.truckNo!==truckNo?" (truck mismatch: "+chosenReq.truckNo+"→"+truckNo+")":""}`);
             }
           }
         }
@@ -4752,6 +4782,19 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         return upd;
       }));
     }
+    // ── Auto-attach diesel request if dieselIndentNo was set from dropdown ──
+    if (t.dieselIndentNo && typeof setDieselRequests === "function") {
+      const indentNo = parseInt(t.dieselIndentNo, 10);
+      const matchReq = (dieselRequests||[]).find(r =>
+        r.indentNo === indentNo && (r.status==="open" || r.status==="confirmed")
+      );
+      if (matchReq) {
+        const updReq = {...matchReq, status:"attached", tripId:t.id, lrNo:t.lrNo||""};
+        setDieselRequests(p => p.map(r => r.id===matchReq.id ? updReq : r));
+        DB.saveDieselRequest(updReq).catch(e => console.error("saveDieselRequest:", e));
+        log("DIESEL ATTACH", `Indent #${matchReq.indentNo} → LR ${t.lrNo} · ₹${matchReq.confirmedAmount??matchReq.amount} (trip form)`);
+      }
+    }
     setF(blankForm()); setAddSheet(false); setWasScanned(false);
   };
 
@@ -5575,6 +5618,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                     <TripForm f={f} ff={ff} isIn={isIn} ac={ac} vehicles={vehicles} settings={settings} employees={employees||[]} cashTransfers={cashTransfers||[]} recentDestinations={recentDestinations} recentGrades={recentGrades}
                       onTruckChange={onTruckChange} onSubmit={saveNew} submitLabel="Save Trip"
                       user={user} wasScanned={wasScanned} trips={trips||[]} indents={indents||[]}
+                      dieselRequests={dieselRequests||[]} setDieselRequests={setDieselRequests}
                       manualLrMode={manualLrMode} />
                   )}
                 </>
@@ -5710,6 +5754,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                   {(wasScanned || user.role==="owner") ? (
                     <TripForm f={f} ff={ff} isIn={false} ac={C.accent} vehicles={vehicles} settings={settings} employees={employees||[]} cashTransfers={cashTransfers||[]} recentDestinations={recentDestinations} recentGrades={recentGrades}
                       onTruckChange={onTruckChange}
+                      dieselRequests={dieselRequests||[]} setDieselRequests={setDieselRequests}
                       manualLrMode={manualLrMode}
                       onSubmit={async ()=>{
                         // All same validations as godown saveNew
@@ -5962,6 +6007,8 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
             showStatus={true}
             wasScanned={user.role !== "owner"}
             isParty={editSheet.orderType==="party"}
+            trips={trips||[]} indents={indents||[]}
+            dieselRequests={dieselRequests||[]} setDieselRequests={setDieselRequests}
           />
         </Sheet>
       )}
@@ -6151,7 +6198,7 @@ function FileUploadRow({ label, path, onFile, disabled }) {
 }
 
 // Shared form for add + edit
-function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit, submitLabel, user, showStatus=false, wasScanned=false, isParty=false, employees=[], cashTransfers=[], recentDestinations=[], recentGrades=[], trips=[], indents=[], manualLrMode=false}) {
+function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit, submitLabel, user, showStatus=false, wasScanned=false, isParty=false, employees=[], cashTransfers=[], recentDestinations=[], recentGrades=[], trips=[], indents=[], dieselRequests=[], setDieselRequests, manualLrMode=false}) {
   // Ensure each diLine has frRate — migrate from trip-level frRate if missing
   const normalizedDiLines = (f.diLines||[]).map(d => ({...d, frRate: d.frRate || +f.frRate || 0}));
   const fWithLines = normalizedDiLines.length > 1 ? {...f, diLines: normalizedDiLines} : f;
@@ -6457,28 +6504,70 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
         <Field label="Diesel Estimate ₹" value={f.dieselEstimate||""} onChange={ff("dieselEstimate")} type="number" half
           note="Driver's estimate (update later via Indent)" placeholder="0" />
       </div>
-      <Field label="⛽ Diesel Indent No"
-        value={f.dieselIndentNo||""} onChange={ff("dieselIndentNo")}
-        placeholder="e.g. 25748 — from pump slip before loading"
-        note="Pump gives this before loading — used to match diesel slip" />
+      {/* ⛽ Diesel Indent No — smart dropdown from open requests */}
       {(()=>{
+        const truck = (f.truckNo||"").trim().toUpperCase();
+        const allOpen = (dieselRequests||[]).filter(r=>r.status==="open"||r.status==="confirmed");
+        const truckReqs = allOpen.filter(r=>r.truckNo===truck);
+        const showList = truckReqs.length>0 ? truckReqs : allOpen;
         const val = (f.dieselIndentNo||"").trim();
-        if(!val) return null;
-        const dupTrip = trips.find(t => t.id !== f.id && t.dieselIndentNo && t.dieselIndentNo.trim() === val);
-        const dupIndent = indents.find(i => i.indentNo && String(i.indentNo).trim() === val);
-        if(dupTrip) return (
-          <div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,
-            padding:"8px 12px",fontSize:12,color:C.red,fontWeight:600}}>
-            ⚠ Indent No "{val}" already used on LR {dupTrip.lrNo||"—"} ({dupTrip.truckNo} · {dupTrip.date}). Each indent must be unique.
+        const matchedReq = allOpen.find(r=>String(r.indentNo)===val);
+        const dupTrip = trips.find(t=>t.id!==f.id&&t.dieselIndentNo&&t.dieselIndentNo.trim()===val);
+        const dupIndent = indents.find(i=>i.indentNo&&String(i.indentNo).trim()===val);
+        return (
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            <div style={{fontSize:11,color:C.muted,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>⛽ Diesel Indent No</div>
+            {allOpen.length>0 && (
+              <select value={val||""} onChange={e=>{
+                const sel=e.target.value;
+                if(sel==="__manual__"){ff("dieselIndentNo")("");return;}
+                ff("dieselIndentNo")(sel);
+                if(sel){
+                  const req=allOpen.find(r=>String(r.indentNo)===sel);
+                  if(req) ff("dieselEstimate")(String(req.confirmedAmount??req.amount));
+                } else { ff("dieselEstimate")("0"); }
+              }} style={{width:"100%",background:C.bg,border:`1.5px solid ${val?C.teal:C.border}`,
+                borderRadius:10,color:val?C.text:C.muted,padding:"12px 12px",fontSize:14,outline:"none"}}>
+                <option value="">— Select indent{truck?` for ${truck}`:""}… —</option>
+                {showList.map(r=>{
+                  const amt=r.confirmedAmount??r.amount;
+                  return <option key={r.id} value={String(r.indentNo)}>
+                    #{r.indentNo} · {r.truckNo} · ₹{amt.toLocaleString("en-IN")}
+                    {r.dieselAmount?` ⛽₹${r.dieselAmount.toLocaleString("en-IN")}`:""}{r.cashAmount?` 💵₹${r.cashAmount.toLocaleString("en-IN")}`:""}{r.status==="confirmed"?" ✓":""}
+                    {r.requestedBy||r.createdBy?" | By: "+(r.requestedBy||r.createdBy):""}
+                  </option>;
+                })}
+                <option value="__manual__">✏ Enter manually…</option>
+              </select>
+            )}
+            {(allOpen.length===0||(val&&!allOpen.find(r=>String(r.indentNo)===val)&&val!=="__manual__")) && (
+              <input value={val} onChange={e=>ff("dieselIndentNo")(e.target.value)}
+                placeholder="e.g. 25748 — from pump slip"
+                style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,
+                  color:C.text,padding:"12px 12px",fontSize:14,outline:"none",
+                  width:"100%",boxSizing:"border-box"}} />
+            )}
+            {matchedReq&&(
+              <div style={{background:C.teal+"11",border:`1px solid ${C.teal}33`,borderRadius:8,
+                padding:"8px 12px",fontSize:12,color:C.teal,fontWeight:600}}>
+                ✅ #{matchedReq.indentNo} · {matchedReq.truckNo} · ₹{(matchedReq.confirmedAmount??matchedReq.amount).toLocaleString("en-IN")}
+                {matchedReq.dieselAmount?` · ⛽₹${matchedReq.dieselAmount.toLocaleString("en-IN")}`:""}
+                {matchedReq.cashAmount?` · 💵₹${matchedReq.cashAmount.toLocaleString("en-IN")}`:""}
+                {matchedReq.status==="confirmed"?" · ✓ Pump confirmed":" · ⏳ Awaiting pump"}
+                {(matchedReq.requestedBy||matchedReq.createdBy)?` · By: ${matchedReq.requestedBy||matchedReq.createdBy}`:""}
+              </div>
+            )}
+            {matchedReq&&matchedReq.truckNo!==truck&&truck&&(
+              <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,borderRadius:8,
+                padding:"8px 12px",fontSize:12,color:C.orange,fontWeight:600}}>
+                ⚠ This indent was for {matchedReq.truckNo} — current trip truck is {truck}
+              </div>
+            )}
+            {dupTrip&&<div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,padding:"8px 12px",fontSize:12,color:C.red,fontWeight:600}}>⚠ Indent No already used on LR {dupTrip.lrNo||"—"} ({dupTrip.truckNo} · {dupTrip.date})</div>}
+            {dupIndent&&!dupTrip&&<div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,padding:"8px 12px",fontSize:12,color:C.red,fontWeight:600}}>⚠ Indent No already exists in Diesel records ({dupIndent.truckNo} · {dupIndent.date})</div>}
+            <div style={{color:C.muted,fontSize:11}}>Selecting from list auto-fills Diesel Estimate</div>
           </div>
         );
-        if(dupIndent) return (
-          <div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,
-            padding:"8px 12px",fontSize:12,color:C.red,fontWeight:600}}>
-            ⚠ Indent No "{val}" already exists in Diesel records ({dupIndent.truckNo} · {dupIndent.date}). Each indent must be unique.
-          </div>
-        );
-        return null;
       })()}
       {showStatus && (
         user?.role==="owner"
@@ -7894,20 +7983,30 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
   const [histFrom,    setHistFrom]    = useState("");
   const [histTo,      setHistTo]      = useState("");
 
-  const openRequests = (dieselRequests||[])
+  // Scope to assigned pump if user has one
+  const assignedPumpId = user?.assignedPumpId || "";
+  const assignedPump   = assignedPumpId ? pumps.find(p=>p.id===assignedPumpId) : null;
+  const scopedRequests = assignedPumpId
+    ? (dieselRequests||[]).filter(r => !r.pumpId || r.pumpId===assignedPumpId)
+    : (dieselRequests||[]);
+  const scopedPayments = assignedPumpId
+    ? (pumpPayments||[]).filter(p => p.pumpId===assignedPumpId)
+    : (pumpPayments||[]);
+
+  const openRequests = scopedRequests
     .filter(r => r.status==="open")
     .filter(r => !lrSearch.trim() || r.truckNo.includes(lrSearch.trim().toUpperCase()) || String(r.indentNo).includes(lrSearch.trim()))
     .sort((a,b)=>b.indentNo-a.indentNo);
 
-  const historyRequests = (dieselRequests||[])
+  const historyRequests = scopedRequests
     .filter(r => r.status!=="open")
     .filter(r => !histFrom || r.date>=histFrom)
     .filter(r => !histTo   || r.date<=histTo)
     .sort((a,b)=>b.indentNo-a.indentNo);
 
-  // Payment summary
-  const totalIndentAmt  = (dieselRequests||[]).filter(r=>r.status==="confirmed"||r.status==="attached").reduce((s,r)=>s+(r.confirmedAmount??r.amount),0);
-  const totalPaid       = (pumpPayments||[]).reduce((s,p)=>s+(+(p.amount)||0),0);
+  // Payment summary scoped to this pump
+  const totalIndentAmt  = scopedRequests.filter(r=>r.status==="confirmed"||r.status==="attached").reduce((s,r)=>s+(r.confirmedAmount??r.amount),0);
+  const totalPaid       = scopedPayments.reduce((s,p)=>s+(+(p.amount)||0),0);
   const pendingAmt      = Math.max(0, totalIndentAmt - totalPaid);
 
   const resetFlow = () => {
@@ -7999,7 +8098,7 @@ ${rows.map(r=>`<tr>
         <div style={{fontSize:22}}>⛽</div>
         <div>
           <div style={{fontWeight:800,fontSize:16,color:C.orange}}>Diesel Indent Portal</div>
-          <div style={{color:C.muted,fontSize:12}}>{user.name} · Pump Operator</div>
+          <div style={{color:C.muted,fontSize:12}}>{user.name} · Pump Operator{assignedPump?" · "+assignedPump.name:" · All Pumps"}</div>
         </div>
       </div>
 
@@ -8268,12 +8367,12 @@ ${rows.map(r=>`<tr>
 
           {/* Payments list */}
           <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginTop:4}}>
-            Payment History ({(pumpPayments||[]).length})
+            Payment History ({scopedPayments.length})
           </div>
-          {(pumpPayments||[]).length===0 && (
+          {scopedPayments.length===0 && (
             <div style={{textAlign:"center",color:C.muted,padding:40,fontSize:14}}>No payments recorded yet</div>
           )}
-          {[...(pumpPayments||[])].sort((a,b)=>(b.date||"").localeCompare(a.date||"")).map(pp=>{
+          {[...scopedPayments].sort((a,b)=>(b.date||"").localeCompare(a.date||"")).map(pp=>{
             const p = pumps.find(x=>x.id===pp.pumpId);
             return (
               <div key={pp.id} style={{background:C.card,borderRadius:12,padding:"12px 14px",borderLeft:`3px solid ${C.green}`}}>
@@ -8294,7 +8393,7 @@ ${rows.map(r=>`<tr>
   );
 }
 
-function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, driverPays, setDriverPays, user, log, viewOnly=false, dieselRequests=[], setDieselRequests, settings}) {
+function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, driverPays, setDriverPays, user, log, viewOnly=false, dieselRequests=[], setDieselRequests, settings}) {
   const [view,        setView]        = useState("requests");
   const [pumpSheet,   setPumpSheet]   = useState(false);
   const [scanSheet,   setScanSheet]   = useState(false);
@@ -8324,6 +8423,8 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
   const [editReqId,      setEditReqId]      = useState(null); // id of request being edited
   const [editTruckNo,    setEditTruckNo]    = useState("");
   const [editAmount,     setEditAmount]     = useState("");
+  const [editDieselAmt,  setEditDieselAmt]  = useState("");
+  const [editCashAmt,    setEditCashAmt]    = useState("");
   const [editPumpId,     setEditPumpId]     = useState("");
 
   const blankP = {name:"", contact:"", address:"", accountNo:"", ifsc:""};
@@ -9039,17 +9140,12 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
 
         const createRequest = async () => {
           if (!drTruckNo.trim()) { alert("Enter truck number"); return; }
-          if (!drAmount || +drAmount<=0) { alert("Enter indent amount"); return; }
-          if (!ibStart||!ibEnd) { alert("Set Indent Book range in Settings → TAFAL tab first."); return; }
-          if (nextNo>ibEnd) { alert(`Indent book exhausted (${ibStart}–${ibEnd}). Update range in Settings → TAFAL tab.`); return; }
           const dieselComp = +drDieselAmt || 0;
           const cashComp   = +drCashAmt   || 0;
-          const totalAmt   = +drAmount;
-          // If diesel+cash provided, validate they sum to total
-          if((dieselComp||cashComp) && Math.round(dieselComp+cashComp) !== Math.round(totalAmt)) {
-            alert(`Diesel (₹${dieselComp}) + Cash (₹${cashComp}) = ₹${dieselComp+cashComp}, but Total Amount is ₹${totalAmt}. They must match.`);
-            return;
-          }
+          const totalAmt   = dieselComp + cashComp;
+          if (totalAmt <= 0) { alert("Enter Diesel amount and/or Cash amount"); return; }
+          if (!ibStart||!ibEnd) { alert("Set Indent Book range in Settings → TAFAL tab first."); return; }
+          if (nextNo>ibEnd) { alert(`Indent book exhausted (${ibStart}–${ibEnd}). Update range in Settings → TAFAL tab.`); return; }
           const pin = genUniquePinForTruck(drTruckNo);
           const req = {
             id:uid(), indentNo:nextNo,
@@ -9061,11 +9157,23 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
             date:today(), pin, status:"open",
             confirmedAmount:null, confirmedReason:null, confirmedAt:null,
             tripId:null, lrNo:null,
+            requestedBy: user.username,
             createdBy:user.username, createdAt:nowTs(),
           };
           setDieselRequests(p=>[req,...(p||[])]);
           await DB.saveDieselRequest(req);
-          log("DIESEL REQUEST",`Indent #${nextNo} · ${req.truckNo} · ₹${req.amount}${dieselComp?` (Diesel:₹${dieselComp} Cash:₹${cashComp})`:"" }`);
+          // Auto-create vehicle if truck is new (truckNo only, no phone required here)
+          const tn = req.truckNo;
+          if(tn && typeof setVehicles==="function" && !(vehicles||[]).find(v=>v.truckNo===tn)) {
+            const nv={id:uid(),truckNo:tn,ownerName:"",phone:"",driverName:"",driverPhone:"",
+              driverLicense:"",accountNo:"",ifsc:"",loan:0,loanRecovered:0,deductPerTrip:0,
+              tafalExempt:false,shortageOwed:0,shortageRecovered:0,loanTxns:[],shortageTxns:[],
+              createdBy:user.username};
+            setVehicles(p=>[...(p||[]),nv]);
+            if(DB.saveVehicle) DB.saveVehicle(nv).catch(()=>{});
+            log("AUTO-CREATE VEHICLE",`${tn} (from diesel indent)`);
+          }
+          log("DIESEL REQUEST",`Indent #${nextNo} · ${req.truckNo} · ₹${req.amount} (⛽₹${dieselComp} 💵₹${cashComp})`);
           setDrPinDisplay(pin); setDrLastIndentNo(nextNo);
           setDrTruckNo(""); setDrAmount(""); setDrDieselAmt(""); setDrCashAmt(""); setDrPumpId("");
         };
@@ -9097,40 +9205,42 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
               <div style={{background:C.card,borderRadius:12,padding:"14px 16px",
                 display:"flex",flexDirection:"column",gap:10}}>
                 <div style={{color:C.teal,fontWeight:700,fontSize:13}}>+ New Diesel Request</div>
+                {/* Truck — vehicle dropdown + manual fallback */}
+                <div>
+                  <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>TRUCK NO</div>
+                  <select value={(vehicles||[]).some(v=>v.truckNo===drTruckNo)?drTruckNo:"__custom__"}
+                    onChange={e=>{ if(e.target.value!=="__custom__") setDrTruckNo(e.target.value); else setDrTruckNo(""); }}
+                    style={{width:"100%",background:C.bg,border:`1.5px solid ${drTruckNo?C.teal:C.border}`,
+                      borderRadius:8,color:drTruckNo?C.text:C.muted,padding:"9px 12px",fontSize:13,outline:"none",marginBottom:4}}>
+                    <option value="">— Select truck —</option>
+                    {[...(vehicles||[])].sort((a,b)=>a.truckNo.localeCompare(b.truckNo)).map(v=>(
+                      <option key={v.truckNo} value={v.truckNo}>{v.truckNo}{v.driverName?" · "+v.driverName:""}</option>
+                    ))}
+                    <option value="__custom__">✏ Enter new truck number…</option>
+                  </select>
+                  {(!(vehicles||[]).some(v=>v.truckNo===drTruckNo)||drTruckNo==="") && (
+                    <input value={drTruckNo} onChange={e=>setDrTruckNo(e.target.value.toUpperCase())}
+                      placeholder="e.g. KA32B1234 — will be added to vehicles"
+                      style={{width:"100%",boxSizing:"border-box",background:C.bg,
+                        border:`1.5px solid ${C.orange}`,borderRadius:8,color:C.text,
+                        padding:"9px 12px",fontSize:13,outline:"none"}} />
+                  )}
+                </div>
+                {/* Diesel + Cash — total auto-computed */}
                 <div style={{display:"flex",gap:8}}>
                   <div style={{flex:1}}>
-                    <Field label="Truck No" value={drTruckNo} onChange={setDrTruckNo} placeholder="KA32AB1234"/>
+                    <Field label="⛽ Diesel ₹" value={drDieselAmt} onChange={setDrDieselAmt} type="number" placeholder="0"/>
                   </div>
                   <div style={{flex:1}}>
-                    <Field label="Total Amount ₹" value={drAmount} onChange={v=>{
-                      setDrAmount(v);
-                      // auto-fill diesel if cash is blank, or cash if diesel is blank
-                      if(!drCashAmt && !drDieselAmt) return;
-                      if(drDieselAmt && !drCashAmt) setDrCashAmt(String(Math.max(0,(+v||0)-(+drDieselAmt||0))||""));
-                      if(drCashAmt && !drDieselAmt) setDrDieselAmt(String(Math.max(0,(+v||0)-(+drCashAmt||0))||""));
-                    }} type="number" placeholder="10000"/>
+                    <Field label="💵 Cash ₹" value={drCashAmt} onChange={setDrCashAmt} type="number" placeholder="0"/>
                   </div>
                 </div>
-                {/* Diesel + Cash breakdown */}
-                <div style={{display:"flex",gap:8}}>
-                  <div style={{flex:1}}>
-                    <Field label="⛽ Diesel ₹" value={drDieselAmt} onChange={v=>{
-                      setDrDieselAmt(v);
-                      if(+drAmount>0) setDrCashAmt(String(Math.max(0,(+drAmount||0)-(+v||0))||""));
-                    }} type="number" placeholder="optional"/>
+                {((+drDieselAmt||0)+(+drCashAmt||0)) > 0 && (
+                  <div style={{background:C.teal+"11",border:`1px solid ${C.teal}33`,borderRadius:7,
+                    padding:"7px 12px",fontSize:13,color:C.teal,fontWeight:700}}>
+                    Total: ₹{((+drDieselAmt||0)+(+drCashAmt||0)).toLocaleString("en-IN")}
                   </div>
-                  <div style={{flex:1}}>
-                    <Field label="💵 Cash ₹" value={drCashAmt} onChange={v=>{
-                      setDrCashAmt(v);
-                      if(+drAmount>0) setDrDieselAmt(String(Math.max(0,(+drAmount||0)-(+v||0))||""));
-                    }} type="number" placeholder="optional"/>
-                  </div>
-                </div>
-                {(+drDieselAmt||+drCashAmt) && (+drDieselAmt||0)+(+drCashAmt||0) !== (+drAmount||0) ? (
-                  <div style={{color:C.orange,fontSize:12}}>
-                    ⚠ Diesel + Cash = ₹{((+drDieselAmt||0)+(+drCashAmt||0)).toLocaleString("en-IN")} — must equal Total ₹{(+drAmount||0).toLocaleString("en-IN")}
-                  </div>
-                ) : null}
+                )}
                 <Field label="Petrol Pump (optional)"
                   value={drPumpId} onChange={setDrPumpId}
                   opts={[{v:"",l:"— No pump selected —"},...(pumps||[]).map(p=>({v:p.id,l:p.name}))]}/>
@@ -9182,6 +9292,9 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
                       </div>
                       <div style={{color:C.muted,fontSize:12,marginTop:2}}>
                         {req.date}{pump?" · "+pump.name:""}
+                        {(req.requestedBy||req.createdBy)&&(
+                          <span style={{color:C.muted}}>{" · "}By: <b style={{color:C.text}}>{req.requestedBy||req.createdBy}</b></span>
+                        )}
                       </div>
                       {(req.dieselAmount||req.cashAmount) ? (
                         <div style={{color:C.muted,fontSize:11,marginTop:2,display:"flex",gap:8}}>
@@ -9220,6 +9333,8 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
                             setEditReqId(req.id);
                             setEditTruckNo(req.truckNo);
                             setEditAmount(String(req.amount));
+                            setEditDieselAmt(req.dieselAmount ? String(req.dieselAmount) : "");
+                            setEditCashAmt(req.cashAmount   ? String(req.cashAmount)   : "");
                             setEditPumpId(req.pumpId||"");
                           }} style={{background:C.blue+"22",border:`1px solid ${C.blue}55`,borderRadius:6,
                             color:C.blue,fontSize:11,padding:"3px 8px",cursor:"pointer",fontWeight:700}}>
@@ -9249,22 +9364,50 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
                     <div style={{marginTop:12,paddingTop:12,borderTop:`1px solid ${C.border}`,
                       display:"flex",flexDirection:"column",gap:10}}>
                       <div style={{color:C.blue,fontWeight:700,fontSize:12}}>✏ Edit Indent #{req.indentNo}</div>
+                      {/* Truck — vehicle dropdown */}
+                      <div>
+                        <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>TRUCK NO</div>
+                        <select value={(vehicles||[]).some(v=>v.truckNo===editTruckNo)?editTruckNo:"__custom__"}
+                          onChange={e=>{ if(e.target.value!=="__custom__") setEditTruckNo(e.target.value); else setEditTruckNo(""); }}
+                          style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,
+                            color:C.text,padding:"8px 10px",fontSize:13,outline:"none",marginBottom:4}}>
+                          <option value="">— Select truck —</option>
+                          {[...(vehicles||[])].sort((a,b)=>a.truckNo.localeCompare(b.truckNo)).map(v=>(
+                            <option key={v.truckNo} value={v.truckNo}>{v.truckNo}{v.driverName?" · "+v.driverName:""}</option>
+                          ))}
+                          <option value="__custom__">✏ Enter manually…</option>
+                        </select>
+                        {(!(vehicles||[]).some(v=>v.truckNo===editTruckNo)||editTruckNo==="") && (
+                          <input value={editTruckNo} onChange={e=>setEditTruckNo(e.target.value.toUpperCase())}
+                            placeholder="e.g. KA32B1234"
+                            style={{width:"100%",boxSizing:"border-box",background:C.bg,
+                              border:`1.5px solid ${C.orange}`,borderRadius:8,color:C.text,
+                              padding:"8px 10px",fontSize:13,outline:"none"}} />
+                        )}
+                      </div>
+                      {/* Diesel + Cash — total auto-computed */}
                       <div style={{display:"flex",gap:8}}>
                         <div style={{flex:1}}>
-                          <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>TRUCK NO</div>
-                          <input value={editTruckNo} onChange={e=>setEditTruckNo(e.target.value.toUpperCase())}
-                            style={{width:"100%",boxSizing:"border-box",background:C.bg,
+                          <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>⛽ DIESEL ₹</div>
+                          <input type="number" value={editDieselAmt} onChange={e=>setEditDieselAmt(e.target.value)}
+                            placeholder="0" style={{width:"100%",boxSizing:"border-box",background:C.bg,
                               border:`1.5px solid ${C.border}`,borderRadius:8,color:C.text,
                               padding:"8px 10px",fontSize:13,outline:"none"}} />
                         </div>
                         <div style={{flex:1}}>
-                          <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>AMOUNT ₹</div>
-                          <input type="number" value={editAmount} onChange={e=>setEditAmount(e.target.value)}
-                            style={{width:"100%",boxSizing:"border-box",background:C.bg,
+                          <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>💵 CASH ₹</div>
+                          <input type="number" value={editCashAmt} onChange={e=>setEditCashAmt(e.target.value)}
+                            placeholder="0" style={{width:"100%",boxSizing:"border-box",background:C.bg,
                               border:`1.5px solid ${C.border}`,borderRadius:8,color:C.text,
                               padding:"8px 10px",fontSize:13,outline:"none"}} />
                         </div>
                       </div>
+                      {((+editDieselAmt||0)+(+editCashAmt||0)) > 0 && (
+                        <div style={{background:C.teal+"11",border:`1px solid ${C.teal}33`,borderRadius:7,
+                          padding:"6px 10px",fontSize:12,color:C.teal,fontWeight:700}}>
+                          Total: ₹{((+editDieselAmt||0)+(+editCashAmt||0)).toLocaleString("en-IN")}
+                        </div>
+                      )}
                       <div>
                         <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>PETROL PUMP</div>
                         <select value={editPumpId} onChange={e=>setEditPumpId(e.target.value)}
@@ -9277,15 +9420,17 @@ function DieselMod({trips, setTrips, vehicles, indents, setIndents, pumpPayments
                       <div style={{display:"flex",gap:8}}>
                         <button onClick={async()=>{
                           if(!editTruckNo.trim()){alert("Enter truck number");return;}
-                          if(!editAmount||+editAmount<=0){alert("Enter valid amount");return;}
-                          const updated = {...req,
+                          const d=+editDieselAmt||0, ca=+editCashAmt||0;
+                          const total=d+ca;
+                          if(total<=0){alert("Enter Diesel and/or Cash amount");return;}
+                          const updated={...req,
                             truckNo:editTruckNo.trim().toUpperCase(),
-                            amount:+editAmount,
+                            amount:total, dieselAmount:d||null, cashAmount:ca||null,
                             pumpId:editPumpId||null,
                           };
                           setDieselRequests(p=>p.map(r=>r.id===req.id?updated:r));
                           await DB.saveDieselRequest(updated);
-                          log("EDIT DIESEL REQUEST",`Indent #${req.indentNo} · ${updated.truckNo} · ₹${updated.amount}`);
+                          log("EDIT DIESEL REQUEST",`Indent #${req.indentNo} · ${updated.truckNo} · ₹${updated.amount} (⛽₹${d} 💵₹${ca})`);
                           setEditReqId(null);
                         }} style={{flex:1,background:C.blue,color:"#fff",border:"none",borderRadius:8,
                           padding:"9px",fontSize:13,fontWeight:700,cursor:"pointer"}}>
@@ -15444,9 +15589,9 @@ function ActivityLog({activity}) {
 }
 
 // ─── USER ADMIN ───────────────────────────────────────────────────────────────
-function UserAdmin({users, setUsers, user, log}) {
+function UserAdmin({users, setUsers, user, log, pumps=[]}) {
   const [sheet,setSheet]=useState(false); const [edit,setEdit]=useState(null);
-  const blank={name:"",username:"",pin:"",role:"operator",active:true,assignedClients:[]};
+  const blank={name:"",username:"",pin:"",role:"operator",active:true,assignedClients:[],assignedPumpId:""};
   const [f,setF]=useState(blank); const ff=k=>v=>setF(p=>({...p,[k]:v}));
   const toggleClient = c => setF(p=>{
     const cur = p.assignedClients||[];
@@ -15492,6 +15637,20 @@ function UserAdmin({users, setUsers, user, log}) {
               <div style={{color:C.muted,fontSize:11,marginTop:4}}>✓ No restriction — can see all clients</div>
             )}
           </div>
+          {/* Assigned Pump — only shown for pump_operator role */}
+          {f.role==="pump_operator" && (
+            <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
+              <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:6}}>
+                ASSIGNED PUMP <span style={{color:C.orange,fontWeight:400}}>(pump operator will only see this pump's data)</span>
+              </div>
+              <select value={f.assignedPumpId||""} onChange={e=>setF(p=>({...p,assignedPumpId:e.target.value}))}
+                style={{width:"100%",background:C.card,border:`1.5px solid ${f.assignedPumpId?C.orange:C.border}`,
+                  borderRadius:8,color:f.assignedPumpId?C.text:C.muted,padding:"9px 12px",fontSize:13,outline:"none"}}>
+                <option value="">— No pump assigned (sees all) —</option>
+                {pumps.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </div>
+          )}
           <div style={{display:"flex",alignItems:"center",gap:10}}><input type="checkbox" checked={f.active} onChange={e=>setF(p=>({...p,active:e.target.checked}))} style={{width:20,height:20}} /><span style={{color:C.text,fontSize:15}}>Active</span></div>
           <Btn onClick={save} full>{edit?"Update":"Add User"}</Btn>
         </div>
@@ -15512,12 +15671,13 @@ function UserAdmin({users, setUsers, user, log}) {
                     ))}
                   </div>
                 )}
+                {u.assignedPumpId&&(()=>{const p=pumps.find(x=>x.id===u.assignedPumpId);return p?<div style={{marginTop:3}}><Badge label={"⛽ "+p.name} color={C.orange}/></div>:null;})()}
               </div>
             </div>
             <Badge label={u.active?"Active":"Off"} color={u.active?C.green:C.muted} />
           </div>
           {!isMe&&<div style={{display:"flex",gap:8}}>
-            <Btn onClick={()=>{setF({name:u.name,username:u.username,pin:u.pin,role:u.role,active:u.active,assignedClients:u.assignedClients||[]});setEdit(u);setSheet(true);}} sm outline color={C.blue}>Edit</Btn>
+            <Btn onClick={()=>{setF({name:u.name,username:u.username,pin:u.pin,role:u.role,active:u.active,assignedClients:u.assignedClients||[],assignedPumpId:u.assignedPumpId||""});setEdit(u);setSheet(true);}} sm outline color={C.blue}>Edit</Btn>
             <Btn onClick={()=>{setUsers(p=>p.map(x=>x.id===u.id?{...x,active:!x.active}:x));log("TOGGLE USER",`${u.name} ${u.active?"disabled":"enabled"}`);}} sm outline color={u.active?C.red:C.green}>{u.active?"Disable":"Enable"}</Btn>
           </div>}
         </div>
