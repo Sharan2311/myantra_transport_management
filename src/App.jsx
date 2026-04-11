@@ -7746,35 +7746,44 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance: tripWithBalancePr
                     value={row.lr} onChange={e=>{
                       const q = e.target.value;
                       updateRow(i,"lr",q);
-                      // auto-match — exact, contains, or numeric fuzzy (SKLC0021 = SKLC021)
+                      // auto-match — only commit on EXACT or numeric-fuzzy match (SKLC0021 = SKLC021)
+                      // Partial/contains matches just show the dropdown; do NOT auto-select
                       if(q.length>=2) {
                         const qLow = q.toLowerCase();
                         const qDigits = parseInt(qLow.replace(/[^0-9]/g,""),10)||0;
                         const qAlpha  = qLow.replace(/[^a-z]/g,"");
-                        const allM = tripWithBalance.filter(t=>{
+                        // Only auto-commit if it's an exact LR match or numeric-fuzzy exact
+                        const exactMatch = tripWithBalance.find(t=>{
                           const lr = (t.lrNo||"").toLowerCase();
                           if(lr===qLow) return true;
-                          if(lr.includes(qLow)) return true;
-                          if((t.truckNo||"").toLowerCase().includes(qLow)) return true;
-                          // Numeric fuzzy: SKLC0021 matches SKLC021
+                          // Numeric fuzzy: SKLC0021 matches SKLC021 (full number must match)
                           const lrDigits = parseInt(lr.replace(/[^0-9]/g,""),10)||0;
                           const lrAlpha  = lr.replace(/[^a-z]/g,"");
-                          if(qDigits && lrDigits && qDigits===lrDigits && (!qAlpha||!lrAlpha||qAlpha===lrAlpha)) return true;
+                          if(qDigits && lrDigits && qDigits===lrDigits && qAlpha && lrAlpha && qAlpha===lrAlpha) return true;
                           return false;
-                        }).sort((a,b)=>{
-                          const aExact = (a.lrNo||"").toLowerCase()===qLow;
-                          const bExact = (b.lrNo||"").toLowerCase()===qLow;
-                          if(aExact && !bExact) return -1;
-                          if(!aExact && bExact) return 1;
-                          if(a.balance>0 && b.balance<=0) return -1;
-                          if(a.balance<=0 && b.balance>0) return 1;
-                          return 0;
                         });
-                        const matchedTrip = allM[0];
-                        updateRow(i,"tripId", matchedTrip?.id||"");
-                        // Auto-fill amount with balance if amount is empty
-                        if(matchedTrip && !row.amount) {
-                          updateRow(i,"amount", String(matchedTrip.balance));
+                        if(exactMatch) {
+                          // Prefer unsettled trip if multiple share same LR
+                          const allExact = tripWithBalance.filter(t=>{
+                            const lr=(t.lrNo||"").toLowerCase();
+                            if(lr===qLow) return true;
+                            const lrD=parseInt(lr.replace(/[^0-9]/g,""),10)||0;
+                            const lrA=lr.replace(/[^a-z]/g,"");
+                            return qDigits&&lrD&&qDigits===lrD&&qAlpha&&lrA&&qAlpha===lrA;
+                          }).sort((a,b)=>{
+                            if(a.balance>0&&b.balance<=0) return -1;
+                            if(a.balance<=0&&b.balance>0) return 1;
+                            return (b.date||"").localeCompare(a.date||"");
+                          });
+                          const best = allExact[0];
+                          updateRow(i,"tripId", best?.id||"");
+                          // Auto-fill amount with balance only on exact match
+                          if(best && !row.amount) {
+                            updateRow(i,"amount", String(best.balance));
+                          }
+                        } else {
+                          // Partial input — clear any stale tripId so dropdown shows
+                          updateRow(i,"tripId","");
                         }
                       } else {
                         updateRow(i,"tripId","");
@@ -7800,7 +7809,7 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance: tripWithBalancePr
                       <div style={{background:C.card,borderRadius:7,marginTop:3,
                         border:`1px solid ${C.border}`,overflow:"hidden"}}>
                         {matches.map(t=>(
-                          <div key={t.id} onClick={()=>{updateRow(i,"tripId",t.id);updateRow(i,"lr",`LR ${t.lrNo} · ${t.truckNo}`);}}
+                          <div key={t.id} onClick={()=>{updateRow(i,"tripId",t.id);updateRow(i,"lr",`LR ${t.lrNo} · ${t.truckNo}`);if(!row.amount)updateRow(i,"amount",String(t.balance));}}
                             style={{padding:"7px 10px",cursor:"pointer",fontSize:12,
                               borderBottom:`1px solid ${C.border}22`}}>
                             <b>LR {t.lrNo}</b> · {t.truckNo} · Balance: <span style={{color:C.accent}}>{fmt(t.balance)}</span>
