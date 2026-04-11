@@ -9206,26 +9206,39 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
                 display:"flex",flexDirection:"column",gap:10}}>
                 <div style={{color:C.teal,fontWeight:700,fontSize:13}}>+ New Diesel Request</div>
                 {/* Truck — vehicle dropdown + manual fallback */}
-                <div>
-                  <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>TRUCK NO</div>
-                  <select value={(vehicles||[]).some(v=>v.truckNo===drTruckNo)?drTruckNo:"__custom__"}
-                    onChange={e=>{ if(e.target.value!=="__custom__") setDrTruckNo(e.target.value); else setDrTruckNo(""); }}
-                    style={{width:"100%",background:C.bg,border:`1.5px solid ${drTruckNo?C.teal:C.border}`,
-                      borderRadius:8,color:drTruckNo?C.text:C.muted,padding:"9px 12px",fontSize:13,outline:"none",marginBottom:4}}>
-                    <option value="">— Select truck —</option>
-                    {[...(vehicles||[])].sort((a,b)=>a.truckNo.localeCompare(b.truckNo)).map(v=>(
-                      <option key={v.truckNo} value={v.truckNo}>{v.truckNo}{v.driverName?" · "+v.driverName:""}</option>
-                    ))}
-                    <option value="__custom__">✏ Enter new truck number…</option>
-                  </select>
-                  {(!(vehicles||[]).some(v=>v.truckNo===drTruckNo)||drTruckNo==="") && (
-                    <input value={drTruckNo} onChange={e=>setDrTruckNo(e.target.value.toUpperCase())}
-                      placeholder="e.g. KA32B1234 — will be added to vehicles"
-                      style={{width:"100%",boxSizing:"border-box",background:C.bg,
-                        border:`1.5px solid ${C.orange}`,borderRadius:8,color:C.text,
-                        padding:"9px 12px",fontSize:13,outline:"none"}} />
-                  )}
-                </div>
+                {(()=>{
+                  const inDropdown = (vehicles||[]).some(v=>v.truckNo===drTruckNo);
+                  const selectVal  = drTruckNo==="" ? "" : inDropdown ? drTruckNo : "__manual__";
+                  return (
+                  <div>
+                    <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>TRUCK NO</div>
+                    <select value={selectVal}
+                      onChange={e=>{
+                        if(e.target.value==="") { setDrTruckNo(""); }
+                        else if(e.target.value==="__manual__") { setDrTruckNo(""); }
+                        else { setDrTruckNo(e.target.value); }
+                      }}
+                      style={{width:"100%",background:C.bg,
+                        border:`1.5px solid ${drTruckNo&&inDropdown?C.teal:C.border}`,
+                        borderRadius:8,color:drTruckNo&&inDropdown?C.text:C.muted,
+                        padding:"9px 12px",fontSize:13,outline:"none",marginBottom:4}}>
+                      <option value="">— Select truck —</option>
+                      {[...(vehicles||[])].sort((a,b)=>a.truckNo.localeCompare(b.truckNo)).map(v=>(
+                        <option key={v.truckNo} value={v.truckNo}>{v.truckNo}{v.driverName?" · "+v.driverName:""}</option>
+                      ))}
+                      <option value="__manual__">✏ Enter new truck number…</option>
+                    </select>
+                    {/* Manual text input — shown when "Enter manually" chosen or typing a new truck */}
+                    {(selectVal==="__manual__"||(!inDropdown&&drTruckNo!=="")) && (
+                      <input value={drTruckNo} onChange={e=>setDrTruckNo(e.target.value.toUpperCase())}
+                        placeholder="Type complete truck number e.g. KA32B1234"
+                        style={{width:"100%",boxSizing:"border-box",background:C.bg,
+                          border:`1.5px solid ${C.orange}`,borderRadius:8,color:C.text,
+                          padding:"9px 12px",fontSize:13,outline:"none"}} />
+                    )}
+                  </div>
+                  );
+                })()}
                 {/* Diesel + Cash — total auto-computed */}
                 <div style={{display:"flex",gap:8}}>
                   <div style={{flex:1}}>
@@ -9244,9 +9257,30 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
                 <Field label="Petrol Pump (optional)"
                   value={drPumpId} onChange={setDrPumpId}
                   opts={[{v:"",l:"— No pump selected —"},...(pumps||[]).map(p=>({v:p.id,l:p.name}))]}/>
-                <Btn onClick={createRequest} full color={C.teal}>
-                  ⛽ Generate Indent #{nextNo||"—"} + Driver PIN
-                </Btn>
+                {(()=>{
+                  const _total = (+drDieselAmt||0)+(+drCashAmt||0);
+                  const _truckOk = drTruckNo.trim().length >= 6; // minimum valid truck no
+                  const _ready = _truckOk && _total > 0;
+                  return (
+                    <>
+                      {!_truckOk && drTruckNo.trim().length>0 && drTruckNo.trim().length<6 && (
+                        <div style={{color:C.orange,fontSize:12,fontWeight:600}}>
+                          ⚠ Enter complete truck number (e.g. KA32B1234)
+                        </div>
+                      )}
+                      {_truckOk && _total<=0 && (
+                        <div style={{color:C.muted,fontSize:12}}>
+                          Enter Diesel ₹ and/or Cash ₹ to continue
+                        </div>
+                      )}
+                      <Btn onClick={createRequest} full color={_ready?C.teal:C.muted}
+                        disabled={!_ready}
+                        style={{opacity:_ready?1:0.45,cursor:_ready?"pointer":"not-allowed"}}>
+                        ⛽ Generate Indent #{nextNo||"—"} + Driver PIN
+                      </Btn>
+                    </>
+                  );
+                })()}
 
                 {/* PIN reveal after creation */}
                 {drPinDisplay && (
@@ -9259,7 +9293,13 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
                       color:C.teal,letterSpacing:10}}>{drPinDisplay}</div>
                     <div style={{color:C.muted,fontSize:11,marginTop:8,lineHeight:1.5}}>
                       Tell this PIN to the driver before he leaves.<br/>
-                      Pump must enter this PIN to change the amount.
+                      Pump must enter this PIN to confirm diesel dispensed.
+                    </div>
+                    <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,
+                      borderRadius:8,padding:"8px 10px",marginTop:8,fontSize:11,color:C.orange,
+                      textAlign:"left",lineHeight:1.5}}>
+                      ⚠ Verify Diesel ₹{(+drDieselAmt||+drCashAmt||0).toLocaleString("en-IN")} and Cash totals are correct before sharing PIN.<br/>
+                      Once pump confirms with PIN, amounts are locked.
                     </div>
                     <Btn onClick={()=>setDrPinDisplay(null)} sm outline color={C.muted}
                       style={{marginTop:10}}>Dismiss</Btn>
@@ -9310,6 +9350,12 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
                       {req.status==="confirmed" && (
                         <div style={{color:C.teal,fontSize:11,marginTop:2}}>
                           ✓ Confirmed by pump — PIN invalidated
+                          {req.confirmedAmount!=null && req.confirmedAmount!==req.amount && (
+                            <span style={{color:C.orange,fontWeight:700,marginLeft:6}}>
+                              ⚠ Amount changed: ₹{req.amount.toLocaleString("en-IN")} → ₹{req.confirmedAmount.toLocaleString("en-IN")}
+                              {req.confirmedReason?` (${req.confirmedReason})`:""}
+                            </span>
+                          )}
                         </div>
                       )}
                       {req.lrNo && (
@@ -9365,26 +9411,37 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
                       display:"flex",flexDirection:"column",gap:10}}>
                       <div style={{color:C.blue,fontWeight:700,fontSize:12}}>✏ Edit Indent #{req.indentNo}</div>
                       {/* Truck — vehicle dropdown */}
-                      <div>
-                        <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>TRUCK NO</div>
-                        <select value={(vehicles||[]).some(v=>v.truckNo===editTruckNo)?editTruckNo:"__custom__"}
-                          onChange={e=>{ if(e.target.value!=="__custom__") setEditTruckNo(e.target.value); else setEditTruckNo(""); }}
-                          style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,
-                            color:C.text,padding:"8px 10px",fontSize:13,outline:"none",marginBottom:4}}>
-                          <option value="">— Select truck —</option>
-                          {[...(vehicles||[])].sort((a,b)=>a.truckNo.localeCompare(b.truckNo)).map(v=>(
-                            <option key={v.truckNo} value={v.truckNo}>{v.truckNo}{v.driverName?" · "+v.driverName:""}</option>
-                          ))}
-                          <option value="__custom__">✏ Enter manually…</option>
-                        </select>
-                        {(!(vehicles||[]).some(v=>v.truckNo===editTruckNo)||editTruckNo==="") && (
-                          <input value={editTruckNo} onChange={e=>setEditTruckNo(e.target.value.toUpperCase())}
-                            placeholder="e.g. KA32B1234"
-                            style={{width:"100%",boxSizing:"border-box",background:C.bg,
-                              border:`1.5px solid ${C.orange}`,borderRadius:8,color:C.text,
-                              padding:"8px 10px",fontSize:13,outline:"none"}} />
-                        )}
-                      </div>
+                      {(()=>{
+                        const inDrop = (vehicles||[]).some(v=>v.truckNo===editTruckNo);
+                        const selVal = editTruckNo==="" ? "" : inDrop ? editTruckNo : "__manual__";
+                        return (
+                        <div>
+                          <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>TRUCK NO</div>
+                          <select value={selVal}
+                            onChange={e=>{
+                              if(e.target.value===""||e.target.value==="__manual__") setEditTruckNo("");
+                              else setEditTruckNo(e.target.value);
+                            }}
+                            style={{width:"100%",background:C.bg,
+                              border:`1.5px solid ${editTruckNo&&inDrop?C.teal:C.border}`,
+                              borderRadius:8,color:editTruckNo&&inDrop?C.text:C.muted,
+                              padding:"8px 10px",fontSize:13,outline:"none",marginBottom:4}}>
+                            <option value="">— Select truck —</option>
+                            {[...(vehicles||[])].sort((a,b)=>a.truckNo.localeCompare(b.truckNo)).map(v=>(
+                              <option key={v.truckNo} value={v.truckNo}>{v.truckNo}{v.driverName?" · "+v.driverName:""}</option>
+                            ))}
+                            <option value="__manual__">✏ Enter manually…</option>
+                          </select>
+                          {(selVal==="__manual__"||(!inDrop&&editTruckNo!=="")) && (
+                            <input value={editTruckNo} onChange={e=>setEditTruckNo(e.target.value.toUpperCase())}
+                              placeholder="Type complete truck number"
+                              style={{width:"100%",boxSizing:"border-box",background:C.bg,
+                                border:`1.5px solid ${C.orange}`,borderRadius:8,color:C.text,
+                                padding:"8px 10px",fontSize:13,outline:"none"}} />
+                          )}
+                        </div>
+                        );
+                      })()}
                       {/* Diesel + Cash — total auto-computed */}
                       <div style={{display:"flex",gap:8}}>
                         <div style={{flex:1}}>
