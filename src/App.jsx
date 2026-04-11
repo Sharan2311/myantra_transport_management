@@ -6313,6 +6313,25 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
   // Fields locked after scan for non-owners
   const locked   = wasScanned && !isOwner;
 
+  // ── Auto-attach diesel request when truck is set ────────────────────────────
+  const prevTruckRef = React.useRef("");
+  React.useEffect(() => {
+    const truck = (f.truckNo||"").trim().toUpperCase();
+    if(!truck || truck === prevTruckRef.current) return;
+    prevTruckRef.current = truck;
+    // Only auto-attach if no indent already selected
+    if(f.dieselIndentNo && f.dieselIndentNo.trim()) return;
+    const open = (dieselRequests||[]).filter(r =>
+      r.truckNo === truck && (r.status==="open" || r.status==="confirmed")
+    ).sort((a,b) => (b.status==="confirmed"?1:0) - (a.status==="confirmed"?1:0));
+    if(open.length === 1) {
+      // Exactly one request — auto-attach silently
+      ff("dieselIndentNo")(String(open[0].indentNo));
+      ff("dieselEstimate")(String(open[0].confirmedAmount ?? open[0].amount));
+    }
+    // Multiple open requests — don't auto-pick, let user choose from cards
+  }, [f.truckNo]);
+
   // Locked display component
   const LockedField = ({label, value, half=false}) => (
     <div style={{display:"flex",flexDirection:"column",gap:5,flex:half?"1 1 45%":"1 1 100%",minWidth:0}}>
@@ -6612,13 +6631,6 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
           ff("dieselEstimate")(String(r.confirmedAmount??r.amount));
         };
         const clearReq = () => { ff("dieselIndentNo")(""); ff("dieselEstimate")("0"); };
-
-        // Auto-attach: if truck has exactly 1 confirmed request and nothing yet selected, attach silently
-        if(!val && truckReqs.length===1) {
-          setTimeout(()=>{
-            if(!(f.dieselIndentNo)) attachReq(truckReqs[0]);
-          }, 0);
-        }
 
         return (
           <div style={{display:"flex",flexDirection:"column",gap:6}}>
