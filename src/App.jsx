@@ -1755,11 +1755,10 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       const ownerDeductG = ownerVehsG[0]?.deductPerTrip||0;
       const ownerBalG = ownerVehsG.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
       const autoLoanG = ownerBalG<=0 ? 0 : (ownerDeductG>0 ? Math.min(ownerDeductG, ownerBalG) : ownerBalG);
-      // Auto-attach confirmed/open diesel request for this truck
-      const openReqsG = (dieselRequests||[])
-        .filter(r => r.truckNo===truckNo && (r.status==="open"||r.status==="confirmed"))
-        .sort((a,b)=>(b.status==="confirmed"?1:0)-(a.status==="confirmed"?1:0));
-      const autoReqG = openReqsG.length===1 ? openReqsG[0] : openReqsG.find(r=>r.status==="confirmed");
+      // Auto-attach ONLY confirmed requests — open (unconfirmed) ones show a warning card instead
+      const confirmedReqsG = (dieselRequests||[])
+        .filter(r => r.truckNo===truckNo && r.status==="confirmed");
+      const autoReqG = confirmedReqsG.length >= 1 ? confirmedReqsG[0] : null;
       const autoIndentNo = autoReqG ? String(autoReqG.indentNo) : "";
       const autoDiesel   = autoReqG ? String(autoReqG.confirmedAmount??autoReqG.amount) : "0";
       return {
@@ -1808,10 +1807,8 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
         const ownerDed2 = ownerVs2[0]?.deductPerTrip||0;
         const ownerBal2 = ownerVs2.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
         const autoLR2 = ownerBal2<=0?0:Math.min(ownerDed2,ownerBal2);
-        const openReqsS = (dieselRequests||[])
-          .filter(r => r.truckNo===g.truckNo && (r.status==="open"||r.status==="confirmed"))
-          .sort((a,b)=>(b.status==="confirmed"?1:0)-(a.status==="confirmed"?1:0));
-        const autoReqS = openReqsS.length===1 ? openReqsS[0] : openReqsS.find(r=>r.status==="confirmed");
+        const autoReqS = (dieselRequests||[])
+          .filter(r => r.truckNo===g.truckNo && r.status==="confirmed")[0] || null;
         const solo = {
           id:uid(), truckNo:g.truckNo, diIds:[itemId],
           client:g.client, tafal:g.tafal,
@@ -6380,6 +6377,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
   const locked   = wasScanned && !isOwner;
 
   // ── Auto-attach diesel request when truck is set ────────────────────────────
+  // Only auto-attach CONFIRMED requests — open (unconfirmed) ones show a warning instead
   const prevTruckRef = React.useRef("");
   React.useEffect(() => {
     const truck = (f.truckNo||"").trim().toUpperCase();
@@ -6387,15 +6385,16 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
     prevTruckRef.current = truck;
     // Only auto-attach if no indent already selected
     if(f.dieselIndentNo && f.dieselIndentNo.trim()) return;
-    const open = (dieselRequests||[]).filter(r =>
-      r.truckNo === truck && (r.status==="open" || r.status==="confirmed")
-    ).sort((a,b) => (b.status==="confirmed"?1:0) - (a.status==="confirmed"?1:0));
-    if(open.length === 1) {
-      // Exactly one request — auto-attach silently
-      ff("dieselIndentNo")(String(open[0].indentNo));
-      ff("dieselEstimate")(String(open[0].confirmedAmount ?? open[0].amount));
+    // Only look at CONFIRMED requests for silent auto-attach
+    const confirmed = (dieselRequests||[]).filter(r =>
+      r.truckNo === truck && r.status === "confirmed"
+    );
+    if(confirmed.length === 1) {
+      // Exactly one confirmed request — auto-attach silently
+      ff("dieselIndentNo")(String(confirmed[0].indentNo));
+      ff("dieselEstimate")(String(confirmed[0].confirmedAmount ?? confirmed[0].amount));
     }
-    // Multiple open requests — don't auto-pick, let user choose from cards
+    // open (unconfirmed) requests → shown as warning cards, not auto-attached
   }, [f.truckNo]);
 
   // Locked display component
