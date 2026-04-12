@@ -2605,6 +2605,32 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                 );
               })()}
 
+              {/* ── Pending diesel request warning — shown even when diesel=0 ── */}
+              {(()=>{
+                const truck = (g.truckNo||"").toUpperCase().trim();
+                const pendingG = (dieselRequests||[]).filter(r=>r.truckNo===truck && r.status==="open");
+                if(!pendingG.length) return null;
+                return (
+                  <div style={{background:"#fff7ed",border:"1.5px solid #f97316",
+                    borderRadius:8,padding:"9px 12px",fontSize:12,color:"#c2410c"}}>
+                    <div style={{fontWeight:700,marginBottom:3}}>
+                      ⏳ Diesel request pending pump confirmation
+                    </div>
+                    {pendingG.map(r=>(
+                      <div key={r.id} style={{marginBottom:2}}>
+                        Indent #{r.indentNo} · ₹{r.amount.toLocaleString("en-IN")}
+                        {r.dieselAmount?<span> · ⛽₹{r.dieselAmount.toLocaleString("en-IN")}</span>:null}
+                        {r.cashAmount?<span> · 💵₹{r.cashAmount.toLocaleString("en-IN")}</span>:null}
+                        {" · PIN: "}<b style={{fontFamily:"monospace",letterSpacing:2}}>{r.pin!=="****"?r.pin:"—"}</b>
+                      </div>
+                    ))}
+                    <div style={{marginTop:4,color:"#92400e",fontSize:11}}>
+                      Ask driver to give PIN to pump operator. Indent will auto-attach once confirmed.
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* Diesel indent — auto-attached from open request if available */}
               {+g.diesel>0&&(()=>{
                 const attachedReq = g._autoAttachedReqId
