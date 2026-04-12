@@ -14508,15 +14508,25 @@ This will auto-recover in the next trip.`);
   const allPays = [...(driverPays||[])]
     .filter(p => allowedTripIds.has(p.tripId) || allowedLRs.has(p.lrNo))
     .sort((a,b)=>b.date.localeCompare(a.date));
-  // Unique "Paid To" accounts from all payment history
-  const paidToAccounts = [...new Set(allPays.map(p=>(p.paidTo||"").trim()).filter(Boolean))].sort();
+  // Unique "Paid To" accounts — case-insensitive dedup (shows canonical form)
+  const paidToAccounts = (() => {
+    const seen = new Map(); // lowercase key → first-seen canonical value
+    allPays.forEach(p => {
+      const raw = (p.paidTo||"").trim();
+      if(!raw) return;
+      const key = raw.toLowerCase();
+      if(!seen.has(key)) seen.set(key, raw);
+    });
+    return [...seen.values()].sort((a,b)=>a.toLowerCase().localeCompare(b.toLowerCase()));
+  })();
 
   const filteredPays = allPays.filter(p => {
     if (histFrom   && p.date < histFrom) return false;
     if (histTo     && p.date > histTo)   return false;
     if (histLR     && !(p.lrNo||"").toLowerCase().includes(histLR.toLowerCase()) &&
                       !(p.truckNo||"").toLowerCase().includes(histLR.toLowerCase())) return false;
-    if (histPaidTo && (p.paidTo||"").trim() !== histPaidTo) return false;
+    // Case-insensitive paidTo match so "ISMAIL" and "Ismail" both hit
+    if (histPaidTo && (p.paidTo||"").trim().toLowerCase() !== histPaidTo.toLowerCase()) return false;
     return true;
   });
   const histTotal = filteredPays.reduce((s,p)=>s+(p.amount||0),0);
