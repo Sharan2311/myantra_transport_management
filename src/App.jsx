@@ -6716,11 +6716,34 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
         };
         const clearReq = () => { ff("dieselIndentNo")(""); ff("dieselEstimate")("0"); };
 
+        // Pending (open, unconfirmed) requests for this truck
+        const pendingReqs = truckReqs.filter(r=>r.status==="open");
+        const hasOnlyPending = pendingReqs.length>0 && truckReqs.every(r=>r.status==="open");
+
         return (
           <div style={{display:"flex",flexDirection:"column",gap:6}}>
             <div style={{fontSize:11,color:C.muted,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>
               ⛽ Diesel Indent No
             </div>
+
+            {/* ── Pending request warning — pump hasn't confirmed yet ── */}
+            {hasOnlyPending && !val && (
+              <div style={{background:"#fff7ed",border:"1.5px solid #f97316",
+                borderRadius:8,padding:"9px 12px",fontSize:12,color:"#c2410c"}}>
+                <div style={{fontWeight:700,marginBottom:3}}>
+                  ⏳ Diesel request pending pump confirmation
+                </div>
+                {pendingReqs.map(r=>(
+                  <div key={r.id} style={{marginBottom:2}}>
+                    Indent #{r.indentNo} · ₹{r.amount.toLocaleString("en-IN")} · Driver PIN: <b style={{fontFamily:"monospace",letterSpacing:2}}>{r.pin!=="****"?r.pin:"—"}</b>
+                  </div>
+                ))}
+                <div style={{marginTop:4,color:"#92400e",fontSize:11}}>
+                  Ask the driver to hand the PIN to the pump operator to confirm before loading.
+                  The indent will auto-attach once confirmed.
+                </div>
+              </div>
+            )}
 
             {/* Requests for this truck — tap-to-attach cards */}
             {truckReqs.length>0 && (
@@ -8302,44 +8325,74 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
     if(!rows.length){ alert("No history records in selected date range."); return; }
     const fromLabel = histFrom||"All";
     const toLabel   = histTo  ||"All";
-    const lines = rows.map(r=>{
-      const effAmt = r.confirmedAmount??r.amount;
-      const diesel = r.dieselAmount ? `D:₹${r.dieselAmount.toLocaleString("en-IN")}` : "";
-      const cash   = r.cashAmount   ? `C:₹${r.cashAmount.toLocaleString("en-IN")}` : "";
-      const breakdown = [diesel,cash].filter(Boolean).join(" ");
-      return `#${r.indentNo} | ${r.truckNo} | ${r.date} | ₹${effAmt.toLocaleString("en-IN")} ${breakdown} | ${r.status.toUpperCase()}`;
-    }).join("\n");
     const total = rows.reduce((s,r)=>s+(r.confirmedAmount??r.amount),0);
-    const content = `DIESEL INDENT HISTORY — ${fromLabel} to ${toLabel}\n${"─".repeat(60)}\n${lines}\n${"─".repeat(60)}\nTOTAL: ₹${total.toLocaleString("en-IN")} (${rows.length} indents)`;
-    // Build HTML for print-to-PDF
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Indent History</title>
-<style>body{font-family:monospace;font-size:13px;padding:20px;color:#000;}
-h2{font-size:15px;margin-bottom:4px;}p{margin:2px 0;color:#555;}
-table{width:100%;border-collapse:collapse;margin-top:12px;}
-th{background:#f0f0f0;padding:6px 10px;text-align:left;font-size:12px;}
-td{padding:5px 10px;border-bottom:1px solid #eee;font-size:12px;}
-.total{font-weight:bold;font-size:13px;margin-top:10px;}
-</style></head><body>
-<h2>⛽ Diesel Indent History</h2>
-<p>Period: <b>${fromLabel}</b> to <b>${toLabel}</b> &nbsp;|&nbsp; ${rows.length} records</p>
-<table><thead><tr><th>#</th><th>Truck</th><th>Date</th><th>Amount</th><th>Diesel</th><th>Cash</th><th>Status</th></tr></thead><tbody>
-${rows.map(r=>`<tr>
-  <td>#${r.indentNo}</td>
-  <td>${r.truckNo}</td>
-  <td>${r.date}</td>
-  <td>₹${(r.confirmedAmount??r.amount).toLocaleString("en-IN")}</td>
-  <td>${r.dieselAmount ? "₹"+r.dieselAmount.toLocaleString("en-IN") : "—"}</td>
-  <td>${r.cashAmount   ? "₹"+r.cashAmount.toLocaleString("en-IN")   : "—"}</td>
-  <td>${r.status.toUpperCase()}</td>
-</tr>`).join("")}
-</tbody></table>
-<div class="total">TOTAL: ₹${total.toLocaleString("en-IN")}</div>
-</body></html>`;
-    const blob = new Blob([html], {type:"text/html"});
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement("a");
-    a.href = url; a.download = `indent_history_${fromLabel}_${toLabel}.html`;
-    a.click(); URL.revokeObjectURL(url);
+    const pumpName = assignedPump ? assignedPump.name : "All Pumps";
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Diesel Indent History</title>
+  <style>
+    @media print { body { margin: 0; } button { display: none !important; } }
+    * { box-sizing: border-box; }
+    body { font-family: Arial, sans-serif; font-size: 12px; color: #111; padding: 24px; max-width: 800px; margin: 0 auto; }
+    .header { border-bottom: 2px solid #e67e00; padding-bottom: 10px; margin-bottom: 16px; }
+    .header h1 { font-size: 18px; margin: 0 0 4px; color: #e67e00; }
+    .meta { color: #555; font-size: 12px; margin: 2px 0; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    thead tr { background: #f5f5f5; }
+    th { padding: 8px 10px; text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 2px solid #ddd; }
+    td { padding: 7px 10px; border-bottom: 1px solid #eee; vertical-align: top; }
+    tr:nth-child(even) td { background: #fafafa; }
+    .status-attached { color: #16a34a; font-weight: 700; }
+    .status-confirmed { color: #0891b2; font-weight: 700; }
+    .status-open { color: #d97706; font-weight: 700; }
+    .amount { font-weight: 700; }
+    .breakdown { color: #666; font-size: 11px; margin-top: 2px; }
+    .total-row { font-weight: 700; font-size: 13px; text-align: right; margin-top: 14px; padding-top: 10px; border-top: 2px solid #ddd; }
+    .print-btn { background: #0891b2; color: #fff; border: none; padding: 10px 24px; font-size: 14px; border-radius: 6px; cursor: pointer; margin-bottom: 16px; }
+  </style>
+</head>
+<body>
+  <button class="print-btn" onclick="window.print()">🖨 Print / Save as PDF</button>
+  <div class="header">
+    <h1>⛽ Diesel Indent History</h1>
+    <div class="meta">Pump: <b>${pumpName}</b></div>
+    <div class="meta">Period: <b>${fromLabel}</b> to <b>${toLabel}</b> &nbsp;·&nbsp; ${rows.length} records</div>
+    <div class="meta">Generated: ${new Date().toLocaleDateString("en-IN", {day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"})}</div>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th><th>Truck</th><th>Date</th><th>Amount</th><th>Diesel</th><th>Cash</th><th>LR</th><th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${rows.map(r => {
+        const amt = r.confirmedAmount ?? r.amount;
+        const statusClass = r.status==="attached"?"status-attached":r.status==="confirmed"?"status-confirmed":"status-open";
+        return `<tr>
+          <td><b>#${r.indentNo}</b></td>
+          <td>${r.truckNo}</td>
+          <td>${r.date}</td>
+          <td class="amount">&#8377;${amt.toLocaleString("en-IN")}</td>
+          <td>${r.dieselAmount ? "&#8377;"+r.dieselAmount.toLocaleString("en-IN") : "&#8212;"}</td>
+          <td>${r.cashAmount   ? "&#8377;"+r.cashAmount.toLocaleString("en-IN")   : "&#8212;"}</td>
+          <td>${r.lrNo||"&#8212;"}</td>
+          <td class="${statusClass}">${r.status.toUpperCase()}</td>
+        </tr>`;
+      }).join("")}
+    </tbody>
+  </table>
+  <div class="total-row">TOTAL: &#8377;${total.toLocaleString("en-IN")}</div>
+</body>
+</html>`;
+    const win = window.open("", "_blank");
+    if(!win) { alert("Pop-up blocked. Please allow pop-ups for this site and try again."); return; }
+    win.document.write(html);
+    win.document.close();
+    // Auto-trigger print dialog after a short delay so content renders first
+    setTimeout(() => win.print(), 600);
   };
 
   return (
