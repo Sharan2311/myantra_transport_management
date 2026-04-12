@@ -15079,8 +15079,8 @@ This will auto-recover in the next trip.`);
             <ScanPaymentBtn onResult={r=>{
               if(r.amount) setPf(p=>({...p,amount:String(r.amount).replace(/[^0-9.]/g,"")}));
               if(r.referenceNo) setPf(p=>({...p,utr:r.referenceNo}));
-              if(r.paidTo) setPf(p=>({...p,paidTo:r.paidTo}));
               if(r.date) setPf(p=>({...p,date:r.date}));
+              if(r.paidTo) setPf(p=>({...p,paidTo:r.paidTo}));
             }} />
             <Field label="Amount ₹" value={pf.amount} onChange={pff("amount")} type="number" />
             <div style={{display:"flex",gap:10}}>
