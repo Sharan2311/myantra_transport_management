@@ -13825,11 +13825,12 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
   const [newAcc,     setNewAcc]     = useState({name:"",accountNo:"",ifsc:""});
   const [newAccEmpId,setNewAccEmpId]= useState(""); // which employee to save new account to
   const [submitted,  setSubmitted]  = useState(false);
+  const [pendingCancelled, setPendingCancelled] = useState(false); // tracks if user just cancelled pending
 
   const recipAccounts = recipType==="vehicle_owner" ? ownerAccounts : allEmpAccounts;
   const selAcc = recipAccounts.find(a=>a.id===accId);
 
-  const hasPending = !isEditing && (paymentRequests||[]).some(r=>r.tripId===t.id&&r.status==="pending");
+  const hasPending = !isEditing && !pendingCancelled && (paymentRequests||[]).some(r=>r.tripId===t.id&&r.status==="pending");
 
   const save = () => {
     const effectiveAccId = (!showOther && recipType==="vehicle_owner") ? (accId||primaryOwnerAcc) : accId;
@@ -13959,10 +13960,9 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
                 <button onClick={()=>{
                   if(!window.confirm("Cancel this pending request?")) return;
                   setPaymentRequests(prev=>(prev||[]).filter(r=>r.id!==pendingReq.id));
-                  if(typeof DB!=="undefined"&&DB.deletePaymentRequest)
-                    DB.deletePaymentRequest(pendingReq.id).catch(()=>{});
-                  if(typeof log==="function")
-                    log("PAY REQUEST CANCELLED",`LR:${t.lrNo} — cancelled to allow new request`);
+                  DB.deletePaymentRequest(pendingReq.id).catch(()=>{});
+                  log&&log("PAY REQUEST CANCELLED",`LR:${t.lrNo} — cancelled to allow new request`);
+                  setPendingCancelled(true); // immediately show form without waiting for re-render
                 }} style={{flex:1,background:C.red,color:"#fff",border:"none",borderRadius:8,
                   padding:"8px 12px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
                   🗑 Cancel & Create New
@@ -14968,9 +14968,9 @@ This will auto-recover in the next trip.`);
             <div style={{textAlign:"center",color:C.muted,padding:"30px 0",fontSize:13}}>No payment requests yet</div>
           )}
           {[...(paymentRequests||[])].filter(pr=>{
-            // Sub-filter
-            const isPaid = (driverPays||[]).some(p=>p.lrNo===pr.lrNo&&p.amount>0);
-            const eff = isPaid?"done":pr.status;
+            // Use actual request status — don't override with payment existence
+            // (a trip can have partial payments AND still have a pending request for the remainder)
+            const eff = pr.status||"pending";
             if(reqSubFilter==="pending" && eff!=="pending") return false;
             if(reqSubFilter==="done"    && eff!=="done")    return false;
             // Search
