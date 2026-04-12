@@ -284,7 +284,7 @@ const fetchRecent = async (table, fromDB, dateCol='date', days=120) => {
   return (data||[]).map(fromDB)
 }
 const upsertOne = async (table, toDB, record) => {
-  const { error } = await supabase.from(table).upsert(toDB(record))
+  const { error } = await supabase.from(table).upsert(toDB(record), { onConflict: 'id' })
   if (error) throw error
 }
 const deleteOne = async (table, id) => {
