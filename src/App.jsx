@@ -14358,6 +14358,24 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
   }) : [];
   const totalBalance = unpaidTrips.reduce((s,t)=>s+t.balance,0);
 
+  // ── Startup cleanup: mark pending requests as done if any payment exists for that LR ──
+  // Handles stale requests created before auto-done logic was added
+  React.useEffect(() => {
+    if(!(paymentRequests||[]).length || !(driverPays||[]).length) return;
+    const lrsWithPayment = new Set((driverPays||[]).map(p=>p.lrNo).filter(Boolean));
+    const stale = (paymentRequests||[]).filter(r =>
+      r.status==="pending" && r.lrNo && lrsWithPayment.has(r.lrNo)
+    );
+    if(stale.length===0) return;
+    setPaymentRequests(prev=>prev.map(r=>{
+      if(r.status!=="pending"||!r.lrNo||!lrsWithPayment.has(r.lrNo)) return r;
+      const done={...r,status:"done",paidAt:today(),paidBy:"auto"};
+      DB.savePaymentRequest(done).catch(()=>{});
+      return done;
+    }));
+  // eslint-disable-next-line
+  }, [!!paymentRequests?.length, !!driverPays?.length]);
+
   // Auto-settle: trips with balance=0 but not marked settled
   React.useEffect(() => {
     const toSettle = tripWithBalance.filter(t=>
@@ -14373,6 +14391,17 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
         const updated = {...tw, driverSettled:true, settledBy:"auto", netPaid:tw.netDue};
         DB.saveTrip(updated).catch(e=>console.warn("auto-settle saveTrip:",e));
       });
+      // Auto-mark pending payment requests as done for fully settled trips
+      const settledIds = new Set(toSettle.map(t=>t.id));
+      const stalePending = (paymentRequests||[]).filter(r=>r.status==="pending"&&settledIds.has(r.tripId));
+      if(stalePending.length>0 && setPaymentRequests) {
+        setPaymentRequests(prev=>prev.map(r=>{
+          if(r.status!=="pending"||!settledIds.has(r.tripId)) return r;
+          const done={...r,status:"done",paidAt:today(),paidBy:"auto"};
+          DB.savePaymentRequest(done).catch(()=>{});
+          return done;
+        }));
+      }
     }
   // eslint-disable-next-line
   }, [JSON.stringify(tripWithBalance.map(t=>({id:t.id,balance:t.balance,settled:t.driverSettled})))]);
@@ -14938,8 +14967,14 @@ This will auto-recover in the next trip.`);
             {t.balance>0&&!viewOnly&&(
               <Btn onClick={()=>{setPaySheet(t);setPf({amount:String(t.balance),utr:"",date:today(),paidTo:"",notes:""});}} full sm color={C.green}>+ Record Payment</Btn>
             )}
-            {t.balance>0&&(
+            {t.balance>0&&!((paymentRequests||[]).some(r=>r.tripId===t.id&&r.status==="pending"))&&(
               <Btn onClick={()=>setPayReqSheet(t)} sm outline color={C.purple}>📋 Request Payment</Btn>
+            )}
+            {t.balance>0&&(paymentRequests||[]).some(r=>r.tripId===t.id&&r.status==="pending")&&(
+              <div style={{fontSize:11,color:C.purple,fontWeight:600,padding:"4px 8px",
+                background:C.purple+"11",borderRadius:6,border:`1px solid ${C.purple}33`}}>
+                📋 Request Pending
+              </div>
             )}
           </div>
         </div>
