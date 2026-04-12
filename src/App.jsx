@@ -13942,13 +13942,39 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
           </div>
         </div>
 
-        {hasPending && (
+        {hasPending && (()=>{
+          const pendingReq = (paymentRequests||[]).find(r=>r.tripId===t.id&&r.status==="pending");
+          return (
           <div style={{background:C.red+"11",border:`1px solid ${C.red}44`,borderRadius:10,
-            padding:"12px 14px",fontSize:13,color:C.red,fontWeight:700}}>
-            🚫 A pending request already exists for this trip.<br/>
-            <span style={{fontWeight:400,fontSize:12}}>Cancel the existing request first, or wait for it to be marked Done.</span>
+            padding:"12px 14px",fontSize:13,color:C.red}}>
+            <div style={{fontWeight:700,marginBottom:6}}>🚫 A pending request already exists for this trip.</div>
+            {pendingReq && (
+              <div style={{background:C.card,borderRadius:8,padding:"8px 10px",marginBottom:8,fontSize:12}}>
+                <div style={{fontWeight:600}}>₹{(pendingReq.amount||0).toLocaleString("en-IN")} · {pendingReq.recipientName||"—"}</div>
+                <div style={{color:C.muted,fontSize:11}}>Requested by {pendingReq.createdBy||"—"} on {pendingReq.createdAt?.slice(0,10)||"—"}</div>
+              </div>
+            )}
+            <div style={{display:"flex",gap:8}}>
+              {pendingReq && (isOwner || pendingReq.createdBy===user?.username) && (
+                <button onClick={()=>{
+                  if(!window.confirm("Cancel this pending request?")) return;
+                  setPaymentRequests(prev=>(prev||[]).filter(r=>r.id!==pendingReq.id));
+                  if(typeof DB!=="undefined"&&DB.deletePaymentRequest)
+                    DB.deletePaymentRequest(pendingReq.id).catch(()=>{});
+                  if(typeof log==="function")
+                    log("PAY REQUEST CANCELLED",`LR:${t.lrNo} — cancelled to allow new request`);
+                }} style={{flex:1,background:C.red,color:"#fff",border:"none",borderRadius:8,
+                  padding:"8px 12px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+                  🗑 Cancel & Create New
+                </button>
+              )}
+              <div style={{flex:1,fontSize:11,color:C.muted,display:"flex",alignItems:"center"}}>
+                Or wait for owner to mark it Done.
+              </div>
+            </div>
           </div>
-        )}
+          );
+        })()}
 
         {/* Rest of form — hidden if pending exists */}
         {!hasPending && <>
@@ -14328,8 +14354,7 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
     if(t.balance<=0) return false;                // already fully paid
     if(t.netDue<=0)  return false;                // nothing owed
     const hasPendingReq = (paymentRequests||[]).some(r=>r.tripId===t.id&&r.status==="pending");
-    const hasDoneReq    = (paymentRequests||[]).some(r=>r.tripId===t.id&&r.status==="done");
-    return !hasPendingReq && !hasDoneReq;          // no request sent yet
+    return !hasPendingReq;   // only block if a pending request exists — done requests allow new ones
   }) : [];
   const totalBalance = unpaidTrips.reduce((s,t)=>s+t.balance,0);
 
