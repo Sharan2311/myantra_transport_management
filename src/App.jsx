@@ -13955,7 +13955,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
               </div>
             )}
             <div style={{display:"flex",gap:8}}>
-              {pendingReq && (isOwner || pendingReq.createdBy===user?.username) && (
+              {pendingReq && (user?.role==="owner" || pendingReq.createdBy===user?.username) && (
                 <button onClick={()=>{
                   if(!window.confirm("Cancel this pending request?")) return;
                   setPaymentRequests(prev=>(prev||[]).filter(r=>r.id!==pendingReq.id));
