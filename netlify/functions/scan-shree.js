@@ -1,4 +1,106 @@
 // netlify/functions/scan-shree.js
+
+const INVOICE_PROMPT = `You are reading a freight tax invoice PDF from M Yantra Enterprises to Shree Cement or Ultratech Cement.
+
+══════════════════════════════════════════════════════════════
+CRITICAL: HOW TO READ THIS PDF TABLE
+══════════════════════════════════════════════════════════════
+
+This PDF uses a fixed-width table layout. When a cell value is too long, it WRAPS
+to the next line WITHIN THE SAME CELL. Read column-by-column, NOT line-by-line.
+
+Table columns (in order):
+S.No | DI NO | INV NO | DATE | TRUCK NO | GR NO | CONSIGNEE NAME | STATION | GRADE | DESP QTY | FRT RATE | FRT AMT
+
+FIELD RULES — copy values exactly, null if not clearly readable:
+
+DI NO:
+- Always exactly 10 digits (e.g. 9003367634)
+- Often wraps: "90033676" line 1, "34" line 2 → join to "9003367634"
+- Count digits — if fewer than 10, remaining digits are on the next line
+- NEVER include INV NO digits in the DI NO
+
+TRUCK NO:
+- Vehicle registration, uppercase, no spaces (e.g. KA28AA4790)
+- May wrap: "KA28AA" + "4790" → join to "KA28AA4790"
+- Typically 8-10 characters
+
+GR NO:
+- Format: 1070/MYE/XXXX — always exactly 2 forward slashes
+- May wrap: "1070/MYE/" + "3881" → join to "1070/MYE/3881"
+
+CONSIGNEE NAME:
+- May wrap across 2-3 lines — join all parts
+
+DESP QTY: decimal number in MT (e.g. 36.00)
+FRT RATE: rate per MT (e.g. 1219.00)
+FRT AMT: should equal DESP QTY × FRT RATE — if not, flag it
+DATE: trip date
+
+STRICT RULES:
+- Return null for any field you cannot clearly read — never guess
+- Do NOT use values from memory or previous documents — read THIS document only
+- Verify: diNo = exactly 10 digits, grNo has exactly 2 slashes, truckNo is 8-10 chars
+
+Return ONLY this JSON, no markdown, no explanation:
+{
+  "type": "invoice",
+  "invoiceNo": "<invoice number from header or null>",
+  "invoiceDate": "<date from header or null>",
+  "totalAmount": <total amount as number or null>,
+  "trips": [
+    {
+      "diNo": "<exactly 10 digits, joined if wrapped, or null>",
+      "grNo": "<1070/MYE/XXXX format or null>",
+      "truckNo": "<uppercase no spaces or null>",
+      "consigneeName": "<full name joined from all wrapped lines or null>",
+      "to": "<destination station/city or null>",
+      "qty": <number or null>,
+      "frRate": <number or null>,
+      "frtAmt": <number or null>,
+      "date": "<date as shown or null>"
+    }
+  ]
+}`;
+
+const PAYMENT_PROMPT = `You are reading a payment advice / remittance advice PDF from Shree Cement or Ultratech to M Yantra Enterprises.
+
+This PDF may have wrapped cell values — read each cell completely before moving to the next column.
+
+STRICT RULES:
+- Copy all values exactly as printed
+- Return null for any field not clearly readable — never guess
+- Invoice numbers must be copied verbatim — join wrapped parts
+
+Return ONLY this JSON, no markdown, no explanation:
+{
+  "type": "payment",
+  "utr": "<UTR/transaction reference number or null>",
+  "paymentDate": "<payment date or null>",
+  "totalPaid": <number or null>,
+  "totalBilled": <number or null>,
+  "tdsDeducted": <number or null>,
+  "holdAmount": <number or null>,
+  "invoices": [
+    {
+      "invoiceNo": "<complete invoice number, join wrapped lines or null>",
+      "invDate": "<invoice date or null>",
+      "sapDoc": "<SAP document number or null>",
+      "totalAmt": <number or null>,
+      "paymentAmt": <number or null>,
+      "hold": <number or null>,
+      "tds": <number or null>
+    }
+  ],
+  "shortages": [
+    { "lrNo": "<LR number or null>", "tonnes": <number or null>, "deduction": <number or null>, "ref": "<reference or null>" }
+  ],
+  "expenses": [
+    { "description": "<description or null>", "amount": <number or null> }
+  ],
+  "penalties": []
+}`;
+
 exports.handler = async (event) => {
   if (event.httpMethod !== "POST") {
     return { statusCode: 405, body: "Method Not Allowed" };
@@ -15,117 +117,6 @@ exports.handler = async (event) => {
   }
 
   const { base64, mediaType, scanType } = body;
-
-  const INVOICE_PROMPT = `You are reading a freight tax invoice PDF from M Yantra Enterprises to Shree Cement or Ultratech Cement.
-
-══════════════════════════════════════════════════════════════
-CRITICAL: HOW TO READ THIS PDF TABLE
-══════════════════════════════════════════════════════════════
-
-This PDF was generated from a database and uses a fixed-width table layout.
-When a cell value is too long to fit on one line, it WRAPS to the next line
-WITHIN THE SAME CELL. This means:
-
-1. A single cell's value may appear across 2, 3, or more lines in the PDF.
-2. The next column's value starts in a new column position, NOT on the next line.
-3. You must read the PDF column-by-column, NOT line-by-line.
-
-The table columns are (in order):
-S.No | DI NO | INV NO | DATE | TRUCK NO | GR NO | CONSIGNEE NAME | STATION | GRADE | DESP QTY | FRT RATE | FRT AMT
-
-HOW TO HANDLE EACH COLUMN:
-
-DI NO — Always exactly 10 digits (e.g. 9003367634)
-  ⚠ Most common wrap: "90033676" on line 1, "34" on line 2 → full value = "9003367634"
-  ⚠ Do NOT confuse the second line of DI NO with the INV NO column
-  ✓ Rule: count digits — if fewer than 10, the remaining digits are on the next line
-
-INV NO — A separate column (e.g. "KR25020302 34" or just "34")
-  ⚠ Do NOT include INV NO digits in the DI NO value
-  ✓ The INV NO is separate and you do NOT need to extract it
-
-TRUCK NO — Vehicle registration number, e.g. "KA28AA4790" or "MH29BE1340"
-  ⚠ May wrap: "KA28AA" on line 1, "4790" on line 2 → full value = "KA28AA4790"
-  ✓ Rule: uppercase, no spaces, typically 8-10 characters
-
-GR NO — Format: 1070/MYE/XXXX (e.g. 1070/MYE/3881)
-  ⚠ May wrap: "1070/MYE/" on line 1, "3881" on line 2 → full value = "1070/MYE/3881"
-  ✓ Must always contain two forward slashes
-
-CONSIGNEE NAME — Long names often wrap across 2-3 lines
-  ✓ Join all lines that belong to the same cell
-
-DESP QTY — Quantity in MT, a decimal number (e.g. 36.00)
-FRT RATE — Rate per MT, a decimal number (e.g. 1219.00)
-FRT AMT — Amount = QTY × RATE (e.g. 43884.00)
-  ✓ Verify: FRT AMT should equal DESP QTY × FRT RATE
-
-DATE — Trip date (e.g. "22-Mar-2026")
-
-══════════════════════════════════════════════════════════════
-VERIFICATION STEP (do this before returning):
-- Each diNo must be exactly 10 digits — if not, find and append missing digits
-- Each truckNo must be 8-10 uppercase alphanumeric characters
-- Each grNo must contain exactly 2 forward slashes
-- Each frtAmt should approximately equal qty × frRate
-══════════════════════════════════════════════════════════════
-
-Return ONLY this JSON (no markdown, no extra text):
-{
-  "type": "invoice",
-  "invoiceNo": "complete invoice number from header",
-  "invoiceDate": "date as shown in header",
-  "totalAmount": 0.00,
-  "trips": [
-    {
-      "diNo": "EXACTLY 10 digits — join all wrapped parts of the DI NO cell",
-      "grNo": "complete GR number with slashes e.g. 1070/MYE/3881",
-      "truckNo": "complete vehicle registration uppercase no spaces",
-      "consigneeName": "complete consignee name joined from all wrapped lines",
-      "to": "destination station/city",
-      "qty": 0.0,
-      "frRate": 0.0,
-      "frtAmt": 0.00
-    }
-  ]
-}
-
-One object in trips[] per table row. Use empty string or 0 for missing fields.`;
-
-  const PAYMENT_PROMPT = `You are reading a payment advice / remittance advice from Shree Cement or Ultratech to M Yantra Enterprises.
-
-This PDF may also have wrapped cell values — read each cell completely before moving to the next column.
-
-Return ONLY this JSON (no markdown, no explanation):
-{
-  "type": "payment",
-  "utr": "UTR/transaction reference number",
-  "paymentDate": "payment date",
-  "totalPaid": 0.00,
-  "totalBilled": 0.00,
-  "tdsDeducted": 0.00,
-  "holdAmount": 0.00,
-  "invoices": [
-    {
-      "invoiceNo": "invoice reference — complete value, join wrapped lines",
-      "invDate": "invoice date",
-      "sapDoc": "SAP document number if present",
-      "totalAmt": 0.00,
-      "paymentAmt": 0.00,
-      "hold": 0.00,
-      "tds": 0.00
-    }
-  ],
-  "shortages": [
-    { "lrNo": "LR number", "tonnes": 0.0, "deduction": 0.00, "ref": "reference" }
-  ],
-  "expenses": [
-    { "description": "description", "amount": 0.00 }
-  ],
-  "penalties": []
-}
-If a field is missing use empty string or 0.`;
-
   const prompt = scanType === "invoice" ? INVOICE_PROMPT : PAYMENT_PROMPT;
   const isImage = mediaType && mediaType.startsWith("image/");
 
@@ -143,7 +134,7 @@ If a field is missing use empty string or 0.`;
         "anthropic-beta": "pdfs-2024-09-25",
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-5-20250929",
+        model: "claude-sonnet-4-6",
         max_tokens: 2048,
         messages: [{ role: "user", content: [contentBlock, { type: "text", text: prompt }] }],
       }),
@@ -170,43 +161,56 @@ If a field is missing use empty string or 0.`;
       };
     }
 
-    // ── Post-process and validate invoice trips ────────────────────────────────
+    // ── Post-process invoice trips ─────────────────────────────────────────────
     if (parsed.trips && Array.isArray(parsed.trips)) {
       parsed.trips = parsed.trips.map(t => {
 
-        // 1. DI number — must be exactly 10 digits
-        const diDigits = String(t.diNo || "").replace(/\D/g, "");
-        if (diDigits.length > 0 && diDigits.length !== 10) {
-          console.warn(`scan-shree: DI "${t.diNo}" → ${diDigits.length} digits, expected 10`);
-          t._diNoWarning = `${diDigits.length} digits extracted, expected 10`;
-        }
-        t.diNo = diDigits;
-
-        // 2. Truck number — strip spaces, uppercase
-        t.truckNo = String(t.truckNo || "").replace(/\s+/g, "").toUpperCase();
-
-        // 3. GR number — must contain slashes (1070/MYE/XXXX)
-        const grNo = String(t.grNo || "");
-        if (grNo && !grNo.includes("/")) {
-          console.warn(`scan-shree: GR "${grNo}" missing slashes — may be truncated`);
-          t._grNoWarning = "GR number may be incomplete";
+        // DI number — must be exactly 10 digits
+        if (t.diNo != null) {
+          const digits = String(t.diNo).replace(/\D/g, "");
+          if (digits.length > 0 && digits.length !== 10) {
+            t._diNoWarning = `${digits.length} digits extracted, expected 10`;
+          }
+          t.diNo = digits || null;
         }
 
-        // 4. Normalize frtRate → frRate for App.jsx compatibility
+        // Truck number — strip spaces, uppercase
+        if (t.truckNo != null) {
+          t.truckNo = String(t.truckNo).replace(/\s+/g, "").toUpperCase();
+        }
+
+        // GR number — must contain 2 slashes
+        if (t.grNo != null) {
+          const slashes = (String(t.grNo).match(/\//g) || []).length;
+          if (slashes !== 2) {
+            t._grNoWarning = `GR "${t.grNo}" has ${slashes} slash(es), expected 2`;
+          }
+        }
+
+        // Rename frtRate → frRate for App.jsx compatibility
         if (t.frtRate !== undefined && t.frRate === undefined) {
           t.frRate = t.frtRate;
           delete t.frtRate;
         }
 
-        // 5. Verify frtAmt = qty × frRate (flag large discrepancies)
-        const calcAmt = (t.qty || 0) * (t.frRate || 0);
-        if (calcAmt > 0 && t.frtAmt > 0 && Math.abs(calcAmt - t.frtAmt) > 5) {
-          console.warn(`scan-shree: frtAmt ${t.frtAmt} ≠ qty(${t.qty}) × frRate(${t.frRate}) = ${calcAmt}`);
-          t._amtWarning = `Calculated ${calcAmt} vs extracted ${t.frtAmt}`;
+        // Verify frtAmt = qty × frRate
+        if (t.qty != null && t.frRate != null && t.frtAmt != null) {
+          const calc = Math.round((t.qty * t.frRate) * 100) / 100;
+          if (Math.abs(calc - t.frtAmt) > 5) {
+            t._amtWarning = `Calculated ${calc} vs extracted ${t.frtAmt}`;
+          }
         }
 
         return t;
       });
+
+      // Error if no trips extracted at all
+      if (parsed.trips.length === 0) {
+        return {
+          statusCode: 200,
+          body: JSON.stringify({ error: "No trip rows found in invoice. Please check the document." })
+        };
+      }
     }
 
     return {
