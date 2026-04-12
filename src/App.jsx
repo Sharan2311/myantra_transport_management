@@ -14271,9 +14271,10 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
   const scanInputRef = useRef();
 
   // History filters
-  const [histFrom,  setHistFrom]  = useState("");
-  const [histTo,    setHistTo]    = useState("");
-  const [histLR,    setHistLR]    = useState("");
+  const [histFrom,   setHistFrom]   = useState("");
+  const [histTo,     setHistTo]     = useState("");
+  const [histLR,     setHistLR]     = useState("");
+  const [histPaidTo, setHistPaidTo] = useState("");
 
   // For each trip compute total paid and balance
   const tripWithBalance = trips.map(t => {
@@ -14507,11 +14508,15 @@ This will auto-recover in the next trip.`);
   const allPays = [...(driverPays||[])]
     .filter(p => allowedTripIds.has(p.tripId) || allowedLRs.has(p.lrNo))
     .sort((a,b)=>b.date.localeCompare(a.date));
+  // Unique "Paid To" accounts from all payment history
+  const paidToAccounts = [...new Set(allPays.map(p=>(p.paidTo||"").trim()).filter(Boolean))].sort();
+
   const filteredPays = allPays.filter(p => {
-    if (histFrom && p.date < histFrom) return false;
-    if (histTo   && p.date > histTo)   return false;
-    if (histLR   && !(p.lrNo||"").toLowerCase().includes(histLR.toLowerCase()) &&
-                    !(p.truckNo||"").toLowerCase().includes(histLR.toLowerCase())) return false;
+    if (histFrom   && p.date < histFrom) return false;
+    if (histTo     && p.date > histTo)   return false;
+    if (histLR     && !(p.lrNo||"").toLowerCase().includes(histLR.toLowerCase()) &&
+                      !(p.truckNo||"").toLowerCase().includes(histLR.toLowerCase())) return false;
+    if (histPaidTo && (p.paidTo||"").trim() !== histPaidTo) return false;
     return true;
   });
   const histTotal = filteredPays.reduce((s,p)=>s+(p.amount||0),0);
@@ -14523,30 +14528,83 @@ This will auto-recover in the next trip.`);
   };
 
   const exportHistoryPDF = () => {
-    const rows = filteredPays.map(p => {
+    if(!filteredPays.length){ alert("No payments in selected filter."); return; }
+    const accountLabel = histPaidTo || "All Accounts";
+    const periodLabel  = (histFrom||histTo) ? `${histFrom||"start"} → ${histTo||"today"}` : "All time";
+    const rows = filteredPays.map((p,idx) => {
       const t = trips.find(x=>x.id===p.tripId);
-      return `<tr><td>${p.date}</td><td>${p.truckNo}</td><td>${p.lrNo||"—"}</td><td>${t?`${t.from||""}→${t.to||""}`:""}</td><td>${p.utr||"—"}</td><td>${p.notes||""}</td><td style="text-align:right;font-weight:bold">${fmt(p.amount)}</td></tr>`;
+      const route = t ? `${t.from||""}→${t.to||""}` : "";
+      return `<tr>
+        <td>${idx+1}</td>
+        <td>${p.date}</td>
+        <td><b>${p.truckNo||"—"}</b></td>
+        <td style="color:#1d4ed8">${p.lrNo||"—"}</td>
+        <td style="font-family:monospace;font-size:10px">${p.utr||"—"}</td>
+        <td>${p.paidTo||"—"}</td>
+        <td>${route}</td>
+        <td>${p.notes||""}</td>
+        <td style="text-align:right;font-weight:bold">&#8377;${(p.amount||0).toLocaleString("en-IN")}</td>
+      </tr>`;
     }).join("");
-    const html = `<html><head><style>
-      body{font-family:Arial,sans-serif;font-size:12px;padding:20px}
-      h2{color:#f97316;margin-bottom:4px}
-      .sub{color:#888;font-size:12px;margin-bottom:12px}
-      table{width:100%;border-collapse:collapse;margin-top:12px}
-      th{background:#f97316;color:#fff;padding:7px 8px;text-align:left;font-size:11px}
-      td{padding:6px 8px;border-bottom:1px solid #eee;font-size:11px}
-      .total{text-align:right;font-weight:bold;font-size:14px;margin-top:12px;color:#f97316}
-    </style></head><body>
-      <h2>M. Yantra — Driver Payment History</h2>
-      <div class="sub">Period: ${histFrom||"all"} → ${histTo||"all"}${histLR?` | Search: ${histLR}`:""}</div>
-      <div class="sub">${filteredPays.length} payments recorded</div>
-      <table><thead><tr><th>Date</th><th>Truck</th><th>LR</th><th>Route</th><th>UTR</th><th>Notes</th><th>Amount</th></tr></thead>
-      <tbody>${rows}</tbody></table>
-      <div class="total">Total Paid: ${fmt(histTotal)}</div>
-    </body></html>`;
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Driver Payment Statement — ${accountLabel}</title>
+  <style>
+    @media print { button { display:none !important; } body { margin:0; } }
+    * { box-sizing:border-box; }
+    body { font-family:Arial,sans-serif; font-size:11px; color:#111; padding:24px; max-width:900px; margin:0 auto; }
+    .print-btn { background:#f97316; color:#fff; border:none; padding:8px 20px; font-size:13px; border-radius:6px; cursor:pointer; margin-bottom:16px; }
+    .header { border-bottom:2px solid #f97316; padding-bottom:10px; margin-bottom:14px; }
+    .header h1 { font-size:17px; margin:0 0 4px; color:#f97316; }
+    .meta { color:#555; font-size:11px; margin:2px 0; }
+    .account-badge { display:inline-block; background:#fef3c7; border:1px solid #f59e0b; color:#92400e; font-weight:700; padding:3px 10px; border-radius:12px; font-size:12px; margin-top:4px; }
+    table { width:100%; border-collapse:collapse; margin-top:8px; }
+    thead tr { background:#f97316; color:#fff; }
+    th { padding:7px 8px; text-align:left; font-size:10px; text-transform:uppercase; letter-spacing:0.4px; }
+    td { padding:6px 8px; border-bottom:1px solid #f0f0f0; vertical-align:middle; }
+    tr:nth-child(even) td { background:#fafafa; }
+    .total-row { font-weight:bold; font-size:13px; text-align:right; margin-top:12px; padding-top:10px; border-top:2px solid #f97316; color:#f97316; }
+    .count { color:#666; font-size:11px; }
+  </style>
+</head>
+<body>
+  <button class="print-btn" onclick="window.print()">🖨 Print / Save as PDF</button>
+  <div class="header">
+    <div style="display:flex;align-items:center;gap:14px;margin-bottom:8px">
+      <img src="${LOGO_SRC}" alt="M Yantra" style="width:54px;height:54px;border-radius:50%;object-fit:cover;border:2px solid #f97316"/>
+      <div>
+        <h1 style="margin:0 0 2px">Driver Payment Statement</h1>
+        <div class="meta" style="font-weight:700;font-size:13px;color:#333">M. YANTRA ENTERPRISES</div>
+        <div class="meta">Transport Management · Kodla, Karnataka</div>
+      </div>
+    </div>
+    <div class="account-badge">👤 ${accountLabel}</div>
+    <div class="meta" style="margin-top:6px">Period: <b>${periodLabel}</b></div>
+    ${histLR?`<div class="meta">Search: <b>${histLR}</b></div>`:""}
+    <div class="meta">Generated: ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"})}</div>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th><th>Date</th><th>Vehicle</th><th>LR No</th>
+        <th>Transaction ID (UTR)</th><th>Paid To</th><th>Route</th><th>Notes</th><th>Amount</th>
+      </tr>
+    </thead>
+    <tbody>${rows}</tbody>
+  </table>
+  <div class="total-row">
+    <span class="count">${filteredPays.length} transaction${filteredPays.length!==1?"s":""}</span>
+    &nbsp;&nbsp;&nbsp; Total: &#8377;${histTotal.toLocaleString("en-IN")}
+  </div>
+</body>
+</html>`;
     const w = window.open("","_blank");
+    if(!w){ alert("Pop-up blocked — please allow pop-ups and try again."); return; }
     w.document.write(html);
     w.document.close();
-    setTimeout(()=>w.print(),400);
+    setTimeout(()=>w.print(), 600);
   };
 
   return (
@@ -14589,6 +14647,22 @@ This will auto-recover in the next trip.`);
         <div style={{display:"flex",flexDirection:"column",gap:10}}>
           {/* Filters */}
           <div style={{background:C.card,borderRadius:12,padding:"12px 14px",display:"flex",flexDirection:"column",gap:10}}>
+            {/* Account filter — primary */}
+            <div>
+              <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:3,textTransform:"uppercase",letterSpacing:1}}>
+                👤 Paid To (Account)
+              </div>
+              <select value={histPaidTo} onChange={e=>setHistPaidTo(e.target.value)}
+                style={{width:"100%",background:C.bg,
+                  border:`1.5px solid ${histPaidTo?C.accent:C.border}`,
+                  borderRadius:8,color:histPaidTo?C.text:C.muted,
+                  padding:"9px 12px",fontSize:13,outline:"none"}}>
+                <option value="">— All accounts —</option>
+                {paidToAccounts.map(a=>(
+                  <option key={a} value={a}>{a}</option>
+                ))}
+              </select>
+            </div>
             <input value={histLR} onChange={e=>setHistLR(e.target.value)}
               placeholder="🔍 Search by LR or truck number…"
               style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,color:C.text,
@@ -14610,10 +14684,19 @@ This will auto-recover in the next trip.`);
                     color:histTo?C.text:C.muted,padding:"8px 10px",fontSize:13,width:"100%",
                     colorScheme:"light",WebkitAppearance:"none",boxSizing:"border-box"}} />
               </div>
-              {(histFrom||histTo||histLR) && (
-                <Btn onClick={()=>{setHistFrom("");setHistTo("");setHistLR("");}} sm outline color={C.muted}>Clear</Btn>
+              {(histFrom||histTo||histLR||histPaidTo) && (
+                <Btn onClick={()=>{setHistFrom("");setHistTo("");setHistLR("");setHistPaidTo("");}} sm outline color={C.muted}>Clear</Btn>
               )}
             </div>
+            {/* Active filter summary chip */}
+            {histPaidTo && (
+              <div style={{background:C.accent+"11",border:`1px solid ${C.accent}33`,
+                borderRadius:20,padding:"5px 12px",fontSize:12,color:C.accent,fontWeight:700,
+                display:"inline-flex",alignItems:"center",gap:6,alignSelf:"flex-start"}}>
+                👤 {histPaidTo}
+                <span onClick={()=>setHistPaidTo("")} style={{cursor:"pointer",color:C.muted,fontSize:14}}>×</span>
+              </div>
+            )}
             {/* Summary + export */}
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
               <div>
@@ -14622,7 +14705,7 @@ This will auto-recover in the next trip.`);
               </div>
               <div style={{display:"flex",gap:8}}>
                 <button onClick={exportHistoryPDF}
-                  style={{background:C.orange,border:"none",borderRadius:8,color:"#000",
+                  style={{background:C.orange,border:"none",borderRadius:8,color:"#fff",
                     fontSize:12,fontWeight:700,padding:"7px 14px",cursor:"pointer"}}>
                   🖨 Export PDF
                 </button>
