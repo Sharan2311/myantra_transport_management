@@ -14478,6 +14478,17 @@ This will auto-recover in the next trip.`);
         throw e;
       }
       autoSettle(p.tripId, p.amount);
+      // Auto-mark pending payment requests for this LR as done
+      const pendingForLR = (paymentRequests||[]).filter(r=>r.lrNo===p.lrNo&&r.status==="pending");
+      if(pendingForLR.length>0 && setPaymentRequests) {
+        setPaymentRequests(prev=>(prev||[]).map(r=>{
+          if(r.lrNo!==p.lrNo||r.status!=="pending") return r;
+          const updated={...r,status:"done",paidAt:today(),paidBy:user.username};
+          DB.savePaymentRequest(updated).catch(e=>console.error("savePaymentRequest:",e));
+          return updated;
+        }));
+        log("PAY REQUEST AUTO-DONE",`LR:${p.lrNo} — ${pendingForLR.length} request(s) marked done via scan`);
+      }
     }
     setSplitSheet(null);
   };
@@ -14511,6 +14522,17 @@ This will auto-recover in the next trip.`);
           const revertedTrip = {...trip, driverSettled:false, settledBy:"", netPaid:0};
           try { await DB.saveTrip(revertedTrip); } catch(e){ console.error("revert trip on pay delete:",e); }
           log && log("UNSETTLE", `LR:${trip.lrNo} ${trip.truckNo} — payment deleted, balance restored ₹${newBal.toLocaleString("en-IN")}`);
+          // Reopen any "done" payment requests for this trip back to pending
+          const doneReqs = (paymentRequests||[]).filter(r=>r.lrNo===trip.lrNo&&r.status==="done");
+          if(doneReqs.length>0 && setPaymentRequests) {
+            setPaymentRequests(prev=>(prev||[]).map(r=>{
+              if(r.lrNo!==trip.lrNo||r.status!=="done") return r;
+              const reopened={...r,status:"pending",paidAt:"",paidBy:""};
+              DB.savePaymentRequest(reopened).catch(e=>console.error("savePaymentRequest reopen:",e));
+              return reopened;
+            }));
+            log&&log("PAY REQUEST REOPENED",`LR:${trip.lrNo} — ${doneReqs.length} request(s) back to pending after payment deletion`);
+          }
         }
       }
     }
@@ -14990,8 +15012,8 @@ This will auto-recover in the next trip.`);
             return (b.createdAt||"").localeCompare(a.createdAt||"");
           }).map(pr=>{
             const trip = (trips||[]).find(t=>t.id===pr.tripId);
-            const isPaid = (driverPays||[]).some(p=>p.lrNo===pr.lrNo&&p.amount>0);
-            const effectiveStatus = isPaid ? "done" : pr.status;
+            // Use the actual saved status — a partial payment does NOT make the request "done"
+            const effectiveStatus = pr.status||"pending";
             // ── Compute current balance to detect stale amount ──────────────────
             const tripVeh = trip ? (vehicles||[]).find(v=>v.truckNo===trip.truckNo) : null;
             const tripIndentsC = trip ? (indents||[]).filter(i=>i.tripId===trip.id&&i.confirmed) : [];
