@@ -14522,17 +14522,8 @@ This will auto-recover in the next trip.`);
           const revertedTrip = {...trip, driverSettled:false, settledBy:"", netPaid:0};
           try { await DB.saveTrip(revertedTrip); } catch(e){ console.error("revert trip on pay delete:",e); }
           log && log("UNSETTLE", `LR:${trip.lrNo} ${trip.truckNo} — payment deleted, balance restored ₹${newBal.toLocaleString("en-IN")}`);
-          // Reopen any "done" payment requests for this trip back to pending
-          const doneReqs = (paymentRequests||[]).filter(r=>r.lrNo===trip.lrNo&&r.status==="done");
-          if(doneReqs.length>0 && setPaymentRequests) {
-            setPaymentRequests(prev=>(prev||[]).map(r=>{
-              if(r.lrNo!==trip.lrNo||r.status!=="done") return r;
-              const reopened={...r,status:"pending",paidAt:"",paidBy:""};
-              DB.savePaymentRequest(reopened).catch(e=>console.error("savePaymentRequest reopen:",e));
-              return reopened;
-            }));
-            log&&log("PAY REQUEST REOPENED",`LR:${trip.lrNo} — ${doneReqs.length} request(s) back to pending after payment deletion`);
-          }
+          // Note: done payment requests stay done even if payment is deleted
+          // User creates a fresh request for the remaining balance
         }
       }
     }
@@ -14961,7 +14952,20 @@ This will auto-recover in the next trip.`);
         <div style={{display:"flex",flexDirection:"column",gap:10}}>
           {/* Sub-filter: Pending / History */}
           {(()=>{
-            const pendingCount = (paymentRequests||[]).filter(r=>r.status==="pending").length;
+            // Pending count: only requests where balance is still > 0
+            const pendingCount = (paymentRequests||[]).filter(r=>{
+              if(r.status!=="pending") return false;
+              const prTrip = (trips||[]).find(t=>t.id===r.tripId);
+              if(!prTrip) return true; // keep if trip not found
+              const gross = (prTrip.diLines&&prTrip.diLines.length>1)
+                ? prTrip.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
+                : (prTrip.qty||0)*(prTrip.givenRate||0);
+              const deducts = (prTrip.advance||0)+(prTrip.tafal||0)+(prTrip.dieselEstimate||0)
+                +((prTrip.shortage||0)*(prTrip.givenRate||0))+(prTrip.shortageRecovery||0)+(prTrip.loanRecovery||0);
+              const netDue = Math.max(0, gross - deducts);
+              const paid = (driverPays||[]).filter(p=>p.tripId===prTrip.id).reduce((s,p)=>s+(p.amount||0),0);
+              return Math.max(0, netDue - paid) > 0;
+            }).length;
             const doneCount    = (paymentRequests||[]).filter(r=>r.status==="done").length;
             return (
               <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
@@ -14990,11 +14994,24 @@ This will auto-recover in the next trip.`);
             <div style={{textAlign:"center",color:C.muted,padding:"30px 0",fontSize:13}}>No payment requests yet</div>
           )}
           {[...(paymentRequests||[])].filter(pr=>{
-            // Use actual request status — don't override with payment existence
-            // (a trip can have partial payments AND still have a pending request for the remainder)
             const eff = pr.status||"pending";
             if(reqSubFilter==="pending" && eff!=="pending") return false;
             if(reqSubFilter==="done"    && eff!=="done")    return false;
+            // In Pending tab: hide requests where the trip balance is now 0 (already fully paid)
+            if(reqSubFilter==="pending" && eff==="pending") {
+              const prTrip = (trips||[]).find(t=>t.id===pr.tripId);
+              if(prTrip) {
+                const gross = (prTrip.diLines&&prTrip.diLines.length>1)
+                  ? prTrip.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
+                  : (prTrip.qty||0)*(prTrip.givenRate||0);
+                const deducts = (prTrip.advance||0)+(prTrip.tafal||0)+(prTrip.dieselEstimate||0)
+                  +((prTrip.shortage||0)*(prTrip.givenRate||0))+(prTrip.shortageRecovery||0)+(prTrip.loanRecovery||0);
+                const netDue = Math.max(0, gross - deducts);
+                const paid = (driverPays||[]).filter(p=>p.tripId===prTrip.id).reduce((s,p)=>s+(p.amount||0),0);
+                const bal = Math.max(0, netDue - paid);
+                if(bal <= 0) return false; // fully paid — don't show in pending
+              }
+            }
             // Search
             if(reqSearch) {
               const q = reqSearch.toLowerCase();
