@@ -5518,8 +5518,8 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                       {t.diLines && t.diLines.length > 1 && <Badge label={t.diLines.length+" DIs"} color={C.teal} />}
                     </div>
                   </div>
-                  {/* Payment details for settled trips */}
-                  {t.driverSettled && (()=>{
+                  {/* Payment details — shown for any trip with payments recorded */}
+                  {(()=>{
                     const pays = (driverPays||[]).filter(p=>p.tripId===t.id).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
                     if(!pays.length) return null;
                     return (
