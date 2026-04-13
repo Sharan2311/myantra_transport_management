@@ -14505,7 +14505,7 @@ This will auto-recover in the next trip.`);
         throw e;
       }
       autoSettle(p.tripId, p.amount);
-
+      autoMarkRequestsDone(p.lrNo);
     }
     setSplitSheet(null);
   };
