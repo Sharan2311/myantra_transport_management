@@ -15001,6 +15001,8 @@ This will auto-recover in the next trip.`);
             const eff = pr.status||"pending";
             if(reqSubFilter==="pending" && eff!=="pending") return false;
             if(reqSubFilter==="done"    && eff!=="done")    return false;
+            // Hide zero-amount requests from pending tab
+
             // Search
             if(reqSearch) {
               const q = reqSearch.toLowerCase();
@@ -15018,8 +15020,13 @@ This will auto-recover in the next trip.`);
             return (b.createdAt||"").localeCompare(a.createdAt||"");
           }).map(pr=>{
             const trip = (trips||[]).find(t=>t.id===pr.tripId);
-            // Use the actual saved status — a partial payment does NOT make the request "done"
             const effectiveStatus = pr.status||"pending";
+            // Compute current balance to detect stale/overpaid requests
+            const prPaidSoFar = trip ? (driverPays||[]).filter(p=>p.tripId===trip.id).reduce((s,p)=>s+(p.amount||0),0) : 0;
+            const prGross = trip ? ((trip.diLines&&trip.diLines.length>1)?trip.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0):(trip.qty||0)*(trip.givenRate||0)) : 0;
+            const prDeducts = trip ? ((trip.advance||0)+(trip.tafal||0)+(trip.dieselEstimate||0)+(trip.shortageRecovery||0)+(trip.loanRecovery||0)) : 0;
+            const prBalance = trip ? Math.max(0, prGross - prDeducts - prPaidSoFar) : null;
+            const isStaleRequest = effectiveStatus==="pending" && prBalance!==null && prBalance<=0;
             // ── Compute current balance to detect stale amount ──────────────────
             const tripVeh = trip ? (vehicles||[]).find(v=>v.truckNo===trip.truckNo) : null;
             const tripIndentsC = trip ? (indents||[]).filter(i=>i.tripId===trip.id&&i.confirmed) : [];
@@ -15043,7 +15050,8 @@ This will auto-recover in the next trip.`);
                       {fmt(pr.amount)}
                       {amountStale&&<span style={{fontSize:10,color:C.orange,display:"block"}}>⚠ outdated</span>}
                     </div>
-                    <Badge label={effectiveStatus==="done"?"✓ Done":"Pending"} color={effectiveStatus==="done"?C.green:amountStale?C.orange:C.purple} />
+                    <Badge label={effectiveStatus==="done"?"✓ Done":isStaleRequest?"Stale":"Pending"} color={effectiveStatus==="done"?C.green:isStaleRequest?C.muted:amountStale?C.orange:C.purple} />
+                    {isStaleRequest && <div style={{fontSize:9,color:C.muted,marginTop:2}}>Trip fully paid</div>}
                   </div>
                 </div>
                 {/* Stale amount warning banner */}
