@@ -1859,6 +1859,9 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       if(checkDupDI(item.extracted?.diNo)) return false;
     }
     if(+g.diesel > 0 && !g.dieselIndentNo.trim()) return false;
+    // Block save if truck has an unconfirmed (open) diesel request — must be confirmed first
+    const hasPendingDiesel = (dieselRequests||[]).some(r=>r.truckNo===g.truckNo&&r.status==="open");
+    if(hasPendingDiesel) return false;
     return true;
   };
 
@@ -2596,36 +2599,39 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                 </div>
                 <div style={{flex:1}}>
                   <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>DIESEL EST. ₹</div>
-                  <input type="text" inputMode="decimal" value={g.diesel}
-                    onChange={e=>updateGroup(g.id,"diesel",e.target.value)}
-                    style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,
-                      borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
+                  <div style={{background:C.dim,border:`1.5px solid ${C.border}`,borderRadius:8,
+                    color:+g.diesel>0?C.text:C.muted,padding:"7px 8px",fontSize:13,
+                    display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                    <span>{+g.diesel>0?("₹"+(+g.diesel).toLocaleString("en-IN")):"—"}</span>
+                    <span style={{fontSize:9,color:C.muted}}>from indent</span>
+                  </div>
                 </div>
               </div>
                 );
               })()}
 
-              {/* ── Pending diesel request warning — shown even when diesel=0 ── */}
+              {/* ── Pending diesel request — BLOCKS save until confirmed by pump ── */}
               {(()=>{
                 const truck = (g.truckNo||"").toUpperCase().trim();
                 const pendingG = (dieselRequests||[]).filter(r=>r.truckNo===truck && r.status==="open");
                 if(!pendingG.length) return null;
                 return (
-                  <div style={{background:"#fff7ed",border:"1.5px solid #f97316",
-                    borderRadius:8,padding:"9px 12px",fontSize:12,color:"#c2410c"}}>
-                    <div style={{fontWeight:700,marginBottom:3}}>
-                      ⏳ Diesel request pending pump confirmation
+                  <div style={{background:"#fef2f2",border:"2px solid #dc2626",
+                    borderRadius:8,padding:"10px 12px",fontSize:12,color:"#dc2626"}}>
+                    <div style={{fontWeight:800,marginBottom:6}}>
+                      🚫 Cannot save — Diesel request not confirmed by pump
                     </div>
                     {pendingG.map(r=>(
-                      <div key={r.id} style={{marginBottom:2}}>
+                      <div key={r.id} style={{marginBottom:3,color:"#7f1d1d"}}>
                         Indent #{r.indentNo} · ₹{r.amount.toLocaleString("en-IN")}
                         {r.dieselAmount?<span> · ⛽₹{r.dieselAmount.toLocaleString("en-IN")}</span>:null}
                         {r.cashAmount?<span> · 💵₹{r.cashAmount.toLocaleString("en-IN")}</span>:null}
-                        {" · PIN: "}<b style={{fontFamily:"monospace",letterSpacing:2}}>{r.pin!=="****"?r.pin:"—"}</b>
+                        {" · Driver PIN: "}<b style={{fontFamily:"monospace",letterSpacing:2,color:"#dc2626"}}>{r.pin!=="****"?r.pin:"—"}</b>
                       </div>
                     ))}
-                    <div style={{marginTop:4,color:"#92400e",fontSize:11}}>
-                      Ask driver to give PIN to pump operator. Indent will auto-attach once confirmed.
+                    <div style={{marginTop:6,fontWeight:600,color:"#991b1b",fontSize:11,lineHeight:1.5}}>
+                      Ask the driver to give the PIN to the pump operator.<br/>
+                      Return here once the pump has confirmed — the indent will auto-attach.
                     </div>
                   </div>
                 );
@@ -2661,19 +2667,11 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                         }} style={{cursor:"pointer",color:C.muted,marginLeft:8,fontSize:13}}>×</span>
                       </div>
                     )}
-                    <input type="text" value={g.dieselIndentNo}
-                      onChange={e=>{
-                        updateGroup(g.id,"dieselIndentNo",e.target.value);
-                        updateGroup(g.id,"_autoAttachedReqId",null);
-                        // If typed value matches a request, auto-fill diesel estimate
-                        const req=(dieselRequests||[]).find(r=>String(r.indentNo)===e.target.value.trim());
-                        if(req) updateGroup(g.id,"diesel",String(req.confirmedAmount??req.amount));
-                      }}
-                      placeholder={displayReq?"Override indent number…":"Indent number"}
-                      style={{width:"100%",background:C.bg,
-                        border:`1.5px solid ${missing?C.red:g.dieselIndentNo.trim()?C.teal:C.border}`,
-                        borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,
-                        outline:"none",boxSizing:"border-box"}} />
+                    {!displayReq && (
+                      <div style={{fontSize:11,color:C.muted,fontStyle:"italic",padding:"4px 2px"}}>
+                        No confirmed indent — save trip without diesel, or wait for pump to confirm.
+                      </div>
+                    )}
                   </div>
                 );
               })()}
@@ -5520,6 +5518,25 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                       {t.diLines && t.diLines.length > 1 && <Badge label={t.diLines.length+" DIs"} color={C.teal} />}
                     </div>
                   </div>
+                  {/* Payment details for settled trips */}
+                  {t.driverSettled && (()=>{
+                    const pays = (driverPays||[]).filter(p=>p.tripId===t.id).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+                    if(!pays.length) return null;
+                    return (
+                      <div style={{padding:"6px 12px 8px",borderTop:`1px solid ${C.border}22`,display:"flex",flexDirection:"column",gap:3}}>
+                        {pays.map((p,i)=>(
+                          <div key={p.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:11}}>
+                            <div style={{color:C.muted}}>
+                              <span style={{fontWeight:700,color:C.green}}>₹{(p.amount||0).toLocaleString("en-IN")}</span>
+                              {p.paidTo&&<span style={{marginLeft:6}}>→ <b style={{color:C.text}}>{p.paidTo}</b></span>}
+                              {p.utr&&<span style={{marginLeft:6,fontFamily:"monospace",color:C.blue,fontSize:10}}>{p.utr}</span>}
+                            </div>
+                            <div style={{color:C.muted,fontSize:10}}>{p.date}{p.date&&p.createdAt?" · ":""}{p.createdAt?p.createdAt.slice(11,16):""}</div>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
 
                   {(t.orderType==="party"||t.grFilePath||t.invoiceFilePath||(t.diLines||[]).some(dl=>dl.grFilePath||dl.invoiceFilePath||(dl.orderType==="party"))) && (
                     <div style={{padding:"5px 12px 8px",display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",
@@ -6751,21 +6768,24 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
               ⛽ Diesel Indent No
             </div>
 
-            {/* ── Pending request warning — pump hasn't confirmed yet ── */}
+            {/* ── Pending request — HARD BLOCK until pump confirms ── */}
             {hasOnlyPending && !val && (
-              <div style={{background:"#fff7ed",border:"1.5px solid #f97316",
-                borderRadius:8,padding:"9px 12px",fontSize:12,color:"#c2410c"}}>
-                <div style={{fontWeight:700,marginBottom:3}}>
-                  ⏳ Diesel request pending pump confirmation
+              <div style={{background:"#fef2f2",border:"2px solid #dc2626",
+                borderRadius:8,padding:"10px 12px",fontSize:12,color:"#dc2626"}}>
+                <div style={{fontWeight:800,marginBottom:6}}>
+                  🚫 Cannot save — Diesel request not confirmed by pump
                 </div>
                 {pendingReqs.map(r=>(
-                  <div key={r.id} style={{marginBottom:2}}>
-                    Indent #{r.indentNo} · ₹{r.amount.toLocaleString("en-IN")} · Driver PIN: <b style={{fontFamily:"monospace",letterSpacing:2}}>{r.pin!=="****"?r.pin:"—"}</b>
+                  <div key={r.id} style={{marginBottom:3,color:"#7f1d1d"}}>
+                    Indent #{r.indentNo} · ₹{r.amount.toLocaleString("en-IN")}
+                    {r.dieselAmount?<span> · ⛽₹{r.dieselAmount.toLocaleString("en-IN")}</span>:null}
+                    {r.cashAmount?<span> · 💵₹{r.cashAmount.toLocaleString("en-IN")}</span>:null}
+                    {" · Driver PIN: "}<b style={{fontFamily:"monospace",letterSpacing:2,color:"#dc2626"}}>{r.pin!=="****"?r.pin:"—"}</b>
                   </div>
                 ))}
-                <div style={{marginTop:4,color:"#92400e",fontSize:11}}>
-                  Ask the driver to hand the PIN to the pump operator to confirm before loading.
-                  The indent will auto-attach once confirmed.
+                <div style={{marginTop:6,fontWeight:600,color:"#991b1b",fontSize:11,lineHeight:1.5}}>
+                  Ask the driver to give the PIN to the pump operator.<br/>
+                  Return here once confirmed — indent will auto-attach.
                 </div>
               </div>
             )}
@@ -6830,25 +6850,16 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
               </select>
             )}
 
-            {/* Manual entry — always visible */}
-            <div style={{display:"flex",alignItems:"center",gap:6}}>
-              <input value={val} onChange={e=>{
-                  const v=e.target.value;
-                  ff("dieselIndentNo")(v);
-                  if(v.trim()){
-                    const req=allOpen.find(r=>String(r.indentNo)===v.trim());
-                    if(req) ff("dieselEstimate")(String(req.confirmedAmount??req.amount));
-                  } else ff("dieselEstimate")("0");
-                }}
-                placeholder={truckReqs.length>0?"Or type indent number manually…":"Type indent number…"}
-                style={{flex:1,background:C.bg,
-                  border:`1.5px solid ${matchedReq?C.teal:C.border}`,
-                  borderRadius:8,color:C.text,padding:"9px 12px",fontSize:13,
-                  outline:"none",boxSizing:"border-box"}} />
-              {val && <button onClick={clearReq}
-                style={{background:"none",border:"none",color:C.muted,
-                  cursor:"pointer",fontSize:20,padding:"0 4px",lineHeight:1}}>x</button>}
-            </div>
+            {/* Manual entry removed — indent must come from confirmed pump request */}
+            {val && (
+              <div style={{display:"flex",alignItems:"center",gap:6}}>
+                <div style={{flex:1,background:C.dim,border:`1.5px solid ${C.border}`,
+                  borderRadius:8,color:C.muted,padding:"9px 12px",fontSize:13}}>
+                  {val}
+                </div>
+                <button onClick={clearReq} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:20,padding:"0 4px",lineHeight:1}}>×</button>
+              </div>
+            )}
 
             {/* Matched / error messages */}
             {matchedReq&&(
@@ -14358,24 +14369,6 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
   }) : [];
   const totalBalance = unpaidTrips.reduce((s,t)=>s+t.balance,0);
 
-  // ── Startup cleanup: mark pending requests as done if any payment exists for that LR ──
-  // Handles stale requests created before auto-done logic was added
-  React.useEffect(() => {
-    if(!(paymentRequests||[]).length || !(driverPays||[]).length) return;
-    const lrsWithPayment = new Set((driverPays||[]).map(p=>p.lrNo).filter(Boolean));
-    const stale = (paymentRequests||[]).filter(r =>
-      r.status==="pending" && r.lrNo && lrsWithPayment.has(r.lrNo)
-    );
-    if(stale.length===0) return;
-    setPaymentRequests(prev=>prev.map(r=>{
-      if(r.status!=="pending"||!r.lrNo||!lrsWithPayment.has(r.lrNo)) return r;
-      const done={...r,status:"done",paidAt:today(),paidBy:"auto"};
-      DB.savePaymentRequest(done).catch(()=>{});
-      return done;
-    }));
-  // eslint-disable-next-line
-  }, [!!paymentRequests?.length, !!driverPays?.length]);
-
   // Auto-settle: trips with balance=0 but not marked settled
   React.useEffect(() => {
     const toSettle = tripWithBalance.filter(t=>
@@ -14391,17 +14384,7 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
         const updated = {...tw, driverSettled:true, settledBy:"auto", netPaid:tw.netDue};
         DB.saveTrip(updated).catch(e=>console.warn("auto-settle saveTrip:",e));
       });
-      // Auto-mark pending payment requests as done for fully settled trips
-      const settledIds = new Set(toSettle.map(t=>t.id));
-      const stalePending = (paymentRequests||[]).filter(r=>r.status==="pending"&&settledIds.has(r.tripId));
-      if(stalePending.length>0 && setPaymentRequests) {
-        setPaymentRequests(prev=>prev.map(r=>{
-          if(r.status!=="pending"||!settledIds.has(r.tripId)) return r;
-          const done={...r,status:"done",paidAt:today(),paidBy:"auto"};
-          DB.savePaymentRequest(done).catch(()=>{});
-          return done;
-        }));
-      }
+
     }
   // eslint-disable-next-line
   }, [JSON.stringify(tripWithBalance.map(t=>({id:t.id,balance:t.balance,settled:t.driverSettled})))]);
@@ -14465,17 +14448,7 @@ This will auto-recover in the next trip.`);
     DB.saveDriverPay(p).catch(e=>console.error("saveDriverPay error:",e));
     log("DRIVER PAYMENT",`LR:${t.lrNo} ${t.truckNo} — ${fmt(+pf.amount)} UTR:${pf.utr}`);
     autoSettle(t.id, +pf.amount);
-    // Auto-mark pending payment requests for this LR as done
-    const pendingReqs = (paymentRequests||[]).filter(r=>r.lrNo===t.lrNo&&r.status==="pending");
-    if(pendingReqs.length>0 && setPaymentRequests) {
-      setPaymentRequests(prev=>(prev||[]).map(r=>{
-        if(r.lrNo!==t.lrNo||r.status!=="pending") return r;
-        const updated={...r,status:"done",paidAt:today(),paidBy:user.username};
-        DB.savePaymentRequest(updated).catch(e=>console.error("savePaymentRequest:",e));
-        return updated;
-      }));
-      log("PAY REQUEST AUTO-DONE",`LR:${t.lrNo} — ${pendingReqs.length} request(s) marked done`);
-    }
+
     setPaySheet(null); setPf({amount:"",utr:"",date:today(),paidTo:"",notes:""});
   };
 
@@ -14507,17 +14480,7 @@ This will auto-recover in the next trip.`);
         throw e;
       }
       autoSettle(p.tripId, p.amount);
-      // Auto-mark pending payment requests for this LR as done
-      const pendingForLR = (paymentRequests||[]).filter(r=>r.lrNo===p.lrNo&&r.status==="pending");
-      if(pendingForLR.length>0 && setPaymentRequests) {
-        setPaymentRequests(prev=>(prev||[]).map(r=>{
-          if(r.lrNo!==p.lrNo||r.status!=="pending") return r;
-          const updated={...r,status:"done",paidAt:today(),paidBy:user.username};
-          DB.savePaymentRequest(updated).catch(e=>console.error("savePaymentRequest:",e));
-          return updated;
-        }));
-        log("PAY REQUEST AUTO-DONE",`LR:${p.lrNo} — ${pendingForLR.length} request(s) marked done via scan`);
-      }
+
     }
     setSplitSheet(null);
   };
@@ -14967,14 +14930,8 @@ This will auto-recover in the next trip.`);
             {t.balance>0&&!viewOnly&&(
               <Btn onClick={()=>{setPaySheet(t);setPf({amount:String(t.balance),utr:"",date:today(),paidTo:"",notes:""});}} full sm color={C.green}>+ Record Payment</Btn>
             )}
-            {t.balance>0&&!((paymentRequests||[]).some(r=>r.tripId===t.id&&r.status==="pending"))&&(
+            {t.balance>0&&(
               <Btn onClick={()=>setPayReqSheet(t)} sm outline color={C.purple}>📋 Request Payment</Btn>
-            )}
-            {t.balance>0&&(paymentRequests||[]).some(r=>r.tripId===t.id&&r.status==="pending")&&(
-              <div style={{fontSize:11,color:C.purple,fontWeight:600,padding:"4px 8px",
-                background:C.purple+"11",borderRadius:6,border:`1px solid ${C.purple}33`}}>
-                📋 Request Pending
-              </div>
             )}
           </div>
         </div>
@@ -14987,20 +14944,7 @@ This will auto-recover in the next trip.`);
         <div style={{display:"flex",flexDirection:"column",gap:10}}>
           {/* Sub-filter: Pending / History */}
           {(()=>{
-            // Pending count: only requests where balance is still > 0
-            const pendingCount = (paymentRequests||[]).filter(r=>{
-              if(r.status!=="pending") return false;
-              const prTrip = (trips||[]).find(t=>t.id===r.tripId);
-              if(!prTrip) return true; // keep if trip not found
-              const gross = (prTrip.diLines&&prTrip.diLines.length>1)
-                ? prTrip.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
-                : (prTrip.qty||0)*(prTrip.givenRate||0);
-              const deducts = (prTrip.advance||0)+(prTrip.tafal||0)+(prTrip.dieselEstimate||0)
-                +((prTrip.shortage||0)*(prTrip.givenRate||0))+(prTrip.shortageRecovery||0)+(prTrip.loanRecovery||0);
-              const netDue = Math.max(0, gross - deducts);
-              const paid = (driverPays||[]).filter(p=>p.tripId===prTrip.id).reduce((s,p)=>s+(p.amount||0),0);
-              return Math.max(0, netDue - paid) > 0;
-            }).length;
+            const pendingCount = (paymentRequests||[]).filter(r=>r.status==="pending").length;
             const doneCount    = (paymentRequests||[]).filter(r=>r.status==="done").length;
             return (
               <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
@@ -15032,21 +14976,6 @@ This will auto-recover in the next trip.`);
             const eff = pr.status||"pending";
             if(reqSubFilter==="pending" && eff!=="pending") return false;
             if(reqSubFilter==="done"    && eff!=="done")    return false;
-            // In Pending tab: hide requests where the trip balance is now 0 (already fully paid)
-            if(reqSubFilter==="pending" && eff==="pending") {
-              const prTrip = (trips||[]).find(t=>t.id===pr.tripId);
-              if(prTrip) {
-                const gross = (prTrip.diLines&&prTrip.diLines.length>1)
-                  ? prTrip.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
-                  : (prTrip.qty||0)*(prTrip.givenRate||0);
-                const deducts = (prTrip.advance||0)+(prTrip.tafal||0)+(prTrip.dieselEstimate||0)
-                  +((prTrip.shortage||0)*(prTrip.givenRate||0))+(prTrip.shortageRecovery||0)+(prTrip.loanRecovery||0);
-                const netDue = Math.max(0, gross - deducts);
-                const paid = (driverPays||[]).filter(p=>p.tripId===prTrip.id).reduce((s,p)=>s+(p.amount||0),0);
-                const bal = Math.max(0, netDue - paid);
-                if(bal <= 0) return false; // fully paid — don't show in pending
-              }
-            }
             // Search
             if(reqSearch) {
               const q = reqSearch.toLowerCase();
