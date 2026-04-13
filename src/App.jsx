@@ -2660,11 +2660,16 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                           {displayReq.status==="confirmed"?"✓":"⏳"} #{displayReq.indentNo} · ₹{(displayReq.confirmedAmount??displayReq.amount).toLocaleString("en-IN")}
                           {attachedReq?" · auto-attached":""}
                         </span>
-                        <span onClick={()=>{
-                          updateGroup(g.id,"dieselIndentNo","");
-                          updateGroup(g.id,"diesel","0");
-                          updateGroup(g.id,"_autoAttachedReqId",null);
-                        }} style={{cursor:"pointer",color:C.muted,marginLeft:8,fontSize:13}}>×</span>
+                        {user?.role==="owner" && (
+                          <span onClick={()=>{
+                            updateGroup(g.id,"dieselIndentNo","");
+                            updateGroup(g.id,"diesel","0");
+                            updateGroup(g.id,"_autoAttachedReqId",null);
+                          }} style={{cursor:"pointer",color:C.muted,marginLeft:8,fontSize:13}}>×</span>
+                        )}
+                        {user?.role!=="owner" && (
+                          <span style={{fontSize:10,color:C.muted,marginLeft:8}}>🔒</span>
+                        )}
                       </div>
                     )}
                     {!displayReq && (
@@ -6735,8 +6740,20 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
             placeholder="0"
             note={veh?.tafalExempt?"⚠ Exempt vehicle — only owner can change this":""}/>
         )}
-        <Field label="Diesel Estimate ₹" value={f.dieselEstimate||""} onChange={ff("dieselEstimate")} type="number" half
-          note="Driver's estimate (update later via Indent)" placeholder="0" />
+        {isOwner ? (
+          <Field label="Diesel Estimate ₹" value={f.dieselEstimate||""} onChange={ff("dieselEstimate")} type="number" half
+            note="Owner only — set from confirmed indent" placeholder="0" />
+        ) : (
+          <div style={{flex:"1 1 45%",minWidth:0,display:"flex",flexDirection:"column",gap:5}}>
+            <label style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Diesel Estimate ₹</label>
+            <div style={{background:C.dim,border:`1.5px solid ${C.border}`,borderRadius:10,
+              color:C.text,padding:"13px 12px",fontSize:15,
+              display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span>{f.dieselEstimate>0?("₹"+(+f.dieselEstimate).toLocaleString("en-IN")):"0"}</span>
+              <span style={{fontSize:11,color:C.muted}}>🔒 Owner only</span>
+            </div>
+          </div>
+        )}
       </div>
       {/* ⛽ Diesel Indent No — auto-attach + manual entry */}
       {(()=>{
@@ -6790,19 +6807,20 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
               </div>
             )}
 
-            {/* Requests for this truck — tap-to-attach cards */}
+            {/* Requests for this truck — tap-to-attach cards (owner only can change) */}
             {truckReqs.length>0 && (
               <div style={{display:"flex",flexDirection:"column",gap:4}}>
                 {truckReqs.map(r=>{
                   const amt = r.confirmedAmount??r.amount;
                   const isSel = val===String(r.indentNo);
                   const isConf = r.status==="confirmed";
+                  const canInteract = isOwner; // only owner can attach/detach
                   return (
-                    <div key={r.id} onClick={()=>isSel?clearReq():attachReq(r)}
+                    <div key={r.id} onClick={()=>canInteract?(isSel?clearReq():attachReq(r)):null}
                       style={{
                         background:isSel?(isConf?C.teal+"22":C.orange+"18"):(isConf?C.teal+"11":C.bg),
                         border:`1.5px solid ${isSel?(isConf?C.teal:C.orange):(isConf?C.teal+"66":C.border)}`,
-                        borderRadius:8,padding:"9px 12px",cursor:"pointer",
+                        borderRadius:8,padding:"9px 12px",cursor:canInteract?"pointer":"default",
                         display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
                       <div style={{flex:1,minWidth:0}}>
                         <div style={{fontWeight:700,fontSize:13,color:isConf?C.teal:C.text}}>
@@ -6820,18 +6838,23 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
                           {(r.requestedBy||r.createdBy)?<span style={{marginLeft:6}}> · By: {r.requestedBy||r.createdBy}</span>:null}
                         </div>
                       </div>
-                      <div style={{fontSize:12,fontWeight:700,flexShrink:0,
-                        color:isSel?C.red:(isConf?C.teal:C.muted)}}>
-                        {isSel?"Remove":"Attach"}
-                      </div>
+                      {canInteract && (
+                        <div style={{fontSize:12,fontWeight:700,flexShrink:0,
+                          color:isSel?C.red:(isConf?C.teal:C.muted)}}>
+                          {isSel?"Remove":"Attach"}
+                        </div>
+                      )}
+                      {!canInteract && isSel && (
+                        <span style={{fontSize:10,color:C.muted}}>🔒</span>
+                      )}
                     </div>
                   );
                 })}
               </div>
             )}
 
-            {/* No requests for this truck but others exist — show a small dropdown */}
-            {truckReqs.length===0 && otherReqs.length>0 && (
+            {/* No requests for this truck — owner can pick from others */}
+            {truckReqs.length===0 && otherReqs.length>0 && isOwner && (
               <select value={val||""} onChange={e=>{
                 const sel=e.target.value;
                 if(!sel){clearReq();return;}
@@ -6850,14 +6873,16 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
               </select>
             )}
 
-            {/* Manual entry removed — indent must come from confirmed pump request */}
+            {/* Indent display — only owner can clear */}
             {val && (
               <div style={{display:"flex",alignItems:"center",gap:6}}>
                 <div style={{flex:1,background:C.dim,border:`1.5px solid ${C.border}`,
                   borderRadius:8,color:C.muted,padding:"9px 12px",fontSize:13}}>
                   {val}
                 </div>
-                <button onClick={clearReq} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:20,padding:"0 4px",lineHeight:1}}>×</button>
+                {isOwner && (
+                  <button onClick={clearReq} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:20,padding:"0 4px",lineHeight:1}}>×</button>
+                )}
               </div>
             )}
 
