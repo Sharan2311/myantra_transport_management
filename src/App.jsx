@@ -5531,7 +5531,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                               {p.paidTo&&<span style={{marginLeft:6}}>→ <b style={{color:C.text}}>{p.paidTo}</b></span>}
                               {p.utr&&<span style={{marginLeft:6,fontFamily:"monospace",color:C.blue,fontSize:10}}>{p.utr}</span>}
                             </div>
-                            <div style={{color:C.muted,fontSize:10}}>{p.date}{p.date&&p.createdAt?" · ":""}{p.createdAt?p.createdAt.slice(11,16):""}</div>
+                            <div style={{color:C.muted,fontSize:10}}>{p.createdAt||p.date||""}</div>
                           </div>
                         ))}
                       </div>
