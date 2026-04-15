@@ -1766,7 +1766,11 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
         truckNo,
         diIds,
         client,
-        tafal: String(settings?.tafalPerTrip||300),
+        tafal: (() => {
+          const gVehT = (vehicles||[]).find(v=>v.truckNo===truckNo);
+          if(gVehT?.tafalExempt) return "0";
+          return String(settings?.tafalPerTrip||300);
+        })(),
         diesel: autoDiesel,
         dieselIndentNo: autoIndentNo,
         advance: "0",
@@ -8006,12 +8010,11 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance: tripWithBalancePr
   const remaining = totalAmount - totalAllocated;
 
   const canSave = rows.every(r => r.tripId && +r.amount > 0) &&
-    rows.every(r => {
-      const t = tripWithBalance.find(x=>x.id===r.tripId);
-      return !t || Math.round(+r.amount) <= Math.round(t.balance) + 1;
-    }) && rows.length > 0 && Math.abs(remaining) <= 1;
+    rows.length > 0 && Math.abs(remaining) <= 1;
 
-  const handleSave = () => {
+  const [saving, setSaving] = useState(false);
+  const handleSave = async () => {
+    if(saving) return;
     const payments = rows.map(r => {
       const t = tripWithBalance.find(x=>x.id===r.tripId);
       return {
@@ -8021,7 +8024,14 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance: tripWithBalancePr
         date: sharedDate, paidTo: sharedPaidTo, notes: sharedNote,
       };
     });
-    onSave(payments);
+    setSaving(true);
+    try {
+      await onSave(payments);
+    } catch(e) {
+      console.error("handleSave error:", e);
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -8283,8 +8293,8 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance: tripWithBalancePr
           </div>
         </div>
 
-        <Btn onClick={handleSave} full color={C.green} disabled={!canSave}>
-          ✓ Save {rows.length} Payment{rows.length>1?"s":""} — {fmt(totalAllocated)}
+        <Btn onClick={handleSave} full color={C.green} disabled={!canSave||saving}>
+          {saving ? "⏳ Saving…" : `✓ Save ${rows.length} Payment${rows.length>1?"s":""} — ${fmt(totalAllocated)}`}
         </Btn>
         {remaining > 0 && (
           <div style={{color:C.orange,fontSize:12,textAlign:"center",fontWeight:700}}>
