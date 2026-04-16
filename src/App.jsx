@@ -500,8 +500,18 @@ function BottomNav({tab, setTab, user, trips, driverPays, vehicles}) {
     const paid = (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
     return netDue>0 && paid<netDue;
   }).length;
-  // Only billing and more tabs get badges — trips/diesel tabs don't need them
-  const badges = {billing:pendingBills||null, more:unsettledDrivers||null};
+  // Diesel stale badge: open/confirmed requests > 2 days not attached
+  const dieselStaleBadge = (() => {
+    const twoDaysAgoNav = (() => { const d=new Date(); d.setDate(d.getDate()-2); return d.toISOString().slice(0,10); })();
+    return (dieselRequests||[]).filter(r=>{
+      if(r.status==="attached"||r.status==="done") return false;
+      if(r.status!=="open"&&r.status!=="confirmed") return false;
+      const m=(r.createdAt||"").match(/(\d{2})\/(\d{2})\/(\d{2})/);
+      const rd = m?`20${m[3]}-${m[2]}-${m[1]}`:(r.date||"");
+      return rd && rd<=twoDaysAgoNav;
+    }).length || null;
+  })();
+  const badges = {billing:pendingBills||null, more:unsettledDrivers||null, diesel:dieselStaleBadge};
 
   return (
     <nav style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:600,background:C.card,borderTop:`1px solid ${C.border}`,display:"flex",zIndex:100,paddingBottom:"env(safe-area-inset-bottom,6px)"}}>
@@ -2076,8 +2086,18 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           return;
         }
         setTrips(p=>[trip,...(p||[])]);
+        // ── Mark pre-filled diesel indent as "attached" ───────────────────
+        if (g.dieselIndentNo.trim() && typeof setDieselRequests === "function") {
+          const preReq = (dieselRequests||[]).find(r => String(r.indentNo)===g.dieselIndentNo.trim() && r.status!=="attached");
+          if (preReq) {
+            const updPreReq = {...preReq, status:"attached", tripId:trip.id, lrNo};
+            setDieselRequests(p=>p.map(r=>r.id===preReq.id?updPreReq:r));
+            await DB.saveDieselRequest(updPreReq);
+            log("DIESEL ATTACH", `Indent #${preReq.indentNo} → LR ${lrNo} · ₹${preReq.confirmedAmount??preReq.amount} (auto)`);
+          }
+        }
         // ── Auto-attach open diesel request for this truck ────────────────
-        if (typeof setDieselRequests === "function") {
+        if (typeof setDieselRequests === "function" && !g.dieselIndentNo.trim()) {
           const openReqs = (dieselRequests||[]).filter(r => r.status==="open" || r.status==="confirmed");
           const truckMatch = openReqs.find(r => r.truckNo===truckNo);
           let chosenReq = truckMatch;
@@ -8851,6 +8871,25 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
     const hasConfirmed = indents.some(i => i.tripId === t.id && i.confirmed);
     return !hasConfirmed;
   });
+
+  // ── Stale diesel REQUESTS: open or confirmed but not attached for > 2 days ──
+  const twoDaysAgo = (() => {
+    const d = new Date(); d.setDate(d.getDate() - 2);
+    return d.toISOString().slice(0,10); // YYYY-MM-DD
+  })();
+  const staleDieselRequests = (dieselRequests||[]).filter(r => {
+    if (r.status === "attached") return false; // already used
+    if (r.status !== "open" && r.status !== "confirmed") return false;
+    // createdAt is locale string like "15/04/26, 8:41 am" — extract date from trip date field or use request date
+    const reqDate = r.date || (r.createdAt ? (() => {
+      // Parse "DD/MM/YY, H:MM am" → YYYY-MM-DD
+      const m = (r.createdAt||"").match(/(\d{2})\/(\d{2})\/(\d{2})/);
+      if(m) return `20${m[3]}-${m[2]}-${m[1]}`;
+      return "";
+    })() : "");
+    if(!reqDate) return false;
+    return reqDate <= twoDaysAgo;
+  });
   const _seenAlerts = new Map();
   _rawAlerts.forEach(i => {
     const key = (i.indentNo||"") + "_" + (i.truckNo||"");
@@ -9273,6 +9312,63 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
           )}
         </div>
       )}
+
+      {/* ── Stale diesel requests alert (open/confirmed > 2 days, not attached) ── */}
+      {staleDieselRequests.length > 0 && (()=>{
+        const isOwner = user?.role==="owner";
+        // Show to owner always; show to logger if any of their requests are stale
+        const myStale = isOwner ? staleDieselRequests :
+          staleDieselRequests.filter(r => r.requestedBy===user?.username || r.createdBy===user?.username);
+        if(!myStale.length) return null;
+        return (
+          <div style={{background:"#fef2f2",border:"2px solid #dc2626",borderRadius:12,overflow:"hidden"}}>
+            <div style={{padding:"10px 14px",background:"#dc262611",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div>
+                <div style={{color:"#dc2626",fontWeight:800,fontSize:13}}>
+                  🚨 {myStale.length} Diesel Request{myStale.length>1?"s":""} Not Attached to LR (2+ days)
+                </div>
+                <div style={{color:"#991b1b",fontSize:11,marginTop:2}}>
+                  These requests are pending/confirmed but never got linked to a trip
+                </div>
+              </div>
+            </div>
+            <div style={{padding:"8px 14px 12px",display:"flex",flexDirection:"column",gap:6}}>
+              {myStale.map(r=>{
+                const reqDate = r.date || (r.createdAt ? (()=>{
+                  const m = (r.createdAt||"").match(/(\d{2})\/(\d{2})\/(\d{2})/);
+                  return m ? `20${m[3]}-${m[2]}-${m[1]}` : "";
+                })() : "");
+                const daysOld = reqDate ? Math.floor((new Date()-new Date(reqDate))/(1000*60*60*24)) : "?";
+                return (
+                  <div key={r.id} style={{background:"#fff",borderRadius:8,padding:"8px 10px",
+                    border:"1px solid #fca5a5",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                    <div>
+                      <div style={{fontWeight:700,fontSize:13}}>
+                        #{r.indentNo} · <span style={{color:"#dc2626"}}>{r.truckNo}</span>
+                        <span style={{marginLeft:6,fontSize:11,fontWeight:400,color:"#92400e",
+                          background:"#fef3c7",padding:"2px 6px",borderRadius:4}}>
+                          {r.status==="confirmed"?"✓ Confirmed":"⏳ Pending"}
+                        </span>
+                      </div>
+                      <div style={{fontSize:11,color:"#6b7280",marginTop:2}}>
+                        {r.pumpName||r.pumpId||"—"} · By: {r.requestedBy||r.createdBy||"—"} · {reqDate||"—"}
+                      </div>
+                      <div style={{fontSize:11,color:"#dc2626",fontWeight:600,marginTop:1}}>
+                        ⚠ {daysOld} day{daysOld!==1?"s":""} without LR attachment
+                      </div>
+                    </div>
+                    <div style={{textAlign:"right",flexShrink:0,marginLeft:10}}>
+                      <div style={{fontWeight:800,fontSize:14,color:"#dc2626"}}>
+                        ₹{((r.confirmedAmount??r.amount)??0).toLocaleString("en-IN")}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Summary KPIs */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
