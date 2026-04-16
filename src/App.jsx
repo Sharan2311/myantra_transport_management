@@ -469,7 +469,7 @@ const ErrBanner = ({msg}) => msg ? (
 
 // ─── BOTTOM NAV ───────────────────────────────────────────────────────────────
 const MAIN_IDS = ["dashboard","trips","billing","diesel","more"];
-function BottomNav({tab, setTab, user, trips, driverPays, vehicles}) {
+function BottomNav({tab, setTab, user, trips, driverPays, vehicles, dieselRequests=[]}) {
   const isFleet = user?.role === "fleet_manager";
   const isPump  = user?.role === "pump_operator";
   const items = isPump ? [
@@ -1393,7 +1393,7 @@ export default function App() {
         {tab==="more"       && <MoreMenu user={user} setTab={setTab} trips={roleTrips} driverPays={driverPays} vehicles={vehicles} />}
         </ErrorBoundary>
       </div>
-      <BottomNav tab={tab} setTab={setTab} user={user} trips={roleTrips} driverPays={driverPays} vehicles={vehicles} />
+      <BottomNav tab={tab} setTab={setTab} user={user} trips={roleTrips} driverPays={driverPays} vehicles={vehicles} dieselRequests={dieselRequests} />
     </div>
   );
 }
@@ -14563,6 +14563,19 @@ This will auto-recover in the next trip.`);
     }
   };
 
+  // Auto-mark all pending payment requests for an LR as done
+  const markRequestsDoneForLR = (lrNo) => {
+    const pending = (paymentRequests||[]).filter(r=>r.lrNo===lrNo&&r.status==="pending");
+    if(!pending.length) return;
+    setPaymentRequests(prev=>(prev||[]).map(r=>{
+      if(r.lrNo!==lrNo||r.status!=="pending") return r;
+      const done={...r,status:"done",paidAt:today(),paidBy:user.username};
+      DB.savePaymentRequest(done).catch(e=>console.error("savePaymentRequest:",e));
+      return done;
+    }));
+    log("PAY REQUEST AUTO-DONE",`LR:${lrNo} — ${pending.length} request(s) marked done`);
+  };
+
   const savePayment = (t) => {
     // Check for duplicate UTR
     if(pf.utr) {
@@ -14579,7 +14592,7 @@ This will auto-recover in the next trip.`);
     DB.saveDriverPay(p).catch(e=>console.error("saveDriverPay error:",e));
     log("DRIVER PAYMENT",`LR:${t.lrNo} ${t.truckNo} — ${fmt(+pf.amount)} UTR:${pf.utr}`);
     autoSettle(t.id, +pf.amount);
-
+    markRequestsDoneForLR(t.lrNo);
     setPaySheet(null); setPf({amount:"",utr:"",date:today(),paidTo:"",notes:""});
   };
 
@@ -14611,7 +14624,7 @@ This will auto-recover in the next trip.`);
         throw e;
       }
       autoSettle(p.tripId, p.amount);
-      autoMarkRequestsDone(p.lrNo);
+      markRequestsDoneForLR(p.lrNo);
     }
     setSplitSheet(null);
   };
