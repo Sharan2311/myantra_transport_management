@@ -5064,6 +5064,19 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       cashEmpId: editSheet.cashEmpId||"",
       editedBy:user.username, editedAt:nowTs(),
     } : t));
+    // ── Mark diesel indent as attached if dieselIndentNo changed ──
+    if (editSheet.dieselIndentNo?.trim() && typeof setDieselRequests === "function") {
+      const indentNo = parseInt(editSheet.dieselIndentNo.trim(), 10);
+      const matchReq = (dieselRequests||[]).find(r =>
+        r.indentNo === indentNo && (r.status==="open" || r.status==="confirmed")
+      );
+      if (matchReq) {
+        const updReq = {...matchReq, status:"attached", tripId:editSheet.id, lrNo:editSheet.lrNo||""};
+        setDieselRequests(p => p.map(r => r.id===matchReq.id ? updReq : r));
+        DB.saveDieselRequest(updReq).catch(e => console.error("saveDieselRequest:", e));
+        log("DIESEL ATTACH", `Indent #${matchReq.indentNo} → LR ${editSheet.lrNo} (edit save)`);
+      }
+    }
     // Reflect shortageRecovery / loanRecovery change into vehicle ledger (delta only)
     const prevTrip = trips.find(t=>t.id===editSheet.id);
     const prevSR = prevTrip?.shortageRecovery||0;
@@ -12262,8 +12275,8 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
         return {ok:true, diff:0, invoiceAmt, expectedAmt:invoiceAmt, note:"unmatched-di"};
       }
     } else {
-      // ── Single DI trip: compare against full billedToShree or qty×frRate ─────
-      expectedAmt = trip.billedToShree || (trip.qty||0)*(trip.frRate||0);
+      // ── Single DI trip: compare against qty × frRate (source of truth) ────────
+      expectedAmt = (trip.qty||0)*(trip.frRate||0);
     }
 
     const diff = invoiceAmt - expectedAmt;
@@ -14499,6 +14512,27 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
     return !hasPendingReq;   // only block if a pending request exists — done requests allow new ones
   }) : [];
   const totalBalance = unpaidTrips.reduce((s,t)=>s+t.balance,0);
+
+  // ── Startup: fix confirmed indents that are actually attached to trips ──────
+  React.useEffect(() => {
+    if(!(dieselRequests||[]).length || !(trips||[]).length) return;
+    const tripsWithIndent = trips.filter(t=>t.dieselIndentNo && t.dieselIndentNo.trim());
+    const staleConfirmed = (dieselRequests||[]).filter(r=>{
+      if(r.status!=="open"&&r.status!=="confirmed") return false;
+      const linkedTrip = tripsWithIndent.find(t=>String(t.dieselIndentNo).trim()===String(r.indentNo));
+      return !!linkedTrip;
+    });
+    if(!staleConfirmed.length) return;
+    setDieselRequests(prev=>prev.map(r=>{
+      if(r.status!=="open"&&r.status!=="confirmed") return r;
+      const linkedTrip = tripsWithIndent.find(t=>String(t.dieselIndentNo).trim()===String(r.indentNo));
+      if(!linkedTrip) return r;
+      const upd={...r, status:"attached", tripId:linkedTrip.id, lrNo:linkedTrip.lrNo||""};
+      DB.saveDieselRequest(upd).catch(()=>{});
+      return upd;
+    }));
+  // eslint-disable-next-line
+  }, [!!dieselRequests?.length, !!trips?.length]);
 
   // Auto-settle: trips with balance=0 but not marked settled
   React.useEffect(() => {
