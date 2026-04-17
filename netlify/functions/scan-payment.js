@@ -1,57 +1,67 @@
 // netlify/functions/scan-payment.js
 
-const PAYMENT_PROMPT = `You are a precise data extractor reading an HDFC Bank NEFT payment confirmation screenshot.
+const PAYMENT_PROMPT = `You are extracting data from an HDFC Bank NEFT payment confirmation screenshot.
 
-Your ONLY job is to find and copy exact text values from specific labelled fields in the image.
-DO NOT reason, infer, guess, or derive any value. If you cannot read a field clearly, return null for that field.
+CRITICAL ACCURACY REQUIREMENT: This data is used for financial records. Every character must be exact.
+DO NOT guess, infer, or fill in any value you are not 100% certain about. Return null for uncertain fields.
 
-The HDFC NEFT screenshot has these labelled fields — read each label and copy the value next to it exactly:
+THE HDFC NEFT SCREENSHOT HAS THESE EXACT LABELLED FIELDS:
 
-FIELD LABELS TO FIND:
-1. The large amount at the top of the screen (e.g. ₹67,300)
-2. The line immediately below the amount — may contain LR numbers (e.g. "SKLC141 SKLC142")
-3. "Paid To:" — copy the name on this line verbatim, character for character
-4. "Reference Number:" — copy this value exactly (e.g. HDFCH00929440594)
-5. "HDFC Transaction ID:" — copy this value exactly (e.g. HDFCB8776F6F7E3B)
-6. The date shown next to "Request Accepted" (e.g. Apr 12, 2026)
-7. "Savings A/c:" or "Current A/c:" — copy the account number
-8. "Paid By:" — copy the sender name verbatim
-
-Return ONLY this JSON, no other text, no markdown:
-{
-  "amount": <number only, no commas, no ₹ symbol, or null if not found>,
-  "paidTo": "<exact text after 'Paid To:' label, or null>",
-  "referenceNo": "<exact text after 'Reference Number:' label, or null>",
-  "transactionId": "<exact text after 'HDFC Transaction ID:' label, or null>",
-  "paymentDate": "<date converted to YYYY-MM-DD format, or null>",
-  "recipientAccount": "<account number after 'Savings A/c:' or 'Current A/c:', or null>",
-  "paidBy": "<exact text after 'Paid By:' label, or null>",
-  "lrNumbers": ["<LR numbers found in subtitle line below amount, formats: SKLC001 SGNC001 SGNGP001 SKLGP001 UTCC001 INBL001 INBGP001 INBH001 or old CEM26 CEM27>"],
-  "narration": "<full narration/remarks text if present, or null>"
-}
+1. Large amount at top → "amount" (number only, no ₹ or commas)
+2. Subtitle line below amount → may contain LR numbers like SKLC190, SKLC195
+3. Date next to "Request Accepted" → "paymentDate" (YYYY-MM-DD)
+4. "Paid To:" → "paidTo" (copy VERBATIM, character by character)
+5. "HDFC Transaction ID:" → "transactionId" (copy VERBATIM — starts with HDFC, alphanumeric)
+6. "Reference Number:" → "referenceNo" (copy VERBATIM — this is the UTR, starts with HDFC)
+   ⚠ CRITICAL: The Reference Number is typically 17-19 characters long starting with "HDFCH".
+   Read each digit individually. Do NOT confuse similar characters: 0/O, 1/I, 6/4, 8/3, 5/S.
+   Example format: HDFCH00939646487
+7. "Savings A/c:" or "Current A/c:" → "recipientAccount"
+8. "Paid By:" → "paidBy"
 
 STRICT RULES:
-- If a label is not visible or value is not clearly readable → set that field to null
-- NEVER guess or fill in a value you cannot directly read from the image
-- Copy text exactly — same capitalisation, same spacing, same characters
-- lrNumbers: return [] if none found, never return null for this field
-- amount: return as plain integer or decimal, e.g. 67300 not "₹67,300"`;
+- "referenceNo" and "transactionId" must be copied CHARACTER BY CHARACTER — read each digit separately
+- If you are not certain about a character, return null for the entire field rather than guessing
+- "paidTo": copy the exact text after "Paid To:" label, verbatim, same capitalisation
+- "amount": plain number e.g. 35877 not "₹35,877"
+- "lrNumbers": array of LR numbers found (formats: SKLC001, SGNC001, UTCC001, INBL001 etc.) — check subtitle line below amount
+- All other fields: return null if not clearly readable
+
+Return ONLY this JSON, no markdown:
+{
+  "amount": <number or null>,
+  "paidTo": "<verbatim text after Paid To: or null>",
+  "referenceNo": "<verbatim Reference Number (UTR) or null>",
+  "transactionId": "<verbatim HDFC Transaction ID or null>",
+  "paymentDate": "<YYYY-MM-DD or null>",
+  "recipientAccount": "<account number or null>",
+  "paidBy": "<verbatim text after Paid By: or null>",
+  "lrNumbers": ["<LR numbers found>"],
+  "narration": null
+}`;
 
 exports.handler = async (event) => {
   if (event.httpMethod !== "POST") {
     return { statusCode: 405, body: "Method Not Allowed" };
   }
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return { statusCode: 500, body: JSON.stringify({ error: "ANTHROPIC_API_KEY not set" }) };
+  }
+
   try {
     const { base64, mediaType } = JSON.parse(event.body);
+
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
+        "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
+        model: "claude-sonnet-4-6",   // Sonnet for financial accuracy — single character errors matter
         max_tokens: 1024,
         messages: [{
           role: "user",
@@ -78,14 +88,14 @@ exports.handler = async (event) => {
     } catch(e) {
       return {
         statusCode: 200,
-        body: JSON.stringify({ error: "Could not parse response from scan. Please fill manually." })
+        body: JSON.stringify({ error: "Could not parse payment details. Please fill manually." })
       };
     }
 
-    // Validate — if critical fields all null, return error
-    const hasAmount  = parsed.amount != null && parsed.amount > 0;
-    const hasPaidTo  = parsed.paidTo != null && String(parsed.paidTo).trim().length > 0;
-    const hasRef     = parsed.referenceNo != null && String(parsed.referenceNo).trim().length > 0;
+    // Validate — if all critical fields null, return error
+    const hasAmount   = parsed.amount != null && parsed.amount > 0;
+    const hasPaidTo   = parsed.paidTo != null && String(parsed.paidTo).trim().length > 0;
+    const hasRef      = parsed.referenceNo != null && String(parsed.referenceNo).trim().length > 0;
 
     if (!hasAmount && !hasPaidTo && !hasRef) {
       return {
@@ -95,10 +105,10 @@ exports.handler = async (event) => {
     }
 
     // Clean up
-    if (parsed.paidTo)       parsed.paidTo       = String(parsed.paidTo).trim();
-    if (parsed.referenceNo)  parsed.referenceNo  = String(parsed.referenceNo).trim();
-    if (parsed.transactionId)parsed.transactionId= String(parsed.transactionId).trim();
-    if (parsed.paidBy)       parsed.paidBy       = String(parsed.paidBy).trim();
+    if (parsed.paidTo)          parsed.paidTo          = String(parsed.paidTo).trim();
+    if (parsed.referenceNo)     parsed.referenceNo     = String(parsed.referenceNo).trim().toUpperCase();
+    if (parsed.transactionId)   parsed.transactionId   = String(parsed.transactionId).trim().toUpperCase();
+    if (parsed.paidBy)          parsed.paidBy          = String(parsed.paidBy).trim();
 
     // Normalise LR numbers
     parsed.lrNumbers = Array.isArray(parsed.lrNumbers)

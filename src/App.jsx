@@ -12096,7 +12096,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
     const map = {};
     payTrips.filter(t=>t.billedToShree&&t.invoiceNo).forEach(t => {
       if(!map[t.invoiceNo]) map[t.invoiceNo] = {
-        invoiceNo:t.invoiceNo, invoiceDate:t.invoiceDate, totalAmt:0, trips:[], status:"billed"
+        invoiceNo:t.invoiceNo, invoiceDate:parseDD(t.invoiceDate||""), totalAmt:0, trips:[], status:"billed"
       };
       map[t.invoiceNo].trips.push(t);
       map[t.invoiceNo].totalAmt += Number(t.billedToShree||0);
@@ -12176,8 +12176,10 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
     if(q && !inv.invoiceNo?.toLowerCase().includes(q)
          && !inv.trips.some(t=>(t.lr||t.lrNo||"").toLowerCase().includes(q))
          && !fmtDate(inv.invoiceDate).toLowerCase().includes(q)) return false;
-    if(invFrom && (inv.invoiceDate||"") < invFrom) return false;
-    if(invTo   && (inv.invoiceDate||"") > invTo)   return false;
+    // Parse invoiceDate to YYYY-MM-DD for proper date comparison
+    const invDateNorm = parseDD(inv.invoiceDate||"");
+    if(invFrom && invDateNorm < invFrom) return false;
+    if(invTo   && invDateNorm > invTo)   return false;
     return true;
   });
   const filteredAdvices = shreePayments.filter(p => {
