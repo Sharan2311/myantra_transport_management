@@ -5482,9 +5482,10 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                       </div>
                     </div>
 
-                    {/* Status + chevron */}
+                    {/* Status + invoice no + chevron */}
                     <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:4,flexShrink:0}}>
                       <Badge label={t.status} color={SC(t.status)} />
+                      {t.invoiceNo && <span style={{fontSize:9,color:C.muted,fontFamily:"monospace"}}>{t.invoiceNo}</span>}
                       <span style={{color:C.muted,fontSize:12,transition:"transform 0.2s",
                         display:"inline-block",transform:isExpanded?"rotate(180deg)":"rotate(0deg)"}}>⌄</span>
                     </div>
@@ -11985,6 +11986,19 @@ function GstReleaseForm({ gstHoldItems, gstReleases, setGstReleases, isOwner, lo
   );
 }
 
+// Stable SearchBar — defined at module level to avoid re-mount on each render
+const SearchBar = ({value,onChange,placeholder}) => (
+  <div style={{position:"relative",marginBottom:12}}>
+    <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",fontSize:14,color:C.muted,pointerEvents:"none"}}>🔍</span>
+    <input value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
+      style={{width:"100%",boxSizing:"border-box",background:C.bg,border:`1px solid ${C.border}`,
+        borderRadius:8,padding:"9px 32px 9px 32px",color:C.text,fontSize:13,outline:"none"}}/>
+    {value&&<button onClick={()=>onChange("")}
+      style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",
+        background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:16,lineHeight:1}}>✕</button>}
+  </div>
+);
+
 function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles, gstReleases, setGstReleases, expenses, setExpenses, user, log}) {
 
   const [activeTab,   setActiveTab]   = useState("overview");
@@ -12029,6 +12043,16 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
   const fmtINR = n => Number(n||0).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2});
   const parseDD = s => {
     if(!s) return "";
+    // Handle YYYY-MM-DD already
+    if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    // Handle "DD-Mon-YYYY" (e.g. "09-Apr-2026")
+    const months={jan:"01",feb:"02",mar:"03",apr:"04",may:"05",jun:"06",jul:"07",aug:"08",sep:"09",oct:"10",nov:"11",dec:"12"};
+    const mMatch = s.match(/(\d{1,2})[\-\/\.\s]([A-Za-z]{3})[\-\/\.\s,]*(\d{4})/);
+    if(mMatch) {
+      const mm = months[mMatch[2].toLowerCase()];
+      if(mm) return `${mMatch[3]}-${mm}-${mMatch[1].padStart(2,"0")}`;
+    }
+    // Handle DD-MM-YYYY or DD/MM/YYYY
     const p = s.split(/[.\-\/]/);
     if(p.length===3 && p[2].length===4) return `${p[2]}-${p[1].padStart(2,"0")}-${p[0].padStart(2,"0")}`;
     return s;
@@ -12576,17 +12600,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
     </span>;
   };
 
-  const SearchBar = ({value,onChange,placeholder}) => (
-    <div style={{position:"relative",marginBottom:12}}>
-      <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",fontSize:14,color:C.muted,pointerEvents:"none"}}>🔍</span>
-      <input value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
-        style={{width:"100%",boxSizing:"border-box",background:C.bg,border:`1px solid ${C.border}`,
-          borderRadius:8,padding:"9px 32px 9px 32px",color:C.text,fontSize:13,outline:"none"}}/>
-      {value&&<button onClick={()=>onChange("")}
-        style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",
-          background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:16,lineHeight:1}}>✕</button>}
-    </div>
-  );
+  // SearchBar moved to top-level to avoid re-mount on every render
 
   const EmptyState = ({icon,text}) => (
     <div style={{textAlign:"center",padding:"40px 20px",color:"#444"}}>
