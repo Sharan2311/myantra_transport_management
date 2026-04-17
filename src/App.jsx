@@ -12094,6 +12094,7 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
 
   const shreeInvoices = useMemo(() => {
     const map = {};
+    const isValidDate = d => /^\d{4}-\d{2}-\d{2}$/.test(d);
     payTrips.filter(t=>t.billedToShree&&t.invoiceNo).forEach(t => {
       if(!map[t.invoiceNo]) map[t.invoiceNo] = {
         invoiceNo:t.invoiceNo, invoiceDate:parseDD(t.invoiceDate||""), totalAmt:0, trips:[], status:"billed"
@@ -12101,6 +12102,13 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
       map[t.invoiceNo].trips.push(t);
       map[t.invoiceNo].totalAmt += Number(t.billedToShree||0);
       if(t.paymentDate) map[t.invoiceNo].status = "paid";
+    });
+    // If invoiceDate is invalid/missing, use earliest trip date as fallback
+    Object.values(map).forEach(inv => {
+      if(!isValidDate(inv.invoiceDate) && inv.trips.length > 0) {
+        const dates = inv.trips.map(t=>t.date).filter(Boolean).sort();
+        inv.invoiceDate = dates[0] || "";
+      }
     });
     return Object.values(map).sort((a,b)=>(b.invoiceDate||"").localeCompare(a.invoiceDate||""));
   }, [trips, payClient]);
@@ -12400,18 +12408,34 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
       setScanError(`UTR ${utr} was already recorded on ${dupPayment.paymentDate||dupPayment.date||"—"}. This payment is already in the system — discard this scan.`);
       return;
     }
-    const invList=scanResult.invoices||[], shorts=scanResult.shortages||[], exps=scanResult.expenses||[];
+    const allInvList=scanResult.invoices||[], shorts=scanResult.shortages||[], exps=scanResult.expenses||[];
 
-    // Block save if any referenced invoice has NOT been uploaded yet
+    // Separate credit entries (freight invoices we have) from debit entries (expenses/penalties)
     const savedInvoiceNos = new Set((trips||[]).filter(t=>t.invoiceNo).map(t=>t.invoiceNo.trim()));
-    const missingInvoices = invList.filter(i => {
-      const invNo = (i.invoiceNo||"").trim();
-      return invNo && !savedInvoiceNos.has(invNo);
+    const invList = allInvList.filter(i => {
+      const n = (i.invoiceNo||"").trim();
+      return n && savedInvoiceNos.has(n);
     });
-    if(missingInvoices.length > 0) {
-      const missing = missingInvoices.map(i=>i.invoiceNo).join(", ");
-      setScanError(`Invoice${missingInvoices.length>1?"s":""} not uploaded: ${missing}. Please upload ${missingInvoices.length>1?"these invoices":"this invoice"} in the Invoices tab first, then scan the payment advice again.`);
-      return;
+    const debitEntries = allInvList.filter(i => {
+      const n = (i.invoiceNo||"").trim();
+      return n && !savedInvoiceNos.has(n);
+    });
+
+    // Save debit entries as expenses
+    if(debitEntries.length > 0 && setExpenses) {
+      const debitExps = debitEntries.map(d => ({
+        id: "EXP"+Date.now()+Math.random().toString(36).slice(2,6),
+        date: pDate || new Date().toISOString().slice(0,10),
+        label: (d._remark||"").trim() || `Debit Note ${d.invoiceNo}`,
+        amount: Math.abs(Number(d.totalAmt||d.paymentAmt||0)),
+        category: "debit_note",
+        notes: `Invoice: ${d.invoiceNo} · UTR:${utr}`,
+        utr: utr,
+        createdBy: user?.name||"",
+        createdAt: new Date().toISOString()
+      }));
+      setExpenses(prev=>[...(Array.isArray(prev)?prev:[]),...debitExps]);
+      log && log("DEBIT EXPENSES: "+debitExps.length+" entries from payment advice UTR:"+utr);
     }
 
     // Build a map of lrNo → trip for shortages lookup
@@ -12979,12 +13003,17 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                       )}
                       {(()=>{
                         const savedInvoiceNos = new Set((trips||[]).filter(t=>t.invoiceNo).map(t=>t.invoiceNo.trim()));
-                        const missingInvs = (scanResult.invoices||[]).filter(i=>{
+                        // Separate credit entries (freight invoices) from debit entries (expenses/penalties)
+                        const creditInvs = (scanResult.invoices||[]).filter(i=>{
+                          const n=(i.invoiceNo||"").trim();
+                          return n && savedInvoiceNos.has(n);
+                        });
+                        const debitInvs = (scanResult.invoices||[]).filter(i=>{
                           const n=(i.invoiceNo||"").trim();
                           return n && !savedInvoiceNos.has(n);
                         });
                         const dupUtr = (payments||[]).find(p=>p.utr===scanResult.utr);
-                        const canApply = missingInvs.length===0 && !dupUtr;
+                        const canApply = !dupUtr && creditInvs.length>0;
                         return (<>
                           {dupUtr && (
                             <div style={{background:C.red+"11",border:`1px solid ${C.red}44`,
@@ -12994,37 +13023,59 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
                               <div style={{color:C.muted,fontSize:11,marginTop:2}}>This payment is already in the system. Discard this scan.</div>
                             </div>
                           )}
-                          {missingInvs.length>0 && (
-                            <div style={{background:"#fffbeb",border:`1px solid ${C.orange}`,borderRadius:10,
+                          {/* Debit entries — show as expenses for user to confirm */}
+                          {debitInvs.length>0 && (
+                            <div style={{background:"#fef2f2",border:`1.5px solid ${C.red}`,borderRadius:10,
                               padding:"12px 14px",marginBottom:8}}>
-                              <div style={{color:C.orange,fontWeight:800,fontSize:13,marginBottom:6}}>
-                                ⚠ Invoice{missingInvs.length>1?"s":""} not uploaded yet
+                              <div style={{color:C.red,fontWeight:800,fontSize:13,marginBottom:6}}>
+                                💸 {debitInvs.length} Debit Note{debitInvs.length>1?"s":""} → Expenses
                               </div>
-                              {missingInvs.map(i=>(
-                                <div key={i.invoiceNo} style={{display:"flex",alignItems:"center",gap:6,
-                                  background:C.card,borderRadius:6,padding:"6px 10px",marginBottom:4,
-                                  border:`1px solid ${C.border}`}}>
-                                  <span style={{fontSize:16}}>📄</span>
-                                  <div>
-                                    <div style={{fontWeight:700,fontSize:12,color:C.text}}>{i.invoiceNo}</div>
-                                    <div style={{fontSize:11,color:C.muted}}>₹{fmtINR(i.totalAmt||i.paymentAmt)}</div>
+                              <div style={{color:C.muted,fontSize:11,marginBottom:8}}>
+                                These are not freight invoices — enter remarks and they'll be saved as expenses.
+                              </div>
+                              {debitInvs.map((d,i)=>(
+                                <div key={d.invoiceNo||i} style={{background:C.card,borderRadius:8,padding:"8px 10px",
+                                  marginBottom:6,border:`1px solid ${C.border}`}}>
+                                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                                    <span style={{fontWeight:700,fontSize:12,color:C.text}}>{d.invoiceNo}</span>
+                                    <span style={{fontWeight:800,color:C.red,fontFamily:"monospace"}}>₹{fmtINR(d.totalAmt||d.paymentAmt||0)}</span>
                                   </div>
+                                  {d.invDate&&<div style={{fontSize:10,color:C.muted}}>Date: {d.invDate}</div>}
+                                  <input
+                                    placeholder="Enter remark (e.g. Safety penalty, Electricity, etc.)…"
+                                    value={d._remark||""}
+                                    onChange={e=>{
+                                      const val=e.target.value;
+                                      setScanResult(prev=>{
+                                        if(!prev) return prev;
+                                        const updInvs=(prev.invoices||[]).map(inv=>
+                                          inv.invoiceNo===d.invoiceNo?{...inv,_remark:val}:inv
+                                        );
+                                        return {...prev,invoices:updInvs};
+                                      });
+                                    }}
+                                    style={{width:"100%",boxSizing:"border-box",background:C.bg,
+                                      border:`1.5px solid ${d._remark?C.green:C.orange}`,
+                                      borderRadius:6,padding:"7px 10px",fontSize:12,color:C.text,
+                                      outline:"none",marginTop:4}}
+                                  />
                                 </div>
                               ))}
-                              <div style={{fontSize:12,color:C.text,marginTop:8,lineHeight:1.5}}>
-                                Go to the <b>Invoices tab</b> → scan or upload{" "}
-                                {missingInvs.length>1?"each invoice":"this invoice"} first,
-                                then come back and scan this payment advice again.
-                              </div>
+                            </div>
+                          )}
+                          {creditInvs.length===0 && debitInvs.length>0 && !dupUtr && (
+                            <div style={{color:C.muted,fontSize:12,marginBottom:8,fontStyle:"italic"}}>
+                              No freight invoices found in this advice — only debit entries. Apply to save as expenses.
                             </div>
                           )}
                           <div style={{display:"flex",gap:8}}>
-                            <button onClick={applyPaymentScan} disabled={!canApply}
-                              style={{flex:1,background:canApply?C.accent:C.dim,
-                                color:canApply?"#fff":C.muted,border:"none",borderRadius:6,
+                            <button onClick={applyPaymentScan} disabled={dupUtr}
+                              style={{flex:1,background:dupUtr?C.dim:C.accent,
+                                color:dupUtr?"#fff":C.muted!==undefined?"#fff":C.text,border:"none",borderRadius:6,
                                 padding:"10px",fontWeight:700,
-                                cursor:canApply?"pointer":"not-allowed",fontSize:12}}>
-                              {dupUtr ? "Already Saved" : missingInvs.length>0 ? `Upload ${missingInvs.length} invoice${missingInvs.length>1?"s":""} first` : "✓ Apply — Mark Paid"}
+                                cursor:dupUtr?"not-allowed":"pointer",fontSize:12,
+                                ...(!dupUtr?{background:C.accent,color:"#fff"}:{background:C.dim,color:C.muted})}}>
+                              {dupUtr ? "Already Saved" : `✓ Apply${creditInvs.length>0?" — Mark "+creditInvs.length+" Invoice"+(creditInvs.length>1?"s":"")+" Paid":""}${debitInvs.length>0?" + "+debitInvs.length+" Expense"+(debitInvs.length>1?"s":""):""}`}
                             </button>
                             <button onClick={()=>setScanResult(null)}
                               style={{background:C.card2,color:C.muted,border:`1px solid ${C.border}`,borderRadius:6,
