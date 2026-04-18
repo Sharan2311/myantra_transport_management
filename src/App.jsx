@@ -7961,7 +7961,7 @@ function ScanPaymentBtn({ onResult }) {
       if (parsed.error) throw new Error(parsed.error);
       onResult(parsed);
     } catch(e) {
-      alert("Could not read payment image. Please fill manually.");
+      alert("Could not read payment image.\n\n" + (e.message||"Unknown error") + "\n\nPlease fill manually.");
     } finally {
       setScanning(false);
       if (inputRef.current) inputRef.current.value = "";
@@ -14802,7 +14802,7 @@ This will auto-recover in the next trip.`);
       // Always open split sheet — handles both single and multi-LR
       setSplitSheet(data);
     } catch(e) {
-      alert("Could not read payment image. Please fill manually.");
+      alert("Could not read payment image.\n\n" + (e.message||"Unknown error") + "\n\nPlease fill manually.");
     } finally {
       setScanningGlobal(false);
       if (scanInputRef.current) scanInputRef.current.value = "";

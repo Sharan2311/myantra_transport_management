@@ -1,44 +1,32 @@
 // netlify/functions/scan-payment.js
 
 const PAYMENT_PROMPT = `You are extracting data from an HDFC Bank payment confirmation screenshot.
-This could be an NEFT transfer, Within HDFC Bank transfer, RTGS, or IMPS payment.
+The payment type can be: NEFT, Within HDFC Bank, RTGS, IMPS, or UPI.
 
-CRITICAL ACCURACY REQUIREMENT: This data is used for financial records. Every character must be exact.
-DO NOT guess, infer, or fill in any value you are not 100% certain about. Return null for uncertain fields.
+CRITICAL: This is used for financial records. Copy every value exactly as shown.
+If a field is not visible or unclear, return null — never guess.
 
-THE HDFC SCREENSHOT HAS THESE LABELLED FIELDS — find each and copy the value exactly:
+FIND THESE FIELDS IN THE SCREENSHOT:
 
-1. Large amount at top (e.g. ₹41,900) → "amount" (number only, no ₹ or commas)
-2. Subtitle line below amount → may contain LR numbers like SKLC209, SGNC010
-3. Date next to "Request Accepted" → "paymentDate" (convert to YYYY-MM-DD)
-4. "Paid To:" → "paidTo" (copy VERBATIM, character by character)
-5. "HDFC Transaction ID:" → "transactionId" (copy VERBATIM, alphanumeric)
-6. "Reference Number:" → "referenceNo" (copy VERBATIM — this is the UTR)
-   ⚠ For NEFT: starts with "HDFC", typically 17-19 characters
-   ⚠ For Within HDFC Bank: much longer numeric string (30+ digits)
-   ⚠ Read each digit individually. Do NOT confuse: 0/O, 1/I, 6/4, 8/3, 5/S
-7. "Savings A/c:" or "A/c:" or "Current A/c:" → "recipientAccount"
-8. "Paid By:" → "paidBy" (copy VERBATIM)
-9. "Payment Method:" → note if it says "NEFT", "Within HDFC Bank", "RTGS", or "IMPS"
+1. The large rupee amount at the top (e.g. ₹41,900)
+2. Text below the amount — often contains LR numbers (e.g. SKLC209)
+3. The date shown near "Request Accepted" (e.g. Apr 18, 2026)
+4. Label "Paid To:" → copy the name exactly
+5. Label "HDFC Transaction ID:" → copy the alphanumeric value exactly
+6. Label "Reference Number:" → copy the value exactly (may be short like HDFCH... or long numeric)
+7. Label with "A/c:" (Savings/Current/A/c) → copy the account number
+8. Label "Paid By:" → copy the name exactly
 
-STRICT RULES:
-- Copy "referenceNo" and "transactionId" CHARACTER BY CHARACTER
-- If uncertain about any character, return null for the entire field
-- "paidTo": exact text after "Paid To:" label, verbatim
-- "amount": plain number e.g. 41900 not "₹41,900"
-- "lrNumbers": array of LR numbers found anywhere (SKLC001, SGNC001, UTCC001, INBL001 etc.)
-- Return null for any field not clearly readable
-
-Return ONLY this JSON, no markdown:
+Return ONLY this JSON:
 {
-  "amount": <number or null>,
-  "paidTo": "<verbatim or null>",
-  "referenceNo": "<verbatim Reference Number or null>",
-  "transactionId": "<verbatim HDFC Transaction ID or null>",
-  "paymentDate": "<YYYY-MM-DD or null>",
+  "amount": <number without commas or ₹, or null>,
+  "paidTo": "<exact text after Paid To: or null>",
+  "referenceNo": "<exact Reference Number value or null>",
+  "transactionId": "<exact HDFC Transaction ID value or null>",
+  "paymentDate": "<YYYY-MM-DD format or null>",
   "recipientAccount": "<account number or null>",
-  "paidBy": "<verbatim or null>",
-  "lrNumbers": ["<LR numbers found>"],
+  "paidBy": "<exact text after Paid By: or null>",
+  "lrNumbers": ["LR numbers found, e.g. SKLC209"],
   "narration": null
 }`;
 
@@ -54,6 +42,10 @@ exports.handler = async (event) => {
 
   try {
     const { base64, mediaType } = JSON.parse(event.body);
+
+    if (!base64) {
+      return { statusCode: 400, body: JSON.stringify({ error: "No image data provided" }) };
+    }
 
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -79,34 +71,45 @@ exports.handler = async (event) => {
     });
 
     const data = await response.json();
-    if (!response.ok || data.error) throw new Error(data.error?.message || "API error");
 
-    const text = data.content[0].text;
+    if (!response.ok || data.error) {
+      const errMsg = data.error?.message || JSON.stringify(data.error) || `API ${response.status}`;
+      console.error("scan-payment API error:", errMsg);
+      return {
+        statusCode: 200,
+        body: JSON.stringify({ error: "Anthropic API error: " + errMsg })
+      };
+    }
+
+    const text = (data.content || []).find(b => b.type === "text")?.text || "";
     const clean = text.replace(/```json|```/g, "").trim();
 
     let parsed;
     try {
       parsed = JSON.parse(clean);
     } catch(e) {
+      console.error("scan-payment parse error:", clean.slice(0, 500));
       return {
         statusCode: 200,
-        body: JSON.stringify({ error: "Could not parse payment details. Please fill manually." })
+        body: JSON.stringify({ error: "Could not parse AI response. Raw: " + clean.slice(0, 200) })
       };
     }
 
-    // Validate — if all critical fields null, return error
-    const hasAmount   = parsed.amount != null && parsed.amount > 0;
-    const hasPaidTo   = parsed.paidTo != null && String(parsed.paidTo).trim().length > 0;
-    const hasRef      = parsed.referenceNo != null && String(parsed.referenceNo).trim().length > 0;
+    // Strict validation — all critical fields must be extracted
+    const missing = [];
+    if (parsed.amount == null || parsed.amount <= 0) missing.push("amount");
+    if (!parsed.paidTo || !String(parsed.paidTo).trim()) missing.push("paidTo");
+    if (!parsed.referenceNo || !String(parsed.referenceNo).trim()) missing.push("referenceNo");
+    if (!parsed.paymentDate || !String(parsed.paymentDate).trim()) missing.push("paymentDate");
 
-    if (!hasAmount && !hasPaidTo && !hasRef) {
+    if (missing.length > 0) {
       return {
         statusCode: 200,
-        body: JSON.stringify({ error: "Could not read payment details from image. Please fill manually." })
+        body: JSON.stringify({ error: "Could not read: " + missing.join(", ") + ". Please fill manually." })
       };
     }
 
-    // Clean up
+    // Clean up — trim strings
     if (parsed.paidTo)          parsed.paidTo          = String(parsed.paidTo).trim();
     if (parsed.referenceNo)     parsed.referenceNo     = String(parsed.referenceNo).trim();
     if (parsed.transactionId)   parsed.transactionId   = String(parsed.transactionId).trim();
@@ -125,6 +128,6 @@ exports.handler = async (event) => {
 
   } catch (error) {
     console.error("scan-payment error:", error);
-    return { statusCode: 500, body: JSON.stringify({ error: error.message }) };
+    return { statusCode: 200, body: JSON.stringify({ error: "Function error: " + error.message }) };
   }
 };
