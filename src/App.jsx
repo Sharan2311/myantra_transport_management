@@ -12251,11 +12251,19 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
       if(byDi) return {trip:byDi, via:"DI"};
     }
     // 2. Match by GR number (second priority)
+    // But only if the DI numbers don't conflict (different DI = wrong trip)
     if(stGr) {
-      const byGr = tripList.find(t =>
-        (t.grNo||"").split("+").map(g=>g.trim()).some(g=>g===stGr) ||
-        (t.diLines||[]).some(d=>(d.grNo||"").trim()===stGr)
-      );
+      const byGr = tripList.find(t => {
+        const grMatch = (t.grNo||"").split("+").map(g=>g.trim()).some(g=>g===stGr) ||
+          (t.diLines||[]).some(d=>(d.grNo||"").trim()===stGr);
+        if(!grMatch) return false;
+        // If invoice has a DI and trip has a DI, they must match
+        if(stDi && (t.diNo||"").trim() && !((t.diNo||"").split("+").map(s=>s.trim()).includes(stDi))
+           && !(t.diLines||[]).some(d=>(d.diNo||"").trim()===stDi)) {
+          return false; // DI conflict — same GR but different DI = wrong trip
+        }
+        return true;
+      });
       if(byGr) return {trip:byGr, via:"GR"};
     }
     // 3. Match by LR number (fallback)
@@ -14531,7 +14539,7 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPayR
   );
 }
 
-function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, setVehicles, employees, cashTransfers, setCashTransfers, paymentRequests=[], setPaymentRequests, indents=[], user, log, viewOnly=false}) {
+function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, setVehicles, employees, cashTransfers, setCashTransfers, paymentRequests=[], setPaymentRequests, indents=[], dieselRequests=[], setDieselRequests, user, log, viewOnly=false}) {
   const [filter,    setFilter]    = useState("unpaid");
   const [paySheet,  setPaySheet]  = useState(null);
   const [payReqSheet,   setPayReqSheet]   = useState(null); // trip for request payment
