@@ -1,41 +1,43 @@
 // netlify/functions/scan-payment.js
 
-const PAYMENT_PROMPT = `You are extracting data from an HDFC Bank NEFT payment confirmation screenshot.
+const PAYMENT_PROMPT = `You are extracting data from an HDFC Bank payment confirmation screenshot.
+This could be an NEFT transfer, Within HDFC Bank transfer, RTGS, or IMPS payment.
 
 CRITICAL ACCURACY REQUIREMENT: This data is used for financial records. Every character must be exact.
 DO NOT guess, infer, or fill in any value you are not 100% certain about. Return null for uncertain fields.
 
-THE HDFC NEFT SCREENSHOT HAS THESE EXACT LABELLED FIELDS:
+THE HDFC SCREENSHOT HAS THESE LABELLED FIELDS — find each and copy the value exactly:
 
-1. Large amount at top → "amount" (number only, no ₹ or commas)
-2. Subtitle line below amount → may contain LR numbers like SKLC190, SKLC195
-3. Date next to "Request Accepted" → "paymentDate" (YYYY-MM-DD)
+1. Large amount at top (e.g. ₹41,900) → "amount" (number only, no ₹ or commas)
+2. Subtitle line below amount → may contain LR numbers like SKLC209, SGNC010
+3. Date next to "Request Accepted" → "paymentDate" (convert to YYYY-MM-DD)
 4. "Paid To:" → "paidTo" (copy VERBATIM, character by character)
-5. "HDFC Transaction ID:" → "transactionId" (copy VERBATIM — starts with HDFC, alphanumeric)
-6. "Reference Number:" → "referenceNo" (copy VERBATIM — this is the UTR, starts with HDFC)
-   ⚠ CRITICAL: The Reference Number is typically 17-19 characters long starting with "HDFCH".
-   Read each digit individually. Do NOT confuse similar characters: 0/O, 1/I, 6/4, 8/3, 5/S.
-   Example format: HDFCH00939646487
-7. "Savings A/c:" or "Current A/c:" → "recipientAccount"
-8. "Paid By:" → "paidBy"
+5. "HDFC Transaction ID:" → "transactionId" (copy VERBATIM, alphanumeric)
+6. "Reference Number:" → "referenceNo" (copy VERBATIM — this is the UTR)
+   ⚠ For NEFT: starts with "HDFC", typically 17-19 characters
+   ⚠ For Within HDFC Bank: much longer numeric string (30+ digits)
+   ⚠ Read each digit individually. Do NOT confuse: 0/O, 1/I, 6/4, 8/3, 5/S
+7. "Savings A/c:" or "A/c:" or "Current A/c:" → "recipientAccount"
+8. "Paid By:" → "paidBy" (copy VERBATIM)
+9. "Payment Method:" → note if it says "NEFT", "Within HDFC Bank", "RTGS", or "IMPS"
 
 STRICT RULES:
-- "referenceNo" and "transactionId" must be copied CHARACTER BY CHARACTER — read each digit separately
-- If you are not certain about a character, return null for the entire field rather than guessing
-- "paidTo": copy the exact text after "Paid To:" label, verbatim, same capitalisation
-- "amount": plain number e.g. 35877 not "₹35,877"
-- "lrNumbers": array of LR numbers found (formats: SKLC001, SGNC001, UTCC001, INBL001 etc.) — check subtitle line below amount
-- All other fields: return null if not clearly readable
+- Copy "referenceNo" and "transactionId" CHARACTER BY CHARACTER
+- If uncertain about any character, return null for the entire field
+- "paidTo": exact text after "Paid To:" label, verbatim
+- "amount": plain number e.g. 41900 not "₹41,900"
+- "lrNumbers": array of LR numbers found anywhere (SKLC001, SGNC001, UTCC001, INBL001 etc.)
+- Return null for any field not clearly readable
 
 Return ONLY this JSON, no markdown:
 {
   "amount": <number or null>,
-  "paidTo": "<verbatim text after Paid To: or null>",
-  "referenceNo": "<verbatim Reference Number (UTR) or null>",
+  "paidTo": "<verbatim or null>",
+  "referenceNo": "<verbatim Reference Number or null>",
   "transactionId": "<verbatim HDFC Transaction ID or null>",
   "paymentDate": "<YYYY-MM-DD or null>",
   "recipientAccount": "<account number or null>",
-  "paidBy": "<verbatim text after Paid By: or null>",
+  "paidBy": "<verbatim or null>",
   "lrNumbers": ["<LR numbers found>"],
   "narration": null
 }`;
@@ -61,7 +63,7 @@ exports.handler = async (event) => {
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-6",   // Sonnet for financial accuracy — single character errors matter
+        model: "claude-sonnet-4-6",
         max_tokens: 1024,
         messages: [{
           role: "user",
@@ -106,8 +108,8 @@ exports.handler = async (event) => {
 
     // Clean up
     if (parsed.paidTo)          parsed.paidTo          = String(parsed.paidTo).trim();
-    if (parsed.referenceNo)     parsed.referenceNo     = String(parsed.referenceNo).trim().toUpperCase();
-    if (parsed.transactionId)   parsed.transactionId   = String(parsed.transactionId).trim().toUpperCase();
+    if (parsed.referenceNo)     parsed.referenceNo     = String(parsed.referenceNo).trim();
+    if (parsed.transactionId)   parsed.transactionId   = String(parsed.transactionId).trim();
     if (parsed.paidBy)          parsed.paidBy          = String(parsed.paidBy).trim();
 
     // Normalise LR numbers
