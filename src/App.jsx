@@ -1667,6 +1667,44 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
     r.readAsDataURL(file);
   });
 
+  // Verify DI number from uploaded party GR/invoice file
+  const verifyPartyFileDI = async (file, expectedDI, itemId, fileType) => {
+    if(!expectedDI) return; // no DI to compare
+    try {
+      const base64 = await fileToBase64(file);
+      const isImage = file.type.startsWith("image/");
+      const resp = await fetch("/.netlify/functions/scan-di", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          base64,
+          mediaType: isImage ? file.type : "application/pdf",
+          promptType: "di"
+        }),
+      });
+      const data = await resp.json();
+      if(!resp.ok || data.error) {
+        updateItem(itemId, fileType+"DiCheck", {status:"warn", msg:"Could not verify DI — " + (data.error||"scan failed")});
+        return;
+      }
+      const extractedDI = (data.diNo||"").replace(/\D/g,"");
+      const expectedClean = (expectedDI||"").replace(/\D/g,"");
+      if(extractedDI && expectedClean && extractedDI !== expectedClean) {
+        updateItem(itemId, fileType+"DiCheck", {
+          status: "error",
+          msg: `DI mismatch: file has ${extractedDI}, expected ${expectedClean}`,
+          fileDI: extractedDI
+        });
+      } else if(extractedDI && expectedClean && extractedDI === expectedClean) {
+        updateItem(itemId, fileType+"DiCheck", {status:"ok", msg:"DI verified ✓"});
+      } else {
+        updateItem(itemId, fileType+"DiCheck", {status:"warn", msg:"Could not extract DI from file"});
+      }
+    } catch(e) {
+      updateItem(itemId, fileType+"DiCheck", {status:"warn", msg:"Verification failed: " + e.message});
+    }
+  };
+
   const userClients = getUserClients(user); // clients this user is allowed to see/use
 
   const detectClient = ex => {
@@ -1869,6 +1907,17 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       if(frRate - (+item.givenRate) < 30) return false;
       // Only require GR/Invoice for DIs explicitly set as party order
       if(item.orderType==="party" && (!item.grFile||!item.invoiceFile)) return false;
+      // Block save if party file DI verification failed (mismatch)
+      if(item.orderType==="party" && item.grFileDiCheck?.status==="error") return false;
+      if(item.orderType==="party" && item.invoiceFileDiCheck?.status==="error") return false;
+      // Block save if party file DI is still being checked
+      if(item.orderType==="party" && (item.grFileDiCheck?.status==="checking" || item.invoiceFileDiCheck?.status==="checking")) return false;
+      // Block if party file DI verification failed (mismatch)
+      if(item.orderType==="party" && item.grFileDiCheck?.status==="error") return false;
+      if(item.orderType==="party" && item.invoiceFileDiCheck?.status==="error") return false;
+      // Block if party file DI verification is still running
+      if(item.orderType==="party" && item.grFileDiCheck?.status==="checking") return false;
+      if(item.orderType==="party" && item.invoiceFileDiCheck?.status==="checking") return false;
       // Block if DI already exists in saved trips
       if(checkDupDI(item.extracted?.diNo)) return false;
     }
@@ -2511,7 +2560,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                         </div>
 
                         {/* Party files */}
-                        {item.orderType==="party"&&(
+                        {item.orderType==="party"&&(<>
                           <div style={{display:"flex",gap:8}}>
                             <div style={{flex:1}}>
                               <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
@@ -2522,7 +2571,13 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                                 padding:"7px 10px",cursor:"pointer",fontSize:12}}>
                                 <span>{item.grFile?"📄 "+item.grFile.name:"📎 Upload GR"}</span>
                                 <input type="file" accept="application/pdf,image/*" style={{display:"none"}}
-                                  onChange={e=>e.target.files?.[0]&&updateItem(item.id,"grFile",e.target.files[0])} />
+                                  onChange={e=>{
+                                    const f=e.target.files?.[0];
+                                    if(!f) return;
+                                    updateItem(item.id,"grFile",f);
+                                    updateItem(item.id,"grFileDiCheck",{status:"checking",msg:"Verifying DI…"});
+                                    verifyPartyFileDI(f, item.extracted?.diNo, item.id, "grFile");
+                                  }} />
                               </label>
                             </div>
                             <div style={{flex:1}}>
@@ -2534,11 +2589,46 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                                 padding:"7px 10px",cursor:"pointer",fontSize:12}}>
                                 <span>{item.invoiceFile?"📄 "+item.invoiceFile.name:"📎 Upload Invoice"}</span>
                                 <input type="file" accept="application/pdf,image/*" style={{display:"none"}}
-                                  onChange={e=>e.target.files?.[0]&&updateItem(item.id,"invoiceFile",e.target.files[0])} />
+                                  onChange={e=>{
+                                    const f=e.target.files?.[0];
+                                    if(!f) return;
+                                    updateItem(item.id,"invoiceFile",f);
+                                    updateItem(item.id,"invoiceFileDiCheck",{status:"checking",msg:"Verifying DI…"});
+                                    verifyPartyFileDI(f, item.extracted?.diNo, item.id, "invoiceFile");
+                                  }} />
                               </label>
                             </div>
                           </div>
-                        )}
+                          {/* DI verification status */}
+                          {(item.grFileDiCheck||item.invoiceFileDiCheck) && (
+                            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                              {item.grFileDiCheck && (
+                                <div style={{fontSize:10,padding:"3px 8px",borderRadius:6,fontWeight:600,
+                                  color:item.grFileDiCheck.status==="ok"?"#16a34a":
+                                    item.grFileDiCheck.status==="error"?"#dc2626":
+                                    item.grFileDiCheck.status==="checking"?C.blue:"#d97706",
+                                  background:item.grFileDiCheck.status==="ok"?"#dcfce7":
+                                    item.grFileDiCheck.status==="error"?"#fef2f2":
+                                    item.grFileDiCheck.status==="checking"?C.blue+"11":"#fffbeb"}}>
+                                  GR: {item.grFileDiCheck.status==="checking"?"⏳ ":""}
+                                  {item.grFileDiCheck.msg}
+                                </div>
+                              )}
+                              {item.invoiceFileDiCheck && (
+                                <div style={{fontSize:10,padding:"3px 8px",borderRadius:6,fontWeight:600,
+                                  color:item.invoiceFileDiCheck.status==="ok"?"#16a34a":
+                                    item.invoiceFileDiCheck.status==="error"?"#dc2626":
+                                    item.invoiceFileDiCheck.status==="checking"?C.blue:"#d97706",
+                                  background:item.invoiceFileDiCheck.status==="ok"?"#dcfce7":
+                                    item.invoiceFileDiCheck.status==="error"?"#fef2f2":
+                                    item.invoiceFileDiCheck.status==="checking"?C.blue+"11":"#fffbeb"}}>
+                                  Invoice: {item.invoiceFileDiCheck.status==="checking"?"⏳ ":""}
+                                  {item.invoiceFileDiCheck.msg}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </>)}
                       </div>
                     )}
                   </div>
@@ -4596,7 +4686,6 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
   const [wasScanned,  setWasScanned]  = useState(false);
   const [confirmDel,  setConfirmDel]  = useState(null);
   const [showDateFilter, setShowDateFilter] = useState(false);
-  const [ownerReportSheet, setOwnerReportSheet] = useState(false);
   const [dateFrom,    setDateFrom]    = useState("");
   const [dateTo,      setDateTo]      = useState("");
   const [expandedIds, setExpandedIds] = useState(new Set()); // collapsed by default
@@ -10519,6 +10608,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
   const [pdfFrom,  setPdfFrom]  = useState("");
   const [pdfTo,    setPdfTo]    = useState("");
   const [showDateFilter, setShowDateFilter] = useState(false);
+  const [ownerReportSheet, setOwnerReportSheet] = useState(null);
 
   // Loan txn form
   const [lAmt,  setLAmt]  = useState(""); const [lDate,  setLDate]  = useState(new Date().toISOString().slice(0,10));
@@ -10721,83 +10811,106 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
     w.document.close();
   };
 
-  // ── Owner Report: aggregated per-owner summary ────────────────────────────
-  const generateOwnerReport = () => {
-    const ownerMap = {};
-    (vehicles||[]).forEach(v => {
-      const name = (v.ownerName||"Unknown").trim();
-      if(!ownerMap[name]) ownerMap[name] = {
-        name, vehicles:[], totalLoan:0, totalRecovered:0, totalShortOwed:0, totalShortRecov:0,
-        totalTrips:0, totalPaid:0, totalDue:0, deductPerTrip:0
-      };
-      const o = ownerMap[name];
-      o.vehicles.push(v);
-      o.totalLoan      += +(v.loan||0);
-      o.totalRecovered += +(v.loanRecovered||0);
-      o.totalShortOwed += +(v.shortageOwed||0);
-      o.totalShortRecov+= +(v.shortageRecovered||0);
-      o.deductPerTrip   = +(v.deductPerTrip||0); // same for all vehs of owner
-    });
-    const fmt = n => "₹"+(n||0).toLocaleString("en-IN");
-    // Count trips and payments per owner
-    Object.values(ownerMap).forEach(o => {
-      const truckNos = new Set(o.vehicles.map(v=>v.truckNo));
-      o.totalTrips = (trips||[]).filter(t=>truckNos.has(t.truckNo)).length;
-      o.totalPaid  = (driverPays||[]).filter(p=>truckNos.has(p.truckNo)).reduce((s,p)=>s+(p.amount||0),0);
-    });
-    const owners = Object.values(ownerMap).sort((a,b)=>(b.totalLoan-b.totalRecovered)-(a.totalLoan-a.totalRecovered));
-    const totalLoanBal = owners.reduce((s,o)=>s+Math.max(0,o.totalLoan-o.totalRecovered),0);
+  // ── Owner names for dropdown ──
+  const ownerNames = [...new Set((vehicles||[]).map(v=>(v.ownerName||"").trim()).filter(Boolean))].sort();
 
-    const rows = owners.map(o => {
-      const loanBal = Math.max(0, o.totalLoan - o.totalRecovered);
-      const shortBal = Math.max(0, o.totalShortOwed - o.totalShortRecov);
-      return `<tr>
-        <td style="font-weight:700">${o.name}</td>
-        <td>${o.vehicles.map(v=>v.truckNo).join(", ")}</td>
-        <td style="text-align:center">${o.vehicles.length}</td>
-        <td style="text-align:center">${o.totalTrips}</td>
-        <td style="text-align:right">${fmt(o.totalLoan)}</td>
-        <td style="text-align:right">${fmt(o.totalRecovered)}</td>
-        <td style="text-align:right;font-weight:700;color:${loanBal>0?"#dc2626":"#16a34a"}">${fmt(loanBal)}</td>
-        <td style="text-align:right">${fmt(o.totalShortOwed)}</td>
-        <td style="text-align:right">${fmt(o.totalShortRecov)}</td>
-        <td style="text-align:right;color:${shortBal>0?"#dc2626":"#16a34a"}">${fmt(shortBal)}</td>
-        <td style="text-align:right">${fmt(o.totalPaid)}</td>
-      </tr>`;
+  // ── Owner Report: per-owner summary ────────────────────────────────────────
+  const generateOwnerReport = (selectedOwner) => {
+    if(!selectedOwner) return;
+    const ownerVehs = (vehicles||[]).filter(v=>(v.ownerName||"").trim()===selectedOwner);
+    if(!ownerVehs.length) { alert("No vehicles found for "+selectedOwner); return; }
+    const fmt = n => "\u20B9"+(n||0).toLocaleString("en-IN");
+    const truckNos = new Set(ownerVehs.map(v=>v.truckNo));
+    const ownerTrips = (trips||[]).filter(t=>truckNos.has(t.truckNo));
+    const ownerPays = (driverPays||[]).filter(p=>truckNos.has(p.truckNo));
+    const totalLoan = ownerVehs.reduce((s,v)=>s+(v.loan||0),0);
+    const totalRecov = ownerVehs.reduce((s,v)=>s+(v.loanRecovered||0),0);
+    const loanBal = Math.max(0, totalLoan - totalRecov);
+    const totalShortOwed = ownerVehs.reduce((s,v)=>s+(v.shortageOwed||0),0);
+    const totalShortRecov = ownerVehs.reduce((s,v)=>s+(v.shortageRecovered||0),0);
+    const shortBal = Math.max(0, totalShortOwed - totalShortRecov);
+    const totalPaid = ownerPays.reduce((s,p)=>s+(p.amount||0),0);
+
+    // Per-vehicle breakdown
+    const vehRows = ownerVehs.map(v => {
+      const vTrips = ownerTrips.filter(t=>t.truckNo===v.truckNo);
+      const vPaid = ownerPays.filter(p=>p.truckNo===v.truckNo).reduce((s,p)=>s+(p.amount||0),0);
+      const vLoanBal = Math.max(0,(v.loan||0)-(v.loanRecovered||0));
+      const vShortBal = Math.max(0,(v.shortageOwed||0)-(v.shortageRecovered||0));
+      return "<tr>"
+        +"<td style=\"font-weight:700\">"+v.truckNo+"</td>"
+        +"<td style=\"text-align:center\">"+vTrips.length+"</td>"
+        +"<td style=\"text-align:right\">"+fmt(v.loan||0)+"</td>"
+        +"<td style=\"text-align:right\">"+fmt(v.loanRecovered||0)+"</td>"
+        +"<td style=\"text-align:right;font-weight:700;color:"+(vLoanBal>0?"#dc2626":"#16a34a")+"\">"+fmt(vLoanBal)+"</td>"
+        +"<td style=\"text-align:right\">"+fmt(v.shortageOwed||0)+"</td>"
+        +"<td style=\"text-align:right\">"+fmt(v.shortageRecovered||0)+"</td>"
+        +"<td style=\"text-align:right;color:"+(vShortBal>0?"#dc2626":"#16a34a")+"\">"+fmt(vShortBal)+"</td>"
+        +"<td style=\"text-align:right\">"+fmt(vPaid)+"</td>"
+        +"</tr>";
     }).join("");
+
+    // Loan transactions
+    const allLoanTxns = ownerVehs.flatMap(v=>(v.loanTxns||[]).map(tx=>({...tx,truckNo:v.truckNo})))
+      .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+    const loanRows = allLoanTxns.slice(0,50).map(tx =>
+      "<tr><td>"+tx.date+"</td><td>"+tx.truckNo+"</td>"
+      +"<td style=\"text-align:right;color:"+(tx.type==="recovery"?"#16a34a":"#dc2626")+"\">"+fmt(tx.amount)+"</td>"
+      +"<td>"+(tx.type==="recovery"?"Recovery":"Loan")+"</td>"
+      +"<td>"+(tx.lrNo||tx.note||"")+"</td></tr>"
+    ).join("");
+
+    // Shortage transactions
+    const allShortTxns = ownerVehs.flatMap(v=>(v.shortageTxns||[]).map(tx=>({...tx,truckNo:v.truckNo})))
+      .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+    const shortRows = allShortTxns.slice(0,50).map(tx =>
+      "<tr><td>"+tx.date+"</td><td>"+tx.truckNo+"</td>"
+      +"<td style=\"text-align:right\">"+fmt(tx.amount)+"</td>"
+      +"<td>"+(tx.type||"")+"</td>"
+      +"<td>"+(tx.lrNo||tx.note||"")+"</td></tr>"
+    ).join("");
 
     const html = `
       <style>
         body{font-family:sans-serif;margin:20px;color:#222}
         h2{color:#0d9488;margin:0 0 4px}
+        h3{color:#333;margin:20px 0 8px;border-bottom:2px solid #0d9488;padding-bottom:4px}
         h4{color:#666;margin:0 0 16px;font-weight:400}
-        table{width:100%;border-collapse:collapse;font-size:11px}
-        th{background:#0d9488;color:#fff;padding:8px 6px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:0.5px}
+        table{width:100%;border-collapse:collapse;font-size:11px;margin-bottom:16px}
+        th{background:#0d9488;color:#fff;padding:8px 6px;text-align:left;font-size:10px;text-transform:uppercase}
         td{padding:6px;border-bottom:1px solid #e5e7eb}
         tr:nth-child(even){background:#f8fafc}
-        .summary{display:flex;gap:16px;margin-bottom:16px;flex-wrap:wrap}
-        .kpi{background:#f0fdfa;border:1px solid #0d948833;border-radius:8px;padding:10px 14px;min-width:120px}
-        .kpi .label{font-size:10px;color:#666;text-transform:uppercase}
-        .kpi .value{font-size:18px;font-weight:800;color:#0d9488}
+        .summary{display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap}
+        .kpi{background:#f0fdfa;border:1px solid #0d948833;border-radius:8px;padding:10px 14px;min-width:100px}
+        .kpi .label{font-size:9px;color:#666;text-transform:uppercase}
+        .kpi .value{font-size:16px;font-weight:800;color:#0d9488}
         .footer{margin-top:20px;font-size:10px;color:#999;border-top:1px solid #ddd;padding-top:8px}
         @media print{body{margin:10px}table{font-size:9px}}
       </style>
-      <h2>M YANTRA ENTERPRISES — Owner Report</h2>
-      <h4>Generated: ${new Date().toLocaleString("en-IN")}</h4>
+      <h2>M YANTRA ENTERPRISES</h2>
+      <h4>Owner Report — <b>${selectedOwner}</b> · Generated: ${new Date().toLocaleString("en-IN")}</h4>
       <div class="summary">
-        <div class="kpi"><div class="label">Total Owners</div><div class="value">${owners.length}</div></div>
-        <div class="kpi"><div class="label">Total Vehicles</div><div class="value">${(vehicles||[]).length}</div></div>
-        <div class="kpi"><div class="label">Total Loan Balance</div><div class="value" style="color:#dc2626">${fmt(totalLoanBal)}</div></div>
+        <div class="kpi"><div class="label">Vehicles</div><div class="value">${ownerVehs.length}</div></div>
+        <div class="kpi"><div class="label">Total Trips</div><div class="value">${ownerTrips.length}</div></div>
+        <div class="kpi"><div class="label">Loan Balance</div><div class="value" style="color:${loanBal>0?"#dc2626":"#16a34a"}">${fmt(loanBal)}</div></div>
+        <div class="kpi"><div class="label">Shortage Balance</div><div class="value" style="color:${shortBal>0?"#dc2626":"#16a34a"}">${fmt(shortBal)}</div></div>
+        <div class="kpi"><div class="label">Total Paid</div><div class="value" style="color:#16a34a">${fmt(totalPaid)}</div></div>
       </div>
+      <h3>Vehicle Breakdown</h3>
       <table>
-        <thead><tr>
-          <th>Owner</th><th>Vehicles</th><th>Count</th><th>Trips</th>
-          <th>Loan</th><th>Recovered</th><th>Loan Bal.</th>
-          <th>Short. Owed</th><th>Short. Recov.</th><th>Short. Bal.</th>
-          <th>Total Paid</th>
-        </tr></thead>
-        <tbody>${rows}</tbody>
+        <thead><tr><th>Vehicle</th><th>Trips</th><th>Loan</th><th>Recovered</th><th>Loan Bal.</th><th>Short. Owed</th><th>Short. Recov.</th><th>Short. Bal.</th><th>Paid</th></tr></thead>
+        <tbody>${vehRows}</tbody>
       </table>
+      ${allLoanTxns.length>0?`<h3>Loan Transactions (Last 50)</h3>
+      <table>
+        <thead><tr><th>Date</th><th>Vehicle</th><th>Amount</th><th>Type</th><th>Reference</th></tr></thead>
+        <tbody>${loanRows}</tbody>
+      </table>`:""}
+      ${allShortTxns.length>0?`<h3>Shortage Transactions (Last 50)</h3>
+      <table>
+        <thead><tr><th>Date</th><th>Vehicle</th><th>Amount</th><th>Type</th><th>Reference</th></tr></thead>
+        <tbody>${shortRows}</tbody>
+      </table>`:""}
       <div class="footer">M Yantra Enterprises · PAN: ABBFM6370M · GSTN: 29ABBFM6370M1ZR</div>`;
 
     const w = window.open("","_blank");
@@ -10824,7 +10937,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
             </Btn>
           )}
           {isOwner && <Btn onClick={()=>{setEditId(null);setF(blank);setSheet(true);}} sm>+ Add</Btn>}
-          {isOwner && <Btn sm outline color={C.blue} onClick={generateOwnerReport}>📊 Owner Report</Btn>}
+          {isOwner && <Btn sm outline color={C.blue} onClick={()=>setOwnerReportSheet("")}>📊 Owner Report</Btn>}
           {isOwner && (
             <Btn sm outline color={C.red} onClick={()=>{
               // Backfill: scan all trips for negative net and add to vehicle loan
@@ -11696,6 +11809,42 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
           </Sheet>
         );
       })()}
+      {/* Owner Report Sheet */}
+      {ownerReportSheet!==null && (
+        <Sheet title="📊 Owner Report" onClose={()=>setOwnerReportSheet(null)}>
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <div style={{fontSize:12,color:C.muted}}>Select an owner to generate their detailed report</div>
+            <select value={ownerReportSheet}
+              onChange={e=>setOwnerReportSheet(e.target.value)}
+              style={{width:"100%",background:C.bg,border:`1.5px solid ${ownerReportSheet?C.accent:C.border}`,
+                borderRadius:8,color:ownerReportSheet?C.text:C.muted,padding:"10px 12px",fontSize:14,outline:"none"}}>
+              <option value="">— Select Owner —</option>
+              {ownerNames.map(n=><option key={n} value={n}>{n} ({(vehicles||[]).filter(v=>(v.ownerName||"").trim()===n).length} vehicles)</option>)}
+            </select>
+            {ownerReportSheet && (()=>{
+              const ov = (vehicles||[]).filter(v=>(v.ownerName||"").trim()===ownerReportSheet);
+              const tns = new Set(ov.map(v=>v.truckNo));
+              const tc = (trips||[]).filter(t=>tns.has(t.truckNo)).length;
+              const lb = ov.reduce((s,v)=>s+Math.max(0,(v.loan||0)-(v.loanRecovered||0)),0);
+              return (
+                <div style={{background:C.bg,borderRadius:10,padding:"12px 14px",border:`1px solid ${C.border}`}}>
+                  <div style={{fontWeight:800,fontSize:14,color:C.text,marginBottom:6}}>{ownerReportSheet}</div>
+                  <div style={{fontSize:12,color:C.muted}}>
+                    {ov.length} vehicle{ov.length!==1?"s":""} · {tc} trips · Loan balance: <b style={{color:lb>0?C.red:C.green}}>₹{lb.toLocaleString("en-IN")}</b>
+                  </div>
+                  <div style={{fontSize:11,color:C.muted,marginTop:4}}>
+                    {ov.map(v=>v.truckNo).join(", ")}
+                  </div>
+                </div>
+              );
+            })()}
+            <Btn onClick={()=>generateOwnerReport(ownerReportSheet)} full color={C.accent}
+              disabled={!ownerReportSheet}>
+              📄 Generate Report{ownerReportSheet?" — "+ownerReportSheet:""}
+            </Btn>
+          </div>
+        </Sheet>
+      )}
     </div>
   );
 }
