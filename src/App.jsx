@@ -10831,92 +10831,119 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
     const shortBal = Math.max(0, totalShortOwed - totalShortRecov);
     const totalPaid = ownerPays.reduce((s,p)=>s+(p.amount||0),0);
 
-    // Per-vehicle breakdown
+    // LR → truck lookup for correct vehicle attribution
+    const lrToTruck = {};
+    (trips||[]).forEach(t=>{ if(t.lrNo) lrToTruck[t.lrNo]=t.truckNo; });
+
+    // Per-vehicle rows
     const vehRows = ownerVehs.map(v => {
       const vTrips = ownerTrips.filter(t=>t.truckNo===v.truckNo);
       const vPaid = ownerPays.filter(p=>p.truckNo===v.truckNo).reduce((s,p)=>s+(p.amount||0),0);
       const vLoanBal = Math.max(0,(v.loan||0)-(v.loanRecovered||0));
       const vShortBal = Math.max(0,(v.shortageOwed||0)-(v.shortageRecovered||0));
-      return "<tr>"
-        +"<td style=\"font-weight:700\">"+v.truckNo+"</td>"
-        +"<td style=\"text-align:center\">"+vTrips.length+"</td>"
-        +"<td style=\"text-align:right\">"+fmt(v.loan||0)+"</td>"
-        +"<td style=\"text-align:right\">"+fmt(v.loanRecovered||0)+"</td>"
-        +"<td style=\"text-align:right;font-weight:700;color:"+(vLoanBal>0?"#dc2626":"#16a34a")+"\">"+fmt(vLoanBal)+"</td>"
-        +"<td style=\"text-align:right\">"+fmt(v.shortageOwed||0)+"</td>"
-        +"<td style=\"text-align:right\">"+fmt(v.shortageRecovered||0)+"</td>"
-        +"<td style=\"text-align:right;color:"+(vShortBal>0?"#dc2626":"#16a34a")+"\">"+fmt(vShortBal)+"</td>"
-        +"<td style=\"text-align:right\">"+fmt(vPaid)+"</td>"
-        +"</tr>";
+      return '<tr>'
+        +'<td class="l b">'+v.truckNo+'</td>'
+        +'<td class="c">'+vTrips.length+'</td>'
+        +'<td class="r">'+fmt(v.loan||0)+'</td>'
+        +'<td class="r">'+fmt(v.loanRecovered||0)+'</td>'
+        +'<td class="r b" style="color:'+(vLoanBal>0?'#dc2626':'#16a34a')+'">'+fmt(vLoanBal)+'</td>'
+        +'<td class="r">'+fmt(v.shortageOwed||0)+'</td>'
+        +'<td class="r">'+fmt(v.shortageRecovered||0)+'</td>'
+        +'<td class="r" style="color:'+(vShortBal>0?'#dc2626':'#16a34a')+'">'+fmt(vShortBal)+'</td>'
+        +'<td class="r b">'+fmt(vPaid)+'</td>'
+        +'</tr>';
     }).join("");
 
-    // Loan transactions
-    const allLoanTxns = ownerVehs.flatMap(v=>(v.loanTxns||[]).map(tx=>({...tx,truckNo:v.truckNo})))
+    // Loan transactions — use lrNo to find actual truck
+    const allLoanTxns = ownerVehs.flatMap(v=>(v.loanTxns||[]).map(tx=>({...tx,_storedOn:v.truckNo})))
       .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
-    const loanRows = allLoanTxns.slice(0,50).map(tx =>
-      "<tr><td>"+tx.date+"</td><td>"+tx.truckNo+"</td>"
-      +"<td style=\"text-align:right;color:"+(tx.type==="recovery"?"#16a34a":"#dc2626")+"\">"+fmt(tx.amount)+"</td>"
-      +"<td>"+(tx.type==="recovery"?"Recovery":"Loan")+"</td>"
-      +"<td>"+(tx.lrNo||tx.note||"")+"</td></tr>"
-    ).join("");
+    const loanRows = allLoanTxns.slice(0,50).map(tx => {
+      const actualTruck = tx.lrNo ? (lrToTruck[tx.lrNo]||tx._storedOn) : tx._storedOn;
+      return '<tr>'
+        +'<td class="l">'+tx.date+'</td>'
+        +'<td class="l">'+(tx.lrNo||"—")+'</td>'
+        +'<td class="l">'+actualTruck+'</td>'
+        +'<td class="r" style="color:'+(tx.type==="recovery"?'#16a34a':'#dc2626')+'">'+fmt(tx.amount)+'</td>'
+        +'<td class="c">'+(tx.type==="recovery"?'Recovery':'Loan')+'</td>'
+        +'<td class="l">'+(tx.note||"")+'</td>'
+        +'</tr>';
+    }).join("");
 
     // Shortage transactions
-    const allShortTxns = ownerVehs.flatMap(v=>(v.shortageTxns||[]).map(tx=>({...tx,truckNo:v.truckNo})))
+    const allShortTxns = ownerVehs.flatMap(v=>(v.shortageTxns||[]).map(tx=>({...tx,_storedOn:v.truckNo})))
       .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
-    const shortRows = allShortTxns.slice(0,50).map(tx =>
-      "<tr><td>"+tx.date+"</td><td>"+tx.truckNo+"</td>"
-      +"<td style=\"text-align:right\">"+fmt(tx.amount)+"</td>"
-      +"<td>"+(tx.type||"")+"</td>"
-      +"<td>"+(tx.lrNo||tx.note||"")+"</td></tr>"
+    const shortRows = allShortTxns.slice(0,50).map(tx => {
+      const actualTruck = tx.lrNo ? (lrToTruck[tx.lrNo]||tx._storedOn) : tx._storedOn;
+      return '<tr>'
+        +'<td class="l">'+tx.date+'</td>'
+        +'<td class="l">'+(tx.lrNo||"—")+'</td>'
+        +'<td class="l">'+actualTruck+'</td>'
+        +'<td class="r">'+fmt(tx.amount)+'</td>'
+        +'<td class="c">'+(tx.type||"")+'</td>'
+        +'<td class="l">'+(tx.note||"")+'</td>'
+        +'</tr>';
+    }).join("");
+
+    // Payment history
+    const payRows = ownerPays.sort((a,b)=>(b.date||"").localeCompare(a.date||"")).slice(0,50).map(p =>
+      '<tr>'
+        +'<td class="l">'+p.date+'</td>'
+        +'<td class="l">'+(p.lrNo||"—")+'</td>'
+        +'<td class="l">'+(p.truckNo||"—")+'</td>'
+        +'<td class="r b">'+fmt(p.amount)+'</td>'
+        +'<td class="l">'+(p.paidTo||"—")+'</td>'
+        +'<td class="l" style="font-family:monospace;font-size:9px">'+(p.utr||"—")+'</td>'
+        +'</tr>'
     ).join("");
 
-    const html = `
-      <style>
-        body{font-family:sans-serif;margin:20px;color:#222}
-        h2{color:#0d9488;margin:0 0 4px}
-        h3{color:#333;margin:20px 0 8px;border-bottom:2px solid #0d9488;padding-bottom:4px}
-        h4{color:#666;margin:0 0 16px;font-weight:400}
-        table{width:100%;border-collapse:collapse;font-size:11px;margin-bottom:16px}
-        th{background:#0d9488;color:#fff;padding:8px 6px;text-align:left;font-size:10px;text-transform:uppercase}
-        td{padding:6px;border-bottom:1px solid #e5e7eb}
-        tr:nth-child(even){background:#f8fafc}
-        .summary{display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap}
-        .kpi{background:#f0fdfa;border:1px solid #0d948833;border-radius:8px;padding:10px 14px;min-width:100px}
-        .kpi .label{font-size:9px;color:#666;text-transform:uppercase}
-        .kpi .value{font-size:16px;font-weight:800;color:#0d9488}
-        .footer{margin-top:20px;font-size:10px;color:#999;border-top:1px solid #ddd;padding-top:8px}
-        @media print{body{margin:10px}table{font-size:9px}}
-      </style>
-      <h2>M YANTRA ENTERPRISES</h2>
-      <h4>Owner Report — <b>${selectedOwner}</b> · Generated: ${new Date().toLocaleString("en-IN")}</h4>
-      <div class="summary">
-        <div class="kpi"><div class="label">Vehicles</div><div class="value">${ownerVehs.length}</div></div>
-        <div class="kpi"><div class="label">Total Trips</div><div class="value">${ownerTrips.length}</div></div>
-        <div class="kpi"><div class="label">Loan Balance</div><div class="value" style="color:${loanBal>0?"#dc2626":"#16a34a"}">${fmt(loanBal)}</div></div>
-        <div class="kpi"><div class="label">Shortage Balance</div><div class="value" style="color:${shortBal>0?"#dc2626":"#16a34a"}">${fmt(shortBal)}</div></div>
-        <div class="kpi"><div class="label">Total Paid</div><div class="value" style="color:#16a34a">${fmt(totalPaid)}</div></div>
+    const html = `<style>
+      body{font-family:-apple-system,sans-serif;margin:24px;color:#222;font-size:12px}
+      .header{display:flex;align-items:center;gap:14px;margin-bottom:14px;padding-bottom:10px;border-bottom:3px solid #0d9488}
+      .logo{width:50px;height:50px;background:#0d9488;border-radius:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+      .logo span{color:#fff;font-size:20px;font-weight:900;font-family:Arial,sans-serif}
+      h3{color:#0d9488;margin:18px 0 6px;padding-bottom:4px;border-bottom:2px solid #e5e7eb;font-size:13px}
+      table{width:100%;border-collapse:collapse;font-size:11px;margin-bottom:14px;table-layout:fixed}
+      th{background:#0d9488;color:#fff;padding:7px 6px;font-size:9px;text-transform:uppercase;letter-spacing:0.5px;white-space:nowrap}
+      td{padding:5px 6px;border-bottom:1px solid #e5e7eb;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      tr:nth-child(even){background:#f8fafc}
+      .l{text-align:left}.c{text-align:center}.r{text-align:right}.b{font-weight:700}
+      .summary{display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap}
+      .kpi{background:#f0fdfa;border:1px solid #0d948833;border-radius:8px;padding:8px 12px;min-width:90px;flex:1}
+      .kpi .label{font-size:8px;color:#666;text-transform:uppercase;letter-spacing:0.5px}
+      .kpi .value{font-size:15px;font-weight:800;color:#0d9488;margin-top:2px}
+      .footer{margin-top:16px;font-size:9px;color:#999;border-top:1px solid #ddd;padding-top:6px}
+      @media print{body{margin:12px}table{font-size:9px}.logo{background:#0d9488!important;-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}th{background:#0d9488!important;-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}}
+    </style>
+    <div class="header">
+      <div class="logo"><span>MY</span></div>
+      <div>
+        <div style="font-size:8px;text-transform:uppercase;letter-spacing:2px;color:#0d9488;font-weight:700">M Yantra Enterprises</div>
+        <div style="font-size:18px;font-weight:800;line-height:1.2">Owner Report — ${selectedOwner}</div>
+        <div style="font-size:10px;color:#888">Generated: ${new Date().toLocaleString("en-IN")} · Vehicles: ${ownerVehs.map(v=>v.truckNo).join(", ")}</div>
       </div>
-      <h3>Vehicle Breakdown</h3>
-      <table>
-        <thead><tr><th>Vehicle</th><th>Trips</th><th>Loan</th><th>Recovered</th><th>Loan Bal.</th><th>Short. Owed</th><th>Short. Recov.</th><th>Short. Bal.</th><th>Paid</th></tr></thead>
-        <tbody>${vehRows}</tbody>
-      </table>
-      ${allLoanTxns.length>0?`<h3>Loan Transactions (Last 50)</h3>
-      <table>
-        <thead><tr><th>Date</th><th>Vehicle</th><th>Amount</th><th>Type</th><th>Reference</th></tr></thead>
-        <tbody>${loanRows}</tbody>
-      </table>`:""}
-      ${allShortTxns.length>0?`<h3>Shortage Transactions (Last 50)</h3>
-      <table>
-        <thead><tr><th>Date</th><th>Vehicle</th><th>Amount</th><th>Type</th><th>Reference</th></tr></thead>
-        <tbody>${shortRows}</tbody>
-      </table>`:""}
-      <div class="footer">M Yantra Enterprises · PAN: ABBFM6370M · GSTN: 29ABBFM6370M1ZR</div>`;
+    </div>
+    <div class="summary">
+      <div class="kpi"><div class="label">Vehicles</div><div class="value">${ownerVehs.length}</div></div>
+      <div class="kpi"><div class="label">Total Trips</div><div class="value">${ownerTrips.length}</div></div>
+      <div class="kpi"><div class="label">Loan Balance</div><div class="value" style="color:${loanBal>0?"#dc2626":"#16a34a"}">${fmt(loanBal)}</div></div>
+      <div class="kpi"><div class="label">Shortage Bal.</div><div class="value" style="color:${shortBal>0?"#dc2626":"#16a34a"}">${fmt(shortBal)}</div></div>
+      <div class="kpi"><div class="label">Total Paid</div><div class="value" style="color:#16a34a">${fmt(totalPaid)}</div></div>
+    </div>
+    <h3>Vehicle Breakdown</h3>
+    <table>
+      <colgroup><col style="width:14%"><col style="width:7%"><col style="width:11%"><col style="width:11%"><col style="width:11%"><col style="width:11%"><col style="width:11%"><col style="width:11%"><col style="width:13%"></colgroup>
+      <thead><tr><th class="l">Vehicle</th><th class="c">Trips</th><th class="r">Loan</th><th class="r">Recovered</th><th class="r">Loan Bal.</th><th class="r">Short. Owed</th><th class="r">Short. Recov.</th><th class="r">Short. Bal.</th><th class="r">Paid</th></tr></thead>
+      <tbody>${vehRows}</tbody>
+    </table>
+    ${allLoanTxns.length>0?'<h3>Loan Transactions (Last 50)</h3><table><colgroup><col style="width:14%"><col style="width:12%"><col style="width:16%"><col style="width:14%"><col style="width:12%"><col style="width:32%"></colgroup><thead><tr><th class="l">Date</th><th class="l">LR</th><th class="l">Vehicle</th><th class="r">Amount</th><th class="c">Type</th><th class="l">Notes</th></tr></thead><tbody>'+loanRows+'</tbody></table>':""}
+    ${allShortTxns.length>0?'<h3>Shortage Transactions (Last 50)</h3><table><colgroup><col style="width:14%"><col style="width:12%"><col style="width:16%"><col style="width:14%"><col style="width:12%"><col style="width:32%"></colgroup><thead><tr><th class="l">Date</th><th class="l">LR</th><th class="l">Vehicle</th><th class="r">Amount</th><th class="c">Type</th><th class="l">Notes</th></tr></thead><tbody>'+shortRows+'</tbody></table>':""}
+    ${ownerPays.length>0?'<h3>Payment History (Last 50)</h3><table><colgroup><col style="width:12%"><col style="width:12%"><col style="width:14%"><col style="width:12%"><col style="width:18%"><col style="width:32%"></colgroup><thead><tr><th class="l">Date</th><th class="l">LR</th><th class="l">Vehicle</th><th class="r">Amount</th><th class="l">Paid To</th><th class="l">UTR</th></tr></thead><tbody>'+payRows+'</tbody></table>':""}
+    <div class="footer">M Yantra Enterprises · PAN: ABBFM6370M · GSTN: 29ABBFM6370M1ZR</div>`;
 
     const w = window.open("","_blank");
-    w.document.write(`<!DOCTYPE html><html><head><title>Owner Report</title></head><body onload="window.print()">${html}</body></html>`);
+    w.document.write('<!DOCTYPE html><html><head><title>Owner Report — '+selectedOwner+'</title></head><body onload="window.print()">'+html+'</body></html>');
     w.document.close();
-    setOwnerReportSheet(false);
+    setOwnerReportSheet(null);
   };
 
   return (
