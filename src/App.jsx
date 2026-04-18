@@ -4596,6 +4596,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
   const [wasScanned,  setWasScanned]  = useState(false);
   const [confirmDel,  setConfirmDel]  = useState(null);
   const [showDateFilter, setShowDateFilter] = useState(false);
+  const [ownerReportSheet, setOwnerReportSheet] = useState(false);
   const [dateFrom,    setDateFrom]    = useState("");
   const [dateTo,      setDateTo]      = useState("");
   const [expandedIds, setExpandedIds] = useState(new Set()); // collapsed by default
@@ -5506,6 +5507,14 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                           <span style={{color:C.blue,fontWeight:700}}>LR: {t.lrNo||"—"}</span>
                           {t.grNo && <span style={{color:C.muted}}> · GR: {t.grNo}</span>}
                         </div>
+                        {/* DI numbers in bold */}
+                        {(t.diLines&&t.diLines.length>1) ? (
+                          <div style={{fontSize:11,marginTop:2,fontWeight:800,color:C.text}}>
+                            DI: {t.diLines.map(d=>d.diNo).filter(Boolean).join(" · ")}
+                          </div>
+                        ) : t.diNo ? (
+                          <div style={{fontSize:11,marginTop:2,fontWeight:800,color:C.text}}>DI: {t.diNo}</div>
+                        ) : null}
                         <div style={{color:C.muted,fontSize:11,marginTop:1}}>{t.from}→{t.to} · {t.date}</div>
                       </div>
                       <div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0}}>
@@ -10712,6 +10721,91 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
     w.document.close();
   };
 
+  // ── Owner Report: aggregated per-owner summary ────────────────────────────
+  const generateOwnerReport = () => {
+    const ownerMap = {};
+    (vehicles||[]).forEach(v => {
+      const name = (v.ownerName||"Unknown").trim();
+      if(!ownerMap[name]) ownerMap[name] = {
+        name, vehicles:[], totalLoan:0, totalRecovered:0, totalShortOwed:0, totalShortRecov:0,
+        totalTrips:0, totalPaid:0, totalDue:0, deductPerTrip:0
+      };
+      const o = ownerMap[name];
+      o.vehicles.push(v);
+      o.totalLoan      += +(v.loan||0);
+      o.totalRecovered += +(v.loanRecovered||0);
+      o.totalShortOwed += +(v.shortageOwed||0);
+      o.totalShortRecov+= +(v.shortageRecovered||0);
+      o.deductPerTrip   = +(v.deductPerTrip||0); // same for all vehs of owner
+    });
+    const fmt = n => "₹"+(n||0).toLocaleString("en-IN");
+    // Count trips and payments per owner
+    Object.values(ownerMap).forEach(o => {
+      const truckNos = new Set(o.vehicles.map(v=>v.truckNo));
+      o.totalTrips = (trips||[]).filter(t=>truckNos.has(t.truckNo)).length;
+      o.totalPaid  = (driverPays||[]).filter(p=>truckNos.has(p.truckNo)).reduce((s,p)=>s+(p.amount||0),0);
+    });
+    const owners = Object.values(ownerMap).sort((a,b)=>(b.totalLoan-b.totalRecovered)-(a.totalLoan-a.totalRecovered));
+    const totalLoanBal = owners.reduce((s,o)=>s+Math.max(0,o.totalLoan-o.totalRecovered),0);
+
+    const rows = owners.map(o => {
+      const loanBal = Math.max(0, o.totalLoan - o.totalRecovered);
+      const shortBal = Math.max(0, o.totalShortOwed - o.totalShortRecov);
+      return `<tr>
+        <td style="font-weight:700">${o.name}</td>
+        <td>${o.vehicles.map(v=>v.truckNo).join(", ")}</td>
+        <td style="text-align:center">${o.vehicles.length}</td>
+        <td style="text-align:center">${o.totalTrips}</td>
+        <td style="text-align:right">${fmt(o.totalLoan)}</td>
+        <td style="text-align:right">${fmt(o.totalRecovered)}</td>
+        <td style="text-align:right;font-weight:700;color:${loanBal>0?"#dc2626":"#16a34a"}">${fmt(loanBal)}</td>
+        <td style="text-align:right">${fmt(o.totalShortOwed)}</td>
+        <td style="text-align:right">${fmt(o.totalShortRecov)}</td>
+        <td style="text-align:right;color:${shortBal>0?"#dc2626":"#16a34a"}">${fmt(shortBal)}</td>
+        <td style="text-align:right">${fmt(o.totalPaid)}</td>
+      </tr>`;
+    }).join("");
+
+    const html = `
+      <style>
+        body{font-family:sans-serif;margin:20px;color:#222}
+        h2{color:#0d9488;margin:0 0 4px}
+        h4{color:#666;margin:0 0 16px;font-weight:400}
+        table{width:100%;border-collapse:collapse;font-size:11px}
+        th{background:#0d9488;color:#fff;padding:8px 6px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:0.5px}
+        td{padding:6px;border-bottom:1px solid #e5e7eb}
+        tr:nth-child(even){background:#f8fafc}
+        .summary{display:flex;gap:16px;margin-bottom:16px;flex-wrap:wrap}
+        .kpi{background:#f0fdfa;border:1px solid #0d948833;border-radius:8px;padding:10px 14px;min-width:120px}
+        .kpi .label{font-size:10px;color:#666;text-transform:uppercase}
+        .kpi .value{font-size:18px;font-weight:800;color:#0d9488}
+        .footer{margin-top:20px;font-size:10px;color:#999;border-top:1px solid #ddd;padding-top:8px}
+        @media print{body{margin:10px}table{font-size:9px}}
+      </style>
+      <h2>M YANTRA ENTERPRISES — Owner Report</h2>
+      <h4>Generated: ${new Date().toLocaleString("en-IN")}</h4>
+      <div class="summary">
+        <div class="kpi"><div class="label">Total Owners</div><div class="value">${owners.length}</div></div>
+        <div class="kpi"><div class="label">Total Vehicles</div><div class="value">${(vehicles||[]).length}</div></div>
+        <div class="kpi"><div class="label">Total Loan Balance</div><div class="value" style="color:#dc2626">${fmt(totalLoanBal)}</div></div>
+      </div>
+      <table>
+        <thead><tr>
+          <th>Owner</th><th>Vehicles</th><th>Count</th><th>Trips</th>
+          <th>Loan</th><th>Recovered</th><th>Loan Bal.</th>
+          <th>Short. Owed</th><th>Short. Recov.</th><th>Short. Bal.</th>
+          <th>Total Paid</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div class="footer">M Yantra Enterprises · PAN: ABBFM6370M · GSTN: 29ABBFM6370M1ZR</div>`;
+
+    const w = window.open("","_blank");
+    w.document.write(`<!DOCTYPE html><html><head><title>Owner Report</title></head><body onload="window.print()">${html}</body></html>`);
+    w.document.close();
+    setOwnerReportSheet(false);
+  };
+
   return (
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
       {/* Header */}
@@ -10730,6 +10824,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
             </Btn>
           )}
           {isOwner && <Btn onClick={()=>{setEditId(null);setF(blank);setSheet(true);}} sm>+ Add</Btn>}
+          {isOwner && <Btn sm outline color={C.blue} onClick={generateOwnerReport}>📊 Owner Report</Btn>}
           {isOwner && (
             <Btn sm outline color={C.red} onClick={()=>{
               // Backfill: scan all trips for negative net and add to vehicle loan
@@ -11999,7 +12094,7 @@ const SearchBar = ({value,onChange,placeholder}) => (
   </div>
 );
 
-function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles, gstReleases, setGstReleases, expenses, setExpenses, user, log}) {
+function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, setVehicles, gstReleases, setGstReleases, expenses, setExpenses, user, log}) {
 
   const [activeTab,   setActiveTab]   = useState("overview");
   const [scanResult,  setScanResult]  = useState(null);
@@ -12082,7 +12177,8 @@ function Payments({payments, setPayments, trips, setTrips, vehicles, setVehicles
   // Client selector — "" = All
   const [payClient, setPayClient] = useState("");
   const [payMaterial, setPayMaterial] = useState("All"); // All | Cement | RawMaterial | Husk
-  const payTrips = (trips||[]).filter(t=> {
+  const displayTrips = fyTrips || trips;
+  const payTrips = (displayTrips||[]).filter(t=> {
     if(payClient && (t.client||DEFAULT_CLIENT)!==payClient) return false;
     if(payMaterial!=="All") {
       if(payMaterial==="Cement"      && t.type!=="outbound") return false;
@@ -14539,7 +14635,7 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPayR
   );
 }
 
-function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, setVehicles, employees, cashTransfers, setCashTransfers, paymentRequests=[], setPaymentRequests, indents=[], dieselRequests=[], setDieselRequests, user, log, viewOnly=false}) {
+function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, vehicles, setVehicles, employees, cashTransfers, setCashTransfers, paymentRequests=[], setPaymentRequests, indents=[], dieselRequests=[], setDieselRequests, user, log, viewOnly=false}) {
   const [filter,    setFilter]    = useState("unpaid");
   const [paySheet,  setPaySheet]  = useState(null);
   const [payReqSheet,   setPayReqSheet]   = useState(null); // trip for request payment
@@ -14558,7 +14654,8 @@ function DriverPayments({trips, setTrips, driverPays, setDriverPays, vehicles, s
   const [histPaidTo, setHistPaidTo] = useState("");
 
   // For each trip compute total paid and balance
-  const tripWithBalance = trips.map(t => {
+  const displayTripsDP = fyTrips || trips;
+  const tripWithBalance = displayTripsDP.map(t => {
     const veh      = vehicles.find(v=>v.truckNo===t.truckNo);
     // Multi-DI: use actual per-DI gross (sum of qty×givenRate per DI line)
     const gross    = (t.diLines&&t.diLines.length>1)
