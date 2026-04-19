@@ -1826,6 +1826,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
         shortageRecovery: "0",
         loanRecovery: String(autoLoanG),
         driverPhone: vehG?.driverPhone || "",
+        ownerName: vehG?.ownerName || "",
         assignedEmpId: "",
         _autoAttachedReqId: autoReqG?.id || null,
       };
@@ -1868,6 +1869,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           dieselIndentNo: autoReqS ? String(autoReqS.indentNo) : "",
           advance:"0", cashEmpId:"",
           shortageRecovery:"0", loanRecovery:String(autoLR2),
+          ownerName:g.ownerName||"",
           _splitFrom:gid,
           _autoAttachedReqId: autoReqS?.id || null,
         };
@@ -1921,6 +1923,9 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       // Block if DI already exists in saved trips
       if(checkDupDI(item.extracted?.diNo)) return false;
     }
+    // Owner name mandatory for new vehicles
+    const readyVeh = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
+    if((!readyVeh || !(readyVeh.ownerName||"").trim()) && !(g.ownerName||"").trim()) return false;
     if(+g.diesel > 0 && !g.dieselIndentNo.trim()) return false;
     // Block save if truck has an unconfirmed (open) diesel request — must be confirmed first
     const hasPendingDiesel = (dieselRequests||[]).some(r=>r.truckNo===g.truckNo&&r.status==="open");
@@ -2063,7 +2068,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       }
 
       if(truckNo && !existingVeh && !createdTrucksThisBatch.has(truckNo)) {
-        const nv = { id:uid(), truckNo, ownerName:"", phone:"",
+        const nv = { id:uid(), truckNo, ownerName:g.ownerName||"", phone:"",
           driverName:"", driverPhone:resolvedPhone, driverLicense:"",
           accountNo:"", ifsc:"", loan:0, loanRecovered:0, deductPerTrip:0,
           tafalExempt:false, shortageOwed:0, shortageRecovered:0,
@@ -2679,6 +2684,61 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                     {g.driverPhone&&phoneOk&&(
                       <div style={{fontSize:10,color:C.green,marginTop:2,fontWeight:700}}>
                         ✓ Will be saved to vehicle record
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* Owner name — required for new vehicles */}
+              {(()=>{
+                const existVehOwner = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
+                const isNewVehicle = !existVehOwner || !(existVehOwner.ownerName||"").trim();
+                if(!isNewVehicle) return null;
+                const allOwners = [...new Set((vehicles||[]).map(v=>(v.ownerName||"").trim()).filter(Boolean))].sort();
+                const ownerVal = (g.ownerName||"").trim();
+                const filtered = ownerVal
+                  ? allOwners.filter(o=>o.toLowerCase().includes(ownerVal.toLowerCase()))
+                  : allOwners;
+                return (
+                  <div>
+                    <div style={{fontSize:10,fontWeight:700,marginBottom:3,
+                      color:ownerVal?C.green:C.red}}>
+                      👤 OWNER NAME * {!ownerVal && "(required for new vehicle)"}
+                    </div>
+                    <div style={{position:"relative"}}>
+                      <input value={g.ownerName||""}
+                        onChange={e=>updateGroup(g.id,"ownerName",e.target.value)}
+                        placeholder="Type to search or enter new owner…"
+                        style={{width:"100%",background:C.bg,
+                          border:`1.5px solid ${ownerVal?C.green:C.red}`,
+                          borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,
+                          outline:"none",boxSizing:"border-box"}} />
+                      {ownerVal && filtered.length>0 && !allOwners.includes(ownerVal) && (
+                        <div style={{position:"absolute",top:"100%",left:0,right:0,zIndex:10,
+                          background:C.card,border:`1px solid ${C.border}`,borderRadius:8,
+                          maxHeight:150,overflowY:"auto",boxShadow:"0 4px 12px #0002",marginTop:2}}>
+                          {filtered.slice(0,8).map(o=>(
+                            <div key={o} onClick={()=>updateGroup(g.id,"ownerName",o)}
+                              style={{padding:"7px 10px",fontSize:12,cursor:"pointer",
+                                borderBottom:`1px solid ${C.border}33`,
+                                background:C.card}}
+                              onMouseEnter={e=>e.target.style.background=C.accent+"11"}
+                              onMouseLeave={e=>e.target.style.background=C.card}>
+                              {o}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    {ownerVal && allOwners.includes(ownerVal) && (
+                      <div style={{fontSize:10,color:C.green,marginTop:2,fontWeight:700}}>
+                        ✓ Known owner
+                      </div>
+                    )}
+                    {ownerVal && !allOwners.includes(ownerVal) && filtered.length===0 && (
+                      <div style={{fontSize:10,color:C.orange,marginTop:2,fontWeight:700}}>
+                        ⚠ New owner — will be added
                       </div>
                     )}
                   </div>
@@ -4723,6 +4783,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     tafal: String(settings?.tafalPerTrip||300),
     dieselEstimate:"0",
     cashEmpId: "",
+    ownerName: "",
     // Party order fields
     orderType: isParty ? "party" : "godown",
     district:"", state:"",
@@ -4947,6 +5008,13 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     // Validate: driver phone mandatory when truck is new or has no phone on record
     {
       const existVeh = (vehicles||[]).find(v=>v.truckNo===(f.truckNo||"").toUpperCase().trim());
+      // Owner name mandatory for new vehicles
+      if(!existVeh || !(existVeh.ownerName||"").trim()) {
+        if(!(f.ownerName||"").trim()) {
+          alert("Owner Name is mandatory for new vehicles.\nPlease enter or select an owner name.\n\nಮಾಲೀಕರ ಹೆಸರು ಕಡ್ಡಾಯ.");
+          return;
+        }
+      }
       if(!existVeh || !existVeh.driverPhone) {
         if(!f.driverPhone || !f.driverPhone.trim()) {
           alert("Driver Phone number is mandatory for new vehicles.\nPlease enter a 10-digit mobile number.\n\nಡ್ರೈವರ್ ಫೋನ್ ನಂಬರ್ ಕಡ್ಡಾಯ.");
@@ -5053,7 +5121,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     const tn2 = (t.truckNo||"").toUpperCase().trim();
     // Auto-create vehicle FIRST if not yet registered — so ledger update below finds it
     if (tn2 && !vehicles.find(v => v.truckNo === tn2)) {
-      const nv = { id:uid(), truckNo:tn2, ownerName:"", phone:"",
+      const nv = { id:uid(), truckNo:tn2, ownerName:f.ownerName||"", phone:"",
         driverName:"", driverPhone:"", driverLicense:"",
         accountNo:"", ifsc:"", loan:0, loanRecovered:0, deductPerTrip:0,
         tafalExempt:false, shortageOwed:0, shortageRecovered:0,
@@ -6644,7 +6712,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
           ? <LockedField label="Date" value={f.date} half />
           : <Field label="Date" value={f.date||today()} onChange={ff("date")} type="date" half />}
       </div>
-      {veh && (
+      {veh && (veh.ownerName||"").trim() && (
         <div style={{fontSize:12,color:C.muted,background:C.bg,borderRadius:8,padding:"10px 12px",
           border:`1px solid ${C.border}33`}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
@@ -6657,6 +6725,44 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
           </div>
         </div>
       )}
+      {/* Owner name — required for new vehicles or vehicles without owner */}
+      {f.truckNo && f.truckNo.trim().length>=4 && (!veh || !(veh.ownerName||"").trim()) && (()=>{
+        const allOwnersTF = [...new Set((vehicles||[]).map(v=>(v.ownerName||"").trim()).filter(Boolean))].sort();
+        const ownerValTF = (f.ownerName||"").trim();
+        const filteredTF = ownerValTF
+          ? allOwnersTF.filter(o=>o.toLowerCase().includes(ownerValTF.toLowerCase()))
+          : allOwnersTF;
+        return (
+          <div style={{position:"relative"}}>
+            <div style={{fontSize:11,fontWeight:700,marginBottom:3,textTransform:"uppercase",letterSpacing:1,
+              color:ownerValTF?C.green:C.red}}>
+              👤 Owner Name * {!ownerValTF && "(required)"}
+            </div>
+            <input value={f.ownerName||""}
+              onChange={e=>ff("ownerName")(e.target.value)}
+              placeholder="Type to search or enter new owner…"
+              style={{width:"100%",boxSizing:"border-box",background:C.bg,
+                border:`1.5px solid ${ownerValTF?C.green:C.red}`,
+                borderRadius:10,color:C.text,padding:"13px 12px",fontSize:15,outline:"none"}} />
+            {ownerValTF && filteredTF.length>0 && !allOwnersTF.includes(ownerValTF) && (
+              <div style={{position:"absolute",top:"100%",left:0,right:0,zIndex:10,
+                background:C.card,border:`1px solid ${C.border}`,borderRadius:8,
+                maxHeight:150,overflowY:"auto",boxShadow:"0 4px 12px #0002",marginTop:2}}>
+                {filteredTF.slice(0,8).map(o=>(
+                  <div key={o} onClick={()=>ff("ownerName")(o)}
+                    style={{padding:"10px 12px",fontSize:13,cursor:"pointer",
+                      borderBottom:`1px solid ${C.border}33`}}>
+                    {o}
+                  </div>
+                ))}
+              </div>
+            )}
+            {ownerValTF && allOwnersTF.includes(ownerValTF) && (
+              <div style={{fontSize:10,color:C.green,marginTop:2,fontWeight:700}}>✓ Known owner</div>
+            )}
+          </div>
+        );
+      })()}
       <div style={{display:"flex",gap:10}}>
         {locked
           ? <><LockedField label="DI / Order No" value={f.diNo} half /><LockedField label="GR No" value={f.grNo} half /></>
