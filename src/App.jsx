@@ -9756,8 +9756,8 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
             truckNo:drTruckNo.trim().toUpperCase(),
             pumpId:drPumpId||null,
             amount:totalAmt,
-            dieselAmount: dieselComp||null,
-            cashAmount:   cashComp||null,
+            dieselAmount: dieselComp,
+            cashAmount:   cashComp,
             date:today(), pin, status:"open",
             confirmedAmount:null, confirmedReason:null, confirmedAt:null,
             tripId:null, lrNo:null,
@@ -10007,10 +10007,10 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
                             setEditReqId(req.id);
                             setEditTruckNo(req.truckNo);
                             setEditAmount(String(req.amount));
-                            // If diesel/cash split exists, use it; otherwise default total to diesel field
-                            const hasSplit = (req.dieselAmount!=null && req.dieselAmount>0) || (req.cashAmount!=null && req.cashAmount>0);
-                            setEditDieselAmt(hasSplit ? String(req.dieselAmount||0) : String(req.amount||0));
-                            setEditCashAmt(hasSplit ? String(req.cashAmount||0) : "0");
+                            // Use stored diesel/cash values if they exist; fallback to total in diesel
+                            const hasSplit = req.dieselAmount!=null || req.cashAmount!=null;
+                            setEditDieselAmt(hasSplit ? String(req.dieselAmount??0) : String(req.amount||0));
+                            setEditCashAmt(String(req.cashAmount??0));
                             setEditPumpId(req.pumpId||"");
                           }} style={{background:C.blue+"22",border:`1px solid ${C.blue}55`,borderRadius:6,
                             color:C.blue,fontSize:11,padding:"3px 8px",cursor:"pointer",fontWeight:700}}>
@@ -10115,7 +10115,7 @@ This was already dispensed — only delete if it was recorded in error.`;
                           if(total<=0){alert("Enter Diesel and/or Cash amount");return;}
                           const updated={...req,
                             truckNo:editTruckNo.trim().toUpperCase(),
-                            amount:total, dieselAmount:d||null, cashAmount:ca||null,
+                            amount:total, dieselAmount:d, cashAmount:ca,
                             pumpId:editPumpId||null,
                           };
                           setDieselRequests(p=>p.map(r=>r.id===req.id?updated:r));
