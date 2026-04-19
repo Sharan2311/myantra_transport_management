@@ -10007,8 +10007,10 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
                             setEditReqId(req.id);
                             setEditTruckNo(req.truckNo);
                             setEditAmount(String(req.amount));
-                            setEditDieselAmt(req.dieselAmount ? String(req.dieselAmount) : "");
-                            setEditCashAmt(req.cashAmount   ? String(req.cashAmount)   : "");
+                            // If diesel/cash split exists, use it; otherwise default total to diesel field
+                            const hasSplit = (req.dieselAmount!=null && req.dieselAmount>0) || (req.cashAmount!=null && req.cashAmount>0);
+                            setEditDieselAmt(hasSplit ? String(req.dieselAmount||0) : String(req.amount||0));
+                            setEditCashAmt(hasSplit ? String(req.cashAmount||0) : "0");
                             setEditPumpId(req.pumpId||"");
                           }} style={{background:C.blue+"22",border:`1px solid ${C.blue}55`,borderRadius:6,
                             color:C.blue,fontSize:11,padding:"3px 8px",cursor:"pointer",fontWeight:700}}>
