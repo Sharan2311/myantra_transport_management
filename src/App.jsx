@@ -6876,9 +6876,9 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
             placeholder="0"
             note={veh?.tafalExempt?"⚠ Exempt vehicle — only owner can change this":""}/>
         )}
-        {isOwner ? (
+        {(isOwner || manualLrMode) ? (
           <Field label="Diesel Estimate ₹" value={f.dieselEstimate||""} onChange={ff("dieselEstimate")} type="number" half
-            note="Owner only — set from confirmed indent" placeholder="0" />
+            note={manualLrMode?"Manual entry":"Owner only"} placeholder="0" />
         ) : (
           <div style={{flex:"1 1 45%",minWidth:0,display:"flex",flexDirection:"column",gap:5}}>
             <label style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Diesel Estimate ₹</label>
@@ -6950,7 +6950,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
                   const amt = r.confirmedAmount??r.amount;
                   const isSel = val===String(r.indentNo);
                   const isConf = r.status==="confirmed";
-                  const canInteract = isOwner; // only owner can attach/detach
+                  const canInteract = isOwner || manualLrMode; // owner or manual LR mode
                   return (
                     <div key={r.id} onClick={()=>canInteract?(isSel?clearReq():attachReq(r)):null}
                       style={{
@@ -6989,8 +6989,8 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
               </div>
             )}
 
-            {/* No requests for this truck — owner can pick from others */}
-            {truckReqs.length===0 && otherReqs.length>0 && isOwner && (
+            {/* No requests for this truck — owner or manual LR can pick from others */}
+            {truckReqs.length===0 && otherReqs.length>0 && (isOwner || manualLrMode) && (
               <select value={val||""} onChange={e=>{
                 const sel=e.target.value;
                 if(!sel){clearReq();return;}
@@ -7009,17 +7009,24 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
               </select>
             )}
 
-            {/* Indent display — only owner can clear */}
+            {/* Indent display — owner or manual LR can clear */}
             {val && (
               <div style={{display:"flex",alignItems:"center",gap:6}}>
                 <div style={{flex:1,background:C.dim,border:`1.5px solid ${C.border}`,
                   borderRadius:8,color:C.muted,padding:"9px 12px",fontSize:13}}>
                   {val}
                 </div>
-                {isOwner && (
+                {(isOwner || manualLrMode) && (
                   <button onClick={clearReq} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:20,padding:"0 4px",lineHeight:1}}>×</button>
                 )}
               </div>
+            )}
+            {/* Manual indent entry for manual LR mode */}
+            {manualLrMode && !val && (
+              <input value={f.dieselIndentNo||""} onChange={e=>ff("dieselIndentNo")(e.target.value)}
+                placeholder="Type indent number…"
+                style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,
+                  borderRadius:8,color:C.text,padding:"9px 12px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
             )}
 
             {/* Matched / error messages */}
