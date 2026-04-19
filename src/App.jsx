@@ -1972,6 +1972,15 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
         }
       }
 
+      // Owner name mandatory for new/unknown vehicles
+      {
+        const ownerVeh = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
+        if((!ownerVeh || !(ownerVeh.ownerName||"").trim()) && !(g.ownerName||"").trim()) {
+          alert(`Truck ${g.truckNo}: Owner Name is required for new vehicles.\n\nPlease enter or select an owner name.`);
+          setSaving(false);
+          return;
+        }
+      }
       // Diesel indent
       if(+g.diesel > 0 && !g.dieselIndentNo.trim()) {
         alert(`Truck ${g.truckNo}: Diesel Indent No is required when Diesel Estimate is entered.`);
@@ -7203,7 +7212,15 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
       )}
 
       <div style={{color:C.muted,fontSize:12}}>Recording as: <b style={{color:ROLES[user.role]?.color}}>{user.name}</b></div>
-      <Btn onClick={onSubmit} full color={ac}>{submitLabel}</Btn>
+      <Btn onClick={onSubmit} full color={ac}
+        disabled={!!(f.truckNo && f.truckNo.trim().length>=4 && (()=>{
+          const sv=(vehicles||[]).find(v=>v.truckNo===(f.truckNo||"").toUpperCase().trim());
+          return (!sv || !(sv.ownerName||"").trim()) && !(f.ownerName||"").trim();
+        })())}
+      >{submitLabel}{!!(f.truckNo && f.truckNo.trim().length>=4 && (()=>{
+          const sv=(vehicles||[]).find(v=>v.truckNo===(f.truckNo||"").toUpperCase().trim());
+          return (!sv || !(sv.ownerName||"").trim()) && !(f.ownerName||"").trim();
+        })()) ? " (enter owner name)" : ""}</Btn>
     </div>
   );
 }
