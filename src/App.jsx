@@ -1615,7 +1615,7 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
 // Flow: Upload DIs → AI scans → Auto-group by vehicle → User reviews groups
 // (select which DIs merge, set order type + driver rate per DI, group-level fields)
 // → Save All → DB.getNextLR() assigns LR atomically per group
-function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user, log, onClose, employees=[], cashTransfers=[], setCashTransfers, dieselRequests=[], setDieselRequests }) {
+function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user, log, onClose, employees=[], cashTransfers=[], setCashTransfers, dieselRequests=[], setDieselRequests, manualDiesel=false }) {
 
   // ── Raw scanned items (one per uploaded file) ────────────────────────────────
   // item: { id, file, status, extracted, error }
@@ -1926,10 +1926,12 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
     // Owner name mandatory for new vehicles
     const readyVeh = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
     if((!readyVeh || !(readyVeh.ownerName||"").trim()) && !(g.ownerName||"").trim()) return false;
-    if(+g.diesel > 0 && !g.dieselIndentNo.trim()) return false;
+    if(!manualDiesel && +g.diesel > 0 && !g.dieselIndentNo.trim()) return false;
     // Block save if truck has an unconfirmed (open) diesel request — must be confirmed first
-    const hasPendingDiesel = (dieselRequests||[]).some(r=>r.truckNo===g.truckNo&&r.status==="open");
-    if(hasPendingDiesel) return false;
+    if(!manualDiesel) {
+      const hasPendingDiesel = (dieselRequests||[]).some(r=>r.truckNo===g.truckNo&&r.status==="open");
+      if(hasPendingDiesel) return false;
+    }
     return true;
   };
 
@@ -1981,8 +1983,8 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           return;
         }
       }
-      // Diesel indent
-      if(+g.diesel > 0 && !g.dieselIndentNo.trim()) {
+      // Diesel indent — skip check in manual diesel mode
+      if(!manualDiesel && +g.diesel > 0 && !g.dieselIndentNo.trim()) {
         alert(`Truck ${g.truckNo}: Diesel Indent No is required when Diesel Estimate is entered.`);
         return;
       }
@@ -2782,12 +2784,19 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                 </div>
                 <div style={{flex:1}}>
                   <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>DIESEL EST. ₹</div>
-                  <div style={{background:C.dim,border:`1.5px solid ${C.border}`,borderRadius:8,
-                    color:+g.diesel>0?C.text:C.muted,padding:"7px 8px",fontSize:13,
-                    display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                    <span>{+g.diesel>0?("₹"+(+g.diesel).toLocaleString("en-IN")):"—"}</span>
-                    <span style={{fontSize:9,color:C.muted}}>from indent</span>
-                  </div>
+                  {manualDiesel ? (
+                    <input type="number" value={g.diesel||""} onChange={e=>updateGroup(g.id,"diesel",e.target.value)}
+                      placeholder="0" style={{width:"100%",boxSizing:"border-box",background:C.bg,
+                        border:`1.5px solid ${C.border}`,borderRadius:8,color:C.text,
+                        padding:"7px 8px",fontSize:13,outline:"none"}} />
+                  ) : (
+                    <div style={{background:C.dim,border:`1.5px solid ${C.border}`,borderRadius:8,
+                      color:+g.diesel>0?C.text:C.muted,padding:"7px 8px",fontSize:13,
+                      display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <span>{+g.diesel>0?("₹"+(+g.diesel).toLocaleString("en-IN")):"—"}</span>
+                      <span style={{fontSize:9,color:C.muted}}>from indent</span>
+                    </div>
+                  )}
                 </div>
               </div>
                 );
@@ -2795,6 +2804,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
 
               {/* ── Pending diesel request — BLOCKS save until confirmed by pump ── */}
               {(()=>{
+                if(manualDiesel) return null; // manual mode — skip pump confirmation check
                 const truck = (g.truckNo||"").toUpperCase().trim();
                 const pendingG = (dieselRequests||[]).filter(r=>r.truckNo===truck && r.status==="open");
                 if(!pendingG.length) return null;
@@ -2821,7 +2831,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
               })()}
 
               {/* Diesel indent — auto-attached from open request if available */}
-              {+g.diesel>0&&(()=>{
+              {(+g.diesel>0||manualDiesel)&&(()=>{
                 const attachedReq = g._autoAttachedReqId
                   ? (dieselRequests||[]).find(r=>r.id===g._autoAttachedReqId)
                   : null;
@@ -2855,10 +2865,17 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                         )}
                       </div>
                     )}
-                    {!displayReq && (
+                    {!displayReq && !manualDiesel && (
                       <div style={{fontSize:11,color:C.muted,fontStyle:"italic",padding:"4px 2px"}}>
                         No confirmed indent — save trip without diesel, or wait for pump to confirm.
                       </div>
+                    )}
+                    {!displayReq && manualDiesel && (
+                      <input type="text" value={g.dieselIndentNo||""} onChange={e=>updateGroup(g.id,"dieselIndentNo",e.target.value)}
+                        placeholder="Type indent number…"
+                        style={{width:"100%",boxSizing:"border-box",background:C.bg,
+                          border:`1.5px solid ${C.border}`,borderRadius:8,color:C.text,
+                          padding:"7px 8px",fontSize:13,outline:"none"}} />
                     )}
                   </div>
                 );
@@ -4780,7 +4797,8 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
   const [sealedSheet, setSealedSheet] = useState(null); // trip object
   const [batchDISheet,  setBatchDISheet]  = useState(false); // morning batch GR scanner
   const [manualLrMode,  setManualLrMode]  = useState(false); // allow manual LR entry for old data
-  const [manualDiesel,  setManualDiesel]  = useState(false); // allow manual diesel/indent entry
+  const [manualDiesel,  setManualDiesel]  = useState(()=>localStorage.getItem("mye_manualDiesel")==="true"); // persisted
+  React.useEffect(()=>localStorage.setItem("mye_manualDiesel",manualDiesel?"true":"false"),[manualDiesel]);
 
   const blankForm = (isParty=false) => ({
     type:tripType, lrNo:"", diNo:"", truckNo:"", grNo:"", dieselIndentNo:"",
@@ -5962,7 +5980,8 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
             employees={employees||[]} cashTransfers={cashTransfers||[]} setCashTransfers={setCashTransfers}
             dieselRequests={dieselRequests||[]} setDieselRequests={setDieselRequests}
             onClose={()=>setBatchDISheet(false)}
-          />
+           manualDiesel={manualDiesel}
+                      />
         </Sheet>
       )}
 
@@ -7050,8 +7069,8 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
               ⛽ Diesel Indent No
             </div>
 
-            {/* ── Pending request — HARD BLOCK until pump confirms ── */}
-            {hasOnlyPending && !val && (
+            {/* ── Pending request — HARD BLOCK until pump confirms (skip in manual mode) ── */}
+            {hasOnlyPending && !val && !manualDiesel && (
               <div style={{background:"#fef2f2",border:"2px solid #dc2626",
                 borderRadius:8,padding:"10px 12px",fontSize:12,color:"#dc2626"}}>
                 <div style={{fontWeight:800,marginBottom:6}}>
