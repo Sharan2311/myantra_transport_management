@@ -2871,11 +2871,31 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                       </div>
                     )}
                     {manualDiesel && (
-                      <input type="text" value={g.dieselIndentNo||""} onChange={e=>updateGroup(g.id,"dieselIndentNo",e.target.value)}
-                        placeholder="Type indent number…"
-                        style={{width:"100%",boxSizing:"border-box",background:C.bg,
-                          border:`1.5px solid ${g.dieselIndentNo?C.teal:C.border}`,borderRadius:8,color:C.text,
-                          padding:"7px 8px",fontSize:13,outline:"none"}} />
+                      <>
+                        <input type="text" value={g.dieselIndentNo||""} onChange={e=>updateGroup(g.id,"dieselIndentNo",e.target.value)}
+                          placeholder="Type indent number…"
+                          style={{width:"100%",boxSizing:"border-box",background:C.bg,
+                            border:`1.5px solid ${g.dieselIndentNo?C.teal:C.border}`,borderRadius:8,color:C.text,
+                            padding:"7px 8px",fontSize:13,outline:"none"}} />
+                        {(()=>{
+                          const typedNo = (g.dieselIndentNo||"").trim();
+                          if(!typedNo) return null;
+                          const matched = (dieselRequests||[]).find(r=>String(r.indentNo)===typedNo);
+                          if(!matched) return null;
+                          if(matched.status==="confirmed") return (
+                            <div style={{background:C.teal+"11",border:`1px solid ${C.teal}44`,borderRadius:6,
+                              padding:"5px 8px",fontSize:10,color:C.teal,fontWeight:600}}>
+                              ✓ Confirmed · ₹{(matched.confirmedAmount??matched.amount).toLocaleString("en-IN")}
+                            </div>
+                          );
+                          return (
+                            <div style={{background:"#fffbeb",border:`1.5px solid #d97706`,borderRadius:6,
+                              padding:"5px 8px",fontSize:10,color:"#92400e",fontWeight:600}}>
+                              ⚠ Attached but not confirmed yet · ₹{(matched.amount||0).toLocaleString("en-IN")}
+                            </div>
+                          );
+                        })()}
+                      </>
                     )}
                   </div>
                 );
@@ -7074,9 +7094,19 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
               style={{width:"100%",boxSizing:"border-box",background:C.bg,
                 border:`1.5px solid ${val?C.teal:C.border}`,borderRadius:10,color:C.text,
                 padding:"13px 12px",fontSize:15,outline:"none"}} />
-            {matchedReq && (
-              <div style={{fontSize:10,color:C.teal,fontWeight:600}}>
-                ✓ Matches indent #{matchedReq.indentNo} · ₹{(matchedReq.confirmedAmount??matchedReq.amount).toLocaleString("en-IN")} · {matchedReq.status}
+            {matchedReq && matchedReq.status==="confirmed" && (
+              <div style={{background:C.teal+"11",border:`1px solid ${C.teal}44`,borderRadius:8,
+                padding:"8px 10px",fontSize:11,color:C.teal,fontWeight:600}}>
+                ✓ Confirmed · Indent #{matchedReq.indentNo} · ₹{(matchedReq.confirmedAmount??matchedReq.amount).toLocaleString("en-IN")}
+              </div>
+            )}
+            {matchedReq && matchedReq.status!=="confirmed" && (
+              <div style={{background:"#fffbeb",border:`1.5px solid #d97706`,borderRadius:8,
+                padding:"8px 10px",fontSize:11,color:"#92400e",fontWeight:600}}>
+                ⚠ Attached but not confirmed yet · Indent #{matchedReq.indentNo} · ₹{(matchedReq.amount||0).toLocaleString("en-IN")}
+                <div style={{fontSize:10,fontWeight:400,marginTop:2,color:"#a16207"}}>
+                  Pump has not confirmed this request. Trip can still be saved in manual mode.
+                </div>
               </div>
             )}
           </div>
