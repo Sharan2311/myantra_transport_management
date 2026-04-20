@@ -4780,6 +4780,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
   const [sealedSheet, setSealedSheet] = useState(null); // trip object
   const [batchDISheet,  setBatchDISheet]  = useState(false); // morning batch GR scanner
   const [manualLrMode,  setManualLrMode]  = useState(false); // allow manual LR entry for old data
+  const [manualDiesel,  setManualDiesel]  = useState(false); // allow manual diesel/indent entry
 
   const blankForm = (isParty=false) => ({
     type:tripType, lrNo:"", diNo:"", truckNo:"", grNo:"", dieselIndentNo:"",
@@ -5367,7 +5368,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
               </button>
             ) : null;
           })()}
-          {/* Manual LR mode toggle — owner only, for entering old/historical data */}
+          {/* Manual LR mode toggle — owner only */}
           {user.role==="owner" && !isIn && (
             <button onClick={()=>setManualLrMode(p=>!p)}
               title={manualLrMode?"Switch back to auto LR":"Enter old trips with manual LR numbers"}
@@ -5376,6 +5377,17 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                 borderRadius:10,color:manualLrMode?C.orange:C.muted,
                 padding:"8px 10px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
               {manualLrMode?"🖊 Manual LR":"🔢 Auto LR"}
+            </button>
+          )}
+          {/* Manual diesel/indent toggle — owner only */}
+          {user.role==="owner" && !isIn && (
+            <button onClick={()=>setManualDiesel(p=>!p)}
+              title={manualDiesel?"Lock diesel & indent to pump requests":"Manually enter diesel & indent values"}
+              style={{background:manualDiesel?C.orange+"33":"transparent",
+                border:`1.5px solid ${manualDiesel?C.orange:C.border}`,
+                borderRadius:10,color:manualDiesel?C.orange:C.muted,
+                padding:"8px 10px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+              {manualDiesel?"🔓 Manual Diesel":"🔒 Locked Diesel"}
             </button>
           )}
           <button onClick={()=>{
@@ -6032,7 +6044,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                       onTruckChange={onTruckChange} onSubmit={saveNew} submitLabel="Save Trip"
                       user={user} wasScanned={wasScanned} trips={trips||[]} indents={indents||[]}
                       dieselRequests={dieselRequests||[]} setDieselRequests={setDieselRequests}
-                      manualLrMode={manualLrMode} />
+                      manualLrMode={manualLrMode} manualDiesel={manualDiesel} />
                   )}
                 </>
               )}
@@ -6168,7 +6180,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                     <TripForm f={f} ff={ff} isIn={false} ac={C.accent} vehicles={vehicles} settings={settings} employees={employees||[]} cashTransfers={cashTransfers||[]} recentDestinations={recentDestinations} recentGrades={recentGrades}
                       onTruckChange={onTruckChange}
                       dieselRequests={dieselRequests||[]} setDieselRequests={setDieselRequests}
-                      manualLrMode={manualLrMode}
+                      manualLrMode={manualLrMode} manualDiesel={manualDiesel}
                       onSubmit={async ()=>{
                         // All same validations as godown saveNew
                         if(!f.givenRate||+f.givenRate<=0){alert("Driver Rate ₹/MT is mandatory.\nಡ್ರೈವರ್ ರೇಟ್ ₹/MT ಕಡ್ಡಾಯ.");return;}
@@ -6422,6 +6434,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
             isParty={editSheet.orderType==="party"}
             trips={trips||[]} indents={indents||[]}
             dieselRequests={dieselRequests||[]} setDieselRequests={setDieselRequests}
+            manualLrMode={manualLrMode} manualDiesel={manualDiesel}
           />
         </Sheet>
       )}
@@ -6611,7 +6624,7 @@ function FileUploadRow({ label, path, onFile, disabled }) {
 }
 
 // Shared form for add + edit
-function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit, submitLabel, user, showStatus=false, wasScanned=false, isParty=false, employees=[], cashTransfers=[], recentDestinations=[], recentGrades=[], trips=[], indents=[], dieselRequests=[], setDieselRequests, manualLrMode=false}) {
+function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit, submitLabel, user, showStatus=false, wasScanned=false, isParty=false, employees=[], cashTransfers=[], recentDestinations=[], recentGrades=[], trips=[], indents=[], dieselRequests=[], setDieselRequests, manualLrMode=false, manualDiesel=false}) {
   // Ensure each diLine has frRate — migrate from trip-level frRate if missing
   const normalizedDiLines = (f.diLines||[]).map(d => ({...d, frRate: d.frRate || +f.frRate || 0}));
   const fWithLines = normalizedDiLines.length > 1 ? {...f, diLines: normalizedDiLines} : f;
@@ -6636,7 +6649,6 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
   const isOwner  = user?.role === "owner";
   // Fields locked after scan for non-owners
   const locked   = wasScanned && !isOwner;
-  const [manualDiesel, setManualDiesel] = useState(false);
 
   // ── Auto-attach diesel request when truck is set ────────────────────────────
   // Only auto-attach CONFIRMED requests — open (unconfirmed) ones show a warning instead
@@ -7007,18 +7019,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
           </div>
         )}
       </div>
-      {/* Manual diesel/indent toggle — owner only */}
-      {isOwner && (
-        <div style={{display:"flex",justifyContent:"flex-end",marginTop:-4,marginBottom:4}}>
-          <button onClick={()=>setManualDiesel(p=>!p)}
-            style={{background:manualDiesel?C.orange+"22":"transparent",
-              border:`1.5px solid ${manualDiesel?C.orange:C.border}`,
-              borderRadius:8,color:manualDiesel?C.orange:C.muted,
-              padding:"4px 10px",fontSize:10,fontWeight:700,cursor:"pointer"}}>
-            {manualDiesel?"🔓 Manual Diesel · Indent":"🔒 Unlock Diesel · Indent"}
-          </button>
-        </div>
-      )}
+
       {/* ⛽ Diesel Indent No — auto-attach + manual entry */}
       {(()=>{
         const truck = (f.truckNo||"").trim().toUpperCase();
