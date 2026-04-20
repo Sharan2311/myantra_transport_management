@@ -2835,7 +2835,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                 const attachedReq = g._autoAttachedReqId
                   ? (dieselRequests||[]).find(r=>r.id===g._autoAttachedReqId)
                   : null;
-                const manualMatchReq = !attachedReq && g.dieselIndentNo.trim()
+                const manualMatchReq = !attachedReq && !manualDiesel && g.dieselIndentNo.trim()
                   ? (dieselRequests||[]).find(r=>String(r.indentNo)===g.dieselIndentNo.trim())
                   : null;
                 const displayReq = attachedReq || manualMatchReq;
@@ -2845,7 +2845,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                     <div style={{fontSize:10,color:missing?C.red:C.muted,fontWeight:700}}>
                       DIESEL INDENT NO {missing&&"* required"}
                     </div>
-                    {displayReq&&(
+                    {displayReq&&!manualDiesel&&(
                       <div style={{background:C.teal+"11",border:`1px solid ${C.teal}44`,
                         borderRadius:7,padding:"5px 8px",fontSize:11,color:C.teal,fontWeight:600,
                         display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -2870,11 +2870,11 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                         No confirmed indent — save trip without diesel, or wait for pump to confirm.
                       </div>
                     )}
-                    {!displayReq && manualDiesel && (
+                    {manualDiesel && (
                       <input type="text" value={g.dieselIndentNo||""} onChange={e=>updateGroup(g.id,"dieselIndentNo",e.target.value)}
                         placeholder="Type indent number…"
                         style={{width:"100%",boxSizing:"border-box",background:C.bg,
-                          border:`1.5px solid ${C.border}`,borderRadius:8,color:C.text,
+                          border:`1.5px solid ${g.dieselIndentNo?C.teal:C.border}`,borderRadius:8,color:C.text,
                           padding:"7px 8px",fontSize:13,outline:"none"}} />
                     )}
                   </div>
@@ -7062,6 +7062,25 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
         // Pending (open, unconfirmed) requests for this truck
         const pendingReqs = truckReqs.filter(r=>r.status==="open");
         const hasOnlyPending = pendingReqs.length>0 && truckReqs.every(r=>r.status==="open");
+
+        // Manual diesel mode — plain text input, no auto-attach/cards
+        if(manualDiesel) return (
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            <div style={{fontSize:11,color:C.muted,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>
+              ⛽ Diesel Indent No
+            </div>
+            <input value={f.dieselIndentNo||""} onChange={e=>ff("dieselIndentNo")(e.target.value)}
+              placeholder="Type indent number…"
+              style={{width:"100%",boxSizing:"border-box",background:C.bg,
+                border:`1.5px solid ${val?C.teal:C.border}`,borderRadius:10,color:C.text,
+                padding:"13px 12px",fontSize:15,outline:"none"}} />
+            {matchedReq && (
+              <div style={{fontSize:10,color:C.teal,fontWeight:600}}>
+                ✓ Matches indent #{matchedReq.indentNo} · ₹{(matchedReq.confirmedAmount??matchedReq.amount).toLocaleString("en-IN")} · {matchedReq.status}
+              </div>
+            )}
+          </div>
+        );
 
         return (
           <div style={{display:"flex",flexDirection:"column",gap:6}}>
