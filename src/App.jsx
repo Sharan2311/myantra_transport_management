@@ -10903,9 +10903,14 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
     const ownerNamePDF = (v.ownerName||"").trim();
     const ownerVehsPDF = ownerNamePDF ? (vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerNamePDF) : [v];
     const ownerLoanGivenPDF = ownerVehsPDF.reduce((s,x)=>s+(x.loan||0),0);
-    const ownerLoanRecovPDF = ownerVehsPDF.reduce((s,x)=>s+(x.loanRecovered||0),0);
+    // Calculate recovered from actual trip data — not stored field which can drift
+    const ownerTruckNos = new Set(ownerVehsPDF.map(x=>x.truckNo));
+    const ownerLoanRecovPDF = (trips||[]).filter(t=>ownerTruckNos.has(t.truckNo)).reduce((s,t)=>s+(t.loanRecovery||0),0);
     const loanBal = ownerLoanGivenPDF - ownerLoanRecovPDF;
     const isMultiVehOwner = ownerVehsPDF.length > 1;
+    // Calculate shortage recovered from trips
+    const vShortRecovPDF = vtrips.reduce((s,t)=>s+(t.shortageRecovery||0),0);
+    const vLoanRecovPDF = vtrips.reduce((s,t)=>s+(t.loanRecovery||0),0);
     // Collect all loan txns across owner's vehicles for the PDF, tagged with truck
     const loanTxns = ownerVehsPDF.flatMap(x=>(x.loanTxns||[]).map(tx=>({...tx,_truckNo:x.truckNo}))).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
     const vLoanTxns = v.loanTxns||[]; // this vehicle only (for per-vehicle section)
@@ -11004,7 +11009,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
       <div class="kpi"><div class="val" style="color:#1d4ed8">${vtrips.length}</div><div class="lbl">TOTAL TRIPS</div></div>
       <div class="kpi"><div class="val" style="color:#15803d">₹${fmt(totalPaid)}</div><div class="lbl">TOTAL PAID</div></div>
       <div class="kpi"><div class="val" style="color:${loanBal>0?"#dc2626":"#15803d"}">₹${fmt(loanBal)}</div><div class="lbl">${isMultiVehOwner?"OWNER LOAN BAL":"LOAN BALANCE"}</div></div>
-      <div class="kpi"><div class="val" style="color:#d97706">₹${fmt((v.shortageOwed||0)-(v.shortageRecovered||0))}</div><div class="lbl">SHORTAGE BALANCE</div></div>
+      <div class="kpi"><div class="val" style="color:#d97706">₹${fmt((v.shortageOwed||0)-vShortRecovPDF)}</div><div class="lbl">SHORTAGE BALANCE</div></div>
       <div class="kpi"><div class="val" style="color:#7c3aed">${vtrips.filter(t=>!t.driverSettled).length}</div><div class="lbl">UNSETTLED</div></div>
     </div>
 
@@ -11024,7 +11029,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
       <tr><th>${isMultiVehOwner?"Owner Total Loan Given":"Total Loan Given"}</th><td>₹${fmt(ownerLoanGivenPDF)}</td></tr>
       <tr><th>Recovered</th><td>₹${fmt(ownerLoanRecovPDF)}</td></tr>
       <tr><th style="color:#dc2626">Balance Due</th><td style="font-weight:800;color:${loanBal>0?"#dc2626":"#15803d"}">₹${fmt(loanBal)}</td></tr>
-      ${isMultiVehOwner?`<tr><th>This Vehicle Given</th><td>₹${fmt(v.loan||0)}</td></tr><tr><th>This Vehicle Recovered</th><td>₹${fmt(v.loanRecovered||0)}</td></tr>`:""}
+      ${isMultiVehOwner?`<tr><th>This Vehicle Given</th><td>₹${fmt(v.loan||0)}</td></tr><tr><th>This Vehicle Recovered</th><td>₹${fmt(vLoanRecovPDF)}</td></tr>`:""}
       <tr><th>Deduct / Trip</th><td>₹${fmt(v.deductPerTrip||0)}</td></tr>
     </table>
 
@@ -11036,8 +11041,8 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
 
     <table style="max-width:380px;margin-top:8px">
       <tr><th>Total Shortage</th><td>₹${fmt(v.shortageOwed||0)}</td></tr>
-      <tr><th>Recovered</th><td>₹${fmt(v.shortageRecovered||0)}</td></tr>
-      <tr><th>Balance Owed</th><td style="font-weight:800;color:#d97706">₹${fmt((v.shortageOwed||0)-(v.shortageRecovered||0))}</td></tr>
+      <tr><th>Recovered</th><td>₹${fmt(vShortRecovPDF)}</td></tr>
+      <tr><th>Balance Owed</th><td style="font-weight:800;color:#d97706">₹${fmt((v.shortageOwed||0)-vShortRecovPDF)}</td></tr>
     </table>
 
     <div class="footer">M Yantra Enterprises · PAN: ABBFM6370M · GSTN: 29ABBFM6370M1ZR · Report generated ${new Date().toLocaleString("en-IN")}</div>`;
@@ -11060,10 +11065,11 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
     const ownerTrips = (trips||[]).filter(t=>truckNos.has(t.truckNo));
     const ownerPays = (driverPays||[]).filter(p=>truckNos.has(p.truckNo));
     const totalLoan = ownerVehs.reduce((s,v)=>s+(v.loan||0),0);
-    const totalRecov = ownerVehs.reduce((s,v)=>s+(v.loanRecovered||0),0);
+    // Calculate recovered from actual trip data — not stored field which can drift
+    const totalRecov = ownerTrips.reduce((s,t)=>s+(t.loanRecovery||0),0);
     const loanBal = Math.max(0, totalLoan - totalRecov);
     const totalShortOwed = ownerVehs.reduce((s,v)=>s+(v.shortageOwed||0),0);
-    const totalShortRecov = ownerVehs.reduce((s,v)=>s+(v.shortageRecovered||0),0);
+    const totalShortRecov = ownerTrips.reduce((s,t)=>s+(t.shortageRecovery||0),0);
     const shortBal = Math.max(0, totalShortOwed - totalShortRecov);
     const totalPaid = ownerPays.reduce((s,p)=>s+(p.amount||0),0);
 
@@ -11075,16 +11081,18 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
     const vehRows = ownerVehs.map(v => {
       const vTrips = ownerTrips.filter(t=>t.truckNo===v.truckNo);
       const vPaid = ownerPays.filter(p=>p.truckNo===v.truckNo).reduce((s,p)=>s+(p.amount||0),0);
-      const vLoanBal = Math.max(0,(v.loan||0)-(v.loanRecovered||0));
-      const vShortBal = Math.max(0,(v.shortageOwed||0)-(v.shortageRecovered||0));
+      const vLoanRecov = ownerTrips.filter(t=>t.truckNo===v.truckNo).reduce((s,t)=>s+(t.loanRecovery||0),0);
+      const vShortRecov = ownerTrips.filter(t=>t.truckNo===v.truckNo).reduce((s,t)=>s+(t.shortageRecovery||0),0);
+      const vLoanBal = Math.max(0,(v.loan||0)-vLoanRecov);
+      const vShortBal = Math.max(0,(v.shortageOwed||0)-vShortRecov);
       return '<tr>'
         +'<td class="l b">'+v.truckNo+'</td>'
         +'<td class="c">'+vTrips.length+'</td>'
         +'<td class="r">'+fmt(v.loan||0)+'</td>'
-        +'<td class="r">'+fmt(v.loanRecovered||0)+'</td>'
+        +'<td class="r">'+fmt(vLoanRecov)+'</td>'
         +'<td class="r b" style="color:'+(vLoanBal>0?'#dc2626':'#16a34a')+'">'+fmt(vLoanBal)+'</td>'
         +'<td class="r">'+fmt(v.shortageOwed||0)+'</td>'
-        +'<td class="r">'+fmt(v.shortageRecovered||0)+'</td>'
+        +'<td class="r">'+fmt(vShortRecov)+'</td>'
         +'<td class="r" style="color:'+(vShortBal>0?'#dc2626':'#16a34a')+'">'+fmt(vShortBal)+'</td>'
         +'<td class="r b">'+fmt(vPaid)+'</td>'
         +'</tr>';
