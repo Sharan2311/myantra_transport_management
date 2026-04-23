@@ -5300,12 +5300,34 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
           const txn={id:uid(),type:"recovery",date:editSheet.date||today(),qty:0,amount:deltaSR,lrNo:editSheet.lrNo,note:"From trip edit"};
           upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+deltaSR,shortageTxns:[...(upd.shortageTxns||[]),txn]};
         } else if(deltaSR<0){
+          // Remove or reduce the shortage txn for this LR
+          const existingTxn = (upd.shortageTxns||[]).find(tx=>tx.lrNo===editSheet.lrNo && tx.type==="recovery");
+          if(existingTxn) {
+            const newAmt = (existingTxn.amount||0) + deltaSR; // deltaSR is negative
+            if(newAmt <= 0) {
+              upd={...upd,shortageTxns:(upd.shortageTxns||[]).filter(tx=>tx!==existingTxn)};
+            } else {
+              upd={...upd,shortageTxns:(upd.shortageTxns||[]).map(tx=>tx===existingTxn?{...tx,amount:newAmt}:tx)};
+            }
+          }
           upd={...upd,shortageRecovered:Math.max(0,(upd.shortageRecovered||0)+deltaSR)};
         }
         if(deltaLR>0){
           const txn={id:uid(),type:"recovery",date:editSheet.date||today(),amount:deltaLR,lrNo:editSheet.lrNo,note:"From trip edit"};
           upd={...upd,loanRecovered:(upd.loanRecovered||0)+deltaLR,loanTxns:[...(upd.loanTxns||[]),txn]};
         } else if(deltaLR<0){
+          // Remove or reduce the loan txn for this LR
+          const existingTxn = (upd.loanTxns||[]).find(tx=>tx.lrNo===editSheet.lrNo && tx.type==="recovery");
+          if(existingTxn) {
+            const newAmt = (existingTxn.amount||0) + deltaLR; // deltaLR is negative
+            if(newAmt <= 0) {
+              // Remove the txn entirely
+              upd={...upd,loanTxns:(upd.loanTxns||[]).filter(tx=>tx!==existingTxn)};
+            } else {
+              // Reduce the txn amount
+              upd={...upd,loanTxns:(upd.loanTxns||[]).map(tx=>tx===existingTxn?{...tx,amount:newAmt}:tx)};
+            }
+          }
           upd={...upd,loanRecovered:Math.max(0,(upd.loanRecovered||0)+deltaLR)};
         }
         return upd;
