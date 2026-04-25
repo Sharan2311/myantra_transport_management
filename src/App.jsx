@@ -9178,6 +9178,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
   const [drPinDisplay,   setDrPinDisplay]   = useState(null);
   const [drLastIndentNo, setDrLastIndentNo] = useState(null);
   const [editReqId,      setEditReqId]      = useState(null); // id of request being edited
+  const [drSearch,       setDrSearch]       = useState(""); // search by truck/indent
   const [editTruckNo,    setEditTruckNo]    = useState("");
   const [editAmount,     setEditAmount]     = useState("");
   const [editDieselAmt,  setEditDieselAmt]  = useState("");
@@ -10167,6 +10168,9 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
               </div>
             )}
 
+            {/* Search + Date filter */}
+            <SearchBar value={drSearch} onChange={setDrSearch} placeholder="Search truck no, indent #…" />
+
             {/* Date filter + Report for requests — owner only */}
             {user.role==="owner" && (
               <div style={{display:"flex",gap:8,marginBottom:8}}>
@@ -10258,6 +10262,14 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
               </div>
             )}
             {[...(dieselRequests||[])].filter(r=>{
+              // Search filter
+              if(drSearch) {
+                const q = drSearch.toLowerCase();
+                if(!r.truckNo?.toLowerCase().includes(q)
+                  && !String(r.indentNo||"").includes(q)
+                  && !(r.requestedBy||"").toLowerCase().includes(q)) return false;
+              }
+              // Date filter
               if(!filterFrom && !filterTo) return true;
               const d = r.date||r.createdAt?.slice(0,10)||"";
               if(filterFrom && d < filterFrom) return false;
