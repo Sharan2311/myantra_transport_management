@@ -10167,13 +10167,103 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
               </div>
             )}
 
+            {/* Date filter + Report for requests — owner only */}
+            {user.role==="owner" && (
+              <div style={{display:"flex",gap:8,marginBottom:8}}>
+                <Btn onClick={()=>setShowFilter(v=>!v)} sm outline color={showFilter?C.orange:C.muted}>📅 Filter</Btn>
+                {(filterFrom||filterTo) && (
+                  <Btn sm outline color={C.orange} onClick={()=>{
+                    const from=filterFrom||"2000-01-01", to=filterTo||"2099-12-31";
+                    const filtered=[...(dieselRequests||[])].filter(r=>(r.date||r.createdAt?.slice(0,10)||"")>=from && (r.date||r.createdAt?.slice(0,10)||"")<=to)
+                      .sort((a,b)=>b.indentNo-a.indentNo);
+                    const pumpMap=Object.fromEntries(pumps.map(p=>[p.id,p.name]));
+                    const totalAmt=filtered.reduce((s,r)=>s+((r.confirmedAmount??r.amount)||0),0);
+                    const totalDiesel=filtered.reduce((s,r)=>s+((r.dieselAmount||r.amount)||0),0);
+                    const totalCash=filtered.reduce((s,r)=>s+(r.cashAmount||0),0);
+                    const rows=filtered.map(r=>{
+                      const eff=r.confirmedAmount??r.amount;
+                      return "<tr>"
+                        +"<td>"+r.date+"</td>"
+                        +"<td><b>#"+r.indentNo+"</b></td>"
+                        +"<td>"+r.truckNo+"</td>"
+                        +"<td>"+(pumpMap[r.pumpId]||"—")+"</td>"
+                        +"<td style='text-align:right'>₹"+(r.dieselAmount||eff||0).toLocaleString("en-IN")+"</td>"
+                        +"<td style='text-align:right'>₹"+(r.cashAmount||0).toLocaleString("en-IN")+"</td>"
+                        +"<td style='text-align:right;font-weight:700'>₹"+(eff||0).toLocaleString("en-IN")+"</td>"
+                        +"<td style='text-align:center'><span style='background:"+(r.status==="attached"?"#dcfce7":r.status==="confirmed"?"#e0f2fe":"#fef9c3")+";padding:2px 6px;border-radius:4px;font-size:10px'>"+r.status+"</span></td>"
+                        +"<td>"+(r.requestedBy||"—")+"</td>"
+                        +"</tr>";
+                    }).join("");
+                    const html="<!DOCTYPE html><html><head><title>Diesel Requests Report</title><style>"
+                      +"body{font-family:-apple-system,sans-serif;margin:20px;font-size:12px}"
+                      +"h2{color:#f97316;margin:0 0 4px}h4{color:#888;margin:0 0 16px}"
+                      +"table{width:100%;border-collapse:collapse}th{background:#f97316;color:#fff;padding:7px 6px;text-align:left;font-size:10px;text-transform:uppercase}"
+                      +"td{padding:5px 6px;border-bottom:1px solid #e5e7eb}tr:nth-child(even){background:#f8fafc}"
+                      +".summary{display:flex;gap:16px;margin-bottom:12px;flex-wrap:wrap}"
+                      +".kpi{background:#fff7ed;border:1px solid #f9731633;border-radius:8px;padding:8px 12px}"
+                      +".kpi .label{font-size:9px;color:#888;text-transform:uppercase}.kpi .value{font-size:16px;font-weight:800;color:#f97316}"
+                      +"@media print{body{margin:10px}th{background:#f97316!important;-webkit-print-color-adjust:exact!important}}"
+                      +"</style></head><body>"
+                      +"<h2>M. Yantra Enterprises — Diesel Requests Report</h2>"
+                      +"<h4>Period: "+(filterFrom||"all")+" to "+(filterTo||"all")+"</h4>"
+                      +"<div class='summary'>"
+                      +"<div class='kpi'><div class='label'>Requests</div><div class='value'>"+filtered.length+"</div></div>"
+                      +"<div class='kpi'><div class='label'>Total Amount</div><div class='value'>₹"+totalAmt.toLocaleString("en-IN")+"</div></div>"
+                      +"<div class='kpi'><div class='label'>Diesel</div><div class='value'>₹"+totalDiesel.toLocaleString("en-IN")+"</div></div>"
+                      +"<div class='kpi'><div class='label'>Cash</div><div class='value'>₹"+totalCash.toLocaleString("en-IN")+"</div></div>"
+                      +"</div>"
+                      +"<table><thead><tr><th>Date</th><th>Indent</th><th>Truck</th><th>Pump</th><th>Diesel ₹</th><th>Cash ₹</th><th>Total ₹</th><th>Status</th><th>By</th></tr></thead>"
+                      +"<tbody>"+rows+"</tbody></table>"
+                      +"<div style='margin-top:16px;font-size:9px;color:#999;border-top:1px solid #ddd;padding-top:6px'>M Yantra Enterprises · PAN: ABBFM6370M · GSTN: 29ABBFM6370M1ZR</div>"
+                      +"</body></html>";
+                    const w=window.open("","_blank");
+                    w.document.write(html);
+                    w.document.close();
+                    setTimeout(()=>w.print(),400);
+                  }}>📄 PDF Report</Btn>
+                )}
+              </div>
+            )}
+            {showFilter && (
+              <div style={{background:C.card,borderRadius:10,padding:"10px 12px",display:"flex",gap:8,alignItems:"flex-end",marginBottom:8}}>
+                <div style={{flex:1}}>
+                  <div style={{color:C.muted,fontSize:11,marginBottom:3}}>FROM</div>
+                  <input type="date" value={filterFrom} onChange={e=>setFilterFrom(e.target.value)}
+                    onClick={e=>e.target.showPicker?.()}
+                    style={{background:C.bg,border:"1.5px solid "+C.border,borderRadius:8,
+                      color:filterFrom?C.text:C.muted,padding:"9px 10px",fontSize:14,width:"100%",
+                      boxSizing:"border-box",WebkitAppearance:"none",colorScheme:"light"}} />
+                </div>
+                <div style={{flex:1}}>
+                  <div style={{color:C.muted,fontSize:11,marginBottom:3}}>TO</div>
+                  <input type="date" value={filterTo} onChange={e=>setFilterTo(e.target.value)}
+                    onClick={e=>e.target.showPicker?.()}
+                    style={{background:C.bg,border:"1.5px solid "+C.border,borderRadius:8,
+                      color:filterTo?C.text:C.muted,padding:"9px 10px",fontSize:14,width:"100%",
+                      boxSizing:"border-box",WebkitAppearance:"none",colorScheme:"light"}} />
+                </div>
+                <Btn onClick={()=>{setFilterFrom("");setFilterTo("");}} sm outline color={C.muted}>Clear</Btn>
+              </div>
+            )}
+            {(filterFrom||filterTo) && (()=>{
+              const from=filterFrom||"2000-01-01", to=filterTo||"2099-12-31";
+              const cnt=[...(dieselRequests||[])].filter(r=>(r.date||r.createdAt?.slice(0,10)||"")>=from && (r.date||r.createdAt?.slice(0,10)||"")<=to).length;
+              return <div style={{fontSize:11,color:C.muted,marginBottom:4}}>{cnt} request{cnt!==1?"s":""} in date range</div>;
+            })()}
+
             {/* Requests list */}
             {(dieselRequests||[]).length===0 && (
               <div style={{textAlign:"center",color:C.muted,padding:40}}>
                 No diesel requests yet. Create one above before dispatching a truck.
               </div>
             )}
-            {[...(dieselRequests||[])].sort((a,b)=>b.indentNo-a.indentNo).map(req=>{
+            {[...(dieselRequests||[])].filter(r=>{
+              if(!filterFrom && !filterTo) return true;
+              const d = r.date||r.createdAt?.slice(0,10)||"";
+              if(filterFrom && d < filterFrom) return false;
+              if(filterTo && d > filterTo) return false;
+              return true;
+            }).sort((a,b)=>b.indentNo-a.indentNo).map(req=>{
               const pump    = pumps.find(p=>p.id===req.pumpId);
               const statusColor = req.status==="attached"?C.green:req.status==="confirmed"?C.teal:C.orange;
               const effAmt  = req.confirmedAmount??req.amount;
