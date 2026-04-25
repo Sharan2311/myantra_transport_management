@@ -9219,8 +9219,16 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
     if ((t.dieselEstimate||0) <= 0) return false;
     if (t.status === "Paid") return false;
     if (t.date >= today()) return false; // only flag if trip date is past
+    // Has a confirmed pump slip scan → not missing
     const hasConfirmed = indents.some(i => i.tripId === t.id && i.confirmed);
-    return !hasConfirmed;
+    if (hasConfirmed) return false;
+    // Has a diesel request that was confirmed or attached → not missing
+    const hasRequest = (dieselRequests||[]).some(r =>
+      (r.status === "confirmed" || r.status === "attached") &&
+      (r.tripId === t.id || (t.dieselIndentNo && String(r.indentNo) === String(t.dieselIndentNo).trim()))
+    );
+    if (hasRequest) return false;
+    return true;
   });
 
   // ── Stale diesel REQUESTS: open or confirmed but not attached for > 2 days ──
@@ -9646,7 +9654,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
           {staleAlertsOpen && (
             <div style={{padding:"0 14px 12px",borderTop:`1px solid ${C.orange}33`}}>
               <div style={{color:C.muted,fontSize:12,marginBottom:8,marginTop:8}}>
-                These trips have a diesel estimate but no pump slip was scanned
+                These trips have a diesel estimate but no confirmed indent or pump slip
               </div>
               {staleIndentAlerts.map(t => (
                 <div key={t.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
