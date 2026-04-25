@@ -7670,20 +7670,7 @@ function TafalMod({trips, vehicles, setVehicles, employees, settings, setSetting
   const perEmployee = activeEmps>0 ? collected/activeEmps : 0;
 
   // Indent book range — local state so saves only on button press
-  const ibStart = settings?.indentBookStart || null;
-  const ibEnd   = settings?.indentBookEnd   || null;
-  const [ibStartLocal, setIbStartLocal] = useState(String(ibStart||""));
-  const [ibEndLocal,   setIbEndLocal]   = useState(String(ibEnd||""));
-  const [ibSaved,      setIbSaved]      = useState(false);
-  // Sync local state when settings load from DB
-  React.useEffect(()=>{ if(ibStart) setIbStartLocal(String(ibStart)); },[ibStart]);
-  React.useEffect(()=>{ if(ibEnd)   setIbEndLocal(String(ibEnd));     },[ibEnd]);
-
   const usedNosSet = new Set((dieselRequests||[]).map(r=>r.indentNo).filter(Boolean));
-  let nextIndentNo = ibStart || null;
-  if(ibStart) { while(nextIndentNo && usedNosSet.has(nextIndentNo)) nextIndentNo++; }
-  const maxUsed = usedNosSet.size > 0 ? Math.max(...usedNosSet) : (ibStart ? ibStart - 1 : 0);
-  const remaining    = ibStart && ibEnd ? ibEnd - maxUsed : null;
 
   return (
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
@@ -7703,65 +7690,6 @@ function TafalMod({trips, vehicles, setVehicles, employees, settings, setSetting
           })} type="number" />
           <div style={{color:C.muted,fontSize:12,paddingBottom:14}}>applies to new trips</div>
         </div>
-      </div>
-
-      {/* Indent Book Range */}
-      <div style={{background:C.card,borderRadius:12,padding:"14px 16px"}}>
-        <div style={{color:C.muted,fontSize:12,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>⛽ Diesel Indent Book Range</div>
-        <div style={{color:C.muted,fontSize:12,marginBottom:12}}>
-          Set the serial number range from your current indent book. Numbers are assigned serially — once the range is exhausted, update to the next book's range.
-        </div>
-        <div style={{display:"flex",gap:10,marginBottom:10}}>
-          <div style={{flex:1}}>
-            <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:4}}>START NUMBER</div>
-            <input type="number" value={ibStartLocal} onChange={e=>setIbStartLocal(e.target.value)}
-              placeholder="e.g. 200"
-              style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,
-                color:C.text,padding:"9px 12px",fontSize:15,boxSizing:"border-box"}} />
-          </div>
-          <div style={{flex:1}}>
-            <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:4}}>END NUMBER</div>
-            <input type="number" value={ibEndLocal} onChange={e=>setIbEndLocal(e.target.value)}
-              placeholder="e.g. 300"
-              style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,
-                color:C.text,padding:"9px 12px",fontSize:15,boxSizing:"border-box"}} />
-          </div>
-        </div>
-        <Btn onClick={()=>{
-          const s = parseInt(ibStartLocal,10);
-          const e = parseInt(ibEndLocal,10);
-          if(!s||!e||isNaN(s)||isNaN(e)) { alert("Enter valid start and end numbers"); return; }
-          if(s>=e) { alert("Start must be less than end"); return; }
-          setSettings(p=>{
-            const updated = {...(p||{}), indentBookStart:s, indentBookEnd:e};
-            DB.saveSettings(updated).catch(e=>console.error("saveSettings:",e));
-            return updated;
-          });
-          setIbSaved(true); setTimeout(()=>setIbSaved(false),2000);
-        }} full color={ibSaved?C.green:C.teal}>{ibSaved?"✓ Saved!":"Save Indent Book Range"}</Btn>
-        {ibStart && ibEnd && (
-          <div style={{background:C.bg,borderRadius:10,padding:"10px 14px",display:"flex",flexDirection:"column",gap:6,marginTop:10}}>
-            <div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:13}}>
-              <span style={{color:C.muted}}>Active Range: <b style={{color:C.text}}>{ibStart}–{ibEnd}</b></span>
-              <span style={{color:C.muted}}>Next No: <b style={{color:C.orange}}>#{nextIndentNo}</b></span>
-              <span style={{color:C.muted}}>Used: <b style={{color:C.text}}>{usedNosSet.size}</b></span>
-              <span style={{color:remaining<=10?C.red:C.green,fontWeight:700}}>Remaining: {remaining}</span>
-            </div>
-            {remaining <= 10 && remaining > 0 && (
-              <div style={{color:C.red,fontSize:12,fontWeight:700}}>
-                ⚠ Only {remaining} indent number{remaining!==1?"s":""} left — update range soon
-              </div>
-            )}
-            {remaining <= 0 && (
-              <div style={{color:C.red,fontSize:12,fontWeight:700}}>
-                🚫 Indent book exhausted. Update Start/End range to a new book.
-              </div>
-            )}
-          </div>
-        )}
-        {(!ibStart || !ibEnd) && (
-          <div style={{color:C.orange,fontSize:12,marginTop:8}}>⚠ Save start and end numbers to enable auto indent numbering</div>
-        )}
       </div>
 
 
@@ -9953,17 +9881,10 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
 
       {/* ── DIESEL REQUESTS VIEW ── */}
       {view==="requests" && (()=>{
-        const ibStart = settings?.indentBookStart||null;
-        const ibEnd   = settings?.indentBookEnd||null;
         const usedNos = new Set((dieselRequests||[]).map(r=>r.indentNo).filter(Boolean));
-        // Find lowest available number — fills gaps left by deleted indents
-        let nextNo = ibStart || null;
-        if(ibStart) {
-          while(nextNo && usedNos.has(nextNo)) nextNo++;
-          if(ibEnd && nextNo > ibEnd) nextNo = null; // exhausted
-        }
-        const maxUsed = usedNos.size>0 ? Math.max(...usedNos) : (ibStart ? ibStart-1 : 0);
-        const remaining = (ibStart&&ibEnd) ? ibEnd - maxUsed - (nextNo && nextNo <= maxUsed ? 0 : 0) : null;
+        // Find lowest available number — continues from existing sequence, fills gaps on delete
+        let nextNo = usedNos.size > 0 ? Math.min(...usedNos) : 1;
+        while(usedNos.has(nextNo)) nextNo++;
 
         // Generate a unique PIN per truck — different from any existing open PIN for that truck
         const genUniquePinForTruck = (truckNo) => {
@@ -9989,8 +9910,6 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
           if (dieselComp <= 0) { alert("Diesel amount is required and must be greater than ₹0"); return; }
           if (drCashAmt === "") { alert("Cash amount is required — enter 0 if no cash is being given"); return; }
           if (!drPumpId)       { alert("Select a Petrol Pump — it is mandatory for diesel requests"); return; }
-          if (!ibStart||!ibEnd) { alert("Set Indent Book range in Settings → TAFAL tab first."); return; }
-          if (nextNo>ibEnd) { alert(`Indent book exhausted (${ibStart}–${ibEnd}). Update range in Settings → TAFAL tab.`); return; }
           const pin = genUniquePinForTruck(drTruckNo);
           const req = {
             id:uid(), indentNo:nextNo,
@@ -10026,24 +9945,17 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
         return (
           <div style={{display:"flex",flexDirection:"column",gap:10}}>
 
-            {/* Indent book status bar */}
-            {(ibStart&&ibEnd) ? (
-              <div style={{background:C.card,borderRadius:10,padding:"10px 14px",
-                display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
-                <div style={{fontSize:12,color:C.muted}}>
-                  Book <b style={{color:C.text}}>{ibStart}–{ibEnd}</b>
-                  {" · "}Next: <b style={{color:C.orange}}>#{nextNo}</b>
-                  {" · "}Remaining: <b style={{color:remaining<=10?C.red:C.green}}>{remaining}</b>
-                </div>
-                {remaining<=10&&remaining>0&&<Badge label={`Only ${remaining} left!`} color={C.red}/>}
-                {remaining<=0&&<Badge label="Book Exhausted" color={C.red}/>}
-              </div>
-            ) : (
-              <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,
-                borderRadius:10,padding:"10px 14px",fontSize:12,color:C.orange}}>
-                ⚠ Set Indent Book Start/End in Settings → TAFAL tab before creating requests
-              </div>
-            )}
+            {/* Indent number status bar */}
+            <div style={{background:C.card,borderRadius:10,padding:"10px 14px",
+              display:"flex",alignItems:"center",gap:8}}>
+              <span style={{fontSize:12,color:C.muted}}>Next Indent:</span>
+              <b style={{color:C.orange,fontSize:14}}>#{nextNo}</b>
+              {usedNos.size > 0 && (
+                <span style={{fontSize:11,color:C.muted,marginLeft:4}}>
+                  · {usedNos.size} issued so far
+                </span>
+              )}
+            </div>
 
             {/* Create request form */}
             {!viewOnly && (
