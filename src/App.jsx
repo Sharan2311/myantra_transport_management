@@ -1403,6 +1403,16 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   const displayTrips = selectedClient ? allFyTrips.filter(t=>(t.client||"Shree Cement Kodla")===selectedClient) : allFyTrips;
   const todayStr    = today();
   const todayTrips  = displayTrips.filter(t => t.date===todayStr);
+  // Yesterday
+  const yest = new Date(); yest.setDate(yest.getDate()-1);
+  const yesterdayStr  = yest.toISOString().split("T")[0];
+  const yesterdayTrips = displayTrips.filter(t => t.date===yesterdayStr);
+  // Month avg tons
+  const monthPrefix   = todayStr.slice(0,7); // "YYYY-MM"
+  const monthTripsAll = displayTrips.filter(t => (t.date||"").startsWith(monthPrefix));
+  const todayDayNum   = new Date().getDate();
+  const monthTotalTons = monthTripsAll.reduce((s,t)=>s+(+(t.qty)||0),0);
+  const monthAvgTons   = todayDayNum > 0 ? monthTotalTons / todayDayNum : 0;
   const pending     = displayTrips.filter(t => t.status==="Pending Bill");
   const weekAgo     = new Date(); weekAgo.setDate(weekAgo.getDate()-7);
   const weekAgoStr  = weekAgo.toISOString().split("T")[0];
@@ -1463,6 +1473,19 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
             {l:"Trips Added",  v:todayTrips.length,       c:C.blue},
             {l:"Today Margin", v:fmt(todayMargin),         c:C.green},
             {l:"Pending Bills",v:pending.length,           c:pending.length>0?C.accent:C.muted},
+          ].map(x=>(
+            <div key={x.l} style={{background:C.bg,borderRadius:8,padding:"8px",textAlign:"center"}}>
+              <div style={{color:x.c,fontWeight:800,fontSize:14}}>{x.v}</div>
+              <div style={{color:C.muted,fontSize:9,textTransform:"uppercase",marginTop:2}}>{x.l}</div>
+            </div>
+          ))}
+        </div>
+        {/* Tons row */}
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginTop:8}}>
+          {[
+            {l:"Today Tons",    v: todayTrips.reduce((s,t)=>s+(+(t.qty)||0),0).toFixed(1),    c:C.teal},
+            {l:"Yesterday Tons",v: yesterdayTrips.reduce((s,t)=>s+(+(t.qty)||0),0).toFixed(1), c:C.purple},
+            {l:"Avg Tons/Day",  v: monthAvgTons.toFixed(1),                                    c:C.orange},
           ].map(x=>(
             <div key={x.l} style={{background:C.bg,borderRadius:8,padding:"8px",textAlign:"center"}}>
               <div style={{color:x.c,fontWeight:800,fontSize:14}}>{x.v}</div>
