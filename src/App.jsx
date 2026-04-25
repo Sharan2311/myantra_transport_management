@@ -9179,6 +9179,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
   const [drLastIndentNo, setDrLastIndentNo] = useState(null);
   const [editReqId,      setEditReqId]      = useState(null); // id of request being edited
   const [drSearch,       setDrSearch]       = useState(""); // search by truck/indent
+  const [drStatusFilter, setDrStatusFilter] = useState("all"); // all | open | confirmed | attached | attached_unconfirmed
   const [editTruckNo,    setEditTruckNo]    = useState("");
   const [editAmount,     setEditAmount]     = useState("");
   const [editDieselAmt,  setEditDieselAmt]  = useState("");
@@ -10263,6 +10264,46 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
               return <div style={{fontSize:11,color:C.muted,marginBottom:4}}>{cnt} request{cnt!==1?"s":""} in date range</div>;
             })()}
 
+            {/* ── Status filter chips ── */}
+            {(()=>{
+              const reqs = dieselRequests||[];
+              const counts = {
+                all:                   reqs.length,
+                open:                  reqs.filter(r=>r.status==="open").length,
+                confirmed:             reqs.filter(r=>r.status==="confirmed").length,
+                attached:              reqs.filter(r=>r.status==="attached" && r.confirmedAmount!=null).length,
+                attached_unconfirmed:  reqs.filter(r=>r.status==="attached" && r.confirmedAmount==null).length,
+              };
+              const chips = [
+                {id:"all",               label:"All",                color:C.muted},
+                {id:"open",              label:"⏳ Pending",          color:C.orange},
+                {id:"confirmed",         label:"✓ Confirmed",         color:C.teal},
+                {id:"attached",          label:"✅ Attached",          color:C.green},
+                {id:"attached_unconfirmed", label:"⚠ No Pump Confirm", color:"#d97706"},
+              ];
+              return (
+                <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
+                  {chips.map(c=>{
+                    const active = drStatusFilter===c.id;
+                    return (
+                      <button key={c.id} onClick={()=>setDrStatusFilter(c.id)}
+                        style={{
+                          background: active ? c.color : "transparent",
+                          border: `1.5px solid ${c.color}`,
+                          borderRadius: 20,
+                          color: active ? "#fff" : c.color,
+                          fontSize: 11, fontWeight: 700,
+                          padding: "4px 10px", cursor: "pointer",
+                          whiteSpace: "nowrap",
+                        }}>
+                        {c.label} {counts[c.id]>0?`(${counts[c.id]})`:""}
+                      </button>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+
             {/* Requests list */}
             {(dieselRequests||[]).length===0 && (
               <div style={{textAlign:"center",color:C.muted,padding:40}}>
@@ -10270,6 +10311,11 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
               </div>
             )}
             {[...(dieselRequests||[])].filter(r=>{
+              // Status filter
+              if(drStatusFilter==="open"               && r.status!=="open") return false;
+              if(drStatusFilter==="confirmed"          && r.status!=="confirmed") return false;
+              if(drStatusFilter==="attached"           && !(r.status==="attached" && r.confirmedAmount!=null)) return false;
+              if(drStatusFilter==="attached_unconfirmed" && !(r.status==="attached" && r.confirmedAmount==null)) return false;
               // Search filter
               if(drSearch) {
                 const q = drSearch.toLowerCase();
