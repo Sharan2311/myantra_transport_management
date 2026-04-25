@@ -10285,7 +10285,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
               return true;
             }).sort((a,b)=>b.indentNo-a.indentNo).map(req=>{
               const pump    = pumps.find(p=>p.id===req.pumpId);
-              const statusColor = req.status==="attached"?C.green:req.status==="confirmed"?C.teal:C.orange;
+              const statusColor = req.status==="attached"?(req.confirmedAmount!=null?C.green:"#d97706"):req.status==="confirmed"?C.teal:C.orange;
               const effAmt  = req.confirmedAmount??req.amount;
               const changed = req.confirmedAmount!=null && req.confirmedAmount!==req.amount;
               const isEditing = editReqId===req.id;
@@ -10329,6 +10329,12 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
                       )}
                       {req.lrNo && (
                         <div style={{color:C.green,fontSize:11,marginTop:2}}>✓ Attached to LR {req.lrNo}</div>
+                      )}
+                      {req.status==="attached" && req.confirmedAmount==null && (
+                        <div style={{color:"#d97706",fontSize:10,marginTop:2,fontWeight:600,
+                          background:"#fffbeb",borderRadius:4,padding:"2px 6px",display:"inline-block"}}>
+                          ⚠ Attached without pump confirmation
+                        </div>
                       )}
                       {changed && (
                         <div style={{color:C.orange,fontSize:11,marginTop:2}}>
