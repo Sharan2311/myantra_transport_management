@@ -1398,8 +1398,9 @@ export default function App() {
   );
 }
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
-function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pumps, pumpPayments, driverPays, activity, settings, setTab, user, selectedFY}) {
-  const displayTrips = fyTrips || trips; // use FY-filtered if available
+function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pumps, pumpPayments, driverPays, activity, settings, setTab, user, selectedFY, selectedClient}) {
+  const allFyTrips = fyTrips || trips;
+  const displayTrips = selectedClient ? allFyTrips.filter(t=>(t.client||"Shree Cement Kodla")===selectedClient) : allFyTrips;
   const todayStr    = today();
   const todayTrips  = displayTrips.filter(t => t.date===todayStr);
   const pending     = displayTrips.filter(t => t.status==="Pending Bill");
@@ -1413,7 +1414,10 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   const totalDieselPaid = (pumpPayments||[]).reduce((s,p) => s+(+(p.amount)||0), 0);
   const unpaidDiesel = Math.max(0, totalDieselOwed - totalDieselPaid);
   const tafalPool   = displayTrips.reduce((s,t) => s+(t.tafal||0), 0);
-  const vLoan       = vehicles.reduce((s,v) => s + Math.max(0, v.loan-v.loanRecovered), 0);
+  // Vehicle loans — filter by client's trucks if client selected
+  const clientTrucks = selectedClient ? new Set(displayTrips.map(t=>t.truckNo)) : null;
+  const loanVehicles = clientTrucks ? vehicles.filter(v=>clientTrucks.has(v.truckNo)) : vehicles;
+  const vLoan       = loanVehicles.reduce((s,v) => s + Math.max(0, v.loan-v.loanRecovered), 0);
   const fyLabel     = selectedFY ? FY_LABEL(selectedFY) : "";
 
   // ── Owner-only: pending receivables from clients ──────────────────────────
@@ -1578,10 +1582,10 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
 
       {/* KPI grid — fleet_manager sees only total trips + tafal pool */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-        <KPI icon="🚚" label="Total Trips"     value={displayTrips.filter(t=>t.type==="outbound").length} color={C.blue} sub={fyLabel||"cement trips"} />
+        <KPI icon="🚚" label="Total Trips"     value={displayTrips.filter(t=>t.type==="outbound").length} color={C.blue} sub={[selectedClient,fyLabel].filter(Boolean).join(" · ")||"cement trips"} />
         <KPI icon="🤝" label="TAFAL Pool"      value={fmt(tafalPool)}   color={C.purple} sub={`₹${settings?.tafalPerTrip||300}/trip`} />
         {user.role!=="fleet_manager" && <>
-          <KPI icon="📈" label="Total Margin"  value={fmt(margin)}      color={C.green} sub={fyLabel||"all time"} />
+          <KPI icon="📈" label="Total Margin"  value={fmt(margin)}      color={C.green} sub={[selectedClient,fyLabel].filter(Boolean).join(" · ")||"all time"} />
           <KPI icon="🔴" label="Vehicle Loans" value={fmt(vLoan)}       color={C.red} />
         </>}
       </div>
