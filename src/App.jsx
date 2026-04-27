@@ -11842,31 +11842,37 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
               </div>
 
               {/* Deduct per trip setting */}
-              {isOwner && (
-                <div style={{background:C.bg,borderRadius:12,padding:"10px 14px",display:"flex",alignItems:"center",gap:10}}>
-                  <div style={{flex:1}}>
-                    <div style={{fontSize:11,color:C.muted,fontWeight:700,marginBottom:4}}>SHORTAGE DEDUCT / TRIP ₹</div>
-                    <div style={{fontSize:10,color:C.muted,marginBottom:6}}>0 = deduct full balance in one trip</div>
-                    <input type="number" inputMode="decimal"
-                      defaultValue={v.shortageDeductPerTrip||0}
-                      key={v.id+"_sdpt"}
-                      onBlur={e=>{
-                        const val=+e.target.value||0;
+              {isOwner && (()=>{
+                const [sdptVal, setSdptVal] = React.useState(String(v.shortageDeductPerTrip||0));
+                const [sdptSaved, setSdptSaved] = React.useState(false);
+                return (
+                  <div style={{background:C.bg,borderRadius:12,padding:"10px 14px"}}>
+                    <div style={{fontSize:11,color:C.muted,fontWeight:700,marginBottom:2}}>SHORTAGE DEDUCT / TRIP ₹</div>
+                    <div style={{fontSize:10,color:C.muted,marginBottom:8}}>0 = deduct full balance in one trip</div>
+                    <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                      <input type="number" inputMode="decimal" value={sdptVal}
+                        onChange={e=>{ setSdptVal(e.target.value); setSdptSaved(false); }}
+                        style={{flex:1,background:C.card,border:`1.5px solid ${C.border}`,
+                          borderRadius:8,color:C.text,padding:"8px 10px",fontSize:15,outline:"none"}} />
+                      <button onClick={()=>{
+                        const val=+sdptVal||0;
                         setVehicles(p=>p.map(x=>{
                           if(x.id!==sSheet) return x;
                           const updated={...x,shortageDeductPerTrip:val};
                           DB.saveVehicle(updated).catch(err=>console.error("saveVehicle sdpt:",err));
                           return updated;
                         }));
-                      }}
-                      style={{width:"100%",background:C.card,border:`1.5px solid ${C.border}`,
-                        borderRadius:8,color:C.text,padding:"8px 10px",fontSize:15,outline:"none",boxSizing:"border-box"}} />
+                        setSdptSaved(true);
+                        setTimeout(()=>setSdptSaved(false),2000);
+                      }} style={{background:sdptSaved?C.green:C.teal,border:"none",borderRadius:8,
+                        color:"#fff",fontWeight:800,fontSize:13,padding:"8px 16px",cursor:"pointer",
+                        whiteSpace:"nowrap"}}>
+                        {sdptSaved?"✓ Saved":"Save"}
+                      </button>
+                    </div>
                   </div>
-                  <div style={{fontSize:11,color:C.teal,fontWeight:700,marginTop:16}}>
-                    {(v.shortageDeductPerTrip||0)>0 ? `₹${fmt(v.shortageDeductPerTrip)} / trip` : "Full balance"}
-                  </div>
-                </div>
-              )}
+                );
+              })()}
 
               {/* Record Shortage */}
               <div style={{background:C.bg,borderRadius:12,padding:14}}>
