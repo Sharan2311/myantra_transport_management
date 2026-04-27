@@ -12121,6 +12121,29 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                 ))}
               </div>
             )}
+            {/* Shortage balance row — always visible */}
+            {(()=>{
+              const stxns=v.shortageTxns||[];
+              const sOwed =stxns.filter(x=>x.type==="shortage").reduce((s,x)=>s+(x.amount||0),0);
+              const sRecov=stxns.filter(x=>x.type==="recovery").reduce((s,x)=>s+(x.amount||0),0);
+              const sBal  =Math.max(0,sOwed-sRecov);
+              if(sBal===0) return null;
+              return (
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:10}}>
+                  {[
+                    {l:"Shortage Owed", v:fmt(sOwed),  c:C.red},
+                    {l:"Recovered",     v:fmt(sRecov), c:C.green},
+                    {l:"Balance Due",   v:fmt(sBal),   c:C.orange},
+                  ].map(x=>(
+                    <div key={x.l} style={{background:C.red+"08",borderRadius:8,padding:"8px",textAlign:"center",
+                      border:`1px solid ${C.red}22`}}>
+                      <div style={{color:x.c,fontWeight:800,fontSize:12}}>{x.v}</div>
+                      <div style={{color:C.muted,fontSize:9}}>{x.l.toUpperCase()}</div>
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
 
             <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:C.muted,marginBottom:10}}>
               <span>Trips: <b style={{color:C.text}}>{vt.length}</b></span>
