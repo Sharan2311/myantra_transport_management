@@ -11841,6 +11841,33 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                 ))}
               </div>
 
+              {/* Deduct per trip setting */}
+              {isOwner && (
+                <div style={{background:C.bg,borderRadius:12,padding:"10px 14px",display:"flex",alignItems:"center",gap:10}}>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:11,color:C.muted,fontWeight:700,marginBottom:4}}>SHORTAGE DEDUCT / TRIP ₹</div>
+                    <div style={{fontSize:10,color:C.muted,marginBottom:6}}>0 = deduct full balance in one trip</div>
+                    <input type="number" inputMode="decimal"
+                      defaultValue={v.shortageDeductPerTrip||0}
+                      key={v.id+"_sdpt"}
+                      onBlur={e=>{
+                        const val=+e.target.value||0;
+                        setVehicles(p=>p.map(x=>{
+                          if(x.id!==sSheet) return x;
+                          const updated={...x,shortageDeductPerTrip:val};
+                          DB.saveVehicle(updated).catch(err=>console.error("saveVehicle sdpt:",err));
+                          return updated;
+                        }));
+                      }}
+                      style={{width:"100%",background:C.card,border:`1.5px solid ${C.border}`,
+                        borderRadius:8,color:C.text,padding:"8px 10px",fontSize:15,outline:"none",boxSizing:"border-box"}} />
+                  </div>
+                  <div style={{fontSize:11,color:C.teal,fontWeight:700,marginTop:16}}>
+                    {(v.shortageDeductPerTrip||0)>0 ? `₹${fmt(v.shortageDeductPerTrip)} / trip` : "Full balance"}
+                  </div>
+                </div>
+              )}
+
               {/* Record Shortage */}
               <div style={{background:C.bg,borderRadius:12,padding:14}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
@@ -12145,9 +12172,10 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
               );
             })()}
 
-            <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:C.muted,marginBottom:10}}>
+            <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:C.muted,marginBottom:10,flexWrap:"wrap",gap:4}}>
               <span>Trips: <b style={{color:C.text}}>{vt.length}</b></span>
-              <span>Deduct/trip: <b style={{color:C.blue}}>{fmt(v.deductPerTrip||0)}</b></span>
+              <span>Loan deduct: <b style={{color:C.blue}}>{fmt(v.deductPerTrip||0)}</b></span>
+              {(v.shortageDeductPerTrip||0)>0 && <span>Short deduct: <b style={{color:C.orange}}>{fmt(v.shortageDeductPerTrip)}</b></span>}
               {(()=>{
                 const stxns=v.shortageTxns||[];
                 const sbal=Math.max(0,stxns.filter(x=>x.type==="shortage").reduce((s,x)=>s+(x.amount||0),0)-stxns.filter(x=>x.type==="recovery").reduce((s,x)=>s+(x.amount||0),0));
