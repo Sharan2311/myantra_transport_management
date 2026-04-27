@@ -1848,7 +1848,10 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       const ownerBalG = ownerVehsG.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
       const autoLoanG = ownerBalG<=0 ? 0 : (ownerDeductG>0 ? Math.min(ownerDeductG, ownerBalG) : ownerBalG);
       // Auto-fill shortage recovery
-      const shortBalG = Math.max(0, (vehG?.shortageOwed||0) - (vehG?.shortageRecovered||0));
+      const _stxnsG = vehG?.shortageTxns||[];
+      const shortBalG = Math.max(0,
+        _stxnsG.filter(x=>x.type==="shortage").reduce((s,x)=>s+(x.amount||0),0) -
+        _stxnsG.filter(x=>x.type==="recovery").reduce((s,x)=>s+(x.amount||0),0));
       const shortDeductG = vehG?.shortageDeductPerTrip||0;
       const autoShortageG = shortBalG<=0 ? 0 : (shortDeductG>0 ? Math.min(shortDeductG, shortBalG) : shortBalG);
       // Auto-attach ONLY confirmed requests — open (unconfirmed) ones show a warning card instead
@@ -1907,7 +1910,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
         const ownerDed2 = ownerVs2[0]?.deductPerTrip||0;
         const ownerBal2 = ownerVs2.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
         const autoLR2 = ownerBal2<=0?0:Math.min(ownerDed2,ownerBal2);
-        const shortBal2 = Math.max(0,(vehT2?.shortageOwed||0)-(vehT2?.shortageRecovered||0));
+        const shortBal2 = Math.max(0,(()=>{const t=vehT2?.shortageTxns||[];return t.filter(x=>x.type==="shortage").reduce((s,x)=>s+(x.amount||0),0)-t.filter(x=>x.type==="recovery").reduce((s,x)=>s+(x.amount||0),0);})());
         const shortDed2 = vehT2?.shortageDeductPerTrip||0;
         const autoSR2 = shortBal2<=0?0:(shortDed2>0?Math.min(shortDed2,shortBal2):shortBal2);
         const autoReqS = (dieselRequests||[])
@@ -4975,7 +4978,10 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     // If deductPerTrip is set: cap recovery at that amount. If not set but balance exists: recover full balance.
     const autoLoanRecov = ownerBalT<=0 ? 0 : (ownerDeductT>0 ? Math.min(ownerDeductT, ownerBalT) : ownerBalT);
     // Auto-fill shortage recovery from vehicle's outstanding shortage balance
-    const shortBal = Math.max(0, (veh?.shortageOwed||0) - (veh?.shortageRecovered||0));
+    const _stxns = veh?.shortageTxns||[];
+    const shortBal = Math.max(0,
+      _stxns.filter(x=>x.type==="shortage").reduce((s,x)=>s+(x.amount||0),0) -
+      _stxns.filter(x=>x.type==="recovery").reduce((s,x)=>s+(x.amount||0),0));
     const shortDeductPerTrip = veh?.shortageDeductPerTrip||0;
     const autoShortageRecov = shortBal <= 0 ? 0 : (shortDeductPerTrip > 0 ? Math.min(shortDeductPerTrip, shortBal) : shortBal);
     // Find last trip with this truck to pre-fill rate and destination
