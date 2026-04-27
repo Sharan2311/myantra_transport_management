@@ -11430,6 +11430,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
       {/* KPIs */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
         <KPI icon="🔴" label="Loan Due"       value={fmt((vehicles||[]).reduce((s,v)=>s+Math.max(0,(v.loan||0)-(v.loanRecovered||0)),0))} color={C.red} />
+        <KPI icon="⚠" label="Shortage Due"    value={fmt((vehicles||[]).reduce((s,v)=>{const txns=v.shortageTxns||[];const owed=txns.filter(x=>x.type==="shortage").reduce((a,x)=>a+(x.amount||0),0);const recov=txns.filter(x=>x.type==="recovery").reduce((a,x)=>a+(x.amount||0),0);return s+Math.max(0,owed-recov);},0))} color={C.orange} />
         <KPI icon="🚛" label="Total Vehicles"  value={(vehicles||[]).length} color={C.blue} />
       </div>
 
@@ -12124,7 +12125,11 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
             <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:C.muted,marginBottom:10}}>
               <span>Trips: <b style={{color:C.text}}>{vt.length}</b></span>
               <span>Deduct/trip: <b style={{color:C.blue}}>{fmt(v.deductPerTrip||0)}</b></span>
-              <span style={{color:short>0?C.red:C.muted}}>Short: {short}MT</span>
+              {(()=>{
+                const stxns=v.shortageTxns||[];
+                const sbal=Math.max(0,stxns.filter(x=>x.type==="shortage").reduce((s,x)=>s+(x.amount||0),0)-stxns.filter(x=>x.type==="recovery").reduce((s,x)=>s+(x.amount||0),0));
+                return <span style={{color:sbal>0?C.red:C.muted}}>Short: <b>{sbal>0?fmt(sbal):"Clear"}</b></span>;
+              })()}
             </div>
 
             {/* Action buttons */}
