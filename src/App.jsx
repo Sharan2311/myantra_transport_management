@@ -1435,11 +1435,23 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   const totalReceived = (payments||[]).reduce((s,p)=>s+Number(p.totalPaid||0),0);
   const pendingReceivable = Math.max(0, totalBilled - totalReceived);
 
+  // Shortage alerts — vehicles with outstanding balance > ₹20,000
+  const highShortageVehicles = (vehicles||[]).filter(v => {
+    const bal = Math.max(0, (v.shortageOwed||0) - (v.shortageRecovered||0));
+    return bal > 20000;
+  });
+
   // Actionable alerts
   const alerts = [
     pending.length>0 && {color:C.accent, icon:"🧾", text:`${pending.length} trip${pending.length>1?"s":""} pending bill — ₹${(pending.reduce((s,t)=>s+t.qty*t.frRate,0)).toLocaleString("en-IN")}`, tab:"billing"},
     oldUnsettled.length>0 && {color:C.red, icon:"⏰", text:`${oldUnsettled.length} trip${oldUnsettled.length>1?"s":""} unsettled >7 days`, tab:"driverPay"},
     unpaidDiesel>0 && {color:C.orange, icon:"⛽", text:`Diesel payment pending — ${fmt(unpaidDiesel)}`, tab:"diesel"},
+    ...highShortageVehicles.map(v=>({
+      color:C.red,
+      icon:"⚠",
+      text:`${v.truckNo} — shortage balance ${fmt(Math.max(0,(v.shortageOwed||0)-(v.shortageRecovered||0)))}`,
+      tab:"vehicles",
+    })),
   ].filter(Boolean);
 
   const hour = new Date().getHours();
@@ -10956,6 +10968,9 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
   const [rLR,   setRLR]   = useState(""); const [rRef,   setRRef]   = useState("");
   // Shortage form
   const [shAmt, setShAmt] = useState(""); const [shTrip, setShTrip] = useState("");
+  const [shManual, setShManual] = useState(false); // manual LR mode for prev-year indents
+  const [shManualLR, setShManualLR] = useState(""); // manually typed LR number
+  const [shManualRate, setShManualRate] = useState(""); // rate for manual LR
   // Shortage recovery form
   const [srAmt, setSrAmt] = useState(""); const [srLR,   setSrLR]   = useState("");
 
@@ -11769,28 +11784,56 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
 
               {/* Record Shortage */}
               <div style={{background:C.bg,borderRadius:12,padding:14}}>
-                <div style={{color:C.red,fontWeight:700,fontSize:12,marginBottom:10}}>⚠ Record Shortage</div>
-                <div style={{display:"flex",gap:10}}>
-                  <Field label="Shortage MT *" value={shAmt} onChange={setShAmt} type="number" half />
-                  <SearchSelect label="Link LR *" value={shTrip} onChange={setShTrip}
-                    opts={[{v:"",l:"— None —"},...vtrips.map(t=>({v:t.id,l:`${t.lrNo||"—"} · ${t.truckNo} · ${t.date}`}))]}
-                    half placeholder={`Search LR… (${vtrips.length} available)`} />
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                  <div style={{color:C.red,fontWeight:700,fontSize:12}}>⚠ Record Shortage</div>
+                  <button onClick={()=>{setShManual(p=>!p);setShTrip("");setShManualLR("");setShManualRate("");}}
+                    style={{background:shManual?C.purple+"22":"transparent",border:`1.5px solid ${C.purple}`,
+                      borderRadius:20,color:C.purple,fontSize:11,fontWeight:700,padding:"3px 10px",cursor:"pointer"}}>
+                    {shManual?"✕ Use Trip LR":"✎ Manual LR"}
+                  </button>
                 </div>
+                {shManual ? (
+                  <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                    <div style={{background:C.purple+"11",border:`1px solid ${C.purple}44`,borderRadius:8,
+                      padding:"7px 10px",fontSize:11,color:C.purple}}>
+                      Previous year / unlisted LR — type any LR number and rate manually
+                    </div>
+                    <Field label="Shortage MT *" value={shAmt} onChange={setShAmt} type="number" />
+                    <Field label="LR Number *" value={shManualLR} onChange={setShManualLR} placeholder="e.g. SKLC180" />
+                    <Field label="Rate ₹/MT (for amount calc)" value={shManualRate} onChange={setShManualRate} type="number" placeholder="0 if unknown" />
+                  </div>
+                ) : (
+                  <div style={{display:"flex",gap:10}}>
+                    <Field label="Shortage MT *" value={shAmt} onChange={setShAmt} type="number" half />
+                    <SearchSelect label="Link LR *" value={shTrip} onChange={setShTrip}
+                      opts={[{v:"",l:"— None —"},...vtrips.map(t=>({v:t.id,l:`${t.lrNo||"—"} · ${t.truckNo} · ${t.date}`}))]}
+                      half placeholder={`Search LR… (${vtrips.length} available)`} />
+                  </div>
+                )}
                 <Btn onClick={()=>{
                   if(!shAmt||+shAmt<=0){alert("Enter shortage MT.\nಕೊರತೆ MT ನಮೂದಿಸಿ.");return;}
-                  if(!shTrip){alert("Link to an LR.\nLR ಗೆ ಲಿಂಕ್ ಮಾಡಿ.");return;}
-                  const trip = vtrips.find(t=>t.id===shTrip);
-                  const lrNo = trip?.lrNo||"";
-                  const rate = trip?.givenRate||0;
-                  const amount = +shAmt * rate;
-                  const txn={id:uid(),type:"shortage",date:trip?.date||today(),qty:+shAmt,lrNo,amount,note:""};
-                  // Update trip shortage too
-                  setTrips(p=>p.map(t=>t.id===shTrip?{...t,shortage:(t.shortage||0)+ +shAmt}:t));
+                  let lrNo, rate, amount, txnDate;
+                  if(shManual){
+                    if(!shManualLR.trim()){alert("Enter LR number");return;}
+                    lrNo    = shManualLR.trim();
+                    rate    = +shManualRate||0;
+                    amount  = +shAmt * rate;
+                    txnDate = today();
+                  } else {
+                    if(!shTrip){alert("Link to an LR.\nLR ಗೆ ಲಿಂಕ್ ಮಾಡಿ.");return;}
+                    const trip = vtrips.find(t=>t.id===shTrip);
+                    lrNo    = trip?.lrNo||"";
+                    rate    = trip?.givenRate||0;
+                    amount  = +shAmt * rate;
+                    txnDate = trip?.date||today();
+                    setTrips(p=>p.map(t=>t.id===shTrip?{...t,shortage:(t.shortage||0)+ +shAmt}:t));
+                  }
+                  const txn={id:uid(),type:"shortage",date:txnDate,qty:+shAmt,lrNo,amount,note:shManual?"Manual/prev-year LR":""};
                   setVehicles(p=>p.map(x=>x.id===sSheet?{...x,
                     shortageOwed:(x.shortageOwed||0)+amount,
                     shortageTxns:[...(x.shortageTxns||[]),txn]}:x));
-                  log("SHORTAGE",`${v.truckNo} ${shAmt}MT LR:${lrNo}`);
-                  setShAmt(""); setShTrip("");
+                  log("SHORTAGE",`${v.truckNo} ${shAmt}MT LR:${lrNo}${shManual?" [manual]":""}`);
+                  setShAmt(""); setShTrip(""); setShManualLR(""); setShManualRate("");
                 }} color={C.red} full>Record Shortage</Btn>
               </div>
 
