@@ -1842,6 +1842,10 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       const ownerDeductG = ownerVehsG[0]?.deductPerTrip||0;
       const ownerBalG = ownerVehsG.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
       const autoLoanG = ownerBalG<=0 ? 0 : (ownerDeductG>0 ? Math.min(ownerDeductG, ownerBalG) : ownerBalG);
+      // Auto-fill shortage recovery
+      const shortBalG = Math.max(0, (vehG?.shortageOwed||0) - (vehG?.shortageRecovered||0));
+      const shortDeductG = vehG?.shortageDeductPerTrip||0;
+      const autoShortageG = shortBalG<=0 ? 0 : (shortDeductG>0 ? Math.min(shortDeductG, shortBalG) : shortBalG);
       // Auto-attach ONLY confirmed requests — open (unconfirmed) ones show a warning card instead
       const confirmedReqsG = (dieselRequests||[])
         .filter(r => r.truckNo===truckNo && r.status==="confirmed");
@@ -1862,8 +1866,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
         dieselIndentNo: autoIndentNo,
         advance: "0",
         cashEmpId: "",
-        shortageRecovery: "0",
-        loanRecovery: String(autoLoanG),
+        shortageRecovery: String(autoShortageG),
         driverPhone: vehG?.driverPhone || "",
         ownerName: vehG?.ownerName || "",
         assignedEmpId: "",
@@ -1899,6 +1902,9 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
         const ownerDed2 = ownerVs2[0]?.deductPerTrip||0;
         const ownerBal2 = ownerVs2.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
         const autoLR2 = ownerBal2<=0?0:Math.min(ownerDed2,ownerBal2);
+        const shortBal2 = Math.max(0,(vehT2?.shortageOwed||0)-(vehT2?.shortageRecovered||0));
+        const shortDed2 = vehT2?.shortageDeductPerTrip||0;
+        const autoSR2 = shortBal2<=0?0:(shortDed2>0?Math.min(shortDed2,shortBal2):shortBal2);
         const autoReqS = (dieselRequests||[])
           .filter(r => r.truckNo===g.truckNo && r.status==="confirmed")[0] || null;
         const solo = {
@@ -1907,7 +1913,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           diesel: autoReqS ? String(autoReqS.confirmedAmount??autoReqS.amount) : "0",
           dieselIndentNo: autoReqS ? String(autoReqS.indentNo) : "",
           advance:"0", cashEmpId:"",
-          shortageRecovery:"0", loanRecovery:String(autoLR2),
+          shortageRecovery:String(autoSR2), loanRecovery:String(autoLR2),
           ownerName:g.ownerName||"",
           _splitFrom:gid,
           _autoAttachedReqId: autoReqS?.id || null,
@@ -2582,6 +2588,18 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                       <div style={{fontSize:11,color:C.blue,fontWeight:700,flexShrink:0}}>
                         FR: ₹{ex?.frRate||0}/MT
                       </div>
+                      {/* Remove DI from batch entirely */}
+                      <button onClick={()=>{
+                        if(!window.confirm(`Remove DI ${ex?.diNo||"this DI"} from batch? It won't be saved.`)) return;
+                        // Remove item from items list and remove its id from any group
+                        setItems(prev=>prev.filter(x=>x.id!==item.id));
+                        setGroups(prev=>{
+                          const updated = prev.map(x=>({...x, diIds:x.diIds.filter(id=>id!==item.id)}));
+                          return updated.filter(x=>x.diIds.length>0);
+                        });
+                      }} title="Remove this DI from batch"
+                        style={{background:"none",border:`1px solid ${C.red}44`,borderRadius:6,
+                          color:C.red,cursor:"pointer",fontSize:13,padding:"2px 6px",flexShrink:0}}>✕</button>
                     </div>
 
                     {/* Per-DI fields (only when checked) */}
@@ -2966,11 +2984,21 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
               {/* Shortage + Loan recovery */}
               <div style={{display:"flex",gap:10}}>
                 <div style={{flex:1}}>
-                  <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>SHORTAGE RECOVERY ₹</div>
-                  <input type="text" inputMode="decimal" value={g.shortageRecovery}
-                    onChange={e=>updateGroup(g.id,"shortageRecovery",e.target.value)}
-                    style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,
-                      borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
+                  <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
+                    SHORTAGE RECOVERY ₹{user?.role!=="owner"&&<span style={{color:C.orange,fontSize:9,marginLeft:4}}>🔒</span>}
+                  </div>
+                  {user?.role==="owner" ? (
+                    <input type="text" inputMode="decimal" value={g.shortageRecovery}
+                      onChange={e=>updateGroup(g.id,"shortageRecovery",e.target.value)}
+                      style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,
+                        borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
+                  ) : (
+                    <div style={{background:C.dim,border:`1.5px solid ${C.border}`,borderRadius:8,
+                      padding:"7px 8px",fontSize:13,color:C.text,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <span>₹{(+g.shortageRecovery||0).toLocaleString("en-IN")}</span>
+                      <span style={{fontSize:10,color:C.muted}}>🔒</span>
+                    </div>
+                  )}
                 </div>
                 <div style={{flex:1}}>
                   <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
@@ -4941,6 +4969,10 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     const ownerBalT = ownerVehsT.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
     // If deductPerTrip is set: cap recovery at that amount. If not set but balance exists: recover full balance.
     const autoLoanRecov = ownerBalT<=0 ? 0 : (ownerDeductT>0 ? Math.min(ownerDeductT, ownerBalT) : ownerBalT);
+    // Auto-fill shortage recovery from vehicle's outstanding shortage balance
+    const shortBal = Math.max(0, (veh?.shortageOwed||0) - (veh?.shortageRecovered||0));
+    const shortDeductPerTrip = veh?.shortageDeductPerTrip||0;
+    const autoShortageRecov = shortBal <= 0 ? 0 : (shortDeductPerTrip > 0 ? Math.min(shortDeductPerTrip, shortBal) : shortBal);
     // Find last trip with this truck to pre-fill rate and destination
     const lastTrip = [...trips].filter(t=>t.truckNo===tn&&t.type===tripType).sort((a,b)=>b.date.localeCompare(a.date))[0];
     setF(p => ({
@@ -4948,6 +4980,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       truckNo: v,
       tafal: veh?.tafalExempt ? "0" : String(settings?.tafalPerTrip||300),
       loanRecovery: String(autoLoanRecov),
+      shortageRecovery: String(autoShortageRecov),
       givenRate: p.givenRate||"" ? p.givenRate : String(lastTrip?.givenRate||""),
       frRate:    p.frRate||""    ? p.frRate    : String(lastTrip?.frRate||""),
       to:        p.to            ? p.to        : (lastTrip?.to||""),
@@ -7020,8 +7053,21 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
       )}
       <div style={{display:"flex",gap:10}}>
         <Field label="Advance ₹" value={f.advance||""} onChange={ff("advance")} type="number" half />
-        <Field label="Shortage Recovery ₹" value={f.shortageRecovery||""} onChange={ff("shortageRecovery")} type="number" half
-          note={veh&&(veh.shortageOwed||0)>(veh.shortageRecovered||0)?`Pending: ₹${((veh.shortageOwed||0)-(veh.shortageRecovered||0)).toLocaleString("en-IN")}`:""} />
+        {user?.role==="owner" ? (
+          <Field label="Shortage Recovery ₹ 🔒" value={f.shortageRecovery||""} onChange={ff("shortageRecovery")} type="number" half
+            note={veh&&(veh.shortageOwed||0)>(veh.shortageRecovered||0)?`Balance: ₹${((veh.shortageOwed||0)-(veh.shortageRecovered||0)).toLocaleString("en-IN")}`:""} />
+        ) : (
+          <div style={{flex:1}}>
+            <label style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,display:"block",marginBottom:4}}>
+              Shortage Recovery ₹ <span style={{color:C.orange,fontSize:10}}>🔒 Owner-set</span>
+            </label>
+            <div style={{background:C.dim,border:`1.5px solid ${C.border}`,borderRadius:10,
+              padding:"13px 12px",fontSize:15,color:C.text,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span>₹{(+f.shortageRecovery||0).toLocaleString("en-IN")}</span>
+              <span style={{fontSize:10,color:C.muted}}>🔒</span>
+            </div>
+          </div>
+        )}
       </div>
       {+f.advance>0 && (employees||[]).length>0 && (
         <div>
@@ -10978,7 +11024,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
     truckNo:"", ownerName:"", phone:"",
     driverName:"", driverPhone:"", driverLicense:"",
     accountNo:"", ifsc:"",
-    loan:"0", loanRecovered:"0", deductPerTrip:"0", tafalExempt:false,
+    loan:"0", loanRecovered:"0", deductPerTrip:"0", shortageDeductPerTrip:"0", tafalExempt:false,
   };
   const [f, setF] = useState(blank);
   const ff = k => v => setF(p => ({...p,[k]:v}));
@@ -11489,7 +11535,9 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
               <Field label="Loan ₹"       value={f.loan}          onChange={ff("loan")}          type="number" half />
               <Field label="Recovered ₹"  value={f.loanRecovered}  onChange={ff("loanRecovered")}  type="number" half />
             </div>
-            <Field label="Deduct Per Trip ₹" value={f.deductPerTrip} onChange={ff("deductPerTrip")} type="number" />
+            <Field label="Deduct Per Trip ₹ (Loan)" value={f.deductPerTrip} onChange={ff("deductPerTrip")} type="number" />
+            <Field label="Shortage Deduct Per Trip ₹" value={f.shortageDeductPerTrip||"0"} onChange={ff("shortageDeductPerTrip")} type="number"
+              note="0 = deduct full balance in one trip" />
             <div style={{display:"flex",gap:10,alignItems:"center",padding:"4px 0"}}>
               <input type="checkbox" checked={f.tafalExempt} onChange={e=>setF(p=>({...p,tafalExempt:e.target.checked}))} style={{width:20,height:20}} />
               <span style={{color:C.text,fontSize:15}}>TAFAL Exempt</span>
@@ -11517,12 +11565,14 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
               if(editId) {
                 setVehicles(p=>p.map(v=>v.id===editId?{...v,...f,
                   loan:+f.loan,loanRecovered:+f.loanRecovered,deductPerTrip:+f.deductPerTrip,
+                  shortageDeductPerTrip:+f.shortageDeductPerTrip||0,
                   truckNo:f.truckNo.toUpperCase().trim()}:v));
                 log("EDIT VEHICLE",`${f.truckNo} updated`);
               } else {
                 const v={...f,id:uid(),
                   truckNo:f.truckNo.toUpperCase().trim(),
                   loan:+f.loan,loanRecovered:+f.loanRecovered,deductPerTrip:+f.deductPerTrip,
+                  shortageDeductPerTrip:+f.shortageDeductPerTrip||0,
                   loanTxns:[],shortageTxns:[],createdBy:user.username};
                 setVehicles(p=>[...(p||[]),v]);
                 log("ADD VEHICLE",`${v.truckNo} driver:${v.driverPhone}`);
@@ -11829,9 +11879,14 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                     setTrips(p=>p.map(t=>t.id===shTrip?{...t,shortage:(t.shortage||0)+ +shAmt}:t));
                   }
                   const txn={id:uid(),type:"shortage",date:txnDate,qty:+shAmt,lrNo,amount,note:shManual?"Manual/prev-year LR":""};
-                  setVehicles(p=>p.map(x=>x.id===sSheet?{...x,
-                    shortageOwed:(x.shortageOwed||0)+amount,
-                    shortageTxns:[...(x.shortageTxns||[]),txn]}:x));
+                  setVehicles(p=>p.map(x=>{
+                    if(x.id!==sSheet) return x;
+                    const updated={...x,
+                      shortageOwed:(x.shortageOwed||0)+amount,
+                      shortageTxns:[...(x.shortageTxns||[]),txn]};
+                    DB.saveVehicle(updated).catch(e=>console.error("saveVehicle shortage:",e));
+                    return updated;
+                  }));
                   log("SHORTAGE",`${v.truckNo} ${shAmt}MT LR:${lrNo}${shManual?" [manual]":""}`);
                   setShAmt(""); setShTrip(""); setShManualLR(""); setShManualRate("");
                 }} color={C.red} full>Record Shortage</Btn>
@@ -11981,7 +12036,9 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                   driverName:v.driverName||"",driverPhone:v.driverPhone||"",driverLicense:v.driverLicense||"",
                   accountNo:v.accountNo||"",ifsc:v.ifsc||"",
                   loan:String(v.loan||0),loanRecovered:String(v.loanRecovered||0),
-                  deductPerTrip:String(v.deductPerTrip||0),tafalExempt:v.tafalExempt||false,
+                  deductPerTrip:String(v.deductPerTrip||0),
+                  shortageDeductPerTrip:String(v.shortageDeductPerTrip||0),
+                  tafalExempt:v.tafalExempt||false,
                 });setEditId(v.id);setSheet(true);}}
                   style={{background:"none",border:`1px solid ${C.muted}44`,borderRadius:6,
                     padding:"3px 8px",color:C.muted,cursor:"pointer",fontSize:11}}>✏ Edit</button>
