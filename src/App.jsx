@@ -7550,9 +7550,23 @@ function Billing({trips, setTrips, fyTrips, selectedClient, user, log}) {
     return true;
   });
 
-  // Totals by type
-  const godownPending = pending.filter(t=>!t.orderType||t.orderType==="godown");
-  const partyPending  = pending.filter(t=>t.orderType==="party");
+  // Apply date/month filter to billed and paid for KPI tiles
+  const filteredBilled = billed.filter(t=>{
+    if(billMonth && !(t.date||"").startsWith(billMonth)) return false;
+    if(billDateFrom && (t.date||"") < billDateFrom) return false;
+    if(billDateTo   && (t.date||"") > billDateTo)   return false;
+    return true;
+  });
+  const filteredPaid = paid.filter(t=>{
+    if(billMonth && !(t.date||"").startsWith(billMonth)) return false;
+    if(billDateFrom && (t.date||"") < billDateFrom) return false;
+    if(billDateTo   && (t.date||"") > billDateTo)   return false;
+    return true;
+  });
+
+  // Totals by type — from filteredPending
+  const godownPending = filteredPending.filter(t=>!t.orderType||t.orderType==="godown");
+  const partyPending  = filteredPending.filter(t=>t.orderType==="party");
   const godownTotal   = godownPending.reduce((s,t)=>s+t.qty*(t.frRate||0),0);
   const partyTotal    = partyPending.reduce((s,t)=>s+t.qty*(t.frRate||0),0);
 
@@ -7586,18 +7600,18 @@ function Billing({trips, setTrips, fyTrips, selectedClient, user, log}) {
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
         <div style={{background:C.card,borderRadius:12,padding:"12px 14px",borderTop:`3px solid ${C.accent}`}}>
           <div style={{color:C.muted,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>⚠ Pending</div>
-          <div style={{color:C.accent,fontWeight:900,fontSize:20,marginTop:4}}>{pending.length}</div>
-          <div style={{color:C.muted,fontSize:11,marginTop:2}}>{fmt(pending.reduce((s,t)=>s+t.qty*(t.frRate||0),0))}</div>
+          <div style={{color:C.accent,fontWeight:900,fontSize:20,marginTop:4}}>{filteredPending.length}</div>
+          <div style={{color:C.muted,fontSize:11,marginTop:2}}>{fmt(filteredPending.reduce((s,t)=>s+t.qty*(t.frRate||0),0))}</div>
         </div>
         <div style={{background:C.card,borderRadius:12,padding:"12px 14px",borderTop:`3px solid ${C.blue}`}}>
           <div style={{color:C.muted,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>🧾 Billed</div>
-          <div style={{color:C.blue,fontWeight:900,fontSize:20,marginTop:4}}>{billed.length}</div>
-          <div style={{color:C.muted,fontSize:11,marginTop:2}}>{fmt(billed.reduce((s,t)=>s+t.qty*(t.frRate||0),0))}</div>
+          <div style={{color:C.blue,fontWeight:900,fontSize:20,marginTop:4}}>{filteredBilled.length}</div>
+          <div style={{color:C.muted,fontSize:11,marginTop:2}}>{fmt(filteredBilled.reduce((s,t)=>s+t.qty*(t.frRate||0),0))}</div>
         </div>
         <div style={{background:C.card,borderRadius:12,padding:"12px 14px",borderTop:`3px solid ${C.green}`}}>
           <div style={{color:C.muted,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>✅ Paid</div>
-          <div style={{color:C.green,fontWeight:900,fontSize:20,marginTop:4}}>{paid.length}</div>
-          <div style={{color:C.muted,fontSize:11,marginTop:2}}>{fmt(paid.reduce((s,t)=>s+t.qty*(t.frRate||0),0))}</div>
+          <div style={{color:C.green,fontWeight:900,fontSize:20,marginTop:4}}>{filteredPaid.length}</div>
+          <div style={{color:C.muted,fontSize:11,marginTop:2}}>{fmt(filteredPaid.reduce((s,t)=>s+t.qty*(t.frRate||0),0))}</div>
         </div>
       </div>
 
