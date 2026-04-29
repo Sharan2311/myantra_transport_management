@@ -12620,8 +12620,10 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
     }).join("");
     const html = `<html><head><style>
       body{font-family:Arial,sans-serif;padding:24px;font-size:12px}
-      h2{margin-bottom:2px}
-      .sub{color:#666;font-size:12px;margin-bottom:14px}
+      .header{display:flex;align-items:center;gap:14px;margin-bottom:4px}
+      .logo{width:48px;height:48px;border-radius:8px;object-fit:cover}
+      h2{margin:0;font-size:18px}
+      .sub{color:#666;font-size:12px;margin-bottom:14px;margin-left:62px}
       table{width:100%;border-collapse:collapse;margin-top:12px}
       th{background:#1565c0;color:#fff;padding:7px 8px;text-align:left;font-size:11px}
       td{padding:6px 8px;border-bottom:1px solid #eee;font-size:11px}
@@ -12629,7 +12631,12 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
       .sv{font-weight:bold}.sc{color:green}.sd{color:#c00}.sb{color:#f97316}
       .total{text-align:right;font-weight:bold;font-size:14px;margin-top:12px}
     </style></head><body>
-      <h2>M. Yantra — Cash Wallet: ${emp.name}</h2>
+      <div class="header">
+        <img src="${LOGO_SRC}" class="logo" alt="M Yantra" />
+        <div>
+          <h2>M. Yantra — Cash Wallet: ${emp.name}</h2>
+        </div>
+      </div>
       <div class="sub">Role: ${emp.role} | Period: ${wFrom||"All"} → ${wTo||"All"}</div>
       <div class="summary">
         <span>Transferred: <span class="sv sc">₹${fmt2(totCr)}</span></span>
