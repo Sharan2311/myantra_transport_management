@@ -5571,7 +5571,15 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
               {isIn ? "🏭 Raw Material" : "🚛 Cement Trips"}
             </div>
             <div style={{color:C.muted,fontSize:11,marginTop:1}}>
-              {shown.length} trip{shown.length!==1?"s":""} · {shown.reduce((s,t)=>s+(t.qty||0),0)} MT
+              {(()=>{
+                const curM = new Date().toISOString().slice(0,7);
+                const mShown = shown.filter(t=>(t.date||"").startsWith(curM));
+                const mTons  = mShown.reduce((s,t)=>s+(t.qty||0),0);
+                return <>
+                  <span style={{color:C.text,fontWeight:700}}>{mShown.length} trips · {mTons} MT</span>
+                  <span style={{color:C.muted,fontSize:10}}> this month</span>
+                </>;
+              })()}
             </div>
           </div>
           {/* Date filter toggle */}
