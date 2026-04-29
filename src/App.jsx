@@ -1512,6 +1512,98 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
         </div>
       </div>
 
+      {/* ── FY Summary ── */}
+      {(()=>{
+        const fyTripsAll = displayTrips;
+        const fyTons     = fyTripsAll.reduce((s,t)=>s+(+(t.qty)||0),0);
+        const fyMargin   = fyTripsAll.reduce((s,t)=>s+((+(t.qty)||0)*((t.frRate||0)-(t.givenRate||0))),0);
+
+        // Build month buckets for the selected FY
+        // FY runs Apr–Mar; detect from trips date range
+        const fyMonths = [];
+        const tripsByMonth = {};
+        fyTripsAll.forEach(t=>{
+          const m = (t.date||"").slice(0,7);
+          if(!m) return;
+          if(!tripsByMonth[m]) tripsByMonth[m]=[];
+          tripsByMonth[m].push(t);
+        });
+        // Sort months
+        const sortedMonths = Object.keys(tripsByMonth).sort();
+
+        return (
+          <>
+            {/* FY KPI bar */}
+            <div style={{background:C.card,borderRadius:14,padding:"14px 16px"}}>
+              <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>
+                {fyLabel||"FY"} — Full Year
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+                {[
+                  {l:"Total Trips",  v:fyTripsAll.length,       c:C.blue},
+                  {l:"Total Tons",   v:fyTons.toFixed(1)+"T",   c:C.teal},
+                  {l:"FY Margin",    v:fmt(fyMargin),            c:C.green},
+                ].map(x=>(
+                  <div key={x.l} style={{background:C.bg,borderRadius:8,padding:"8px",textAlign:"center"}}>
+                    <div style={{color:x.c,fontWeight:800,fontSize:14}}>{x.v}</div>
+                    <div style={{color:C.muted,fontSize:9,textTransform:"uppercase",marginTop:2}}>{x.l}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Month-wise breakdown */}
+            {sortedMonths.length>0 && (
+              <div style={{background:C.card,borderRadius:14,padding:"14px 16px"}}>
+                <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>
+                  Month-wise Breakdown
+                </div>
+                <div style={{overflowX:"auto"}}>
+                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                    <thead>
+                      <tr style={{borderBottom:`1.5px solid ${C.border}`}}>
+                        {["Month","Trips","Tons","Margin"].map(h=>(
+                          <th key={h} style={{color:C.muted,fontWeight:700,padding:"4px 6px",
+                            textAlign:h==="Month"?"left":"right",whiteSpace:"nowrap"}}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {[...sortedMonths].reverse().map(m=>{
+                        const mTrips   = tripsByMonth[m];
+                        const mTons    = mTrips.reduce((s,t)=>s+(+(t.qty)||0),0);
+                        const mMargin  = mTrips.reduce((s,t)=>s+(+(t.qty)||0)*((t.frRate||0)-(t.givenRate||0)),0);
+                        const mLabel   = new Date(m+"-01").toLocaleDateString("en-IN",{month:"short",year:"2-digit"});
+                        const isThisMonth = m===todayStr.slice(0,7);
+                        return (
+                          <tr key={m} style={{borderBottom:`1px solid ${C.border}22`,
+                            background:isThisMonth?C.accent+"11":"transparent"}}>
+                            <td style={{padding:"7px 6px",color:isThisMonth?C.accent:C.text,fontWeight:isThisMonth?700:400}}>
+                              {mLabel}{isThisMonth&&<span style={{color:C.accent,fontSize:9,marginLeft:4}}>◀</span>}
+                            </td>
+                            <td style={{padding:"7px 6px",textAlign:"right",color:C.blue,fontWeight:600}}>{mTrips.length}</td>
+                            <td style={{padding:"7px 6px",textAlign:"right",color:C.teal,fontWeight:600}}>{mTons.toFixed(1)}</td>
+                            <td style={{padding:"7px 6px",textAlign:"right",color:mMargin>=0?C.green:C.red,fontWeight:600}}>{fmt(mMargin)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                    <tfoot>
+                      <tr style={{borderTop:`1.5px solid ${C.border}`,background:C.bg}}>
+                        <td style={{padding:"7px 6px",color:C.text,fontWeight:800}}>Total</td>
+                        <td style={{padding:"7px 6px",textAlign:"right",color:C.blue,fontWeight:800}}>{fyTripsAll.length}</td>
+                        <td style={{padding:"7px 6px",textAlign:"right",color:C.teal,fontWeight:800}}>{fyTons.toFixed(1)}</td>
+                        <td style={{padding:"7px 6px",textAlign:"right",color:C.green,fontWeight:800}}>{fmt(fyMargin)}</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              </div>
+            )}
+          </>
+        );
+      })()}
+
       {/* Actionable alerts */}
       {alerts.length>0 && (
         <div style={{display:"flex",flexDirection:"column",gap:8}}>
