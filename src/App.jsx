@@ -66,7 +66,7 @@ const canEdit = (user, p) => {
 
 // ─── SUPABASE DATA HOOK ────────────────────────────────────────────────────────
 // Loads data once, then every 15 seconds. Writes go straight to DB + local state.
-function useDB(fetcher, initial = []) {
+function useDB(fetcher, initial = [], delay = 0) {
   const [data,  setData]  = useState(initial);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState(null);
@@ -103,9 +103,14 @@ function useDB(fetcher, initial = []) {
     }
   }, []);
 
-  useEffect(() => { load(); }, [load]);
   useEffect(() => {
-    const t = setInterval(load, 15000);
+    // Stagger initial load by delay ms to spread DB connections across phases
+    const t = delay > 0 ? setTimeout(() => load(), delay) : (load(), null);
+    return () => { if(t) clearTimeout(t); };
+  }, [load]);
+  useEffect(() => {
+    // Poll every 45s instead of 15s — reduces connection pool pressure by 3×
+    const t = setInterval(load, 45000);
     return () => clearInterval(t);
   }, [load]);
 
@@ -917,8 +922,9 @@ export default function App() {
   const [selectedFY, setSelectedFY] = useState(currentFY()); // Financial year filter
   const [selectedClient, setSelectedClient] = useState(""); // "" = All clients
 
-  const [users,       setUsers,       rU, reloadUsers]       = useDB(DB.getUsers,       []);
-  const [trips,       setTrips,       rT, reloadTrips]       = useDB(DB.getTrips,       []);
+  // ── Phase 1 (0ms) — critical for first render: 4 connections ────────────────
+  const [users,       setUsers,       rU, reloadUsers]       = useDB(DB.getUsers,       [],               0);
+  const [trips,       setTrips,       rT, reloadTrips]       = useDB(DB.getTrips,       [],               0);
   const [allTripsLoaded, setAllTripsLoaded] = useState(false);
   const [loadingAllTrips, setLoadingAllTrips] = useState(false);
   // Load all trips (beyond 90-day default) — called explicitly by user
@@ -934,22 +940,26 @@ export default function App() {
       setLoadingAllTrips(false);
     }
   };
-  const [vehicles,    setVehicles,    rV, reloadVehicles]    = useDB(DB.getVehicles,    []);
-  const [employees,   setEmployees,   rE, reloadEmployees]   = useDB(DB.getEmployees,   []);
-  const [payments,    setPayments,    rP, reloadPayments]    = useDB(DB.getPayments,    []);
-  const [settlements, setSettlements, rS, reloadSettlements] = useDB(DB.getSettlements, []);
-  const [activity,    setActivity,    rA, reloadActivity]    = useDB(DB.getActivity,    []);
-  const [pumps,       setPumps,       rPu,reloadPumps]       = useDB(DB.getPumps,       []);
-  const [indents,        setIndents,        rI,  reloadIndents]       = useDB(DB.getIndents,       []);
-  const [pumpPayments,   setPumpPayments,   rPP, reloadPumpPayments] = useDB(DB.getPumpPayments, []);
-  const [dieselRequests, setDieselRequests, rDR, reloadDieselRequests] = useDB(DB.getDieselRequests, []);
-  const dbSetPumpPayments = async (val) => { setPumpPayments(val); }; // pump payments saved individually via recordPumpPayment
-  const [settings,    setSettings,    rSt,reloadSettings]    = useDB(DB.getSettings,    {tafalPerTrip:300});
-  const [driverPays,  setDriverPays,  rDP,reloadDriverPays]  = useDB(DB.getDriverPays,  []);
-  const [expenses,       setExpenses,       rEx, reloadExpenses]      = useDB(DB.getExpenses,       []);
-  const [gstReleases,    setGstReleases,    rGR, reloadGst]           = useDB(DB.getGstReleases,    []);
-  const [cashTransfers,  setCashTransfers,  rCT, reloadCashTransfers] = useDB(DB.getCashTransfers,  []);
-  const [paymentRequests, setPaymentRequests, rPR] = useDB(DB.getPaymentRequests, []);
+  const [vehicles,    setVehicles,    rV, reloadVehicles]    = useDB(DB.getVehicles,    [],               0);
+  const [settings,    setSettings,    rSt,reloadSettings]    = useDB(DB.getSettings,    {tafalPerTrip:300},0);
+
+  // ── Phase 2 (300ms) — 5 connections ──────────────────────────────────────────
+  const [employees,   setEmployees,   rE, reloadEmployees]   = useDB(DB.getEmployees,   [],             300);
+  const [payments,    setPayments,    rP, reloadPayments]    = useDB(DB.getPayments,    [],             300);
+  const [pumps,       setPumps,       rPu,reloadPumps]       = useDB(DB.getPumps,       [],             300);
+  const [indents,        setIndents,        rI,  reloadIndents]       = useDB(DB.getIndents,       [],  300);
+  const [dieselRequests, setDieselRequests, rDR, reloadDieselRequests] = useDB(DB.getDieselRequests, [], 300);
+
+  // ── Phase 3 (650ms) — 6 connections ──────────────────────────────────────────
+  const [settlements, setSettlements, rS, reloadSettlements] = useDB(DB.getSettlements, [],             650);
+  const [activity,    setActivity,    rA, reloadActivity]    = useDB(DB.getActivity,    [],             650);
+  const [driverPays,  setDriverPays,  rDP,reloadDriverPays]  = useDB(DB.getDriverPays,  [],             650);
+  const [expenses,       setExpenses,       rEx, reloadExpenses]      = useDB(DB.getExpenses,       [], 650);
+  const [gstReleases,    setGstReleases,    rGR, reloadGst]           = useDB(DB.getGstReleases,    [], 650);
+  const [cashTransfers,  setCashTransfers,  rCT, reloadCashTransfers] = useDB(DB.getCashTransfers,  [], 650);
+  const [pumpPayments,   setPumpPayments,   rPP, reloadPumpPayments]  = useDB(DB.getPumpPayments,   [], 650);
+  const [paymentRequests, setPaymentRequests, rPR] = useDB(DB.getPaymentRequests, [],               650);
+  const dbSetPumpPayments = async (val) => { setPumpPayments(val); };
 
   const loading = !rU||!rT||!rV||!rE||!rP||!rS||!rPu||!rI||!rSt||!rDP||!rEx||!rGR;
   const dbError = (!rU && users.length===0) ? "Could not load users from database." : null;
@@ -8670,6 +8680,7 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance: tripWithBalancePr
                   note:(sharedNote||paidTo||"Cash Transfer").trim(),utr,
                   createdBy:user?.username||"",createdAt:nowTs()};
                 setCashTransfers(prev=>[tx,...(Array.isArray(prev)?prev:[])]);
+                DB.saveCashTransfer(tx).catch(e=>console.error("saveCashTransfer wallet scan:",e));
                 log&&log("CASH TRANSFER",`${selEmp?.name} ₹${fmt(totalAmount)} UTR:${utr}`);
                 alert(`✅ ₹${fmt(totalAmount)} added to ${selEmp?.name}'s wallet`);
                 onCancel();

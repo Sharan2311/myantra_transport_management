@@ -270,21 +270,36 @@ const pumpPaymentToDB = p => ({
   created_by: p.createdBy, created_at: p.createdAt,
 })
 
-const fetchAll = async (table, fromDB) => {
+// ── Retry helper — exponential backoff, 3 attempts ───────────────────────────
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const withRetry = async (fn, retries = 3, baseDelay = 800) => {
+  for (let i = 0; i < retries; i++) {
+    try { return await fn(); }
+    catch (e) {
+      const last = i === retries - 1;
+      if (last) throw e;
+      const delay = baseDelay * Math.pow(2, i); // 800ms, 1600ms, 3200ms
+      console.warn(`[DB] Retry ${i + 1}/${retries - 1} after ${delay}ms — ${e.message}`);
+      await sleep(delay);
+    }
+  }
+};
+
+const fetchAll = (table, fromDB) => withRetry(async () => {
   const { data, error } = await supabase.from(table).select('*').order('id')
   if (error) throw error
   return (data||[]).map(fromDB)
-}
+});
 
 // Date-limited fetch — loads only last N days, ordered by date desc
-const fetchRecent = async (table, fromDB, dateCol='date', days=120) => {
+const fetchRecent = (table, fromDB, dateCol='date', days=120) => withRetry(async () => {
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
   const { data, error } = await supabase.from(table).select('*')
     .gte(dateCol, cutoff)
     .order(dateCol, { ascending: false })
   if (error) throw error
   return (data||[]).map(fromDB)
-}
+});
 const upsertOne = async (table, toDB, record) => {
   const { error } = await supabase.from(table).upsert(toDB(record), { onConflict: 'id' })
   if (error) throw error
@@ -529,5 +544,90 @@ export const DB = {
   saveSettings: async (val) => {
     const { error } = await supabase.from('mye_settings').upsert({ key: 'app_settings', value: val })
     if (error) throw error
+  },
+
+  // ── Phased loader — replaces 15 simultaneous requests with 3 staggered bursts
+  // Phase 1 (0ms)   — 4 calls: critical for first render
+  // Phase 2 (250ms) — 5 calls: needed within seconds
+  // Phase 3 (600ms) — 6 calls: background / secondary data
+  loadAll: async (onPhase) => {
+    const safe = async (fn, fallback = []) => {
+      try { return await fn(); } catch (e) { console.warn('[DB loadAll]', e.message); return fallback; }
+    };
+
+    // ── Phase 1: must-have for initial render ─────────────────────────────────
+    const [users, settings, trips, vehicles] = await Promise.all([
+      safe(() => fetchAll('mye_users', userFromDB)),
+      safe(async () => {
+        const { data } = await supabase.from('mye_settings').select('*').eq('key','app_settings').single();
+        return data?.value || { tafalPerTrip: 300 };
+      }, { tafalPerTrip: 300 }),
+      safe(async () => {
+        const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        const { data, error } = await supabase.from('mye_trips').select('*').order('date', {ascending:false}).order('id').gte('date', cutoff);
+        if (error) throw error;
+        return (data||[]).map(tripFromDB);
+      }),
+      safe(() => fetchAll('mye_vehicles', vehicleFromDB)),
+    ]);
+    onPhase?.({ users, settings, trips, vehicles });
+
+    await sleep(250);
+
+    // ── Phase 2: needed for billing, payments, employee tabs ──────────────────
+    const [employees, payments, pumps, indents, dieselRequests] = await Promise.all([
+      safe(() => fetchAll('mye_employees', employeeFromDB)),
+      safe(() => fetchRecent('mye_payments', paymentFromDB, 'payment_date', 120)),
+      safe(() => fetchAll('mye_pumps', pumpFromDB)),
+      safe(() => fetchRecent('mye_indents', indentFromDB, 'date', 90)),
+      safe(async () => {
+        const { data, error } = await supabase.from('mye_diesel_requests').select('*').order('created_at', {ascending:false});
+        if (error) throw error;
+        return (data||[]).map(r => ({
+          id: r.id, indentNo: r.indent_no, truckNo: r.truck_no, pumpId: r.pump_id,
+          amount: +(r.amount||0), dieselAmount: r.diesel_amount!=null ? +(r.diesel_amount) : null,
+          cashAmount: r.cash_amount!=null ? +(r.cash_amount) : null,
+          requestedBy: r.requested_by||'', date: r.date, pin: r.pin, status: r.status,
+          confirmedAmount: r.confirmed_amount!=null ? +(r.confirmed_amount) : null,
+          confirmedReason: r.confirmed_reason, confirmedAt: r.confirmed_at,
+          tripId: r.trip_id, lrNo: r.lr_no, createdBy: r.created_by, createdAt: r.created_at,
+        }));
+      }),
+    ]);
+    onPhase?.({ employees, payments, pumps, indents, dieselRequests });
+
+    await sleep(350);
+
+    // ── Phase 3: background — driver pays, expenses, wallet, activity etc ─────
+    const [driverPays, cashTransfers, pumpPayments, settlements, paymentRequests, activity] = await Promise.all([
+      safe(() => fetchRecent('mye_driver_payments', driverPayFromDB, 'date', 120)),
+      safe(async () => {
+        try { return await fetchRecent('mye_cash_transfers', cashTransferFromDB, 'date', 120); }
+        catch(e) { console.warn('mye_cash_transfers not ready:', e.message); return []; }
+      }),
+      safe(async () => {
+        try { return await fetchRecent('mye_pump_payments', pumpPaymentFromDB, 'date', 120); }
+        catch(e) { console.warn('mye_pump_payments not ready:', e.message); return []; }
+      }),
+      safe(() => fetchRecent('mye_settlements', settlementFromDB, 'date', 120)),
+      safe(async () => {
+        try { return await fetchAll('mye_payment_requests', r => ({
+          id: r.id, tripId: r.trip_id, lrNo: r.lr_no, truckNo: r.truck_no,
+          amount: +(r.amount||0), recipientType: r.recipient_type,
+          recipientId: r.recipient_id, recipientName: r.recipient_name,
+          accountId: r.account_id, accountName: r.account_name,
+          accountNo: r.account_no, ifsc: r.ifsc,
+          status: r.status||'pending', notes: r.notes||'',
+          createdBy: r.created_by, createdAt: r.created_at,
+          paidAt: r.paid_at||'', paidBy: r.paid_by||'',
+        })); } catch(e) { return []; }
+      }),
+      safe(async () => {
+        const { data, error } = await supabase.from('mye_activity').select('*').order('time', {ascending:false}).limit(200);
+        if (error) throw error;
+        return (data||[]).map(activityFromDB);
+      }),
+    ]);
+    onPhase?.({ driverPays, cashTransfers, pumpPayments, settlements, paymentRequests, activity });
   },
 }
