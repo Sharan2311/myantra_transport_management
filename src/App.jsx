@@ -7533,11 +7533,22 @@ function Billing({trips, setTrips, fyTrips, selectedClient, user, log}) {
   const billed  = filteredTrips.filter(t => t.status==="Billed");
   const paid    = filteredTrips.filter(t => t.status==="Paid");
   const [orderFilter, setOrderFilter] = useState("All"); // "All" | "godown" | "party"
+  const [billDateFrom, setBillDateFrom] = useState("");
+  const [billDateTo,   setBillDateTo]   = useState("");
+  const [billMonth,    setBillMonth]    = useState(""); // "YYYY-MM"
 
-  // Apply order type filter to pending
-  const filteredPending = orderFilter==="All" ? pending
-    : orderFilter==="party"  ? pending.filter(t=>t.orderType==="party")
-    : pending.filter(t=>!t.orderType||t.orderType==="godown");
+  // Build available months from pending trips for quick-select
+  const availableMonths = [...new Set(pending.map(t=>(t.date||"").slice(0,7)).filter(Boolean))].sort().reverse();
+
+  // Apply all filters to pending
+  const filteredPending = pending.filter(t=>{
+    if(orderFilter==="party"  && t.orderType!=="party") return false;
+    if(orderFilter==="godown" && (t.orderType&&t.orderType!=="godown")) return false;
+    if(billMonth && !(t.date||"").startsWith(billMonth)) return false;
+    if(billDateFrom && (t.date||"") < billDateFrom) return false;
+    if(billDateTo   && (t.date||"") > billDateTo)   return false;
+    return true;
+  });
 
   // Totals by type
   const godownPending = pending.filter(t=>!t.orderType||t.orderType==="godown");
@@ -7612,6 +7623,52 @@ function Billing({trips, setTrips, fyTrips, selectedClient, user, log}) {
           <div style={{background:C.accent+"11",border:`1px solid ${C.accent}33`,borderRadius:10,
             padding:"9px 12px",color:C.accent,fontSize:12,fontWeight:700,marginBottom:10}}>
             Upload the invoice in Shree Payments tab → trips will be marked Billed automatically
+          </div>
+
+          {/* Date / Month filter */}
+          <div style={{background:C.bg,borderRadius:10,padding:"10px 12px",marginBottom:10,display:"flex",flexDirection:"column",gap:8}}>
+            {/* Month quick-select chips */}
+            <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+              <span style={{fontSize:11,color:C.muted,fontWeight:700,marginRight:2}}>Month:</span>
+              <button onClick={()=>setBillMonth("")}
+                style={{background:!billMonth?C.blue:C.card,border:`1.5px solid ${C.blue}`,borderRadius:16,
+                  color:!billMonth?"#fff":C.blue,fontSize:11,fontWeight:700,padding:"3px 10px",cursor:"pointer"}}>All</button>
+              {availableMonths.map(m=>{
+                const label=new Date(m+"-01").toLocaleDateString("en-IN",{month:"short",year:"2-digit"});
+                return (
+                  <button key={m} onClick={()=>setBillMonth(m===billMonth?"":m)}
+                    style={{background:billMonth===m?C.blue:C.card,border:`1.5px solid ${C.blue}`,borderRadius:16,
+                      color:billMonth===m?"#fff":C.blue,fontSize:11,fontWeight:700,padding:"3px 10px",cursor:"pointer"}}>
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+            {/* Date range */}
+            <div style={{display:"flex",gap:8,alignItems:"center"}}>
+              <div style={{flex:1}}>
+                <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>FROM</div>
+                <input type="date" value={billDateFrom} onChange={e=>{setBillDateFrom(e.target.value);setBillMonth("");}}
+                  style={{width:"100%",background:C.card,border:`1.5px solid ${C.border}`,borderRadius:8,
+                    color:C.text,padding:"7px 10px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
+              </div>
+              <div style={{flex:1}}>
+                <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>TO</div>
+                <input type="date" value={billDateTo} onChange={e=>{setBillDateTo(e.target.value);setBillMonth("");}}
+                  style={{width:"100%",background:C.card,border:`1.5px solid ${C.border}`,borderRadius:8,
+                    color:C.text,padding:"7px 10px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
+              </div>
+              {(billDateFrom||billDateTo||billMonth) && (
+                <button onClick={()=>{setBillDateFrom("");setBillDateTo("");setBillMonth("");}}
+                  style={{background:"none",border:`1.5px solid ${C.red}`,borderRadius:8,color:C.red,
+                    fontSize:11,fontWeight:700,padding:"7px 10px",cursor:"pointer",marginTop:16,whiteSpace:"nowrap"}}>✕ Clear</button>
+              )}
+            </div>
+            {(billDateFrom||billDateTo||billMonth) && (
+              <div style={{fontSize:11,color:C.accent,fontWeight:700}}>
+                Showing {filteredPending.length} of {pending.length} pending trips
+              </div>
+            )}
           </div>
 
           {/* Filter pills */}
