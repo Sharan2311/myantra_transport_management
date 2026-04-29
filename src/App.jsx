@@ -1512,8 +1512,8 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
         </div>
       </div>
 
-      {/* ── FY Summary ── */}
-      {(()=>{
+      {/* ── FY Summary + Month-wise — Owner only ── */}
+      {user.role==="owner" && (()=>{
         const fyTripsAll = displayTrips;
         const fyTons     = fyTripsAll.reduce((s,t)=>s+(+(t.qty)||0),0);
         const fyMargin   = fyTripsAll.reduce((s,t)=>s+((+(t.qty)||0)*((t.frRate||0)-(t.givenRate||0))),0);
