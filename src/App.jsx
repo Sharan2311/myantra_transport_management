@@ -1460,32 +1460,22 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   const totalReceived   = filteredPayments.reduce((s,p)=>s+Number(p.totalPaid||0),0);
   const pendingReceivable = Math.max(0, totalBilled - totalReceived);
 
-  // ── Invoice split: use payments table as source of truth ────────────────────
-  // A trip's invoice is credited = its invoiceNo exists in payments table
-  const paidInvoiceNos = new Set((payments||[]).map(p=>p.invoiceNo).filter(Boolean));
-  const billedTrips = clientFiltered.filter(t=>t.status==="Billed"&&t.invoiceNo);
-
-  // Uncredited = billed, invoice NOT in payments
-  const uncreditedMap = {};
-  billedTrips.filter(t=>!paidInvoiceNos.has(t.invoiceNo)).forEach(t=>{
+  // ── Invoice split: use same logic as Shree Payments tab ─────────────────────
+  // An invoice is credited = at least one trip in it has paymentDate set
+  // (mirrors how shreeInvoices builds status:"paid" in Shree Payments tab)
+  const invoiceMap = {};
+  clientFiltered.filter(t=>t.billedToShree&&t.invoiceNo).forEach(t=>{
     const inv = t.invoiceNo;
-    if(!uncreditedMap[inv]) uncreditedMap[inv]={invoiceNo:inv,invoiceDate:t.invoiceDate||t.date||"",trips:[],total:0};
-    uncreditedMap[inv].trips.push(t);
-    uncreditedMap[inv].total += (t.qty||0)*(t.frRate||0);
+    if(!invoiceMap[inv]) invoiceMap[inv]={invoiceNo:inv,invoiceDate:t.invoiceDate||t.date||"",trips:[],total:0,paid:false};
+    invoiceMap[inv].trips.push(t);
+    invoiceMap[inv].total += Number(t.billedToShree||0);
+    if(t.paymentDate) invoiceMap[inv].paid = true;
   });
-  const uncreditedInvoices = Object.values(uncreditedMap).sort((a,b)=>(b.invoiceDate||"").localeCompare(a.invoiceDate||""));
+  const allInvoices      = Object.values(invoiceMap).sort((a,b)=>(b.invoiceDate||"").localeCompare(a.invoiceDate||""));
+  const uncreditedInvoices = allInvoices.filter(x=>!x.paid);
+  const creditedInvoices   = allInvoices.filter(x=>x.paid);
 
-  // Credited = billed trips whose invoice IS in payments (already received)
-  const creditedMap = {};
-  billedTrips.filter(t=>paidInvoiceNos.has(t.invoiceNo)).forEach(t=>{
-    const inv = t.invoiceNo;
-    if(!creditedMap[inv]) creditedMap[inv]={invoiceNo:inv,invoiceDate:t.invoiceDate||t.date||"",trips:[],total:0};
-    creditedMap[inv].trips.push(t);
-    creditedMap[inv].total += (t.qty||0)*(t.frRate||0);
-  });
-  const creditedInvoices = Object.values(creditedMap).sort((a,b)=>(b.invoiceDate||"").localeCompare(a.invoiceDate||""));
-
-  // ── Unbilled: status="Pending Bill" = trips not yet invoiced ─────────────────
+  // ── Unbilled: trips not yet invoiced to Shree ────────────────────────────────
   const unbilledTrips = clientFiltered.filter(t=>t.status==="Pending Bill");
   const unbilledTotal = unbilledTrips.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
 
