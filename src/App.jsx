@@ -2214,7 +2214,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
         const ownerVs2 = ownerN2?(vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerN2):(vehT2?[vehT2]:[]);
         const ownerDed2 = ownerVs2[0]?.deductPerTrip||0;
         const ownerBal2 = ownerVs2.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
-        const autoLR2 = ownerBal2<=0?0:Math.min(ownerDed2,ownerBal2);
+        const autoLR2 = ownerBal2<=0 ? 0 : (ownerDed2>0 ? Math.min(ownerDed2,ownerBal2) : ownerBal2);
         const shortBal2 = Math.max(0,(()=>{const t=vehT2?.shortageTxns||[];return t.filter(x=>x.type==="shortage").reduce((s,x)=>s+(x.amount||0),0)-t.filter(x=>x.type==="recovery").reduce((s,x)=>s+(x.amount||0),0);})());
         const shortDed2 = vehT2?.shortageDeductPerTrip||0;
         const autoSR2 = shortBal2<=0?0:(shortDed2>0?Math.min(shortDed2,shortBal2):shortBal2);
@@ -6162,6 +6162,23 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                         ) : (
                           <button onClick={()=>{
                             const normalized = {...t, diLines: (t.diLines||[]).map(d=>({...d, frRate: d.frRate||t.frRate||0}))};
+                            // Recompute loanRecovery + shortageRecovery from current vehicle balance (only if not yet settled)
+                            if(!t.driverSettled) {
+                              const veh = (vehicles||[]).find(x=>x.truckNo===t.truckNo);
+                              if(veh) {
+                                const ownerName = (veh.ownerName||"").trim();
+                                const ownerVehs = ownerName ? (vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerName) : [veh];
+                                const ownerBal  = ownerVehs.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
+                                const deductPT  = ownerVehs[0]?.deductPerTrip||0;
+                                const autoLR    = ownerBal<=0 ? 0 : (deductPT>0 ? Math.min(deductPT,ownerBal) : ownerBal);
+                                const stxns     = veh.shortageTxns||[];
+                                const shortBal  = Math.max(0,stxns.filter(x=>x.type==="shortage").reduce((s,x)=>s+(x.amount||0),0)-stxns.filter(x=>x.type==="recovery").reduce((s,x)=>s+(x.amount||0),0));
+                                const sdpt      = veh.shortageDeductPerTrip||0;
+                                const autoSR    = shortBal<=0 ? 0 : (sdpt>0 ? Math.min(sdpt,shortBal) : shortBal);
+                                normalized.loanRecovery     = autoLR;
+                                normalized.shortageRecovery = autoSR;
+                              }
+                            }
                             setEditSheet(normalized);
                           }} style={{background:C.dim,border:"none",borderRadius:8,color:t.driverSettled?C.orange:C.muted,padding:"5px 8px",cursor:"pointer",fontSize:14}}>
                             {t.driverSettled?"🔓":"✏"}
@@ -13663,22 +13680,53 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
       return n && !savedInvoiceNos.has(n);
     });
 
-    // Save debit entries as expenses
-    if(debitEntries.length > 0 && setExpenses) {
-      const debitExps = debitEntries.map(d => ({
+    // Save ONLY entries user explicitly marked as Debit Note
+    const confirmedDebitEntries = debitEntries.filter(d => d._tag === "debit");
+    if(confirmedDebitEntries.length > 0 && setExpenses) {
+      const debitExps = confirmedDebitEntries.map(d => ({
         id: "EXP"+Date.now()+Math.random().toString(36).slice(2,6),
         date: pDate || new Date().toISOString().slice(0,10),
         label: (d._remark||"").trim() || `Debit Note ${d.invoiceNo}`,
         amount: Math.abs(Number(d.totalAmt||d.paymentAmt||0)),
         category: "debit_note",
         notes: `Invoice: ${d.invoiceNo} · UTR:${utr}`,
-        utr: utr,
-        createdBy: user?.name||"",
-        createdAt: new Date().toISOString()
+        utr, createdBy: user?.name||"", createdAt: new Date().toISOString()
       }));
       setExpenses(prev=>[...(Array.isArray(prev)?prev:[]),...debitExps]);
-      log && log("DEBIT EXPENSES: "+debitExps.length+" entries from payment advice UTR:"+utr);
+      log && log("DEBIT EXPENSES: "+debitExps.length+" entries from UTR:"+utr);
     }
+
+    // Save shortage entries to vehicle shortage balance
+    const shortageEntries = debitEntries.filter(d => d._tag === "shortage" && d._truckNo);
+    if(shortageEntries.length > 0) {
+      shortageEntries.forEach(d => {
+        const veh = (vehicles||[]).find(v=>v.truckNo===d._truckNo);
+        if(!veh) return;
+        const amount = Math.abs(Number(d.totalAmt||d.paymentAmt||0));
+        const txn = {id:uid(), type:"shortage", date:pDate||today(),
+          qty:0, lrNo:d._lrNo||"", amount,
+          note:`Payment advice ${d.invoiceNo} UTR:${utr}`};
+        const sdpt = +d._sdpt||0;
+        setVehicles(p=>p.map(x=>{
+          if(x.truckNo!==d._truckNo) return x;
+          const updated={...x,
+            shortageOwed:(x.shortageOwed||0)+amount,
+            shortageTxns:[...(x.shortageTxns||[]),txn],
+            ...(sdpt>0?{shortageDeductPerTrip:sdpt}:{})};
+          DB.saveVehicle(updated).catch(e=>console.error("saveVehicle shortage from scan:",e));
+          return updated;
+        }));
+        log && log(`SHORTAGE from PA: ${d._truckNo} ₹${fmt(amount)} LR:${d._lrNo||"—"} UTR:${utr}`);
+      });
+    }
+
+    // Invoice-match entries — treat as matched freight invoices
+    const invoiceMatchEntries = debitEntries.filter(d => d._tag === "invoice" && d._matchInv);
+    const extraMatchedNos = new Set(invoiceMatchEntries.map(d=>d._matchInv.trim()));
+    const invListFull = [
+      ...invList,
+      ...allInvList.filter(i=>extraMatchedNos.has((i.invoiceNo||"").trim()))
+    ];
 
     // Build a map of lrNo → trip for shortages lookup
     const allTrips = trips||[];
@@ -13688,7 +13736,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     // Apply trip updates — mark paid, attach shreeShortage
     const paidTrips = [];
     setTrips(prev=>prev.map(t=>{
-      if(invList.some(i=>i.invoiceNo===t.invoiceNo)){
+      if(invListFull.some(i=>(i.invoiceNo||i._matchInv||"").trim()===t.invoiceNo)){
         const lrKey=(t.lrNo||t.lr||"").trim();
         const short=shorts.find(s=>(s.lrNo||"").trim()===lrKey);
         if(t.orderType==="party" && t.id) paidTrips.push(t.id); // track for file deletion
@@ -14265,64 +14313,157 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                               <div style={{color:C.muted,fontSize:11,marginTop:2}}>This payment is already in the system. Discard this scan.</div>
                             </div>
                           )}
-                          {/* Debit entries — show as expenses for user to confirm */}
+                          {/* Unmatched entries — user decides per invoice */}
                           {debitInvs.length>0 && (
-                            <div style={{background:"#fef2f2",border:`1.5px solid ${C.red}`,borderRadius:10,
+                            <div style={{background:"#fef9ec",border:`1.5px solid ${C.orange}`,borderRadius:10,
                               padding:"12px 14px",marginBottom:8}}>
-                              <div style={{color:C.red,fontWeight:800,fontSize:13,marginBottom:6}}>
-                                💸 {debitInvs.length} Debit Note{debitInvs.length>1?"s":""} → Expenses
+                              <div style={{color:C.orange,fontWeight:800,fontSize:13,marginBottom:4}}>
+                                ❓ {debitInvs.length} Unmatched Invoice{debitInvs.length>1?"s":""}
                               </div>
-                              <div style={{color:C.muted,fontSize:11,marginBottom:8}}>
-                                These are not freight invoices — enter remarks and they'll be saved as expenses.
+                              <div style={{color:C.muted,fontSize:11,marginBottom:10}}>
+                                Not found in trips. Choose what each entry is:
                               </div>
-                              {debitInvs.map((d,i)=>(
-                                <div key={d.invoiceNo||i} style={{background:C.card,borderRadius:8,padding:"8px 10px",
-                                  marginBottom:6,border:`1px solid ${C.border}`}}>
-                                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
-                                    <span style={{fontWeight:700,fontSize:12,color:C.text}}>{d.invoiceNo}</span>
-                                    <span style={{fontWeight:800,color:C.red,fontFamily:"monospace"}}>₹{fmtINR(d.totalAmt||d.paymentAmt||0)}</span>
+                              {debitInvs.map((d,i)=>{
+                                const tag = d._tag; // "debit"|"shortage"|"invoice"|"skip"
+                                const amt = Math.abs(Number(d.totalAmt||d.paymentAmt||0));
+                                const tagBtn = (label, val, color) => (
+                                  <button onClick={()=>setScanResult(prev=>prev&&({...prev,
+                                    invoices:(prev.invoices||[]).map(inv=>
+                                      inv.invoiceNo===d.invoiceNo?{...inv,_tag:tag===val?undefined:val,_remark:"",_lrNo:"",_truckNo:"",_sdpt:""}:inv)}))}
+                                    style={{flex:1,padding:"6px 4px",borderRadius:7,cursor:"pointer",fontWeight:700,fontSize:10,
+                                      background:tag===val?color:"transparent",
+                                      border:`1.5px solid ${color}`,color:tag===val?"#fff":color}}>
+                                    {label}
+                                  </button>
+                                );
+                                return (
+                                  <div key={d.invoiceNo||i} style={{background:C.card,borderRadius:8,padding:"10px 12px",
+                                    marginBottom:8,border:`1.5px solid ${
+                                      tag==="debit"?C.red:tag==="shortage"?C.orange:tag==="invoice"?C.teal:tag==="skip"?C.muted:C.border}`}}>
+                                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                                      <span style={{fontWeight:700,fontSize:12,color:C.text}}>{d.invoiceNo}</span>
+                                      <span style={{fontWeight:800,color:C.orange,fontFamily:"monospace"}}>₹{fmtINR(amt)}</span>
+                                    </div>
+                                    {d.invDate&&<div style={{fontSize:10,color:C.muted,marginBottom:6}}>Date: {d.invDate}</div>}
+                                    {/* 4 choice buttons */}
+                                    <div style={{display:"flex",gap:6,marginBottom:tag&&tag!=="skip"?8:0}}>
+                                      {tagBtn("💸 Debit Note","debit",C.red)}
+                                      {tagBtn("⚠ Shortage","shortage",C.orange)}
+                                      {tagBtn("🧾 Invoice","invoice",C.teal)}
+                                      {tagBtn("✕ Skip","skip","#9ca3af")}
+                                    </div>
+
+                                    {/* DEBIT NOTE — remark */}
+                                    {tag==="debit" && (
+                                      <input placeholder="Remark (e.g. Safety penalty, Electricity…)"
+                                        value={d._remark||""} onChange={e=>setScanResult(prev=>prev&&({...prev,
+                                          invoices:(prev.invoices||[]).map(inv=>inv.invoiceNo===d.invoiceNo?{...inv,_remark:e.target.value}:inv)}))}
+                                        style={{width:"100%",boxSizing:"border-box",background:C.bg,
+                                          border:`1.5px solid ${d._remark?C.green:C.red}`,
+                                          borderRadius:6,padding:"7px 10px",fontSize:12,color:C.text,outline:"none"}}/>
+                                    )}
+
+                                    {/* SHORTAGE — truck + LR + deduct per trip */}
+                                    {tag==="shortage" && (()=>{
+                                      const allTrucks = (vehicles||[]).map(v=>({v:v.truckNo,l:v.truckNo+(v.ownerName?` · ${v.ownerName}`:"")}));
+                                      const linkedVeh = (vehicles||[]).find(v=>v.truckNo===d._truckNo);
+                                      const shortBal  = linkedVeh ? (()=>{
+                                        const st=linkedVeh.shortageTxns||[];
+                                        return Math.max(0,st.filter(x=>x.type==="shortage").reduce((s,x)=>s+(x.amount||0),0)-st.filter(x=>x.type==="recovery").reduce((s,x)=>s+(x.amount||0),0));
+                                      })() : 0;
+                                      const vtripsForLR = d._truckNo ? (trips||[]).filter(t=>t.truckNo===d._truckNo&&t.lrNo).slice(0,50) : [];
+                                      return (
+                                        <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                                          <select value={d._truckNo||""} onChange={e=>setScanResult(prev=>prev&&({...prev,
+                                            invoices:(prev.invoices||[]).map(inv=>inv.invoiceNo===d.invoiceNo?{...inv,_truckNo:e.target.value,_lrNo:""}:inv)}))}
+                                            style={{width:"100%",background:C.bg,border:`1.5px solid ${d._truckNo?C.orange:C.border}`,
+                                              borderRadius:6,padding:"7px 10px",fontSize:12,color:C.text,outline:"none"}}>
+                                            <option value="">— Select Truck —</option>
+                                            {allTrucks.map(t=><option key={t.v} value={t.v}>{t.l}</option>)}
+                                          </select>
+                                          {d._truckNo && (
+                                            <select value={d._lrNo||""} onChange={e=>setScanResult(prev=>prev&&({...prev,
+                                              invoices:(prev.invoices||[]).map(inv=>inv.invoiceNo===d.invoiceNo?{...inv,_lrNo:e.target.value}:inv)}))}
+                                              style={{width:"100%",background:C.bg,border:`1.5px solid ${d._lrNo?C.orange:C.border}`,
+                                                borderRadius:6,padding:"7px 10px",fontSize:12,color:C.text,outline:"none"}}>
+                                              <option value="">— Link LR (optional) —</option>
+                                              {vtripsForLR.map(t=><option key={t.id} value={t.lrNo}>{t.lrNo} · {t.date}</option>)}
+                                            </select>
+                                          )}
+                                          {linkedVeh && (
+                                            <div style={{background:C.bg,borderRadius:6,padding:"6px 10px",fontSize:11}}>
+                                              <span style={{color:C.muted}}>Current shortage balance: </span>
+                                              <span style={{color:shortBal>0?C.red:C.green,fontWeight:700}}>
+                                                {shortBal>0?`₹${fmt(shortBal)}+₹${fmtINR(amt)}=₹${fmt(shortBal+amt)}`:"Clear → ₹"+fmtINR(amt)+" new"}
+                                              </span>
+                                            </div>
+                                          )}
+                                          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                                            <div style={{flex:1}}>
+                                              <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>DEDUCT PER TRIP ₹ (0 = full balance)</div>
+                                              <input type="number" placeholder="0" value={d._sdpt||""}
+                                                onChange={e=>setScanResult(prev=>prev&&({...prev,
+                                                  invoices:(prev.invoices||[]).map(inv=>inv.invoiceNo===d.invoiceNo?{...inv,_sdpt:e.target.value}:inv)}))}
+                                                style={{width:"100%",boxSizing:"border-box",background:C.bg,
+                                                  border:`1.5px solid ${C.border}`,borderRadius:6,
+                                                  padding:"7px 10px",fontSize:12,color:C.text,outline:"none"}}/>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      );
+                                    })()}
+
+                                    {/* INVOICE MATCH — manual invoice no correction */}
+                                    {tag==="invoice" && (
+                                      <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                                        <div style={{fontSize:10,color:C.muted}}>Type the matching invoice number from your trips:</div>
+                                        <input placeholder="e.g. SMYE107027100021"
+                                          value={d._matchInv||""} onChange={e=>setScanResult(prev=>prev&&({...prev,
+                                            invoices:(prev.invoices||[]).map(inv=>inv.invoiceNo===d.invoiceNo?{...inv,_matchInv:e.target.value}:inv)}))}
+                                          style={{width:"100%",boxSizing:"border-box",background:C.bg,
+                                            border:`1.5px solid ${d._matchInv?C.teal:C.border}`,
+                                            borderRadius:6,padding:"7px 10px",fontSize:12,color:C.text,outline:"none"}}/>
+                                        {d._matchInv && (()=>{
+                                          const matched = (trips||[]).filter(t=>(t.invoiceNo||"").trim()===d._matchInv.trim());
+                                          return matched.length>0
+                                            ? <div style={{fontSize:10,color:C.teal,fontWeight:700}}>✓ Matches {matched.length} trip{matched.length>1?"s":""} · {matched.map(t=>t.lrNo||t.truckNo).join(", ")}</div>
+                                            : <div style={{fontSize:10,color:C.red}}>✗ No trips found with this invoice number</div>;
+                                        })()}
+                                      </div>
+                                    )}
                                   </div>
-                                  {d.invDate&&<div style={{fontSize:10,color:C.muted}}>Date: {d.invDate}</div>}
-                                  <input
-                                    placeholder="Enter remark (e.g. Safety penalty, Electricity, etc.)…"
-                                    value={d._remark||""}
-                                    onChange={e=>{
-                                      const val=e.target.value;
-                                      setScanResult(prev=>{
-                                        if(!prev) return prev;
-                                        const updInvs=(prev.invoices||[]).map(inv=>
-                                          inv.invoiceNo===d.invoiceNo?{...inv,_remark:val}:inv
-                                        );
-                                        return {...prev,invoices:updInvs};
-                                      });
-                                    }}
-                                    style={{width:"100%",boxSizing:"border-box",background:C.bg,
-                                      border:`1.5px solid ${d._remark?C.green:C.orange}`,
-                                      borderRadius:6,padding:"7px 10px",fontSize:12,color:C.text,
-                                      outline:"none",marginTop:4}}
-                                  />
-                                </div>
-                              ))}
+                                );
+                              })}
                             </div>
                           )}
                           {creditInvs.length===0 && debitInvs.length>0 && !dupUtr && (
                             <div style={{color:C.muted,fontSize:12,marginBottom:8,fontStyle:"italic"}}>
-                              No freight invoices found in this advice — only debit entries. Apply to save as expenses.
+                              No freight invoices found. Mark unmatched entries as Debit Note to save as expenses, or Skip to ignore.
                             </div>
                           )}
-                          <div style={{display:"flex",gap:8}}>
-                            <button onClick={applyPaymentScan} disabled={dupUtr}
-                              style={{flex:1,background:dupUtr?C.dim:C.accent,
-                                color:dupUtr?"#fff":C.muted!==undefined?"#fff":C.text,border:"none",borderRadius:6,
-                                padding:"10px",fontWeight:700,
-                                cursor:dupUtr?"not-allowed":"pointer",fontSize:12,
-                                ...(!dupUtr?{background:C.accent,color:"#fff"}:{background:C.dim,color:C.muted})}}>
-                              {dupUtr ? "Already Saved" : `✓ Apply${creditInvs.length>0?" — Mark "+creditInvs.length+" Invoice"+(creditInvs.length>1?"s":"")+" Paid":""}${debitInvs.length>0?" + "+debitInvs.length+" Expense"+(debitInvs.length>1?"s":""):""}`}
-                            </button>
-                            <button onClick={()=>setScanResult(null)}
-                              style={{background:C.card2,color:C.muted,border:`1px solid ${C.border}`,borderRadius:6,
-                                padding:"10px 14px",cursor:"pointer",fontSize:12}}>Discard</button>
-                          </div>
+                          {(()=>{
+                            const confirmedDebitCount   = debitInvs.filter(d=>d._tag==="debit").length;
+                            const confirmedShortCount   = debitInvs.filter(d=>d._tag==="shortage"&&d._truckNo).length;
+                            const confirmedInvCount     = debitInvs.filter(d=>d._tag==="invoice"&&d._matchInv).length;
+                            const pendingDecision       = debitInvs.filter(d=>!d._tag).length;
+                            const canApplyNow = !dupUtr && (creditInvs.length>0||confirmedDebitCount>0||confirmedShortCount>0||confirmedInvCount>0);
+                            const applyLabel = dupUtr ? "Already Saved"
+                              : `✓ Apply${(creditInvs.length+confirmedInvCount)>0?" — Mark "+(creditInvs.length+confirmedInvCount)+" Invoice"+((creditInvs.length+confirmedInvCount)>1?"s":"")+" Paid":""}${confirmedDebitCount>0?" + "+confirmedDebitCount+" Debit Note"+(confirmedDebitCount>1?"s":""):""}${confirmedShortCount>0?" + "+confirmedShortCount+" Shortage"+(confirmedShortCount>1?"s":""):""}`;
+                            return (
+                              <div style={{display:"flex",gap:8}}>
+                                <button onClick={applyPaymentScan} disabled={!canApplyNow}
+                                  style={{flex:1,border:"none",borderRadius:6,padding:"10px",fontWeight:700,
+                                    cursor:canApplyNow?"pointer":"not-allowed",fontSize:12,
+                                    background:canApplyNow?C.accent:C.dim,
+                                    color:canApplyNow?"#fff":C.muted}}>
+                                  {applyLabel}
+                                </button>
+                                <button onClick={()=>setScanResult(null)}
+                                  style={{background:C.card2,color:C.muted,border:`1px solid ${C.border}`,borderRadius:6,
+                                    padding:"10px 14px",cursor:"pointer",fontSize:12}}>Discard</button>
+                              </div>
+                            );
+                          })()}
                         </>);
                       })()}
                     </>
