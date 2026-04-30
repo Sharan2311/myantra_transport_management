@@ -1413,6 +1413,8 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   const [uncreditedOpen, setUncreditedOpen] = useState(false);
   const [creditedOpen,   setCreditedOpen]   = useState(false);
   const [unbilledOpen,   setUnbilledOpen]   = useState(false);
+  const [unbilledGodownOpen, setUnbilledGodownOpen] = useState(false);
+  const [unbilledPartyOpen,  setUnbilledPartyOpen]  = useState(false);
 
   const allFyTrips = fyTrips || trips;
   // Apply client filter then month filter
@@ -1804,25 +1806,65 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
                   </div>
                   <span style={{color:C.orange,fontSize:14}}>{unbilledOpen?"▲":"▼"}</span>
                 </button>
-                {unbilledOpen && (
-                  <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:4,maxHeight:280,overflowY:"auto"}}>
-                    {unbilledTrips.slice().sort((a,b)=>(b.date||"").localeCompare(a.date||"")).map(t=>(
-                      <div key={t.id} style={{background:C.bg,borderRadius:8,padding:"8px 10px",
-                        borderLeft:`3px solid ${C.orange}`}}>
-                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                          <div>
-                            <span style={{color:C.text,fontWeight:700,fontSize:12}}>{t.truckNo}</span>
-                            <span style={{color:C.muted,fontSize:10,marginLeft:6}}>{t.lrNo||"—"}</span>
+                {unbilledOpen && (()=>{
+                  const godownUnbilled = unbilledTrips.filter(t=>!t.orderType||t.orderType==="godown");
+                  const partyUnbilled  = unbilledTrips.filter(t=>t.orderType==="party");
+                  const godownAmt = godownUnbilled.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
+                  const partyAmt  = partyUnbilled.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
+                  const TripList = ({list}) => (
+                    <div style={{display:"flex",flexDirection:"column",gap:4,maxHeight:220,overflowY:"auto"}}>
+                      {list.slice().sort((a,b)=>(b.date||"").localeCompare(a.date||"")).map(t=>(
+                        <div key={t.id} style={{background:C.bg,borderRadius:8,padding:"8px 10px",
+                          borderLeft:`3px solid ${C.orange}`}}>
+                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                            <div>
+                              <span style={{color:C.text,fontWeight:700,fontSize:12}}>{t.truckNo}</span>
+                              <span style={{color:C.muted,fontSize:10,marginLeft:6}}>{t.lrNo||"—"}</span>
+                            </div>
+                            <span style={{color:C.orange,fontWeight:800,fontSize:12}}>{fmt((t.qty||0)*(t.frRate||0))}</span>
                           </div>
-                          <span style={{color:C.orange,fontWeight:800,fontSize:12}}>{fmt((t.qty||0)*(t.frRate||0))}</span>
+                          <div style={{color:C.muted,fontSize:10,marginTop:2}}>
+                            {t.date} · {t.qty}MT · {t.to||"—"} · {(t.client||"").replace("Shree Cement ","SC ")}
+                          </div>
                         </div>
-                        <div style={{color:C.muted,fontSize:10,marginTop:2}}>
-                          {t.date} · {t.qty}MT · {t.to||"—"} · {(t.client||"").replace("Shree Cement ","SC ")}
+                      ))}
+                    </div>
+                  );
+                  return (
+                    <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:8}}>
+                      {/* Godown sub-section */}
+                      {godownUnbilled.length>0 && (
+                        <div>
+                          <button onClick={()=>setUnbilledGodownOpen(p=>!p)}
+                            style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,
+                              borderRadius:8,padding:"7px 10px",cursor:"pointer",
+                              display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                            <span style={{color:C.text,fontSize:11,fontWeight:700}}>
+                              🏭 Godown <span style={{color:C.muted,fontWeight:400}}>({godownUnbilled.length}) · {fmt(godownAmt)}</span>
+                            </span>
+                            <span style={{color:C.muted,fontSize:12}}>{unbilledGodownOpen?"▲":"▼"}</span>
+                          </button>
+                          {unbilledGodownOpen && <div style={{marginTop:6}}><TripList list={godownUnbilled}/></div>}
                         </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                      )}
+                      {/* Party sub-section */}
+                      {partyUnbilled.length>0 && (
+                        <div>
+                          <button onClick={()=>setUnbilledPartyOpen(p=>!p)}
+                            style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,
+                              borderRadius:8,padding:"7px 10px",cursor:"pointer",
+                              display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                            <span style={{color:C.text,fontSize:11,fontWeight:700}}>
+                              🤝 Party <span style={{color:C.muted,fontWeight:400}}>({partyUnbilled.length}) · {fmt(partyAmt)}</span>
+                            </span>
+                            <span style={{color:C.muted,fontSize:12}}>{unbilledPartyOpen?"▲":"▼"}</span>
+                          </button>
+                          {unbilledPartyOpen && <div style={{marginTop:6}}><TripList list={partyUnbilled}/></div>}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
             )}
 
@@ -12551,20 +12593,20 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
               <Btn onClick={()=>setHSheet(v.id)} sm outline color={C.purple}>📋 History</Btn>
               <Btn onClick={()=>exportVehiclePDF(v,pdfFrom,pdfTo)} sm outline color={C.orange}>📄 PDF</Btn>
               <Btn onClick={()=>{
-                // Standalone Loan Report PDF
+                // Standalone Loan Report PDF — compute totals FIRST before using them
                 const ownerVehsPDF2local = (v.ownerName||"").trim() ? (vehicles||[]).filter(x=>(x.ownerName||"").trim()===(v.ownerName||"").trim()) : [v];
-                const lTxns = ownerVehsPDF2local.flatMap(x=>(x.loanTxns||[]).map(tx=>({...tx,_truckNo:x.truckNo}))).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
-                const rawGivenTxns = lTxns.filter(x=>x.type==="given");
-                // If loan balance exists but no given txns recorded (pre-fix data), show synthetic entry
-                const givenTxnsDisplay = rawGivenTxns.length > 0 ? rawGivenTxns
-                  : totalGiven > 0 ? [{date:"—", amount:totalGiven, ref:"—", accountName:"—", _truckNo:"(all)", note:"Prior balance — date unknown"}]
+                const totalGiven2 = ownerVehsPDF2local.reduce((s,x)=>s+(x.loan||0),0);
+                const totalRecov2 = ownerVehsPDF2local.reduce((s,x)=>s+(x.loanRecovered||0),0);
+                const ownerNameL  = (v.ownerName||"").trim()||v.truckNo;
+                const lTxns2 = ownerVehsPDF2local.flatMap(x=>(x.loanTxns||[]).map(tx=>({...tx,_truckNo:x.truckNo}))).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+                const rawGiven2 = lTxns2.filter(x=>x.type==="given");
+                const givenDisplay2 = rawGiven2.length > 0 ? rawGiven2
+                  : totalGiven2 > 0 ? [{date:"—",amount:totalGiven2,ref:"—",accountName:"—",_truckNo:"(all)",note:"Prior balance — date unknown"}]
                   : [];
-                const givenRows = givenTxnsDisplay.map(x=>`<tr><td>${x.date==="—"?"—":fmtD(x.date)}</td><td style="font-weight:700;color:#dc2626">₹${fmt(x.amount)}</td><td>${x.ref||"—"}</td><td>${x.accountName||"—"}</td><td>${x._truckNo}</td><td>${x.note||"—"}</td></tr>`).join("");
-                const recovRows = lTxns.filter(x=>x.type==="recovery").map(x=>`<tr><td>${fmtD(x.date)}</td><td style="font-weight:700;color:#15803d">₹${fmt(x.amount)}</td><td>${x.lrNo||"—"}</td><td>${x.ref||"—"}</td><td>${x._truckNo}</td><td>${x.note||"—"}</td></tr>`).join("");
-                const ownerNameL = (v.ownerName||"").trim()||v.truckNo;
-                const totalGiven = ownerVehsPDF2local.reduce((s,x)=>s+(x.loan||0),0);
-                const totalRecov = ownerVehsPDF2local.reduce((s,x)=>s+(x.loanRecovered||0),0);
+                const givenRows2 = givenDisplay2.map(x=>`<tr><td>${x.date==="—"?"—":fmtD(x.date)}</td><td style="font-weight:700;color:#dc2626">₹${fmt(x.amount)}</td><td>${x.ref||"—"}</td><td>${x.accountName||"—"}</td><td>${x._truckNo}</td><td>${x.note||"—"}</td></tr>`).join("");
+                const recovRows2 = lTxns2.filter(x=>x.type==="recovery").map(x=>`<tr><td>${fmtD(x.date)}</td><td style="font-weight:700;color:#15803d">₹${fmt(x.amount)}</td><td>${x.lrNo||"—"}</td><td>${x.ref||"—"}</td><td>${x._truckNo}</td><td>${x.note||"—"}</td></tr>`).join("");
                 const w=window.open("","_blank");
+                if(!w){alert("Please allow popups to generate the Loan Report.");return;}
                 w.document.write(`<html><head><title>Loan Report — ${ownerNameL}</title><style>
                   body{font-family:Arial,sans-serif;font-size:11px;margin:20px}
                   h2{font-size:14px;margin:16px 0 6px;border-bottom:2px solid #eee;padding-bottom:4px}
@@ -12574,7 +12616,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                   .header{display:flex;align-items:center;gap:12px;margin-bottom:10px;padding-bottom:8px;border-bottom:2px solid #1565c0}
                   img.logo{width:48px;height:48px;border-radius:8px;object-fit:cover}
                   .kpi{display:inline-block;border:1px solid #ddd;border-radius:6px;padding:8px 14px;margin:4px;text-align:center;min-width:110px}
-                  .kv{font-size:15px;font-weight:800} .kl{font-size:9px;color:#888;margin-top:2px}
+                  .kv{font-size:15px;font-weight:800}.kl{font-size:9px;color:#888;margin-top:2px}
                   @media print{*{-webkit-print-color-adjust:exact!important}}
                 </style></head><body>
                 <div class="header">
@@ -12586,17 +12628,17 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                   </div>
                 </div>
                 <div style="margin-bottom:14px">
-                  <div class="kpi"><div class="kv" style="color:#dc2626">₹${fmt(totalGiven)}</div><div class="kl">TOTAL GIVEN</div></div>
-                  <div class="kpi"><div class="kv" style="color:#15803d">₹${fmt(totalRecov)}</div><div class="kl">RECOVERED</div></div>
-                  <div class="kpi"><div class="kv" style="color:${totalGiven-totalRecov>0?"#dc2626":"#15803d"}">₹${fmt(totalGiven-totalRecov)}</div><div class="kl">BALANCE</div></div>
+                  <div class="kpi"><div class="kv" style="color:#dc2626">₹${fmt(totalGiven2)}</div><div class="kl">TOTAL GIVEN</div></div>
+                  <div class="kpi"><div class="kv" style="color:#15803d">₹${fmt(totalRecov2)}</div><div class="kl">RECOVERED</div></div>
+                  <div class="kpi"><div class="kv" style="color:${totalGiven2-totalRecov2>0?"#dc2626":"#15803d"}">₹${fmt(totalGiven2-totalRecov2)}</div><div class="kl">BALANCE</div></div>
                 </div>
-                <h2>Loan Disbursements (${lTxns.filter(x=>x.type==="given").length})</h2>
-                ${givenRows?`<table><tr><th>Date</th><th>Amount</th><th>Reference</th><th>Account Credited</th><th>Vehicle</th><th>Note</th></tr>${givenRows}</table>`:"<p style='color:#999;font-style:italic'>No loan disbursements recorded.</p>"}
-                <h2>Loan Recoveries (${lTxns.filter(x=>x.type==="recovery").length})</h2>
-                ${recovRows?`<table><tr><th>Date</th><th>Amount</th><th>LR No</th><th>Reference</th><th>Vehicle</th><th>Note</th></tr>${recovRows}</table>`:"<p style='color:#999;font-style:italic'>No loan recoveries recorded.</p>"}
+                <h2>Loan Disbursements (${givenDisplay2.length})</h2>
+                ${givenRows2?`<table><tr><th>Date</th><th>Amount</th><th>Reference</th><th>Account Credited</th><th>Vehicle</th><th>Note</th></tr>${givenRows2}</table>`:"<p style='color:#999;font-style:italic'>No loan disbursements recorded.</p>"}
+                <h2>Loan Recoveries (${lTxns2.filter(x=>x.type==="recovery").length})</h2>
+                ${recovRows2?`<table><tr><th>Date</th><th>Amount</th><th>LR No</th><th>Reference</th><th>Vehicle</th><th>Note</th></tr>${recovRows2}</table>`:"<p style='color:#999;font-style:italic'>No loan recoveries recorded.</p>"}
                 </body></html>`);
                 w.document.close(); w.print();
-              }} sm outline color={C.purple}>🏦 Loan</Btn>
+              }} sm outline color={C.purple}>🏦 Loan Report</Btn>
               {v.driverPhone&&(
                 <Btn onClick={()=>window.open(`https://wa.me/91${v.driverPhone.replace(/\D/g,"")}?text=${encodeURIComponent(`Dear ${v.driverName||"Driver"}, this is M Yantra Enterprises. - 9606477257`)}`,`_blank`)} sm outline color={C.teal}>📲 Driver</Btn>
               )}
