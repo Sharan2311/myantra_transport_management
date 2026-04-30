@@ -14591,8 +14591,34 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                       )}
                     </div>
                   );
+                })()}
+              {filteredInvoices.length === 0
+              ? (() => {
+                  const allShreeInvoiceTrips = (displayTrips||[]).filter(t=>t.billedToShree&&t.invoiceNo);
+                  const q = searchInv.toLowerCase();
+                  const crossTrip = q && allShreeInvoiceTrips.find(t=>(t.invoiceNo||"").toLowerCase().includes(q));
+                  return (
+                    <div style={{textAlign:"center",padding:"30px 16px"}}>
+                      <div style={{fontSize:32,marginBottom:8}}>🧾</div>
+                      <div style={{color:C.text,fontWeight:700,marginBottom:6}}>
+                        {searchInv ? "No invoices match your search." : "No invoices yet. Upload an invoice PDF."}
+                      </div>
+                      {crossTrip && (
+                        <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,
+                          borderRadius:10,padding:"10px 14px",marginTop:8,fontSize:12,color:C.orange,textAlign:"left"}}>
+                          <b>Found in different filter:</b><br/>
+                          Invoice <b>{crossTrip.invoiceNo}</b> is under
+                          <b> {crossTrip.client||"SC Kodla"}</b> / <b>{crossTrip.type==="outbound"?"Cement":"Raw Material"}</b>.
+                          <button onClick={()=>{ setPayClient(crossTrip.client||""); setPayMaterial(crossTrip.type==="outbound"?"Cement":"RawMaterial"); }}
+                            style={{display:"block",marginTop:8,background:C.orange,border:"none",borderRadius:6,
+                              color:"#fff",padding:"6px 14px",cursor:"pointer",fontWeight:700,fontSize:12}}>
+                            Switch to that filter →
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
                 })()
-              : <EmptyState icon="🧾" text={searchInv?"No invoices match your search.":"No invoices yet. Upload an invoice PDF."}/>
               : filteredInvoices.map(inv=>{
                 const isOpen = expandedInv===inv.invoiceNo;
                 return (
