@@ -1411,6 +1411,7 @@ export default function App() {
 function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pumps, pumpPayments, driverPays, activity, settings, setTab, user, selectedFY, selectedClient}) {
   const [dashMonth, setDashMonth] = useState(""); // "YYYY-MM" or "" = all
   const [uncreditedOpen, setUncreditedOpen] = useState(false);
+  const [unbilledOpen,   setUnbilledOpen]   = useState(false);
 
   const allFyTrips = fyTrips || trips;
   // Apply client filter then month filter
@@ -1458,19 +1459,20 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   const totalReceived   = filteredPayments.reduce((s,p)=>s+Number(p.totalPaid||0),0);
   const pendingReceivable = Math.max(0, totalBilled - totalReceived);
 
-  // ── Uncredited invoices: billed trips whose invoiceNo not in payments ──────
+  // ── Uncredited: status="Billed" = invoice raised but Shree hasn't paid yet ──
   const billedTrips = clientFiltered.filter(t=>t.status==="Billed"&&t.invoiceNo);
-  const paidInvoiceNos = new Set((payments||[]).map(p=>p.invoiceNo).filter(Boolean));
-  // Group by invoiceNo
   const uncreditedMap = {};
   billedTrips.forEach(t=>{
     const inv = t.invoiceNo;
-    if(paidInvoiceNos.has(inv)) return; // already paid
-    if(!uncreditedMap[inv]) uncreditedMap[inv]={invoiceNo:inv,invoiceDate:t.invoiceDate||"",trips:[],total:0};
+    if(!uncreditedMap[inv]) uncreditedMap[inv]={invoiceNo:inv,invoiceDate:t.invoiceDate||t.date||"",trips:[],total:0};
     uncreditedMap[inv].trips.push(t);
     uncreditedMap[inv].total += (t.qty||0)*(t.frRate||0);
   });
   const uncreditedInvoices = Object.values(uncreditedMap).sort((a,b)=>(b.invoiceDate||"").localeCompare(a.invoiceDate||""));
+
+  // ── Unbilled: status="Pending Bill" = trips not yet invoiced to Shree ────────
+  const unbilledTrips = clientFiltered.filter(t=>t.status==="Pending Bill");
+  const unbilledTotal = unbilledTrips.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
 
   // Shortage alerts — vehicles with outstanding balance > ₹20,000
   // Derive from shortageTxns as source of truth (covers cases where shortageOwed wasn't persisted)
@@ -1753,6 +1755,42 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
                 </div>
               )}
             </div>
+
+            {/* Unbilled trips collapsible — separate card */}
+            {unbilledTrips.length>0 && (
+              <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.border}`}}>
+                <button onClick={()=>setUnbilledOpen(p=>!p)}
+                  style={{width:"100%",background:"none",border:"none",padding:0,cursor:"pointer",
+                    display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div>
+                    <span style={{color:C.orange,fontWeight:700,fontSize:12}}>
+                      🟡 {unbilledTrips.length} Unbilled Trip{unbilledTrips.length!==1?"s":""}
+                    </span>
+                    <span style={{color:C.muted,fontSize:11,marginLeft:8}}>{fmt(unbilledTotal)}</span>
+                  </div>
+                  <span style={{color:C.orange,fontSize:14}}>{unbilledOpen?"▲":"▼"}</span>
+                </button>
+                {unbilledOpen && (
+                  <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:4,maxHeight:280,overflowY:"auto"}}>
+                    {unbilledTrips.slice().sort((a,b)=>(b.date||"").localeCompare(a.date||"")).map(t=>(
+                      <div key={t.id} style={{background:C.bg,borderRadius:8,padding:"8px 10px",
+                        borderLeft:`3px solid ${C.orange}`}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                          <div>
+                            <span style={{color:C.text,fontWeight:700,fontSize:12}}>{t.truckNo}</span>
+                            <span style={{color:C.muted,fontSize:10,marginLeft:6}}>{t.lrNo||"—"}</span>
+                          </div>
+                          <span style={{color:C.orange,fontWeight:800,fontSize:12}}>{fmt((t.qty||0)*(t.frRate||0))}</span>
+                        </div>
+                        <div style={{color:C.muted,fontSize:10,marginTop:2}}>
+                          {t.date} · {t.qty}MT · {t.to||"—"} · {(t.client||"").replace("Shree Cement ","SC ")}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Client × Cement breakdown */}
             {clientData.length>0 && (
