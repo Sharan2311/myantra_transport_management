@@ -1409,8 +1409,17 @@ export default function App() {
 }
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
 function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pumps, pumpPayments, driverPays, activity, settings, setTab, user, selectedFY, selectedClient}) {
+  const [dashMonth, setDashMonth] = useState(""); // "YYYY-MM" or "" = all
+  const [uncreditedOpen, setUncreditedOpen] = useState(false);
+
   const allFyTrips = fyTrips || trips;
-  const displayTrips = selectedClient ? allFyTrips.filter(t=>(t.client||"Shree Cement Kodla")===selectedClient) : allFyTrips;
+  // Apply client filter then month filter
+  const clientFiltered = selectedClient ? allFyTrips.filter(t=>(t.client||"Shree Cement Kodla")===selectedClient) : allFyTrips;
+  const displayTrips   = dashMonth ? clientFiltered.filter(t=>(t.date||"").startsWith(dashMonth)) : clientFiltered;
+
+  // Available months from FY trips for quick-select chips
+  const availDashMonths = [...new Set(clientFiltered.map(t=>(t.date||"").slice(0,7)).filter(Boolean))].sort().reverse();
+
   const todayStr    = today();
   const todayTrips  = displayTrips.filter(t => t.date===todayStr);
   // Yesterday
@@ -1418,7 +1427,7 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   const yesterdayStr  = yest.toISOString().split("T")[0];
   const yesterdayTrips = displayTrips.filter(t => t.date===yesterdayStr);
   // Month avg tons
-  const monthPrefix   = todayStr.slice(0,7); // "YYYY-MM"
+  const monthPrefix   = todayStr.slice(0,7);
   const monthTripsAll = displayTrips.filter(t => (t.date||"").startsWith(monthPrefix));
   const todayDayNum   = new Date().getDate();
   const monthTotalTons = monthTripsAll.reduce((s,t)=>s+(+(t.qty)||0),0);
@@ -1440,10 +1449,28 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   const vLoan       = loanVehicles.reduce((s,v) => s + Math.max(0, v.loan-v.loanRecovered), 0);
   const fyLabel     = selectedFY ? FY_LABEL(selectedFY) : "";
 
-  // ── Owner-only: pending receivables from clients ──────────────────────────
-  const totalBilled   = displayTrips.filter(t=>t.type==="outbound").reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
-  const totalReceived = (payments||[]).reduce((s,p)=>s+Number(p.totalPaid||0),0);
+  // ── Owner-only: pending receivables — filter payments by month too ────────
+  const totalBilled = displayTrips.filter(t=>t.type==="outbound").reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
+  // Filter payments to match selected month if any
+  const filteredPayments = dashMonth
+    ? (payments||[]).filter(p=>(p.paymentDate||p.date||"").startsWith(dashMonth))
+    : (payments||[]);
+  const totalReceived   = filteredPayments.reduce((s,p)=>s+Number(p.totalPaid||0),0);
   const pendingReceivable = Math.max(0, totalBilled - totalReceived);
+
+  // ── Uncredited invoices: billed trips whose invoiceNo not in payments ──────
+  const billedTrips = clientFiltered.filter(t=>t.status==="Billed"&&t.invoiceNo);
+  const paidInvoiceNos = new Set((payments||[]).map(p=>p.invoiceNo).filter(Boolean));
+  // Group by invoiceNo
+  const uncreditedMap = {};
+  billedTrips.forEach(t=>{
+    const inv = t.invoiceNo;
+    if(paidInvoiceNos.has(inv)) return; // already paid
+    if(!uncreditedMap[inv]) uncreditedMap[inv]={invoiceNo:inv,invoiceDate:t.invoiceDate||"",trips:[],total:0};
+    uncreditedMap[inv].trips.push(t);
+    uncreditedMap[inv].total += (t.qty||0)*(t.frRate||0);
+  });
+  const uncreditedInvoices = Object.values(uncreditedMap).sort((a,b)=>(b.invoiceDate||"").localeCompare(a.invoiceDate||""));
 
   // Shortage alerts — vehicles with outstanding balance > ₹20,000
   // Derive from shortageTxns as source of truth (covers cases where shortageOwed wasn't persisted)
@@ -1486,6 +1513,30 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
           <button onClick={()=>setTab("trips")}   style={{flex:1,background:C.accent+"22",border:`1.5px solid ${C.accent}`,color:C.accent,borderRadius:12,padding:"12px 6px",fontSize:13,fontWeight:700,cursor:"pointer"}}>🚚 + Cement</button>
           {user.role!=="fleet_manager" && <button onClick={()=>setTab("inbound")} style={{flex:1,background:C.teal+"22",  border:`1.5px solid ${C.teal}`,  color:C.teal,  borderRadius:12,padding:"12px 6px",fontSize:13,fontWeight:700,cursor:"pointer"}}>🏭 + RM Trip</button>}
           {can(user,"diesel") && <button onClick={()=>setTab("diesel")} style={{flex:1,background:C.orange+"22",border:`1.5px solid ${C.orange}`,color:C.orange,borderRadius:12,padding:"12px 6px",fontSize:13,fontWeight:700,cursor:"pointer"}}>⛽ Indent</button>}
+        </div>
+      )}
+
+      {/* ── Month filter chips — owner only ── */}
+      {user.role==="owner" && availDashMonths.length>1 && (
+        <div style={{background:C.card,borderRadius:12,padding:"10px 14px"}}>
+          <div style={{fontSize:11,color:C.muted,fontWeight:700,marginBottom:8,textTransform:"uppercase",letterSpacing:1}}>
+            Filter by Month {dashMonth && <span style={{color:C.accent,textTransform:"none",fontWeight:400,fontSize:10}}>· {new Date(dashMonth+"-01").toLocaleDateString("en-IN",{month:"long",year:"numeric"})}</span>}
+          </div>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+            <button onClick={()=>setDashMonth("")}
+              style={{background:!dashMonth?C.blue:"transparent",border:`1.5px solid ${C.blue}`,
+                borderRadius:20,color:!dashMonth?"#fff":C.blue,fontSize:11,fontWeight:700,
+                padding:"4px 12px",cursor:"pointer"}}>All</button>
+            {availDashMonths.map(m=>{
+              const label=new Date(m+"-01").toLocaleDateString("en-IN",{month:"short",year:"2-digit"});
+              return (
+                <button key={m} onClick={()=>setDashMonth(m===dashMonth?"":m)}
+                  style={{background:dashMonth===m?C.blue:"transparent",border:`1.5px solid ${C.blue}`,
+                    borderRadius:20,color:dashMonth===m?"#fff":C.blue,fontSize:11,fontWeight:700,
+                    padding:"4px 12px",cursor:"pointer"}}>{label}</button>
+              );
+            })}
+          </div>
         </div>
       )}
 
@@ -1663,6 +1714,44 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
                   </div>
                 ))}
               </div>
+
+              {/* Uncredited invoices collapsible */}
+              {uncreditedInvoices.length>0 && (
+                <div style={{marginTop:10}}>
+                  <button onClick={()=>setUncreditedOpen(p=>!p)}
+                    style={{width:"100%",background:C.red+"11",border:`1px solid ${C.red}33`,
+                      borderRadius:8,padding:"8px 12px",cursor:"pointer",
+                      display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                    <span style={{color:C.red,fontSize:12,fontWeight:700}}>
+                      🔴 {uncreditedInvoices.length} Uncredited Invoice{uncreditedInvoices.length!==1?"s":""}
+                      <span style={{color:C.muted,fontWeight:400,marginLeft:6}}>
+                        · {fmt(uncreditedInvoices.reduce((s,x)=>s+x.total,0))}
+                      </span>
+                    </span>
+                    <span style={{color:C.red,fontSize:14}}>{uncreditedOpen?"▲":"▼"}</span>
+                  </button>
+                  {uncreditedOpen && (
+                    <div style={{marginTop:6,display:"flex",flexDirection:"column",gap:4}}>
+                      {uncreditedInvoices.map(inv=>(
+                        <div key={inv.invoiceNo} style={{background:C.bg,borderRadius:8,
+                          padding:"8px 10px",borderLeft:`3px solid ${C.red}`}}>
+                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                            <div>
+                              <span style={{color:C.text,fontWeight:700,fontSize:12}}>{inv.invoiceNo}</span>
+                              {inv.invoiceDate && <span style={{color:C.muted,fontSize:10,marginLeft:6}}>{inv.invoiceDate}</span>}
+                            </div>
+                            <span style={{color:C.red,fontWeight:800,fontSize:13}}>{fmt(inv.total)}</span>
+                          </div>
+                          <div style={{color:C.muted,fontSize:10,marginTop:2}}>
+                            {inv.trips.length} trip{inv.trips.length!==1?"s":" "} · {inv.trips.reduce((s,t)=>s+(t.qty||0),0)} MT
+                            · {inv.trips[0]?.client?.replace("Shree Cement ","SC ")||"—"}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Client × Cement breakdown */}
