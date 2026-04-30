@@ -2285,11 +2285,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
     const readyVeh = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
     if((!readyVeh || !(readyVeh.ownerName||"").trim()) && !(g.ownerName||"").trim()) return false;
     if(!manualDiesel && +g.diesel > 0 && !g.dieselIndentNo.trim()) return false;
-    // Block save if truck has an unconfirmed (open) diesel request — must be confirmed first
-    if(!manualDiesel) {
-      const hasPendingDiesel = (dieselRequests||[]).some(r=>r.truckNo===g.truckNo&&r.status==="open");
-      if(hasPendingDiesel) return false;
-    }
+    // Note: open (unconfirmed) requests are allowed with a warning — not blocked
     return true;
   };
 
@@ -3200,72 +3196,98 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                 );
               })()}
 
-              {/* Diesel indent — auto-attached from open request if available */}
-              {(+g.diesel>0||manualDiesel)&&(()=>{
+              {/* Diesel indent — only from diesel requests */}
+              {(()=>{
                 const attachedReq = g._autoAttachedReqId
                   ? (dieselRequests||[]).find(r=>r.id===g._autoAttachedReqId)
                   : null;
-                const manualMatchReq = !attachedReq && !manualDiesel && g.dieselIndentNo.trim()
+                const manualMatchReq = !attachedReq && g.dieselIndentNo.trim()
                   ? (dieselRequests||[]).find(r=>String(r.indentNo)===g.dieselIndentNo.trim())
                   : null;
                 const displayReq = attachedReq || manualMatchReq;
-                const missing = +g.diesel>0 && !g.dieselIndentNo.trim();
+                // Unattached requests for this truck (not yet on any LR)
+                const availReqs = (dieselRequests||[]).filter(r=>
+                  r.truckNo===g.truckNo &&
+                  (r.status==="confirmed"||r.status==="open") &&
+                  !r.tripId && !r.lrNo
+                );
+                const alreadyAttached = displayReq != null;
                 return (
                   <div style={{display:"flex",flexDirection:"column",gap:4}}>
-                    <div style={{fontSize:10,color:missing?C.red:C.muted,fontWeight:700}}>
-                      DIESEL INDENT NO {missing&&"* required"}
-                    </div>
-                    {displayReq&&!manualDiesel&&(
-                      <div style={{background:C.teal+"11",border:`1px solid ${C.teal}44`,
-                        borderRadius:7,padding:"5px 8px",fontSize:11,color:C.teal,fontWeight:600,
-                        display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                        <span>
-                          {displayReq.status==="confirmed"?"✓":"⏳"} #{displayReq.indentNo} · ₹{(displayReq.confirmedAmount??displayReq.amount).toLocaleString("en-IN")}
-                          {attachedReq?" · auto-attached":""}
-                        </span>
-                        {user?.role==="owner" && (
+                    <div style={{fontSize:10,color:C.muted,fontWeight:700}}>⛽ DIESEL INDENT</div>
+
+                    {/* Attached request display */}
+                    {displayReq && (
+                      <>
+                        {displayReq.status!=="confirmed" && (
+                          <div style={{background:"#fffbeb",border:`1.5px solid ${C.orange}`,
+                            borderRadius:7,padding:"5px 8px",fontSize:10,color:"#92400e",fontWeight:600}}>
+                            ⚠ Attached without pump confirmation
+                            {displayReq.pin&&displayReq.pin!=="****"&&(
+                              <span style={{marginLeft:6,fontFamily:"monospace",letterSpacing:2}}>PIN: {displayReq.pin}</span>
+                            )}
+                          </div>
+                        )}
+                        <div style={{background:displayReq.status==="confirmed"?C.teal+"11":C.orange+"11",
+                          border:`1px solid ${displayReq.status==="confirmed"?C.teal+"44":C.orange+"44"}`,
+                          borderRadius:7,padding:"5px 8px",fontSize:11,
+                          color:displayReq.status==="confirmed"?C.teal:C.orange,fontWeight:600,
+                          display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                          <span>
+                            {displayReq.status==="confirmed"?"✓":"⏳"} #{displayReq.indentNo}
+                            {" · "}₹{(displayReq.confirmedAmount??displayReq.amount).toLocaleString("en-IN")}
+                          </span>
                           <span onClick={()=>{
                             updateGroup(g.id,"dieselIndentNo","");
                             updateGroup(g.id,"diesel","0");
                             updateGroup(g.id,"_autoAttachedReqId",null);
-                          }} style={{cursor:"pointer",color:C.muted,marginLeft:8,fontSize:13}}>×</span>
-                        )}
-                        {user?.role!=="owner" && (
-                          <span style={{fontSize:10,color:C.muted,marginLeft:8}}>🔒</span>
-                        )}
-                      </div>
-                    )}
-                    {!displayReq && !manualDiesel && (
-                      <div style={{fontSize:11,color:C.muted,fontStyle:"italic",padding:"4px 2px"}}>
-                        No confirmed indent — save trip without diesel, or wait for pump to confirm.
-                      </div>
-                    )}
-                    {manualDiesel && (
-                      <>
-                        <input type="text" value={g.dieselIndentNo||""} onChange={e=>updateGroup(g.id,"dieselIndentNo",e.target.value)}
-                          placeholder="Type indent number…"
-                          style={{width:"100%",boxSizing:"border-box",background:C.bg,
-                            border:`1.5px solid ${g.dieselIndentNo?C.teal:C.border}`,borderRadius:8,color:C.text,
-                            padding:"7px 8px",fontSize:13,outline:"none"}} />
-                        {(()=>{
-                          const typedNo = (g.dieselIndentNo||"").trim();
-                          if(!typedNo) return null;
-                          const matched = (dieselRequests||[]).find(r=>String(r.indentNo)===typedNo);
-                          if(!matched) return null;
-                          if(matched.status==="confirmed") return (
-                            <div style={{background:C.teal+"11",border:`1px solid ${C.teal}44`,borderRadius:6,
-                              padding:"5px 8px",fontSize:10,color:C.teal,fontWeight:600}}>
-                              ✓ Confirmed · ₹{(matched.confirmedAmount??matched.amount).toLocaleString("en-IN")}
-                            </div>
-                          );
-                          return (
-                            <div style={{background:"#fffbeb",border:`1.5px solid #d97706`,borderRadius:6,
-                              padding:"5px 8px",fontSize:10,color:"#92400e",fontWeight:600}}>
-                              ⚠ Attached but not confirmed yet · ₹{(matched.amount||0).toLocaleString("en-IN")}
-                            </div>
-                          );
-                        })()}
+                          }} style={{cursor:"pointer",color:C.red,marginLeft:8,fontSize:13,fontWeight:800}}>×</span>
+                        </div>
                       </>
+                    )}
+
+                    {/* Available unattached requests for this truck */}
+                    {!alreadyAttached && availReqs.length>0 && (
+                      <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                        {availReqs.map(r=>{
+                          const isConf = r.status==="confirmed";
+                          return (
+                            <div key={r.id}
+                              onClick={()=>{
+                                if(!isConf && !window.confirm(`⚠ Indent #${r.indentNo} is not confirmed by pump yet.\nPIN: ${r.pin}\n\nAttach anyway?`)) return;
+                                updateGroup(g.id,"dieselIndentNo",String(r.indentNo));
+                                updateGroup(g.id,"diesel",String(r.confirmedAmount??r.amount));
+                                updateGroup(g.id,"_autoAttachedReqId",r.id);
+                              }}
+                              style={{background:isConf?C.teal+"11":"#fffbeb",
+                                border:`1.5px solid ${isConf?C.teal:C.orange}`,
+                                borderRadius:7,padding:"7px 10px",cursor:"pointer",
+                                display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                              <div>
+                                <span style={{fontWeight:700,fontSize:12,color:isConf?C.teal:C.orange}}>
+                                  #{r.indentNo}
+                                  <span style={{marginLeft:6,fontSize:10,background:isConf?C.teal:C.orange,
+                                    color:"#fff",borderRadius:3,padding:"1px 5px"}}>
+                                    {isConf?"✓ CONFIRMED":"PENDING"}
+                                  </span>
+                                </span>
+                                <div style={{fontSize:10,color:C.muted,marginTop:2}}>
+                                  ₹{(r.confirmedAmount??r.amount).toLocaleString("en-IN")}
+                                  {!isConf&&r.pin&&r.pin!=="****"&&<span style={{marginLeft:6,fontFamily:"monospace",color:C.orange}}>PIN: {r.pin}</span>}
+                                </div>
+                              </div>
+                              <span style={{fontSize:11,fontWeight:700,color:isConf?C.teal:C.orange}}>Attach</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {/* No requests at all */}
+                    {!alreadyAttached && availReqs.length===0 && (
+                      <div style={{fontSize:11,color:C.muted,fontStyle:"italic",padding:"3px 2px"}}>
+                        No diesel request found — trip will be saved without diesel.
+                      </div>
                     )}
                   </div>
                 );
@@ -5197,8 +5219,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
   const [sealedSheet, setSealedSheet] = useState(null); // trip object
   const [batchDISheet,  setBatchDISheet]  = useState(false); // morning batch GR scanner
   const [manualLrMode,  setManualLrMode]  = useState(false); // allow manual LR entry for old data
-  const [manualDiesel,  setManualDiesel]  = useState(()=>localStorage.getItem("mye_manualDiesel")==="true"); // persisted
-  React.useEffect(()=>localStorage.setItem("mye_manualDiesel",manualDiesel?"true":"false"),[manualDiesel]);
+  const [manualDiesel,  setManualDiesel]  = useState(false); // always locked — diesel only from requests
 
   const blankForm = (isParty=false) => ({
     type:tripType, lrNo:"", diNo:"", truckNo:"", grNo:"", dieselIndentNo:"",
@@ -5835,17 +5856,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
               {manualLrMode?"🖊 Manual LR":"🔢 Auto LR"}
             </button>
           )}
-          {/* Manual diesel/indent toggle — owner only */}
-          {user.role==="owner" && !isIn && (
-            <button onClick={()=>setManualDiesel(p=>!p)}
-              title={manualDiesel?"Lock diesel & indent to pump requests":"Manually enter diesel & indent values"}
-              style={{background:manualDiesel?C.orange+"33":"transparent",
-                border:`1.5px solid ${manualDiesel?C.orange:C.border}`,
-                borderRadius:10,color:manualDiesel?C.orange:C.muted,
-                padding:"8px 10px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
-              {manualDiesel?"🔓 Manual Diesel":"🔒 Locked Diesel"}
-            </button>
-          )}
+          {/* Diesel locked to pump requests — no manual entry */}
           <button onClick={()=>{
               if(isIn){
                 setOrderTypeStep("godown"); setF(blankForm(false)); setAddSheet(true);
@@ -7491,25 +7502,35 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
             placeholder="0"
             note={veh?.tafalExempt?"⚠ Exempt vehicle — only owner can change this":""}/>
         )}
-        {(isOwner || manualLrMode || manualDiesel) ? (
-          <Field label="Diesel Estimate ₹" value={f.dieselEstimate||""} onChange={ff("dieselEstimate")} type="number" half
-            placeholder="0" />
-        ) : (
-          <div style={{flex:"1 1 45%",minWidth:0,display:"flex",flexDirection:"column",gap:5}}>
-            <label style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Diesel Estimate ₹</label>
+        {/* Diesel Estimate — locked, derived from attached request */}
+        <div style={{flex:"1 1 45%",minWidth:0,display:"flex",flexDirection:"column",gap:5}}>
+          <label style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Diesel Estimate ₹</label>
+          <div style={{background:C.dim,border:`1.5px solid ${C.border}`,borderRadius:10,
+            color:C.text,padding:"13px 12px",fontSize:15,
+            display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span>{f.dieselEstimate>0?("₹"+(+f.dieselEstimate).toLocaleString("en-IN")):"—"}</span>
+            <span style={{fontSize:10,color:C.muted}}>From indent</span>
+          </div>
+        </div>
+      </div>
+
+      {/* ⛽ Diesel Indent No — only from diesel requests */}
+      {(()=>{
+        const truck = (f.truckNo||"").trim().toUpperCase();
+        // Lock diesel for non-owners on settled/paid trips
+        const dieselLocked = !isOwner && (f.driverSettled || f.paymentDate || f.status==="Paid");
+        if(dieselLocked) return (
+          <div style={{display:"flex",flexDirection:"column",gap:5}}>
+            <label style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>
+              ⛽ Diesel Indent No <span style={{color:C.orange,fontSize:10}}>🔒 Owner only</span>
+            </label>
             <div style={{background:C.dim,border:`1.5px solid ${C.border}`,borderRadius:10,
-              color:C.text,padding:"13px 12px",fontSize:15,
-              display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <span>{f.dieselEstimate>0?("₹"+(+f.dieselEstimate).toLocaleString("en-IN")):"0"}</span>
+              padding:"13px 12px",fontSize:15,color:C.text,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span>{f.dieselIndentNo||"—"}</span>
               <span style={{fontSize:11,color:C.muted}}>🔒</span>
             </div>
           </div>
-        )}
-      </div>
-
-      {/* ⛽ Diesel Indent No — auto-attach + manual entry */}
-      {(()=>{
-        const truck = (f.truckNo||"").trim().toUpperCase();
+        );
         const allOpen = (dieselRequests||[]).filter(r=>r.status==="open"||r.status==="confirmed");
         // Requests for this truck — confirmed first
         const truckReqs = allOpen
@@ -7529,36 +7550,6 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
 
         // Pending (open, unconfirmed) requests for this truck
         const pendingReqs = truckReqs.filter(r=>r.status==="open");
-        const hasOnlyPending = pendingReqs.length>0 && truckReqs.every(r=>r.status==="open");
-
-        // Manual diesel mode — plain text input, no auto-attach/cards
-        if(manualDiesel) return (
-          <div style={{display:"flex",flexDirection:"column",gap:6}}>
-            <div style={{fontSize:11,color:C.muted,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>
-              ⛽ Diesel Indent No
-            </div>
-            <input value={f.dieselIndentNo||""} onChange={e=>ff("dieselIndentNo")(e.target.value)}
-              placeholder="Type indent number…"
-              style={{width:"100%",boxSizing:"border-box",background:C.bg,
-                border:`1.5px solid ${val?C.teal:C.border}`,borderRadius:10,color:C.text,
-                padding:"13px 12px",fontSize:15,outline:"none"}} />
-            {matchedReq && matchedReq.status==="confirmed" && (
-              <div style={{background:C.teal+"11",border:`1px solid ${C.teal}44`,borderRadius:8,
-                padding:"8px 10px",fontSize:11,color:C.teal,fontWeight:600}}>
-                ✓ Confirmed · Indent #{matchedReq.indentNo} · ₹{(matchedReq.confirmedAmount??matchedReq.amount).toLocaleString("en-IN")}
-              </div>
-            )}
-            {matchedReq && matchedReq.status!=="confirmed" && (
-              <div style={{background:"#fffbeb",border:`1.5px solid #d97706`,borderRadius:8,
-                padding:"8px 10px",fontSize:11,color:"#92400e",fontWeight:600}}>
-                ⚠ Attached but not confirmed yet · Indent #{matchedReq.indentNo} · ₹{(matchedReq.amount||0).toLocaleString("en-IN")}
-                <div style={{fontSize:10,fontWeight:400,marginTop:2,color:"#a16207"}}>
-                  Pump has not confirmed this request. Trip can still be saved in manual mode.
-                </div>
-              </div>
-            )}
-          </div>
-        );
 
         return (
           <div style={{display:"flex",flexDirection:"column",gap:6}}>
@@ -7566,128 +7557,92 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
               ⛽ Diesel Indent No
             </div>
 
-            {/* ── Pending request — HARD BLOCK until pump confirms (skip in manual mode) ── */}
-            {hasOnlyPending && !val && !manualDiesel && (
-              <div style={{background:"#fef2f2",border:"2px solid #dc2626",
-                borderRadius:8,padding:"10px 12px",fontSize:12,color:"#dc2626"}}>
-                <div style={{fontWeight:800,marginBottom:6}}>
-                  🚫 Cannot save — Diesel request not confirmed by pump
-                </div>
-                {pendingReqs.map(r=>(
-                  <div key={r.id} style={{marginBottom:3,color:"#7f1d1d"}}>
-                    Indent #{r.indentNo} · ₹{r.amount.toLocaleString("en-IN")}
-                    {r.dieselAmount?<span> · ⛽₹{r.dieselAmount.toLocaleString("en-IN")}</span>:null}
-                    {r.cashAmount?<span> · 💵₹{r.cashAmount.toLocaleString("en-IN")}</span>:null}
-                    {" · Driver PIN: "}<b style={{fontFamily:"monospace",letterSpacing:2,color:"#dc2626"}}>{r.pin!=="****"?r.pin:"—"}</b>
-                  </div>
-                ))}
-                <div style={{marginTop:6,fontWeight:600,color:"#991b1b",fontSize:11,lineHeight:1.5}}>
-                  Ask the driver to give the PIN to the pump operator.<br/>
-                  Return here once confirmed — indent will auto-attach.
-                </div>
-              </div>
-            )}
-
-            {/* Requests for this truck — tap-to-attach cards (owner only can change) */}
-            {truckReqs.length>0 && (
+            {/* ── Confirmed requests — tap to attach ── */}
+            {truckReqs.filter(r=>r.status==="confirmed").length>0 && (
               <div style={{display:"flex",flexDirection:"column",gap:4}}>
-                {truckReqs.map(r=>{
+                {truckReqs.filter(r=>r.status==="confirmed").map(r=>{
                   const amt = r.confirmedAmount??r.amount;
                   const isSel = val===String(r.indentNo);
-                  const isConf = r.status==="confirmed";
-                  const canInteract = isOwner || manualLrMode || manualDiesel;
+                  const canInteract = isOwner || (!wasScanned && !f.driverSettled); // always interactable — diesel only from requests
                   return (
                     <div key={r.id} onClick={()=>canInteract?(isSel?clearReq():attachReq(r)):null}
                       style={{
-                        background:isSel?(isConf?C.teal+"22":C.orange+"18"):(isConf?C.teal+"11":C.bg),
-                        border:`1.5px solid ${isSel?(isConf?C.teal:C.orange):(isConf?C.teal+"66":C.border)}`,
+                        background:isSel?C.teal+"22":C.teal+"11",
+                        border:`1.5px solid ${isSel?C.teal:C.teal+"66"}`,
                         borderRadius:8,padding:"9px 12px",cursor:canInteract?"pointer":"default",
                         display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
                       <div style={{flex:1,minWidth:0}}>
-                        <div style={{fontWeight:700,fontSize:13,color:isConf?C.teal:C.text}}>
+                        <div style={{fontWeight:700,fontSize:13,color:C.teal}}>
                           #{r.indentNo}
                           <span style={{marginLeft:6,fontSize:11,fontWeight:600,
-                            background:isConf?C.teal:C.orange,color:"#fff",
-                            borderRadius:4,padding:"1px 6px"}}>
-                            {isConf?"✓ CONFIRMED":"OPEN"}
-                          </span>
+                            background:C.teal,color:"#fff",borderRadius:4,padding:"1px 6px"}}>✓ CONFIRMED</span>
                         </div>
                         <div style={{fontSize:11,color:C.muted,marginTop:2}}>
-                          {"₹"}{amt.toLocaleString("en-IN")}
-                          {r.dieselAmount?<span style={{marginLeft:8}}>Diesel {"₹"}{r.dieselAmount.toLocaleString("en-IN")}</span>:null}
-                          {r.cashAmount?<span style={{marginLeft:6}}>Cash {"₹"}{r.cashAmount.toLocaleString("en-IN")}</span>:null}
+                          ₹{amt.toLocaleString("en-IN")}
+                          {r.dieselAmount?<span style={{marginLeft:8}}>Diesel ₹{r.dieselAmount.toLocaleString("en-IN")}</span>:null}
+                          {r.cashAmount?<span style={{marginLeft:6}}>Cash ₹{r.cashAmount.toLocaleString("en-IN")}</span>:null}
                           {(r.requestedBy||r.createdBy)?<span style={{marginLeft:6}}> · By: {r.requestedBy||r.createdBy}</span>:null}
                         </div>
                       </div>
-                      {canInteract && (
-                        <div style={{fontSize:12,fontWeight:700,flexShrink:0,
-                          color:isSel?C.red:(isConf?C.teal:C.muted)}}>
-                          {isSel?"Remove":"Attach"}
-                        </div>
-                      )}
-                      {!canInteract && isSel && (
-                        <span style={{fontSize:10,color:C.muted}}>🔒</span>
-                      )}
+                      {canInteract && <div style={{fontSize:12,fontWeight:700,flexShrink:0,color:isSel?C.red:C.teal}}>{isSel?"Remove":"Attach"}</div>}
+                      {!canInteract && isSel && <span style={{fontSize:10,color:C.muted}}>🔒</span>}
                     </div>
                   );
                 })}
               </div>
             )}
 
-            {/* No requests for this truck — owner/manual can pick from others */}
-            {truckReqs.length===0 && otherReqs.length>0 && (isOwner || manualLrMode || manualDiesel) && (
-              <select value={val||""} onChange={e=>{
-                const sel=e.target.value;
-                if(!sel){clearReq();return;}
-                ff("dieselIndentNo")(sel);
-                const req=allOpen.find(r=>String(r.indentNo)===sel);
-                if(req) ff("dieselEstimate")(String(req.confirmedAmount??req.amount));
-              }} style={{width:"100%",background:C.bg,border:`1.5px solid ${val?C.teal:C.border}`,
-                borderRadius:8,color:val?C.text:C.muted,padding:"10px 12px",fontSize:13,outline:"none"}}>
-                <option value="">— No request for {truck||"this truck"} — pick from others —</option>
-                {otherReqs.map(r=>{
-                  const amt=r.confirmedAmount??r.amount;
-                  return <option key={r.id} value={String(r.indentNo)}>
-                    #{r.indentNo} {r.truckNo} {"₹"}{amt.toLocaleString("en-IN")} {r.status==="confirmed"?"(confirmed)":"(open)"}
-                  </option>;
-                })}
-              </select>
-            )}
-
-            {/* Indent display */}
-            {val && (
-              <div style={{display:"flex",alignItems:"center",gap:6}}>
-                <div style={{flex:1,background:C.dim,border:`1.5px solid ${C.border}`,
-                  borderRadius:8,color:C.muted,padding:"9px 12px",fontSize:13}}>
-                  {val}
+            {/* ── Pending (open/unconfirmed) requests — warning + explicit override ── */}
+            {truckReqs.filter(r=>r.status==="open").map(r=>{
+              const isSel = val===String(r.indentNo);
+              return (
+                <div key={r.id} style={{background:"#fffbeb",border:`1.5px solid ${C.orange}`,
+                  borderRadius:8,padding:"10px 12px",fontSize:12}}>
+                  <div style={{fontWeight:800,color:C.orange,marginBottom:4}}>
+                    ⚠ Pending — not yet confirmed by pump
+                  </div>
+                  <div style={{color:C.muted,fontSize:11,marginBottom:6}}>
+                    Indent #{r.indentNo} · ₹{r.amount.toLocaleString("en-IN")}
+                    {" · PIN: "}<b style={{fontFamily:"monospace",letterSpacing:2,color:C.orange}}>{r.pin!=="****"?r.pin:"—"}</b>
+                  </div>
+                  <div style={{fontSize:11,color:"#92400e",marginBottom:8,lineHeight:1.5}}>
+                    Pump operator hasn't confirmed this yet. Ask the driver to share the PIN.<br/>
+                    <b>Recommended: wait for confirmation before attaching.</b>
+                  </div>
+                  <div style={{display:"flex",gap:8}}>
+                    <button onClick={()=>isSel?clearReq():attachReq(r)}
+                      style={{flex:1,padding:"7px 0",borderRadius:7,fontWeight:700,fontSize:11,
+                        cursor:"pointer",border:`1.5px solid ${C.orange}`,
+                        background:isSel?C.orange:"transparent",color:isSel?"#fff":C.orange}}>
+                      {isSel?"✕ Remove (unconfirmed)":"⚠ Attach anyway (unconfirmed)"}
+                    </button>
+                  </div>
+                  {isSel && (
+                    <div style={{marginTop:6,background:C.orange+"11",borderRadius:6,padding:"5px 8px",
+                      fontSize:10,color:"#92400e",fontWeight:600}}>
+                      Status will be saved as "Attached without pump confirmation"
+                    </div>
+                  )}
                 </div>
-                {(isOwner || manualLrMode || manualDiesel) && (
-                  <button onClick={clearReq} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:20,padding:"0 4px",lineHeight:1}}>×</button>
-                )}
+              );
+            })}
+
+            {/* No requests for this truck — info message */}
+            {truckReqs.length===0 && truck && (
+              <div style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,
+                padding:"8px 12px",fontSize:11,color:C.muted,fontStyle:"italic"}}>
+                No unattached diesel requests for {truck}. Create a diesel request first from the Diesel tab.
               </div>
-            )}
-            {/* Manual indent entry */}
-            {(manualLrMode || manualDiesel) && !val && (
-              <input value={f.dieselIndentNo||""} onChange={e=>ff("dieselIndentNo")(e.target.value)}
-                placeholder="Type indent number…"
-                style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,
-                  borderRadius:8,color:C.text,padding:"9px 12px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
             )}
 
             {/* Matched / error messages */}
-            {matchedReq&&(
-              <div style={{background:C.teal+"11",border:`1px solid ${C.teal}33`,borderRadius:8,
-                padding:"7px 12px",fontSize:12,color:C.teal,fontWeight:600}}>
-                Indent #{matchedReq.indentNo} attached — {"₹"}{(matchedReq.confirmedAmount??matchedReq.amount).toLocaleString("en-IN")} · {matchedReq.status==="confirmed"?"Pump confirmed":"Awaiting pump"}
-              </div>
-            )}
             {matchedReq&&matchedReq.truckNo!==truck&&truck&&(
               <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,borderRadius:8,
                 padding:"7px 12px",fontSize:12,color:C.orange,fontWeight:600}}>
                 This indent was for {matchedReq.truckNo} — trip truck is {truck}
               </div>
             )}
-            {dupTrip&&<div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,padding:"7px 12px",fontSize:12,color:C.red,fontWeight:600}}>Indent already used on LR {dupTrip.lrNo||"—"} ({dupTrip.truckNo} · {dupTrip.date})</div>}
+            {dupTrip&&<div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,padding:"7px 12px",fontSize:12,color:C.red,fontWeight:600}}>⚠ Indent already used on LR {dupTrip.lrNo||"—"} ({dupTrip.truckNo} · {dupTrip.date})</div>}
             {dupIndent&&!dupTrip&&<div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,padding:"7px 12px",fontSize:12,color:C.red,fontWeight:600}}>Indent already in Diesel records ({dupIndent.truckNo} · {dupIndent.date})</div>}
           </div>
         );
@@ -10784,8 +10739,14 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
                       )}
                       {req.status==="attached" && req.confirmedAmount==null && (
                         <div style={{color:"#d97706",fontSize:10,marginTop:2,fontWeight:600,
-                          background:"#fffbeb",borderRadius:4,padding:"2px 6px",display:"inline-block"}}>
+                          background:"#fffbeb",borderRadius:4,padding:"3px 8px",display:"inline-flex",gap:8,alignItems:"center"}}>
                           ⚠ Attached without pump confirmation
+                          {req.pin && req.pin!=="****" && (
+                            <span style={{fontFamily:"monospace",letterSpacing:3,color:"#d97706",
+                              background:"#fef3c7",borderRadius:4,padding:"1px 6px",fontSize:12,fontWeight:800}}>
+                              PIN: {req.pin}
+                            </span>
+                          )}
                         </div>
                       )}
                       {changed && (
