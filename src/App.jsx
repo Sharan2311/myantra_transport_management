@@ -1451,14 +1451,7 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   const vLoan       = loanVehicles.reduce((s,v) => s + Math.max(0, v.loan-v.loanRecovered), 0);
   const fyLabel     = selectedFY ? FY_LABEL(selectedFY) : "";
 
-  // ── Owner-only: pending receivables — filter payments by month too ────────
-  const totalBilled = displayTrips.filter(t=>t.type==="outbound").reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
-  // Filter payments to match selected month if any
-  const filteredPayments = dashMonth
-    ? (payments||[]).filter(p=>(p.paymentDate||p.date||"").startsWith(dashMonth))
-    : (payments||[]);
-  const totalReceived   = filteredPayments.reduce((s,p)=>s+Number(p.totalPaid||0),0);
-  const pendingReceivable = Math.max(0, totalBilled - totalReceived);
+  // ── KPIs derived after invoice lists are built — consistent with what's shown ─
 
   // ── Invoice split: use same logic as Shree Payments tab ─────────────────────
   // An invoice is credited = at least one trip in it has paymentDate set
@@ -1478,6 +1471,11 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   // ── Unbilled: trips not yet invoiced to Shree ────────────────────────────────
   const unbilledTrips = clientFiltered.filter(t=>t.status==="Pending Bill");
   const unbilledTotal = unbilledTrips.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
+
+  // KPIs derived from same source as the invoice lists — consistent numbers
+  const totalBilled       = [...uncreditedInvoices, ...creditedInvoices].reduce((s,x)=>s+x.total,0);
+  const totalReceived     = creditedInvoices.reduce((s,x)=>s+x.total,0);
+  const pendingReceivable = uncreditedInvoices.reduce((s,x)=>s+x.total,0);
 
   // Shortage alerts — vehicles with outstanding balance > ₹20,000
   // Derive from shortageTxns as source of truth (covers cases where shortageOwed wasn't persisted)
@@ -1709,11 +1707,12 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
             {/* Receivables card */}
             <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.border}`}}>
               <div style={{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:0.5,marginBottom:8}}>💰 RECEIVABLES</div>
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
                 {[
                   {l:"Total Billed",   v:fmt(totalBilled),         c:C.blue},
                   {l:"Received",       v:fmt(totalReceived),       c:C.green},
-                  {l:"Pending",        v:fmt(pendingReceivable),   c:pendingReceivable>0?C.red:C.muted},
+                  {l:"Uncredited",     v:fmt(pendingReceivable),   c:pendingReceivable>0?C.red:C.muted},
+                  {l:"Unbilled",       v:fmt(unbilledTotal),       c:C.orange},
                 ].map(x=>(
                   <div key={x.l} style={{background:C.bg,borderRadius:8,padding:"8px",textAlign:"center"}}>
                     <div style={{color:x.c,fontWeight:800,fontSize:13}}>{x.v}</div>
@@ -11452,8 +11451,12 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
       </tr>`;
     }).join("");
 
-    const loanGivenRows = loanTxns.filter(x=>x.type==="given").map(x=>`<tr>
-      <td>${fmtD(x.date)}</td><td>₹${fmt(x.amount)}</td>
+    const rawGivenTxns = loanTxns.filter(x=>x.type==="given");
+    const givenTxnsDisplay = rawGivenTxns.length > 0 ? rawGivenTxns
+      : ownerLoanGivenPDF > 0 ? [{date:"—", amount:ownerLoanGivenPDF, ref:"—", accountName:"—", _truckNo:"(all)", note:"Prior balance — date unknown"}]
+      : [];
+    const loanGivenRows = givenTxnsDisplay.map(x=>`<tr>
+      <td>${x.date==="—"?"—":fmtD(x.date)}</td><td>₹${fmt(x.amount)}</td>
       <td>${x.ref||"—"}</td><td>${x.accountName||"—"}</td>
       ${isMultiVehOwner?`<td>${x._truckNo||"—"}</td>`:""}
       <td>${x.note||"—"}</td>
@@ -11503,13 +11506,11 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
       .footer{margin-top:20px;font-size:9px;color:#aaa;border-top:1px solid #eee;padding-top:8px}
       .empty{color:#999;font-style:italic;font-size:11px;padding:6px 0}
       .logo-box{width:48px;height:48px;background:#1565c0;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;margin-right:10px}
-      .logo-box span{color:white;font-size:17px;font-weight:900;font-family:Arial,sans-serif;letter-spacing:-1px}
-      @media print { * { -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; } .logo-box{background:#1565c0 !important;} }
+      .logo-img{width:52px;height:52px;border-radius:8px;object-fit:cover}
+      @media print { * { -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; } }
     </style>
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;padding-bottom:8px;border-bottom:2px solid #1565c0">
-      <div class="logo-box">
-        <span>MY</span>
-      </div>
+      <img src="${LOGO_SRC}" class="logo-img" alt="M Yantra" />
       <div>
         <div style="font-size:7px;text-transform:uppercase;letter-spacing:2px;color:#1565c0;font-weight:700">M Yantra Enterprises</div>
         <div style="font-size:20px;font-weight:800;line-height:1.2">Vehicle Report — ${v.truckNo}</div>
@@ -11538,7 +11539,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
     <h2>💳 Driver Payment History (${pays.length})</h2>
     ${pays.length===0?'<div class="empty">No payments recorded.</div>':`<table><tr><th>Date</th><th>LR No</th><th>UTR / Reference</th><th>Amount</th><th>Paid To</th><th>Note</th></tr>${payRows}</table>`}
 
-    <h2>🏦 ${isMultiVehOwner?"Owner ":""}Loan Ledger — Given (${loanTxns.filter(x=>x.type==="given").length})</h2>
+    <h2>🏦 ${isMultiVehOwner?"Owner ":""}Loan Ledger — Given (${givenTxnsDisplay.length})</h2>
     ${loanGivenRows?`<table><tr><th>Date</th><th>Amount</th><th>Reference</th><th>Account</th>${isMultiVehOwner?"<th>Vehicle</th>":""}<th>Note</th></tr>${loanGivenRows}</table>`:'<div class="empty">No loan disbursements recorded.</div>'}
 
     <h2>🏦 ${isMultiVehOwner?"Owner ":""}Loan Ledger — Recoveries (${loanTxns.filter(x=>x.type==="recovery").length})</h2>
@@ -12041,9 +12042,12 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                   if(!lAmt||+lAmt<=0){alert("Enter loan amount.\nಸಾಲದ ಮೊತ್ತ ನಮೂದಿಸಿ.");return;}
                   const targetId = (ownerVehs.length>1 && lAcct2) ? lAcct2 : v.id;
                   const txn={id:uid(),type:"given",date:lDate,amount:+lAmt,ref:lRef,accountName:lAcct,note:""};
-                  setVehicles(p=>p.map(x=>x.id===targetId?{...x,
-                    loan:(x.loan||0)+ +lAmt,
-                    loanTxns:[...(x.loanTxns||[]),txn]}:x));
+                  setVehicles(p=>p.map(x=>{
+                    if(x.id!==targetId) return x;
+                    const updated={...x, loan:(x.loan||0)+ +lAmt, loanTxns:[...(x.loanTxns||[]),txn]};
+                    DB.saveVehicle(updated).catch(e=>console.error("saveVehicle addLoan:",e));
+                    return updated;
+                  }));
                   const targetTruck = ownerVehs.find(x=>x.id===targetId)?.truckNo||v.truckNo;
                   log("ADD LOAN",`${ownerName||targetTruck} via ${targetTruck} ₹${fmt(+lAmt)} ref:${lRef||"—"}`);
                   setLAmt(""); setLDate(today()); setLRef(""); setLAcct(""); setLAcct2("");
@@ -12090,9 +12094,12 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                     : null;
                   const targetRecovId = targetVeh ? targetVeh.id : v.id;
                   const txn={id:uid(),type:"recovery",date:rDate,amount:+rAmt,lrNo:rLR,ref:rRef,note:""};
-                  setVehicles(p=>p.map(x=>x.id===targetRecovId?{...x,
-                    loanRecovered:(x.loanRecovered||0)+ +rAmt,
-                    loanTxns:[...(x.loanTxns||[]),txn]}:x));
+                  setVehicles(p=>p.map(x=>{
+                    if(x.id!==targetRecovId) return x;
+                    const updated={...x, loanRecovered:(x.loanRecovered||0)+ +rAmt, loanTxns:[...(x.loanTxns||[]),txn]};
+                    DB.saveVehicle(updated).catch(e=>console.error("saveVehicle loanRecov:",e));
+                    return updated;
+                  }));
                   if(rLR){
                     setTrips(p=>p.map(t=>{
                       if((t.lrNo||t.id)!==rLR) return t;
@@ -12543,6 +12550,53 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
               <Btn onClick={()=>{resetShForm();setSSheet(v.id);setSdptVal(String(v.shortageDeductPerTrip||0));setSdptSaved(false);}} sm outline color={C.red}>⚠ Shortage</Btn>
               <Btn onClick={()=>setHSheet(v.id)} sm outline color={C.purple}>📋 History</Btn>
               <Btn onClick={()=>exportVehiclePDF(v,pdfFrom,pdfTo)} sm outline color={C.orange}>📄 PDF</Btn>
+              <Btn onClick={()=>{
+                // Standalone Loan Report PDF
+                const ownerVehsPDF2local = (v.ownerName||"").trim() ? (vehicles||[]).filter(x=>(x.ownerName||"").trim()===(v.ownerName||"").trim()) : [v];
+                const lTxns = ownerVehsPDF2local.flatMap(x=>(x.loanTxns||[]).map(tx=>({...tx,_truckNo:x.truckNo}))).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+                const rawGivenTxns = lTxns.filter(x=>x.type==="given");
+                // If loan balance exists but no given txns recorded (pre-fix data), show synthetic entry
+                const givenTxnsDisplay = rawGivenTxns.length > 0 ? rawGivenTxns
+                  : totalGiven > 0 ? [{date:"—", amount:totalGiven, ref:"—", accountName:"—", _truckNo:"(all)", note:"Prior balance — date unknown"}]
+                  : [];
+                const givenRows = givenTxnsDisplay.map(x=>`<tr><td>${x.date==="—"?"—":fmtD(x.date)}</td><td style="font-weight:700;color:#dc2626">₹${fmt(x.amount)}</td><td>${x.ref||"—"}</td><td>${x.accountName||"—"}</td><td>${x._truckNo}</td><td>${x.note||"—"}</td></tr>`).join("");
+                const recovRows = lTxns.filter(x=>x.type==="recovery").map(x=>`<tr><td>${fmtD(x.date)}</td><td style="font-weight:700;color:#15803d">₹${fmt(x.amount)}</td><td>${x.lrNo||"—"}</td><td>${x.ref||"—"}</td><td>${x._truckNo}</td><td>${x.note||"—"}</td></tr>`).join("");
+                const ownerNameL = (v.ownerName||"").trim()||v.truckNo;
+                const totalGiven = ownerVehsPDF2local.reduce((s,x)=>s+(x.loan||0),0);
+                const totalRecov = ownerVehsPDF2local.reduce((s,x)=>s+(x.loanRecovered||0),0);
+                const w=window.open("","_blank");
+                w.document.write(`<html><head><title>Loan Report — ${ownerNameL}</title><style>
+                  body{font-family:Arial,sans-serif;font-size:11px;margin:20px}
+                  h2{font-size:14px;margin:16px 0 6px;border-bottom:2px solid #eee;padding-bottom:4px}
+                  table{width:100%;border-collapse:collapse;margin-bottom:10px}
+                  th{background:#1565c0;color:#fff;padding:5px 8px;font-size:10px;text-align:left}
+                  td{padding:5px 8px;border-bottom:1px solid #eee;font-size:11px}
+                  .header{display:flex;align-items:center;gap:12px;margin-bottom:10px;padding-bottom:8px;border-bottom:2px solid #1565c0}
+                  img.logo{width:48px;height:48px;border-radius:8px;object-fit:cover}
+                  .kpi{display:inline-block;border:1px solid #ddd;border-radius:6px;padding:8px 14px;margin:4px;text-align:center;min-width:110px}
+                  .kv{font-size:15px;font-weight:800} .kl{font-size:9px;color:#888;margin-top:2px}
+                  @media print{*{-webkit-print-color-adjust:exact!important}}
+                </style></head><body>
+                <div class="header">
+                  <img src="${LOGO_SRC}" class="logo" alt="M Yantra"/>
+                  <div>
+                    <div style="font-size:7px;text-transform:uppercase;letter-spacing:2px;color:#1565c0;font-weight:700">M Yantra Enterprises</div>
+                    <div style="font-size:18px;font-weight:800">Loan Report — ${ownerNameL}</div>
+                    <div style="font-size:10px;color:#888">Generated ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}</div>
+                  </div>
+                </div>
+                <div style="margin-bottom:14px">
+                  <div class="kpi"><div class="kv" style="color:#dc2626">₹${fmt(totalGiven)}</div><div class="kl">TOTAL GIVEN</div></div>
+                  <div class="kpi"><div class="kv" style="color:#15803d">₹${fmt(totalRecov)}</div><div class="kl">RECOVERED</div></div>
+                  <div class="kpi"><div class="kv" style="color:${totalGiven-totalRecov>0?"#dc2626":"#15803d"}">₹${fmt(totalGiven-totalRecov)}</div><div class="kl">BALANCE</div></div>
+                </div>
+                <h2>Loan Disbursements (${lTxns.filter(x=>x.type==="given").length})</h2>
+                ${givenRows?`<table><tr><th>Date</th><th>Amount</th><th>Reference</th><th>Account Credited</th><th>Vehicle</th><th>Note</th></tr>${givenRows}</table>`:"<p style='color:#999;font-style:italic'>No loan disbursements recorded.</p>"}
+                <h2>Loan Recoveries (${lTxns.filter(x=>x.type==="recovery").length})</h2>
+                ${recovRows?`<table><tr><th>Date</th><th>Amount</th><th>LR No</th><th>Reference</th><th>Vehicle</th><th>Note</th></tr>${recovRows}</table>`:"<p style='color:#999;font-style:italic'>No loan recoveries recorded.</p>"}
+                </body></html>`);
+                w.document.close(); w.print();
+              }} sm outline color={C.purple}>🏦 Loan</Btn>
               {v.driverPhone&&(
                 <Btn onClick={()=>window.open(`https://wa.me/91${v.driverPhone.replace(/\D/g,"")}?text=${encodeURIComponent(`Dear ${v.driverName||"Driver"}, this is M Yantra Enterprises. - 9606477257`)}`,`_blank`)} sm outline color={C.teal}>📲 Driver</Btn>
               )}
