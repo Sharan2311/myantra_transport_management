@@ -1425,21 +1425,22 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   const availDashMonths = [...new Set(clientFiltered.map(t=>(t.date||"").slice(0,7)).filter(Boolean))].sort().reverse();
 
   const todayStr    = today();
-  const todayTrips  = displayTrips.filter(t => t.date===todayStr);
-  // Yesterday
+  // Today/Yesterday always use unfiltered FY trips — not affected by dashMonth
+  const allFyClientTrips = clientFiltered; // before dashMonth filter
+  const todayTrips      = allFyClientTrips.filter(t => t.date===todayStr);
   const yest = new Date(); yest.setDate(yest.getDate()-1);
-  const yesterdayStr  = yest.toISOString().split("T")[0];
-  const yesterdayTrips = displayTrips.filter(t => t.date===yesterdayStr);
-  // Month avg tons
-  const monthPrefix   = todayStr.slice(0,7);
-  const monthTripsAll = displayTrips.filter(t => (t.date||"").startsWith(monthPrefix));
-  const todayDayNum   = new Date().getDate();
-  const monthTotalTons = monthTripsAll.reduce((s,t)=>s+(+(t.qty)||0),0);
-  const monthAvgTons   = todayDayNum > 0 ? monthTotalTons / todayDayNum : 0;
-  const pending     = displayTrips.filter(t => t.status==="Pending Bill");
+  const yesterdayStr    = yest.toISOString().split("T")[0];
+  const yesterdayTrips  = allFyClientTrips.filter(t => t.date===yesterdayStr);
+  // Month avg tons — derive day number from todayStr (consistent with UTC date)
+  const monthPrefix     = todayStr.slice(0,7);
+  const todayDayNum     = parseInt(todayStr.slice(8,10), 10); // from todayStr, not new Date().getDate()
+  const monthTripsAll   = allFyClientTrips.filter(t => (t.date||"").startsWith(monthPrefix));
+  const monthTotalTons  = monthTripsAll.reduce((s,t)=>s+(+(t.qty)||0),0);
+  const monthAvgTons    = todayDayNum > 0 ? monthTotalTons / todayDayNum : 0;
+  const pending     = allFyClientTrips.filter(t => t.status==="Pending Bill");
   const weekAgo     = new Date(); weekAgo.setDate(weekAgo.getDate()-7);
   const weekAgoStr  = weekAgo.toISOString().split("T")[0];
-  const oldUnsettled = displayTrips.filter(t => !t.driverSettled && t.date < weekAgoStr && (t.qty||0)*(t.givenRate||0)>0);
+  const oldUnsettled = allFyClientTrips.filter(t => !t.driverSettled && t.date < weekAgoStr && (t.qty||0)*(t.givenRate||0)>0);
   const margin      = displayTrips.reduce((s,t) => s + t.qty*(t.frRate-t.givenRate), 0);
   const todayMargin = todayTrips.reduce((s,t) => s + t.qty*(t.frRate-t.givenRate), 0);
   const confirmedIndents = indents.filter(i => i.confirmed);
