@@ -1411,6 +1411,7 @@ export default function App() {
 function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pumps, pumpPayments, driverPays, activity, settings, setTab, user, selectedFY, selectedClient}) {
   const [dashMonth, setDashMonth] = useState(""); // "YYYY-MM" or "" = all
   const [uncreditedOpen, setUncreditedOpen] = useState(false);
+  const [creditedOpen,   setCreditedOpen]   = useState(false);
   const [unbilledOpen,   setUnbilledOpen]   = useState(false);
 
   const allFyTrips = fyTrips || trips;
@@ -1459,10 +1460,14 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   const totalReceived   = filteredPayments.reduce((s,p)=>s+Number(p.totalPaid||0),0);
   const pendingReceivable = Math.max(0, totalBilled - totalReceived);
 
-  // ── Uncredited: status="Billed" = invoice raised but Shree hasn't paid yet ──
+  // ── Invoice split: use payments table as source of truth ────────────────────
+  // A trip's invoice is credited = its invoiceNo exists in payments table
+  const paidInvoiceNos = new Set((payments||[]).map(p=>p.invoiceNo).filter(Boolean));
   const billedTrips = clientFiltered.filter(t=>t.status==="Billed"&&t.invoiceNo);
+
+  // Uncredited = billed, invoice NOT in payments
   const uncreditedMap = {};
-  billedTrips.forEach(t=>{
+  billedTrips.filter(t=>!paidInvoiceNos.has(t.invoiceNo)).forEach(t=>{
     const inv = t.invoiceNo;
     if(!uncreditedMap[inv]) uncreditedMap[inv]={invoiceNo:inv,invoiceDate:t.invoiceDate||t.date||"",trips:[],total:0};
     uncreditedMap[inv].trips.push(t);
@@ -1470,7 +1475,17 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   });
   const uncreditedInvoices = Object.values(uncreditedMap).sort((a,b)=>(b.invoiceDate||"").localeCompare(a.invoiceDate||""));
 
-  // ── Unbilled: status="Pending Bill" = trips not yet invoiced to Shree ────────
+  // Credited = billed trips whose invoice IS in payments (already received)
+  const creditedMap = {};
+  billedTrips.filter(t=>paidInvoiceNos.has(t.invoiceNo)).forEach(t=>{
+    const inv = t.invoiceNo;
+    if(!creditedMap[inv]) creditedMap[inv]={invoiceNo:inv,invoiceDate:t.invoiceDate||t.date||"",trips:[],total:0};
+    creditedMap[inv].trips.push(t);
+    creditedMap[inv].total += (t.qty||0)*(t.frRate||0);
+  });
+  const creditedInvoices = Object.values(creditedMap).sort((a,b)=>(b.invoiceDate||"").localeCompare(a.invoiceDate||""));
+
+  // ── Unbilled: status="Pending Bill" = trips not yet invoiced ─────────────────
   const unbilledTrips = clientFiltered.filter(t=>t.status==="Pending Bill");
   const unbilledTotal = unbilledTrips.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
 
@@ -1725,28 +1740,58 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
                       borderRadius:8,padding:"8px 12px",cursor:"pointer",
                       display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                     <span style={{color:C.red,fontSize:12,fontWeight:700}}>
-                      🔴 {uncreditedInvoices.length} Uncredited Invoice{uncreditedInvoices.length!==1?"s":""}
-                      <span style={{color:C.muted,fontWeight:400,marginLeft:6}}>
-                        · {fmt(uncreditedInvoices.reduce((s,x)=>s+x.total,0))}
-                      </span>
+                      🔴 {uncreditedInvoices.length} Uncredited
+                      <span style={{color:C.muted,fontWeight:400,marginLeft:6}}>· {fmt(uncreditedInvoices.reduce((s,x)=>s+x.total,0))}</span>
                     </span>
                     <span style={{color:C.red,fontSize:14}}>{uncreditedOpen?"▲":"▼"}</span>
                   </button>
                   {uncreditedOpen && (
-                    <div style={{marginTop:6,display:"flex",flexDirection:"column",gap:4}}>
+                    <div style={{marginTop:6,display:"flex",flexDirection:"column",gap:4,maxHeight:260,overflowY:"auto"}}>
                       {uncreditedInvoices.map(inv=>(
-                        <div key={inv.invoiceNo} style={{background:C.bg,borderRadius:8,
-                          padding:"8px 10px",borderLeft:`3px solid ${C.red}`}}>
+                        <div key={inv.invoiceNo} style={{background:C.bg,borderRadius:8,padding:"8px 10px",borderLeft:`3px solid ${C.red}`}}>
                           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                             <div>
                               <span style={{color:C.text,fontWeight:700,fontSize:12}}>{inv.invoiceNo}</span>
-                              {inv.invoiceDate && <span style={{color:C.muted,fontSize:10,marginLeft:6}}>{inv.invoiceDate}</span>}
+                              {inv.invoiceDate&&<span style={{color:C.muted,fontSize:10,marginLeft:6}}>{inv.invoiceDate}</span>}
                             </div>
                             <span style={{color:C.red,fontWeight:800,fontSize:13}}>{fmt(inv.total)}</span>
                           </div>
                           <div style={{color:C.muted,fontSize:10,marginTop:2}}>
-                            {inv.trips.length} trip{inv.trips.length!==1?"s":" "} · {inv.trips.reduce((s,t)=>s+(t.qty||0),0)} MT
-                            · {inv.trips[0]?.client?.replace("Shree Cement ","SC ")||"—"}
+                            {inv.trips.length} trip{inv.trips.length!==1?"s":""} · {inv.trips.reduce((s,t)=>s+(t.qty||0),0)} MT · {inv.trips[0]?.client?.replace("Shree Cement ","SC ")||"—"}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Credited / Received invoices collapsible */}
+              {creditedInvoices.length>0 && (
+                <div style={{marginTop:8}}>
+                  <button onClick={()=>setCreditedOpen(p=>!p)}
+                    style={{width:"100%",background:C.green+"11",border:`1px solid ${C.green}33`,
+                      borderRadius:8,padding:"8px 12px",cursor:"pointer",
+                      display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                    <span style={{color:C.green,fontSize:12,fontWeight:700}}>
+                      ✅ {creditedInvoices.length} Credited / Received
+                      <span style={{color:C.muted,fontWeight:400,marginLeft:6}}>· {fmt(creditedInvoices.reduce((s,x)=>s+x.total,0))}</span>
+                    </span>
+                    <span style={{color:C.green,fontSize:14}}>{creditedOpen?"▲":"▼"}</span>
+                  </button>
+                  {creditedOpen && (
+                    <div style={{marginTop:6,display:"flex",flexDirection:"column",gap:4,maxHeight:260,overflowY:"auto"}}>
+                      {creditedInvoices.map(inv=>(
+                        <div key={inv.invoiceNo} style={{background:C.bg,borderRadius:8,padding:"8px 10px",borderLeft:`3px solid ${C.green}`}}>
+                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                            <div>
+                              <span style={{color:C.text,fontWeight:700,fontSize:12}}>{inv.invoiceNo}</span>
+                              {inv.invoiceDate&&<span style={{color:C.muted,fontSize:10,marginLeft:6}}>{inv.invoiceDate}</span>}
+                            </div>
+                            <span style={{color:C.green,fontWeight:800,fontSize:13}}>{fmt(inv.total)}</span>
+                          </div>
+                          <div style={{color:C.muted,fontSize:10,marginTop:2}}>
+                            {inv.trips.length} trip{inv.trips.length!==1?"s":""} · {inv.trips.reduce((s,t)=>s+(t.qty||0),0)} MT · {inv.trips[0]?.client?.replace("Shree Cement ","SC ")||"—"}
                           </div>
                         </div>
                       ))}
