@@ -1524,7 +1524,7 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
       )}
 
       {/* ── Month filter chips — owner only ── */}
-      {user.role==="owner" && availDashMonths.length>1 && (
+      {user.role==="owner" && availDashMonths.length>0 && (
         <div style={{background:C.card,borderRadius:12,padding:"10px 14px"}}>
           <div style={{fontSize:11,color:C.muted,fontWeight:700,marginBottom:8,textTransform:"uppercase",letterSpacing:1}}>
             Filter by Month {dashMonth && <span style={{color:C.accent,textTransform:"none",fontWeight:400,fontSize:10}}>· {new Date(dashMonth+"-01").toLocaleDateString("en-IN",{month:"long",year:"numeric"})}</span>}
