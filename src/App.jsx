@@ -13292,7 +13292,9 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
 
   // Client selector — "" = All
   const [payClient, setPayClient] = useState("");
-  const [payMaterial, setPayMaterial] = useState("All"); // All | Cement | RawMaterial | Husk
+  const [payMaterial, setPayMaterial] = useState("All");
+  const [scanClient,   setScanClient]   = useState(""); // for invoice scan override
+  const [scanMaterial, setScanMaterial] = useState("Cement"); // default to Cement
   const displayTrips = fyTrips || trips;
   const payTrips = (displayTrips||[]).filter(t=> {
     if(payClient && (t.client||DEFAULT_CLIENT)!==payClient) return false;
@@ -13323,7 +13325,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
       }
     });
     return Object.values(map).sort((a,b)=>(b.invoiceDate||"").localeCompare(a.invoiceDate||""));
-  }, [trips, payClient]);
+  }, [trips, payClient, payMaterial]);
 
   const shreeTrips = payTrips.filter(t=>t.billedToShree)
     .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
@@ -13600,6 +13602,12 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
 
     // All matched and amounts OK — apply
     const invDate = parseDD(scanResult.invoiceDate);
+    const chosenClient   = scanClient   || "";
+    const chosenMaterial = scanMaterial || "";
+    // Map material label to trip type
+    const typeOverride = chosenMaterial==="Cement" ? "outbound"
+                       : chosenMaterial==="Raw Material" ? "inbound"
+                       : null;
     let matched = 0;
     setTrips(prev=>prev.map(t=>{
       const lineMatch = scTrips.reduce((found, st) => {
@@ -13612,12 +13620,16 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         return {...t, invoiceNo:invNo, invoiceDate:invDate,
           status:"Billed", billedBy:"scan", billedAt:nowTs(),
           shreeStatus:"billed",
+          ...(chosenClient ? {client:chosenClient} : {}),
+          ...(typeOverride  ? {type:typeOverride}   : {}),
           billedToShree: Number(lineMatch.st.frtAmt||t.billedToShree||0) || t.billedToShree};
       }
       return t;
     }));
-    log && log("Invoice "+invNo+" scanned — "+matched+" trip(s) marked Billed");
+    log && log("Invoice "+invNo+" scanned — "+matched+" trip(s) marked Billed · "+chosenClient+" · "+chosenMaterial);
     setScanResult(null);
+    setScanClient("");
+    setScanMaterial("Cement");
   };
 
   const applyPaymentScan = () => {
@@ -14175,30 +14187,36 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                           {/* Client + Material override */}
                           <div style={{display:"flex",gap:8,marginTop:6}}>
                             <div style={{flex:1}}>
-                              <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>CLIENT OVERRIDE</div>
-                              <select value={payClient} onChange={e=>setPayClient(e.target.value)}
-                                style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,
+                              <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>CLIENT *</div>
+                              <select value={scanClient} onChange={e=>setScanClient(e.target.value)}
+                                style={{width:"100%",background:C.bg,border:`1px solid ${scanClient?C.teal:C.orange}`,borderRadius:6,
                                   color:C.text,padding:"6px 8px",fontSize:12,outline:"none"}}>
-                                <option value="">Auto-detect</option>
+                                <option value="">— Select Client —</option>
                                 {CLIENTS.map(c=><option key={c} value={c}>{c.replace("Shree Cement ","SC ").replace("Ultratech ","UT ")}</option>)}
                               </select>
                             </div>
                             <div style={{flex:1}}>
-                              <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>MATERIAL</div>
-                              <select value={payMaterial} onChange={e=>setPayMaterial(e.target.value)}
-                                style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,
+                              <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>MATERIAL *</div>
+                              <select value={scanMaterial} onChange={e=>setScanMaterial(e.target.value)}
+                                style={{width:"100%",background:C.bg,border:`1px solid ${scanMaterial&&scanMaterial!=="Select"?C.teal:C.orange}`,borderRadius:6,
                                   color:C.text,padding:"6px 8px",fontSize:12,outline:"none"}}>
-                                {["All","Cement","RawMaterial","Husk"].map(m=><option key={m} value={m}>{m==="RawMaterial"?"Raw Material":m}</option>)}
+                                <option value="">— Select Material —</option>
+                                {["Cement","Raw Material","Husk"].map(m=><option key={m} value={m}>{m}</option>)}
                               </select>
                             </div>
                           </div>
+                          {(!scanClient||!scanMaterial) && (
+                            <div style={{fontSize:10,color:C.orange,fontWeight:600,marginTop:4}}>
+                              ⚠ Select client and material before saving
+                            </div>
+                          )}
                           <div style={{display:"flex",gap:8,marginTop:8}}>
-                            <button onClick={applyInvoiceScan} disabled={!allOk||alreadySaved}
-                              style={{flex:1,background:allOk&&!alreadySaved?C.green:C.dim,
-                                color:allOk&&!alreadySaved?"#000":"#666",border:"none",borderRadius:6,
+                            <button onClick={applyInvoiceScan} disabled={!allOk||alreadySaved||!scanClient||!scanMaterial}
+                              style={{flex:1,background:allOk&&!alreadySaved&&scanClient&&scanMaterial?C.green:C.dim,
+                                color:allOk&&!alreadySaved&&scanClient&&scanMaterial?"#000":"#666",border:"none",borderRadius:6,
                                 padding:"10px",fontWeight:700,
-                                cursor:allOk&&!alreadySaved?"pointer":"not-allowed",fontSize:13}}>
-                              {alreadySaved ? "Already Saved" : allOk ? "✓ Apply — Mark Billed" : "Fix issues above first"}
+                                cursor:allOk&&!alreadySaved&&scanClient&&scanMaterial?"pointer":"not-allowed",fontSize:13}}>
+                              {alreadySaved ? "Already Saved" : !scanClient||!scanMaterial ? "Select client & material first" : allOk ? "✓ Apply — Mark Billed" : "Fix issues above first"}
                             </button>
                             <button onClick={()=>setScanResult(null)}
                               style={{background:"#e8f0fa",color:C.muted,border:"1px solid #ccddf0",borderRadius:6,
@@ -14545,7 +14563,36 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
               {searchInv&&` · "${searchInv}"`}{(invFrom||invTo)?" (date filtered)":""}
             </div>
             {filteredInvoices.length===0
-              ? <EmptyState icon="🧾" text={searchInv?"No invoices match your search.":"No invoices yet. Upload an invoice PDF."}/>
+              ? (() => {
+                  // Check if invoice exists in other client/material filters
+                  const allShreeInvoiceTrips = (displayTrips||[]).filter(t=>t.billedToShree&&t.invoiceNo);
+                  const q = searchInv.toLowerCase();
+                  const crossMatch = q && allShreeInvoiceTrips.some(t=>
+                    (t.invoiceNo||"").toLowerCase().includes(q) ||
+                    (t.lrNo||"").toLowerCase().includes(q)
+                  );
+                  const crossTrip = q && allShreeInvoiceTrips.find(t=>(t.invoiceNo||"").toLowerCase().includes(q));
+                  return (
+                    <div style={{textAlign:"center",padding:"30px 16px"}}>
+                      <div style={{fontSize:32,marginBottom:8}}>🧾</div>
+                      <div style={{color:C.text,fontWeight:700,marginBottom:6}}>No invoices match your search.</div>
+                      {crossMatch && crossTrip && (
+                        <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,
+                          borderRadius:10,padding:"10px 14px",marginTop:8,fontSize:12,color:C.orange,textAlign:"left"}}>
+                          <b>Found in different filter:</b><br/>
+                          Invoice <b>{crossTrip.invoiceNo}</b> exists but is under
+                          <b> {crossTrip.client||"SC Kodla"}</b> / <b>{crossTrip.type==="outbound"?"Cement":"Raw Material"}</b>.
+                          <button onClick={()=>{ setPayClient(crossTrip.client||""); setPayMaterial(crossTrip.type==="outbound"?"Cement":"RawMaterial"); }}
+                            style={{display:"block",marginTop:8,background:C.orange,border:"none",borderRadius:6,
+                              color:"#fff",padding:"6px 14px",cursor:"pointer",fontWeight:700,fontSize:12}}>
+                            Switch to that filter →
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()
+              : <EmptyState icon="🧾" text={searchInv?"No invoices match your search.":"No invoices yet. Upload an invoice PDF."}/>
               : filteredInvoices.map(inv=>{
                 const isOpen = expandedInv===inv.invoiceNo;
                 return (
