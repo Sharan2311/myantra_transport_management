@@ -6088,6 +6088,11 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
               const v    = vehicles.find(x => x.truckNo===t.truckNo);
               const tripIndents = indents.filter(i => i.tripId===t.id && i.confirmed);
               const confirmedDiesel = tripIndents.reduce((s,i) => s+(i.amount||0), 0);
+              // Fall back to diesel estimate or diesel request amount if no confirmed DI record
+              const dieselReq = t.dieselIndentNo ? (dieselRequests||[]).find(r=>String(r.indentNo)===String(t.dieselIndentNo).trim()) : null;
+              const displayDiesel = confirmedDiesel>0 ? confirmedDiesel
+                : dieselReq ? (dieselReq.confirmedAmount??dieselReq.amount)
+                : (t.dieselEstimate||0);
               const calc = calcNet(t, v, confirmedDiesel > 0 ? confirmedDiesel : null);
               const paidSoFar = (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
               const remaining = Math.max(0, calc.net - paidSoFar);
@@ -6228,8 +6233,8 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                       {t.tafal>0     && <Badge label={"TAFAL ₹"+t.tafal}     color={C.purple} />}
                       {t.shortage>0  && <Badge label={"⚠ "+t.shortage+"MT"}  color={C.red} />}
                       {t.advance>0   && <Badge label={"Adv "+fmt(t.advance)}  color={C.orange} />}
-                      {(confirmedDiesel>0 || t.dieselIndentNo) && (
-                        <Badge label={`⛽${t.dieselIndentNo?" #"+t.dieselIndentNo.trim():""}${confirmedDiesel>0?" "+fmt(confirmedDiesel):""}`} color={C.orange} />
+                      {(displayDiesel>0 || t.dieselIndentNo) && (
+                        <Badge label={`⛽${t.dieselIndentNo?" #"+t.dieselIndentNo.trim():""}${displayDiesel>0?" "+fmt(displayDiesel):""}`} color={C.orange} />
                       )}
                       {t.driverSettled   && <Badge label="✓ Settled"          color={C.green} />}
                       {t.diLines && t.diLines.length > 1 && <Badge label={t.diLines.length+" DIs"} color={C.teal} />}
@@ -7533,10 +7538,10 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
             </label>
             <div style={{background:C.dim,border:`1.5px solid ${C.border}`,borderRadius:10,
               padding:"11px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              {val ? (
+              {val || dispAmt>0 ? (
                 <div>
-                  <span style={{fontSize:14,fontWeight:700,color:C.text}}>#{val}</span>
-                  {dispAmt>0 && <span style={{fontSize:12,color:C.orange,marginLeft:10}}>⛽ {fmt(dispAmt)}</span>}
+                  {val && <span style={{fontSize:14,fontWeight:700,color:C.text}}>#{val}</span>}
+                  {dispAmt>0 && <span style={{fontSize:12,color:C.orange,marginLeft:val?10:0}}>⛽ {fmt(dispAmt)}</span>}
                   {attachedReq && (
                     <span style={{fontSize:11,color:attachedReq.status==="confirmed"?C.teal:C.orange,marginLeft:8}}>
                       {attachedReq.status==="confirmed"?"✓ Confirmed":"⚠ Not confirmed"}
