@@ -6228,8 +6228,9 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                       {t.tafal>0     && <Badge label={"TAFAL ₹"+t.tafal}     color={C.purple} />}
                       {t.shortage>0  && <Badge label={"⚠ "+t.shortage+"MT"}  color={C.red} />}
                       {t.advance>0   && <Badge label={"Adv "+fmt(t.advance)}  color={C.orange} />}
-                      {confirmedDiesel>0 && <Badge label={"⛽ "+fmt(confirmedDiesel)} color={C.orange} />}
-                      {t.dieselIndentNo && <Badge label={"#"+t.dieselIndentNo.trim()} color={C.orange} />}
+                      {(confirmedDiesel>0 || t.dieselIndentNo) && (
+                        <Badge label={`⛽${t.dieselIndentNo?" #"+t.dieselIndentNo.trim():""}${confirmedDiesel>0?" "+fmt(confirmedDiesel):""}`} color={C.orange} />
+                      )}
                       {t.driverSettled   && <Badge label="✓ Settled"          color={C.green} />}
                       {t.diLines && t.diLines.length > 1 && <Badge label={t.diLines.length+" DIs"} color={C.teal} />}
                     </div>
@@ -7516,24 +7517,39 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
         </div>
       </div>
 
-      {/* ⛽ Diesel Indent No — only from diesel requests */}
+      {/* ⛽ Diesel Indent No — owner only editable */}
       {(()=>{
         const truck = (f.truckNo||"").trim().toUpperCase();
-        // Lock diesel for non-owners on settled/paid trips
-        const dieselLocked = !isOwner && (f.driverSettled || f.paymentDate || f.status==="Paid");
-        if(dieselLocked) return (
+        const val = (f.dieselIndentNo||"").trim();
+        // Find the attached/matched request for display
+        const attachedReq = val ? (dieselRequests||[]).find(r=>String(r.indentNo)===val) : null;
+        const dispAmt = attachedReq ? (attachedReq.confirmedAmount??attachedReq.amount) : (+f.dieselEstimate||0);
+
+        // Non-owners: always locked — just show the current indent info
+        if(!isOwner) return (
           <div style={{display:"flex",flexDirection:"column",gap:5}}>
             <label style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>
               ⛽ Diesel Indent No <span style={{color:C.orange,fontSize:10}}>🔒 Owner only</span>
             </label>
             <div style={{background:C.dim,border:`1.5px solid ${C.border}`,borderRadius:10,
-              padding:"13px 12px",fontSize:15,color:C.text,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <span>{f.dieselIndentNo||"—"}</span>
+              padding:"11px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              {val ? (
+                <div>
+                  <span style={{fontSize:14,fontWeight:700,color:C.text}}>#{val}</span>
+                  {dispAmt>0 && <span style={{fontSize:12,color:C.orange,marginLeft:10}}>⛽ {fmt(dispAmt)}</span>}
+                  {attachedReq && (
+                    <span style={{fontSize:11,color:attachedReq.status==="confirmed"?C.teal:C.orange,marginLeft:8}}>
+                      {attachedReq.status==="confirmed"?"✓ Confirmed":"⚠ Not confirmed"}
+                    </span>
+                  )}
+                </div>
+              ) : (
+                <span style={{color:C.muted,fontSize:13}}>No indent attached</span>
+              )}
               <span style={{fontSize:11,color:C.muted}}>🔒</span>
             </div>
           </div>
         );
-        const val = (f.dieselIndentNo||"").trim();
         // Include open/confirmed requests + the already-attached one (if any)
         const allOpen = (dieselRequests||[]).filter(r=>
           r.status==="open" || r.status==="confirmed" ||
