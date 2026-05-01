@@ -7587,6 +7587,41 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
               ⛽ Diesel Indent No
             </div>
 
+            {/* ── Already-attached request — show with option to remove (owner only) ── */}
+            {truckReqs.filter(r=>r.status==="attached").map(r=>{
+              const amt = r.confirmedAmount??r.amount;
+              const isConf = r.confirmedAmount!=null;
+              return (
+                <div key={r.id} style={{background:isConf?C.teal+"11":C.orange+"11",
+                  border:`1.5px solid ${isConf?C.teal:C.orange}`,borderRadius:8,padding:"9px 12px",
+                  display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+                  <div style={{flex:1}}>
+                    <div style={{fontWeight:700,fontSize:13,color:isConf?C.teal:C.orange}}>
+                      #{r.indentNo}
+                      <span style={{marginLeft:6,fontSize:11,fontWeight:600,
+                        background:isConf?C.teal:C.orange,color:"#fff",borderRadius:4,padding:"1px 6px"}}>
+                        {isConf?"✓ CONFIRMED":"⚠ NOT CONFIRMED"}
+                      </span>
+                    </div>
+                    <div style={{fontSize:11,color:C.muted,marginTop:2}}>
+                      ₹{amt.toLocaleString("en-IN")}
+                      {r.dieselAmount?<span style={{marginLeft:8}}>⛽ ₹{r.dieselAmount.toLocaleString("en-IN")}</span>:null}
+                      {r.cashAmount?<span style={{marginLeft:6}}>💵 ₹{r.cashAmount.toLocaleString("en-IN")}</span>:null}
+                      {r.lrNo&&<span style={{marginLeft:6}}>LR: {r.lrNo}</span>}
+                    </div>
+                  </div>
+                  {isOwner && (
+                    <button onClick={clearReq}
+                      style={{background:"none",border:`1px solid ${C.red}44`,borderRadius:6,
+                        color:C.red,cursor:"pointer",fontSize:12,padding:"3px 8px",flexShrink:0}}>
+                      ✕ Remove
+                    </button>
+                  )}
+                  {!isOwner && <span style={{fontSize:10,color:C.muted}}>🔒</span>}
+                </div>
+              );
+            })}
+
             {/* ── Confirmed requests — tap to attach ── */}
             {truckReqs.filter(r=>r.status==="confirmed").length>0 && (
               <div style={{display:"flex",flexDirection:"column",gap:4}}>
@@ -7658,7 +7693,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
             })}
 
             {/* No requests for this truck — info message */}
-            {truckReqs.length===0 && truck && (
+            {truckReqs.length===0 && !val && truck && (
               <div style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,
                 padding:"8px 12px",fontSize:11,color:C.muted,fontStyle:"italic"}}>
                 No unattached diesel requests for {truck}. Create a diesel request first from the Diesel tab.
