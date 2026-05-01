@@ -6231,6 +6231,18 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                     <span style={{color:ROLES[t.createdBy]?.color||C.muted,fontSize:11}}>by {t.createdBy} · {t.createdAt}</span>
                     <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}}>
                       {t.tafal>0     && <Badge label={"TAFAL ₹"+t.tafal}     color={C.purple} />}
+                      {/* Warn if loan deduction not yet applied on this trip */}
+                      {(()=>{
+                        if(t.loanRecovery>0||t.driverSettled) return null;
+                        const ownerName=(v?.ownerName||"").trim();
+                        const ownerVehs=ownerName?(vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerName):[v].filter(Boolean);
+                        const ownerBal=ownerVehs.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
+                        const deduct=(v?.deductPerTrip||0);
+                        if(deduct>0&&ownerBal>0) return (
+                          <span style={{fontSize:10,color:C.orange,fontWeight:600,marginLeft:4}}>
+                            ⚠ Loan ₹{fmt(Math.min(deduct,ownerBal))} not applied — edit to update
+                          </span>
+                        );
                       {t.shortage>0  && <Badge label={"⚠ "+t.shortage+"MT"}  color={C.red} />}
                       {t.advance>0   && <Badge label={"Adv "+fmt(t.advance)}  color={C.orange} />}
                       {(displayDiesel>0 || t.dieselIndentNo) && (
