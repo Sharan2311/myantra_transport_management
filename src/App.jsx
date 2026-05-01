@@ -6243,6 +6243,8 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                             ⚠ Loan ₹{fmt(Math.min(deduct,ownerBal))} not applied — edit to update
                           </span>
                         );
+                        return null;
+                      })()}
                       {t.shortage>0  && <Badge label={"⚠ "+t.shortage+"MT"}  color={C.red} />}
                       {t.advance>0   && <Badge label={"Adv "+fmt(t.advance)}  color={C.orange} />}
                       {(displayDiesel>0 || t.dieselIndentNo) && (
