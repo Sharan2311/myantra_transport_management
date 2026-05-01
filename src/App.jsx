@@ -9087,12 +9087,12 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
     : (pumpPayments||[]);
 
   const openRequests = scopedRequests
-    .filter(r => r.status==="open")
+    .filter(r => r.status==="open" || (r.status==="attached" && r.confirmedAmount==null))
     .filter(r => !lrSearch.trim() || r.truckNo.includes(lrSearch.trim().toUpperCase()) || String(r.indentNo).includes(lrSearch.trim()))
     .sort((a,b)=>b.indentNo-a.indentNo);
 
   const historyRequests = scopedRequests
-    .filter(r => r.status!=="open")
+    .filter(r => r.status!=="open" && !(r.status==="attached" && r.confirmedAmount==null))
     .filter(r => !histFrom || r.date>=histFrom)
     .filter(r => !histTo   || r.date<=histTo)
     .sort((a,b)=>b.indentNo-a.indentNo);
@@ -9259,14 +9259,27 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
           )}
           {openRequests.map(req=>{
             const p = pumps.find(x=>x.id===req.pumpId);
+            const isAttachedUnconfirmed = req.status==="attached" && req.confirmedAmount==null;
             return (
-              <div key={req.id} style={{background:C.card,borderRadius:12,padding:"14px 16px",borderLeft:`3px solid ${C.orange}`}}>
+              <div key={req.id} style={{background:C.card,borderRadius:12,padding:"14px 16px",
+                borderLeft:`3px solid ${isAttachedUnconfirmed?"#d97706":C.orange}`}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
                   <div>
-                    <div style={{fontWeight:800,fontSize:15}}>
+                    <div style={{fontWeight:800,fontSize:15,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
                       <span style={{color:C.orange}}>#{req.indentNo}</span>{" · "}{req.truckNo}
+                      {isAttachedUnconfirmed && (
+                        <span style={{background:"#fef3c7",color:"#92400e",fontSize:10,fontWeight:700,
+                          borderRadius:4,padding:"2px 7px",border:"1px solid #f59e0b"}}>
+                          ⚠ Trip Attached · Confirm PIN
+                        </span>
+                      )}
                     </div>
-                    <div style={{color:C.muted,fontSize:12,marginTop:2}}>{req.date}{p?" · "+p.name:""}</div>
+                    <div style={{color:C.muted,fontSize:12,marginTop:2}}>
+                      {req.date}{p?" · "+p.name:""}
+                      {isAttachedUnconfirmed && req.lrNo && (
+                        <span style={{marginLeft:6,color:"#92400e",fontWeight:600}}>LR: {req.lrNo}</span>
+                      )}
+                    </div>
                     {(req.dieselAmount||req.cashAmount) ? (
                       <div style={{display:"flex",gap:12,marginTop:4}}>
                         {req.dieselAmount ? <span style={{fontSize:12,color:C.muted}}>⛽ <b style={{color:C.text}}>₹{req.dieselAmount.toLocaleString("en-IN")}</b></span> : null}
@@ -9276,7 +9289,9 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
                   </div>
                   <div style={{fontWeight:800,fontSize:18,color:C.text}}>{fmt(req.amount)}</div>
                 </div>
-                <Btn onClick={()=>startEdit(req)} full color={C.orange}>Open & Confirm</Btn>
+                <Btn onClick={()=>startEdit(req)} full color={isAttachedUnconfirmed?"#d97706":C.orange}>
+                  {isAttachedUnconfirmed ? "⚠ Confirm Attached Indent" : "Open & Confirm"}
+                </Btn>
               </div>
             );
           })}
