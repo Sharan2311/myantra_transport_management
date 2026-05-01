@@ -6229,6 +6229,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                       {t.shortage>0  && <Badge label={"⚠ "+t.shortage+"MT"}  color={C.red} />}
                       {t.advance>0   && <Badge label={"Adv "+fmt(t.advance)}  color={C.orange} />}
                       {confirmedDiesel>0 && <Badge label={"⛽ "+fmt(confirmedDiesel)} color={C.orange} />}
+                      {t.dieselIndentNo && <Badge label={"#"+t.dieselIndentNo.trim()} color={C.orange} />}
                       {t.driverSettled   && <Badge label="✓ Settled"          color={C.green} />}
                       {t.diLines && t.diLines.length > 1 && <Badge label={t.diLines.length+" DIs"} color={C.teal} />}
                     </div>
@@ -7532,13 +7533,20 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
             </div>
           </div>
         );
-        const allOpen = (dieselRequests||[]).filter(r=>r.status==="open"||r.status==="confirmed");
-        // Requests for this truck — confirmed first
-        const truckReqs = allOpen
-          .filter(r=>r.truckNo===truck)
+        const val = (f.dieselIndentNo||"").trim();
+        // Include open/confirmed requests + the already-attached one (if any)
+        const allOpen = (dieselRequests||[]).filter(r=>
+          r.status==="open" || r.status==="confirmed" ||
+          (r.status==="attached" && val && String(r.indentNo)===val)
+        );
+        // Requests for this truck — only unattached (or currently attached to this trip)
+        const truckReqs = (dieselRequests||[])
+          .filter(r=>r.truckNo===truck && (
+            r.status==="open" || r.status==="confirmed" ||
+            (r.status==="attached" && val && String(r.indentNo)===val)
+          ))
           .sort((a,b)=>(b.status==="confirmed"?1:0)-(a.status==="confirmed"?1:0));
         const otherReqs = allOpen.filter(r=>r.truckNo!==truck);
-        const val = (f.dieselIndentNo||"").trim();
         const matchedReq = allOpen.find(r=>String(r.indentNo)===val);
         const dupTrip = trips.find(t=>t.id!==f.id&&t.dieselIndentNo&&t.dieselIndentNo.trim()===val);
         const dupIndent = indents.find(i=>i.indentNo&&String(i.indentNo).trim()===val);
