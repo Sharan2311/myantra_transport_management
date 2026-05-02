@@ -2261,6 +2261,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
         advance: "0",
         cashEmpId: "",
         shortageRecovery: String(autoShortageG),
+        loanRecovery: String(autoLoanG),
         driverPhone: vehG?.driverPhone || "",
         ownerName: vehG?.ownerName || "",
         assignedEmpId: "",
@@ -2648,6 +2649,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
             let upd={...veh};
             if(+g.shortageRecovery>0){const txn={id:uid(),type:"recovery",date:trip.date||today(),qty:0,amount:+g.shortageRecovery,lrNo,note:"Batch DI"};upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+(+g.shortageRecovery),shortageTxns:[...(upd.shortageTxns||[]),txn]};}
             if(+g.loanRecovery>0){const txn={id:uid(),type:"recovery",date:trip.date||today(),amount:+g.loanRecovery,lrNo,note:"Batch DI"};upd={...upd,loanRecovered:(upd.loanRecovered||0)+(+g.loanRecovery),loanTxns:[...(upd.loanTxns||[]),txn]};}
+            DB.saveVehicle(upd).catch(e=>console.error("saveVehicle batch DI recovery:",e));
             return upd;
           }));
         }
@@ -2776,6 +2778,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
             let upd={...veh};
             if(+g.shortageRecovery>0){const txn={id:uid(),type:"recovery",date:trip.date||today(),qty:0,amount:+g.shortageRecovery,lrNo,note:"Batch multi-DI"};upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+(+g.shortageRecovery),shortageTxns:[...(upd.shortageTxns||[]),txn]};}
             if(+g.loanRecovery>0){const txn={id:uid(),type:"recovery",date:trip.date||today(),amount:+g.loanRecovery,lrNo,note:"Batch multi-DI"};upd={...upd,loanRecovered:(upd.loanRecovered||0)+(+g.loanRecovery),loanTxns:[...(upd.loanTxns||[]),txn]};}
+            DB.saveVehicle(upd).catch(e=>console.error("saveVehicle batch multi-DI recovery:",e));
             return upd;
           }));
         }
@@ -6391,6 +6394,8 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                       {/* Warn if loan deduction not yet applied on this trip */}
                       {(()=>{
                         if(t.loanRecovery>0||t.driverSettled) return null;
+                        // Don't warn on trips saved today — recovery may have just been applied
+                        if((t.createdAt||t.date||"").slice(0,10)===todayStr) return null;
                         const ownerName=(v?.ownerName||"").trim();
                         const ownerVehs=ownerName?(vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerName):[v].filter(Boolean);
                         const ownerBal=ownerVehs.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
