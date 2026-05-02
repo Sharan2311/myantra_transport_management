@@ -2924,7 +2924,13 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
             {/* Group header */}
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
               <div>
-                <div style={{fontWeight:800,fontSize:15,color:C.text}}>🚛 {g.truckNo}</div>
+                <div style={{fontWeight:800,fontSize:15,color:C.text}}>🚛 {g.truckNo}
+                  {(()=>{
+                    const vehH=(vehicles||[]).find(v=>v.truckNo===g.truckNo);
+                    const ownH=(vehH?.ownerName||g.ownerName||"").trim();
+                    return ownH ? <span style={{fontSize:11,color:C.muted,fontWeight:400,marginLeft:8}}>👤 {ownH}</span> : null;
+                  })()}
+                </div>
                 {g._splitFrom&&<div style={{fontSize:10,color:C.teal,fontWeight:700,marginBottom:2}}>✂ Split into separate trip</div>}
                 <div style={{color:C.muted,fontSize:11,marginTop:2}}>
                   {groupItems.length} DI{groupItems.length>1?"s":""} selected · {totalQty} MT total
@@ -5711,7 +5717,17 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         tafalExempt:false, shortageOwed:0, shortageRecovered:0,
         shortageTxns:[], loanTxns:[], createdBy:user.username };
       setVehicles(p => [...(p||[]), nv]);
+      DB.saveVehicle(nv).catch(e=>console.error("saveVehicle auto-create:",e));
       log("AUTO-CREATE VEHICLE", `${tn2} from trip save`);
+    } else if(tn2 && f.ownerName?.trim()) {
+      // If vehicle exists but ownerName was blank — persist it now
+      const existV = vehicles.find(v=>v.truckNo===tn2);
+      if(existV && !(existV.ownerName||"").trim()) {
+        const updated = {...existV, ownerName:f.ownerName.trim()};
+        setVehicles(prev=>prev.map(v=>v.truckNo===tn2?updated:v));
+        DB.saveVehicle(updated).catch(e=>console.error("saveVehicle ownerName:",e));
+        log("VEHICLE OWNER SET", `${tn2} → ${f.ownerName.trim()}`);
+      }
     }
     // Reflect shortageRecovery / loanRecovery into vehicle ledger
     if(tn2 && (t.shortageRecovery>0 || t.loanRecovery>0)){
@@ -7372,7 +7388,14 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
           ? <LockedField label="Date" value={f.date} half />
           : <Field label="Date" value={f.date||today()} onChange={ff("date")} type="date" half />}
       </div>
+      {/* Owner name — shown prominently right after truck selection */}
       {veh && (veh.ownerName||"").trim() && (
+        <div style={{fontSize:12,color:C.teal,fontWeight:700,marginTop:-4,paddingLeft:2,
+          display:"flex",alignItems:"center",gap:5}}>
+          👤 {veh.ownerName.trim()}
+          <span style={{color:C.muted,fontSize:11,fontWeight:400}}>· owner</span>
+        </div>
+      )}
         <div style={{fontSize:12,color:C.muted,background:C.bg,borderRadius:8,padding:"10px 12px",
           border:`1px solid ${C.border}33`}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
