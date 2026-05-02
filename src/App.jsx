@@ -204,72 +204,127 @@ const Field = ({label, value, onChange, type="text", placeholder="", opts=null, 
 };
 
 // ─── TRUCKSEARCH — type-to-search truck input with live suggestions ──────────
-function TruckSearch({value, onChange, vehicles=[], label="TRUCK NO", placeholder="Type truck number…"}) {
+function TruckSearch({value, onChange, vehicles=[], label="TRUCK NO", placeholder="Type truck number…", onAddVehicle=null}) {
   const [query,    setQuery]    = useState(value||"");
   const [open,     setOpen]     = useState(false);
   const [focused,  setFocused]  = useState(false);
+  const [addMode,  setAddMode]  = useState(false);
+  const [newDriver, setNewDriver] = useState("");
+  const [newOwner,  setNewOwner]  = useState("");
+  const [newPhone,  setNewPhone]  = useState("");
 
-  // Sync external value changes (e.g. edit form pre-population)
   React.useEffect(() => { setQuery(value||""); }, [value]);
 
   const q = query.trim().toUpperCase();
   const exact = (vehicles||[]).find(v => v.truckNo === q);
+
+  // Fuzzy match — levenshtein distance
+  const levenshtein = (a,b) => {
+    const m=a.length,n=b.length;
+    const dp=Array.from({length:m+1},(_,i)=>Array.from({length:n+1},(_,j)=>i?j?0:i:j));
+    for(let i=1;i<=m;i++) for(let j=1;j<=n;j++)
+      dp[i][j]=a[i-1]===b[j-1]?dp[i-1][j-1]:1+Math.min(dp[i-1][j],dp[i][j-1],dp[i-1][j-1]);
+    return dp[m][n];
+  };
+
   const suggestions = q.length >= 2
-    ? (vehicles||[]).filter(v => v.truckNo.includes(q) && v.truckNo !== q)
-        .sort((a,b) => a.truckNo.localeCompare(b.truckNo))
+    ? (vehicles||[])
+        .filter(v => v.truckNo.includes(q) || levenshtein(v.truckNo,q)<=2)
+        .filter(v => v.truckNo !== q)
+        .sort((a,b) => {
+          const da = a.truckNo.includes(q)?0:levenshtein(a.truckNo,q);
+          const db = b.truckNo.includes(q)?0:levenshtein(b.truckNo,q);
+          return da-db;
+        })
         .slice(0, 8)
     : [];
+
+  const fuzzyOnly = suggestions.filter(v=>!v.truckNo.includes(q));
   const showDropdown = focused && q.length >= 2 && (exact || suggestions.length > 0);
   const isNew = q.length >= 6 && !exact;
 
   const commit = (truckNo) => {
-    setQuery(truckNo);
-    onChange(truckNo);
-    setOpen(false);
-    setFocused(false);
+    setQuery(truckNo); onChange(truckNo);
+    setOpen(false); setFocused(false); setAddMode(false);
   };
 
   const handleChange = (e) => {
     const v = e.target.value.toUpperCase();
-    setQuery(v);
-    onChange(v);        // propagate immediately so parent state stays in sync
-    setFocused(true);
+    setQuery(v); onChange(v); setFocused(true); setAddMode(false);
+  };
+
+  const handleAdd = () => {
+    if(!newOwner.trim()) { alert("Owner name is required"); return; }
+    if(!newPhone.trim() || newPhone.trim().length < 10) { alert("Driver phone (min 10 digits) is required"); return; }
+    if(onAddVehicle) onAddVehicle({truckNo:q, ownerName:newOwner.trim(), driverPhone:newPhone.trim(), driverName:newDriver.trim()});
+    commit(q);
+    setAddMode(false); setNewDriver(""); setNewOwner(""); setNewPhone("");
   };
 
   const borderColor = exact ? C.teal : isNew ? C.orange : C.border;
-  const statusText  = exact
-    ? `✅ ${exact.driverName ? exact.driverName + " · " : ""}Known vehicle`
-    : isNew ? "🆕 New truck — will be added to vehicles on save"
-    : null;
 
   return (
     <div style={{position:"relative"}}>
       <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3,textTransform:"uppercase",letterSpacing:1}}>{label}</div>
-      <input
-        value={query}
-        onChange={handleChange}
-        onFocus={() => setFocused(true)}
-        onBlur={() => setTimeout(()=>setFocused(false), 150)}
-        placeholder={placeholder}
-        autoComplete="off"
+      <input value={query} onChange={handleChange}
+        onFocus={()=>setFocused(true)}
+        onBlur={()=>setTimeout(()=>setFocused(false),200)}
+        placeholder={placeholder} autoComplete="off"
         style={{width:"100%",boxSizing:"border-box",background:C.bg,
           border:`1.5px solid ${borderColor}`,borderRadius:8,color:C.text,
-          padding:"9px 12px",fontSize:14,outline:"none",
-          transition:"border-color 0.15s"}}
+          padding:"9px 12px",fontSize:14,outline:"none",transition:"border-color 0.15s"}}
       />
-      {statusText && (
-        <div style={{fontSize:11,marginTop:3,color:exact?C.teal:C.orange,fontWeight:600}}>
-          {statusText}
+
+      {/* Status line */}
+      {exact && <div style={{fontSize:11,marginTop:3,color:C.teal,fontWeight:600}}>
+        ✅ {exact.driverName||""}  {exact.ownerName?"· "+exact.ownerName:""} · Known vehicle</div>}
+      {isNew && !addMode && <div style={{fontSize:11,marginTop:3,color:C.orange,fontWeight:600}}>
+        🆕 Not in vehicle master —{" "}
+        <span onClick={()=>setAddMode(true)} style={{cursor:"pointer",textDecoration:"underline",color:C.teal}}>
+          Add new vehicle
+        </span>
+      </div>}
+
+      {/* Add new vehicle inline form */}
+      {addMode && isNew && (
+        <div style={{background:C.teal+"11",border:`1.5px solid ${C.teal}`,borderRadius:10,
+          padding:"12px 14px",marginTop:8,display:"flex",flexDirection:"column",gap:8}}>
+          <div style={{color:C.teal,fontWeight:800,fontSize:12}}>➕ Add {q} to Vehicle Master</div>
+          <input placeholder="Owner Name *" value={newOwner} onChange={e=>setNewOwner(e.target.value)}
+            style={{width:"100%",boxSizing:"border-box",background:C.bg,
+              border:`1.5px solid ${newOwner?C.teal:C.red}`,borderRadius:7,color:C.text,
+              padding:"8px 10px",fontSize:13,outline:"none"}}/>
+          <input placeholder="Driver Phone * (10 digits)" value={newPhone} onChange={e=>setNewPhone(e.target.value)}
+            type="tel" inputMode="numeric"
+            style={{width:"100%",boxSizing:"border-box",background:C.bg,
+              border:`1.5px solid ${newPhone.length>=10?C.teal:newPhone?C.red:C.border}`,
+              borderRadius:7,color:C.text,padding:"8px 10px",fontSize:13,outline:"none"}}/>
+          <input placeholder="Driver Name (optional)" value={newDriver} onChange={e=>setNewDriver(e.target.value)}
+            style={{width:"100%",boxSizing:"border-box",background:C.bg,
+              border:`1.5px solid ${C.border}`,borderRadius:7,color:C.text,
+              padding:"8px 10px",fontSize:13,outline:"none"}}/>
+          <div style={{display:"flex",gap:8}}>
+            <button onMouseDown={handleAdd}
+              style={{flex:2,background:C.teal,border:"none",borderRadius:7,color:"#fff",
+                fontWeight:800,padding:"8px",cursor:"pointer",fontSize:12}}>
+              ✓ Add &amp; Continue
+            </button>
+            <button onMouseDown={()=>setAddMode(false)}
+              style={{flex:1,background:"none",border:`1px solid ${C.border}`,borderRadius:7,
+                color:C.muted,padding:"8px",cursor:"pointer",fontSize:12}}>
+              Cancel
+            </button>
+          </div>
         </div>
       )}
+
       {/* Suggestions dropdown */}
-      {showDropdown && (
+      {showDropdown && !addMode && (
         <div style={{position:"absolute",top:"100%",left:0,right:0,zIndex:200,
           background:C.card,border:`1.5px solid ${C.border}`,borderRadius:8,
-          boxShadow:"0 4px 16px rgba(0,0,0,0.15)",overflow:"hidden",marginTop:2}}>
+          boxShadow:"0 4px 16px rgba(0,0,0,0.15)",overflow:"hidden",marginTop:2,maxHeight:260,overflowY:"auto"}}>
           {exact && (
-            <div
-              onMouseDown={()=>commit(exact.truckNo)}
+            <div onMouseDown={()=>commit(exact.truckNo)}
               style={{padding:"9px 12px",cursor:"pointer",background:C.teal+"11",
                 borderBottom:`1px solid ${C.border}22`,fontSize:13}}>
               <b style={{color:C.teal}}>{exact.truckNo}</b>
@@ -277,13 +332,27 @@ function TruckSearch({value, onChange, vehicles=[], label="TRUCK NO", placeholde
               <span style={{float:"right",color:C.teal,fontSize:11,fontWeight:700}}>✓ Select</span>
             </div>
           )}
-          {suggestions.map(v => (
-            <div key={v.truckNo}
-              onMouseDown={()=>commit(v.truckNo)}
-              style={{padding:"9px 12px",cursor:"pointer",fontSize:13,
-                borderBottom:`1px solid ${C.border}11`}}>
+          {suggestions.filter(v=>v.truckNo.includes(q)).map(v => (
+            <div key={v.truckNo} onMouseDown={()=>commit(v.truckNo)}
+              style={{padding:"9px 12px",cursor:"pointer",fontSize:13,borderBottom:`1px solid ${C.border}11`}}>
               <b>{v.truckNo}</b>
               {v.driverName && <span style={{color:C.muted,marginLeft:8,fontSize:12}}>{v.driverName}</span>}
+            </div>
+          ))}
+          {/* Fuzzy matches — shown with typo warning */}
+          {fuzzyOnly.length>0 && (
+            <div style={{padding:"5px 12px",fontSize:10,color:C.muted,fontWeight:700,
+              background:C.bg,borderTop:`1px solid ${C.border}22`}}>
+              🔍 Similar (possible typo?)
+            </div>
+          )}
+          {fuzzyOnly.map(v => (
+            <div key={v.truckNo} onMouseDown={()=>commit(v.truckNo)}
+              style={{padding:"9px 12px",cursor:"pointer",fontSize:13,
+                background:"#fffbeb",borderBottom:`1px solid ${C.border}11`}}>
+              <b style={{color:C.orange}}>{v.truckNo}</b>
+              {v.driverName && <span style={{color:C.muted,marginLeft:8,fontSize:12}}>{v.driverName}</span>}
+              <span style={{float:"right",color:C.orange,fontSize:10,fontWeight:700}}>≈ Similar</span>
             </div>
           ))}
         </div>
@@ -1480,6 +1549,12 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   const totalReceived     = creditedInvoices.reduce((s,x)=>s+x.total,0);
   const pendingReceivable = uncreditedInvoices.reduce((s,x)=>s+x.total,0);
 
+  // Layer 3 — confirmed indents not attached to any trip for > 1 day
+  const yesterdayDateStr2 = new Date(Date.now()-86400000).toISOString().split("T")[0];
+  const unattachedOldIndents = (indents||[]).filter(r=>
+    r.confirmed && !r.tripId && (r.date||"") <= yesterdayDateStr2
+  );
+
   // Shortage alerts — vehicles with outstanding balance > ₹20,000
   // Derive from shortageTxns as source of truth (covers cases where shortageOwed wasn't persisted)
   const highShortageVehicles = (vehicles||[]).filter(v => {
@@ -1495,6 +1570,11 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
     pending.length>0 && {color:C.accent, icon:"🧾", text:`${pending.length} trip${pending.length>1?"s":""} pending bill — ₹${(pending.reduce((s,t)=>s+t.qty*t.frRate,0)).toLocaleString("en-IN")}`, tab:"billing"},
     oldUnsettled.length>0 && {color:C.red, icon:"⏰", text:`${oldUnsettled.length} trip${oldUnsettled.length>1?"s":""} unsettled >7 days`, tab:"driverPay"},
     unpaidDiesel>0 && {color:C.orange, icon:"⛽", text:`Diesel payment pending — ${fmt(unpaidDiesel)}`, tab:"diesel"},
+    ...unattachedOldIndents.map(r=>({
+      color:"#d97706", icon:"⛽",
+      text:`Indent #${r.indentNo} (${r.truckNo} · ${fmt(r.amount)}) confirmed but not attached to any trip`,
+      tab:"diesel"
+    })),
     ...highShortageVehicles.map(v=>{
       const txns = v.shortageTxns||[];
       const owed     = txns.filter(x=>x.type==="shortage").reduce((s,x)=>s+(x.amount||0),0);
@@ -3169,30 +3249,26 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                 );
               })()}
 
-              {/* ── Pending diesel request — BLOCKS save until confirmed by pump ── */}
+              {/* ── Pending diesel — soft warning only, saving IS allowed ── */}
               {(()=>{
-                if(manualDiesel) return null; // manual mode — skip pump confirmation check
                 const truck = (g.truckNo||"").toUpperCase().trim();
-                const pendingG = (dieselRequests||[]).filter(r=>r.truckNo===truck && r.status==="open");
-                if(!pendingG.length) return null;
+                const attachedIndentNo = g.dieselIndentNo?.trim();
+                // Only warn about UNATTACHED open requests (not the one already selected)
+                const unattachedPending = (dieselRequests||[]).filter(r=>
+                  r.truckNo===truck && r.status==="open" &&
+                  String(r.indentNo)!==attachedIndentNo
+                );
+                if(!unattachedPending.length) return null;
                 return (
-                  <div style={{background:"#fef2f2",border:"2px solid #dc2626",
-                    borderRadius:8,padding:"10px 12px",fontSize:12,color:"#dc2626"}}>
-                    <div style={{fontWeight:800,marginBottom:6}}>
-                      🚫 Cannot save — Diesel request not confirmed by pump
-                    </div>
-                    {pendingG.map(r=>(
-                      <div key={r.id} style={{marginBottom:3,color:"#7f1d1d"}}>
-                        Indent #{r.indentNo} · ₹{r.amount.toLocaleString("en-IN")}
-                        {r.dieselAmount?<span> · ⛽₹{r.dieselAmount.toLocaleString("en-IN")}</span>:null}
-                        {r.cashAmount?<span> · 💵₹{r.cashAmount.toLocaleString("en-IN")}</span>:null}
-                        {" · Driver PIN: "}<b style={{fontFamily:"monospace",letterSpacing:2,color:"#dc2626"}}>{r.pin!=="****"?r.pin:"—"}</b>
+                  <div style={{background:"#fffbeb",border:"1px solid #d97706",
+                    borderRadius:8,padding:"8px 10px",fontSize:11,color:"#92400e"}}>
+                    <div style={{fontWeight:700,marginBottom:3}}>⚠ Unconfirmed diesel request exists</div>
+                    {unattachedPending.map(r=>(
+                      <div key={r.id}>
+                        Indent #{r.indentNo} · PIN: <b style={{fontFamily:"monospace",letterSpacing:2}}>{r.pin!=="****"?r.pin:"—"}</b>
                       </div>
                     ))}
-                    <div style={{marginTop:6,fontWeight:600,color:"#991b1b",fontSize:11,lineHeight:1.5}}>
-                      Ask the driver to give the PIN to the pump operator.<br/>
-                      Return here once the pump has confirmed — the indent will auto-attach.
-                    </div>
+                    <div style={{marginTop:4,fontSize:10}}>You can still save. Ask pump to confirm later.</div>
                   </div>
                 );
               })()}
@@ -3250,12 +3326,10 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                     {/* Available unattached requests for this truck */}
                     {!alreadyAttached && availReqs.length>0 && (
                       <div style={{display:"flex",flexDirection:"column",gap:4}}>
-                        {availReqs.map(r=>{
-                          const isConf = r.status==="confirmed";
+                        {availReqs.map(r=>{                          const isConf = r.status==="confirmed";
                           return (
                             <div key={r.id}
                               onClick={()=>{
-                                if(!isConf && !window.confirm(`⚠ Indent #${r.indentNo} is not confirmed by pump yet.\nPIN: ${r.pin}\n\nAttach anyway?`)) return;
                                 updateGroup(g.id,"dieselIndentNo",String(r.indentNo));
                                 updateGroup(g.id,"diesel",String(r.confirmedAmount??r.amount));
                                 updateGroup(g.id,"_autoAttachedReqId",r.id);
@@ -3283,6 +3357,46 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                         })}
                       </div>
                     )}
+
+                    {/* No exact match — show fuzzy matches from other truck numbers */}
+                    {!alreadyAttached && availReqs.length===0 && g.truckNo && (()=>{
+                      const lev=(a,b)=>{const m=a.length,n=b.length,dp=Array.from({length:m+1},(_,i)=>Array.from({length:n+1},(_,j)=>i?j?0:i:j));for(let i=1;i<=m;i++)for(let j=1;j<=n;j++)dp[i][j]=a[i-1]===b[j-1]?dp[i-1][j-1]:1+Math.min(dp[i-1][j],dp[i][j-1],dp[i-1][j-1]);return dp[m][n];};
+                      const trk = g.truckNo.toUpperCase();
+                      const fuzzy = (dieselRequests||[]).filter(r=>
+                        (r.status==="confirmed"||r.status==="open") && !r.tripId && !r.lrNo &&
+                        r.truckNo!==trk && lev(r.truckNo,trk)<=2
+                      ).slice(0,3);
+                      if(!fuzzy.length) return null;
+                      return (
+                        <div>
+                          <div style={{fontSize:10,color:C.orange,fontWeight:700,marginBottom:4,
+                            background:"#fffbeb",borderRadius:6,padding:"4px 8px"}}>
+                            🔍 No exact match — similar truck numbers found (possible typo?):
+                          </div>
+                          {fuzzy.map(r=>(
+                            <div key={r.id} style={{background:"#fffbeb",border:`1.5px solid ${C.orange}`,
+                              borderRadius:7,padding:"7px 10px",cursor:"pointer",marginBottom:4,
+                              display:"flex",justifyContent:"space-between",alignItems:"center"}}
+                              onClick={()=>{
+                                updateGroup(g.id,"dieselIndentNo",String(r.indentNo));
+                                updateGroup(g.id,"diesel",String(r.confirmedAmount??r.amount));
+                                updateGroup(g.id,"_autoAttachedReqId",r.id);
+                              }}>
+                              <div>
+                                <span style={{fontWeight:700,fontSize:12,color:C.orange}}>#{r.indentNo}</span>
+                                <span style={{marginLeft:8,fontSize:11,color:C.text}}>
+                                  Registered as: <b>{r.truckNo}</b>
+                                </span>
+                                <span style={{marginLeft:8,fontSize:11,color:C.muted}}>
+                                  ₹{(r.confirmedAmount??r.amount).toLocaleString("en-IN")}
+                                </span>
+                              </div>
+                              <span style={{fontSize:10,fontWeight:700,color:C.orange}}>≈ Attach</span>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })()}
 
                     {/* No requests at all */}
                     {!alreadyAttached && availReqs.length===0 && (
@@ -7693,7 +7807,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
                       style={{flex:1,padding:"7px 0",borderRadius:7,fontWeight:700,fontSize:11,
                         cursor:"pointer",border:`1.5px solid ${C.orange}`,
                         background:isSel?C.orange:"transparent",color:isSel?"#fff":C.orange}}>
-                      {isSel?"✕ Remove (unconfirmed)":"⚠ Attach anyway (unconfirmed)"}
+                      {isSel?"✕ Remove":"Attach (unconfirmed)"}
                     </button>
                   </div>
                   {isSel && (
@@ -10511,6 +10625,15 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
                   onChange={setDrTruckNo}
                   vehicles={vehicles||[]}
                   placeholder="Type truck number e.g. KA32B1234"
+                  onAddVehicle={(newVeh)=>{
+                    const v={id:uid(), truckNo:newVeh.truckNo, ownerName:newVeh.ownerName,
+                      driverName:newVeh.driverName||"", driverPhone:newVeh.driverPhone,
+                      loan:0, loanRecovered:0, deductPerTrip:0, shortageDeductPerTrip:0,
+                      tafalExempt:false, loanTxns:[], shortageTxns:[], createdBy:user?.username||""};
+                    setVehicles(p=>[...(p||[]),v]);
+                    DB.saveVehicle(v).catch(e=>console.error("saveVehicle from diesel form:",e));
+                    log&&log("NEW VEHICLE",`${v.truckNo} added from diesel request form`);
+                  }}
                 />
                 {/* Diesel + Cash — total auto-computed */}
                 {/* ── Diesel + Cash (both mandatory) ── */}
