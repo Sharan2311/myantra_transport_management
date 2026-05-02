@@ -3148,11 +3148,23 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                 );
               })()}
 
-              {/* Owner name — required for new vehicles */}
+              {/* Owner name — auto-filled if vehicle known, required only if missing */}
               {(()=>{
-                const existVehOwner = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
-                const isNewVehicle = !existVehOwner || !(existVehOwner.ownerName||"").trim();
-                if(!isNewVehicle) return null;
+                const existVeh = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
+                const existingOwner = (existVeh?.ownerName||"").trim();
+
+                // If vehicle exists and has owner — auto-fill silently and hide field
+                if(existingOwner) {
+                  if(g.ownerName!==existingOwner) updateGroup(g.id,"ownerName",existingOwner);
+                  return (
+                    <div style={{fontSize:11,color:C.teal,fontWeight:600,display:"flex",alignItems:"center",gap:4}}>
+                      👤 <span>{existingOwner}</span>
+                      <span style={{color:C.muted,fontWeight:400}}>(owner · auto-filled)</span>
+                    </div>
+                  );
+                }
+
+                // New vehicle or vehicle without owner — show input (mandatory)
                 const allOwners = [...new Set((vehicles||[]).map(v=>(v.ownerName||"").trim()).filter(Boolean))].sort();
                 const ownerVal = (g.ownerName||"").trim();
                 const filtered = ownerVal
@@ -6293,6 +6305,11 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                         ) : (
                           <button onClick={()=>{
                             const normalized = {...t, diLines: (t.diLines||[]).map(d=>({...d, frRate: d.frRate||t.frRate||0}))};
+                            // Auto-fill ownerName from vehicle master if blank on trip
+                            if(!(normalized.ownerName||"").trim()) {
+                              const veh = (vehicles||[]).find(x=>x.truckNo===t.truckNo);
+                              if(veh?.ownerName) normalized.ownerName = veh.ownerName;
+                            }
                             // Recompute loanRecovery + shortageRecovery from current vehicle balance (only if not yet settled)
                             if(!t.driverSettled) {
                               const veh = (vehicles||[]).find(x=>x.truckNo===t.truckNo);
@@ -7368,8 +7385,21 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
           </div>
         </div>
       )}
-      {/* Owner name — required for new vehicles or vehicles without owner */}
-      {f.truckNo && f.truckNo.trim().length>=4 && (!veh || !(veh.ownerName||"").trim()) && (()=>{
+      {/* Owner name — show if vehicle has owner, required input only if missing */}
+      {f.truckNo && f.truckNo.trim().length>=4 && (()=>{
+        const existingOwner = (veh?.ownerName||"").trim();
+        // Vehicle has owner — show as read-only info, auto-fill silently
+        if(existingOwner) {
+          if((f.ownerName||"").trim()!==existingOwner) ff("ownerName")(existingOwner);
+          return (
+            <div style={{fontSize:11,color:C.teal,fontWeight:600,display:"flex",alignItems:"center",gap:4,
+              padding:"6px 10px",background:C.teal+"11",borderRadius:8}}>
+              👤 <span>{existingOwner}</span>
+              <span style={{color:C.muted,fontWeight:400}}>(auto-filled from vehicle)</span>
+            </div>
+          );
+        }
+        // No owner — show required input
         const allOwnersTF = [...new Set((vehicles||[]).map(v=>(v.ownerName||"").trim()).filter(Boolean))].sort();
         const ownerValTF = (f.ownerName||"").trim();
         const filteredTF = ownerValTF
