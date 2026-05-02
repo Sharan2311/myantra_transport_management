@@ -5885,6 +5885,16 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         return upd;
       }));
     }
+    // Persist ownerName to vehicle master if it was blank
+    if(tn3 && (editSheet.ownerName||"").trim()) {
+      const existV3 = vehicles.find(v=>v.truckNo===tn3);
+      if(existV3 && !(existV3.ownerName||"").trim()) {
+        const updV3 = {...existV3, ownerName:editSheet.ownerName.trim()};
+        setVehicles(prev=>prev.map(v=>v.truckNo===tn3?updV3:v));
+        DB.saveVehicle(updV3).catch(e=>console.error("saveVehicle ownerName edit:",e));
+        log("VEHICLE OWNER SET", `${tn3} → ${editSheet.ownerName.trim()} (from edit trip)`);
+      }
+    }
     // Wallet advance: upsert a single record per trip using stable id "WX-"+tripId
     // This prevents duplicate entries — editing just overwrites the same record
     const newAdv   = +editSheet.advance||0;
@@ -7388,14 +7398,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
           ? <LockedField label="Date" value={f.date} half />
           : <Field label="Date" value={f.date||today()} onChange={ff("date")} type="date" half />}
       </div>
-      {/* Owner name — shown prominently right after truck selection */}
-      {veh && (veh.ownerName||"").trim() && (
-        <div style={{fontSize:12,color:C.teal,fontWeight:700,marginTop:-4,paddingLeft:2,
-          display:"flex",alignItems:"center",gap:5}}>
-          👤 {veh.ownerName.trim()}
-          <span style={{color:C.muted,fontSize:11,fontWeight:400}}>· owner</span>
-        </div>
-      )}
+      {veh && (veh.accountNo||veh.phone) && (veh.ownerName||"").trim() && (
         <div style={{fontSize:12,color:C.muted,background:C.bg,borderRadius:8,padding:"10px 12px",
           border:`1px solid ${C.border}33`}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
@@ -7408,17 +7411,20 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
           </div>
         </div>
       )}
-      {/* Owner name — show if vehicle has owner, required input only if missing */}
+      {/* Owner name — show if vehicle or trip has owner, required input only if missing */}
       {f.truckNo && f.truckNo.trim().length>=4 && (()=>{
-        const existingOwner = (veh?.ownerName||"").trim();
-        // Vehicle has owner — show as read-only info, auto-fill silently
+        const existingOwner = (veh?.ownerName||f.ownerName||"").trim();
+        // Vehicle or trip has owner — show as read-only info, save to vehicle if needed
         if(existingOwner) {
           if((f.ownerName||"").trim()!==existingOwner) ff("ownerName")(existingOwner);
           return (
             <div style={{fontSize:11,color:C.teal,fontWeight:600,display:"flex",alignItems:"center",gap:4,
               padding:"6px 10px",background:C.teal+"11",borderRadius:8}}>
               👤 <span>{existingOwner}</span>
-              <span style={{color:C.muted,fontWeight:400}}>(auto-filled from vehicle)</span>
+              {!veh?.ownerName && <span style={{color:C.orange,fontWeight:400,marginLeft:4}}>
+                (from trip — will save to vehicle on update)
+              </span>}
+              {veh?.ownerName && <span style={{color:C.muted,fontWeight:400}}>(auto-filled)</span>}
             </div>
           );
         }
