@@ -3161,7 +3161,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
 
                 // If vehicle exists and has owner — auto-fill silently and hide field
                 if(existingOwner) {
-                  if(g.ownerName!==existingOwner) updateGroup(g.id,"ownerName",existingOwner);
+                  if(!g.ownerName) updateGroup(g.id,"ownerName",existingOwner);
                   return (
                     <div style={{fontSize:11,color:C.teal,fontWeight:600,display:"flex",alignItems:"center",gap:4}}>
                       👤 <span>{existingOwner}</span>
@@ -7413,18 +7413,15 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
       )}
       {/* Owner name — show if vehicle or trip has owner, required input only if missing */}
       {f.truckNo && f.truckNo.trim().length>=4 && (()=>{
-        const existingOwner = (veh?.ownerName||f.ownerName||"").trim();
-        // Vehicle or trip has owner — show as read-only info, save to vehicle if needed
+        const existingOwner = (veh?.ownerName||"").trim();
+        // Vehicle has owner — show as read-only teal bar, auto-fill once if blank
         if(existingOwner) {
-          if((f.ownerName||"").trim()!==existingOwner) ff("ownerName")(existingOwner);
+          if(!(f.ownerName||"").trim()) ff("ownerName")(existingOwner);
           return (
             <div style={{fontSize:11,color:C.teal,fontWeight:600,display:"flex",alignItems:"center",gap:4,
               padding:"6px 10px",background:C.teal+"11",borderRadius:8}}>
               👤 <span>{existingOwner}</span>
-              {!veh?.ownerName && <span style={{color:C.orange,fontWeight:400,marginLeft:4}}>
-                (from trip — will save to vehicle on update)
-              </span>}
-              {veh?.ownerName && <span style={{color:C.muted,fontWeight:400}}>(auto-filled)</span>}
+              <span style={{color:C.muted,fontWeight:400}}>(auto-filled)</span>
             </div>
           );
         }
