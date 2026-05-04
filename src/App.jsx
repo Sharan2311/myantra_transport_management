@@ -13415,6 +13415,8 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
   const [salRef, setSalRef] = useState("");
   const [salNote,setSalNote]= useState("");
   const [salType,setSalType]= useState("salary");
+  const [salRecoverLoan, setSalRecoverLoan] = useState(false);
+  const [salLoanAmt, setSalLoanAmt] = useState("");
   const [txAmt,  setTxAmt]  = useState("");
   const [txDate, setTxDate] = useState(today());
   const [txNote, setTxNote] = useState("");
@@ -13438,6 +13440,8 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
   const txHistory = empId => empTx(empId).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
 
   const generateEmpPDF = (e) => {
+    const fmtDate = d => {try{return new Date(d).toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"});}catch{return d||"—";}};
+    const fmtAmt  = n => Number(n||0).toLocaleString("en-IN",{maximumFractionDigits:2});
     const loanTxns = (e.loanTxns||[]).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
     const salTxns  = ((cashTransfers||[]).filter(t=>t.empId===e.id&&t.type==="salary")).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
     const walTxns  = ((cashTransfers||[]).filter(t=>t.empId===e.id&&t.type!=="salary")).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
@@ -13464,18 +13468,18 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
       </div>
     </div>
     <div style="margin-bottom:12px">
-      <div class="kpi"><div class="kv" style="color:#dc2626">₹${fmt(e.loan||0)}</div><div class="kl">LOAN GIVEN</div></div>
-      <div class="kpi"><div class="kv" style="color:#15803d">₹${fmt(e.loanRecovered||0)}</div><div class="kl">LOAN RECOVERED</div></div>
-      <div class="kpi"><div class="kv" style="color:${loanBal>0?"#dc2626":"#15803d"}">₹${fmt(loanBal)}</div><div class="kl">LOAN BALANCE</div></div>
-      <div class="kpi"><div class="kv" style="color:#1565c0">₹${fmt(totalSal)}</div><div class="kl">TOTAL SALARY PAID</div></div>
-      <div class="kpi"><div class="kv" style="color:#7c3aed">₹${fmt(walBal)}</div><div class="kl">WALLET BALANCE</div></div>
+      <div class="kpi"><div class="kv" style="color:#dc2626">₹${fmtAmt(e.loan||0)}</div><div class="kl">LOAN GIVEN</div></div>
+      <div class="kpi"><div class="kv" style="color:#15803d">₹${fmtAmt(e.loanRecovered||0)}</div><div class="kl">LOAN RECOVERED</div></div>
+      <div class="kpi"><div class="kv" style="color:${loanBal>0?"#dc2626":"#15803d"}">₹${fmtAmt(loanBal)}</div><div class="kl">LOAN BALANCE</div></div>
+      <div class="kpi"><div class="kv" style="color:#1565c0">₹${fmtAmt(totalSal)}</div><div class="kl">TOTAL SALARY PAID</div></div>
+      <div class="kpi"><div class="kv" style="color:#7c3aed">₹${fmtAmt(walBal)}</div><div class="kl">WALLET BALANCE</div></div>
     </div>
     <h2>Loan History (${loanTxns.length})</h2>
-    ${loanTxns.length===0?"<p style='color:#999;font-style:italic'>No loan transactions.</p>":`<table><tr><th>Date</th><th>Type</th><th>Amount</th><th>Reference</th></tr>${loanTxns.map(t=>`<tr style="background:${t.type==="given"?"#fef2f2":"#f0fdf4"}"><td>${fmtD(t.date)}</td><td>${t.type==="given"?"Given":"Recovery"}</td><td>₹${fmt(t.amount||0)}</td><td>${t.ref||"—"}</td></tr>`).join("")}</table>`}
+    ${loanTxns.length===0?"<p style='color:#999;font-style:italic'>No loan transactions.</p>":`<table><tr><th>Date</th><th>Type</th><th>Amount</th><th>Reference</th></tr>${loanTxns.map(t=>`<tr style="background:${t.type==="given"?"#fef2f2":"#f0fdf4"}"><td>${fmtDate(t.date)}</td><td>${t.type==="given"?"Given":"Recovery"}</td><td>₹${fmtAmt(t.amount||0)}</td><td>${t.ref||"—"}</td></tr>`).join("")}</table>`}
     <h2>Salary History (${salTxns.length})</h2>
-    ${salTxns.length===0?"<p style='color:#999;font-style:italic'>No salary payments recorded.</p>":`<table><tr><th>Date</th><th>Amount</th><th>Note</th><th>Reference</th></tr>${salTxns.map(t=>`<tr style="background:#eff6ff"><td>${fmtD(t.date)}</td><td>₹${fmt(t.amount||0)}</td><td>${t.note||"—"}</td><td>${t.ref||"—"}</td></tr>`).join("")}</table>`}
+    ${salTxns.length===0?"<p style='color:#999;font-style:italic'>No salary payments recorded.</p>":`<table><tr><th>Date</th><th>Amount</th><th>Note</th><th>Reference</th></tr>${salTxns.map(t=>`<tr style="background:#eff6ff"><td>${fmtDate(t.date)}</td><td>₹${fmtAmt(t.amount||0)}</td><td>${t.note||"—"}</td><td>${t.ref||"—"}</td></tr>`).join("")}</table>`}
     <h2>Wallet History (${walTxns.length})</h2>
-    ${walTxns.length===0?"<p style='color:#999;font-style:italic'>No wallet transactions.</p>":`<table><tr><th>Date</th><th>Amount</th><th>Type</th><th>Note</th></tr>${walTxns.map(t=>`<tr><td>${fmtD(t.date)}</td><td>₹${fmt(Math.abs(t.amount||0))}${t.amount<0?" (advance)":""}</td><td>${t.type||"transfer"}</td><td>${t.note||"—"}</td></tr>`).join("")}</table>`}
+    ${walTxns.length===0?"<p style='color:#999;font-style:italic'>No wallet transactions.</p>":`<table><tr><th>Date</th><th>Amount</th><th>Type</th><th>Note</th></tr>${walTxns.map(t=>`<tr><td>${fmtDate(t.date)}</td><td>₹${fmtAmt(Math.abs(t.amount||0))}${t.amount<0?" (advance)":""}</td><td>${t.type||"transfer"}</td><td>${t.note||"—"}</td></tr>`).join("")}</table>`}
     <script>window.onload=function(){window.print();}</script>
     </body></html>`;
 
@@ -13653,7 +13657,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
         const totalTaf = tafalTxns.reduce((s,t)=>s+Number(t.amount||0),0);
         const loanBal  = (e.loan||0)-(e.loanRecovered||0);
         return(
-        <Sheet title={`💼 Payments — ${e.name}`} onClose={()=>{setSalSheet(null);setSalAmt("");setSalDate(today());setSalRef("");setSalNote("");setSalType("salary");}}>
+        <Sheet title={`💼 Payments — ${e.name}`} onClose={()=>{setSalSheet(null);setSalAmt("");setSalDate(today());setSalRef("");setSalNote("");setSalType("salary");setSalRecoverLoan(false);setSalLoanAmt("");}}>
           <div style={{display:"flex",flexDirection:"column",gap:14}}>
             {/* Summary */}
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
@@ -13677,14 +13681,35 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                     color:C.text,padding:"9px 10px",fontSize:14,outline:"none"}}>
                   <option value="salary">💰 Salary</option>
                   <option value="tafal">🤝 TAFAL</option>
-                  <option value="loan_recovery">🏦 Loan Recovery</option>
                 </select>
               </div>
 
-              {(salType==="loan_recovery"&&loanBal>0)&&(
-                <div style={{background:C.orange+"11",borderRadius:7,padding:"6px 10px",fontSize:11,
-                  color:C.orange,marginBottom:8,fontWeight:600}}>
-                  Loan balance: ₹{fmt(loanBal)} — enter recovery amount below
+              {/* Recover loan toggle */}
+              {loanBal>0&&(
+                <div onClick={()=>setSalRecoverLoan(p=>!p)}
+                  style={{display:"flex",alignItems:"center",gap:10,background:salRecoverLoan?C.green+"11":C.bg,
+                    border:`1.5px solid ${salRecoverLoan?C.green:C.border}`,borderRadius:8,
+                    padding:"9px 12px",cursor:"pointer",marginBottom:8}}>
+                  <div style={{width:18,height:18,borderRadius:4,flexShrink:0,
+                    background:salRecoverLoan?C.green:"transparent",border:`2px solid ${salRecoverLoan?C.green:C.muted}`,
+                    display:"flex",alignItems:"center",justifyContent:"center"}}>
+                    {salRecoverLoan&&<span style={{color:"#fff",fontSize:10,fontWeight:800}}>✓</span>}
+                  </div>
+                  <div>
+                    <div style={{fontSize:12,fontWeight:700,color:C.green}}>Recover Loan from this payment</div>
+                    <div style={{fontSize:10,color:C.muted}}>Loan balance: ₹{fmt(loanBal)} — enter recovery amount in separate field below</div>
+                  </div>
+                </div>
+              )}
+
+              {/* Loan recovery amount — shown when toggle is on */}
+              {salRecoverLoan&&loanBal>0&&(
+                <div style={{background:C.green+"11",border:`1px solid ${C.green}33`,borderRadius:8,padding:"10px 12px",marginBottom:8}}>
+                  <div style={{fontSize:11,fontWeight:700,color:C.green,marginBottom:6}}>Loan Recovery Amount</div>
+                  <Field label="Recovery ₹ (part of above payment)" value={salLoanAmt} onChange={setSalLoanAmt} type="number" />
+                  <div style={{fontSize:10,color:C.muted,marginTop:4}}>
+                    Max: ₹{fmt(Math.min(+salAmt||loanBal, loanBal))} · will be deducted from loan balance
+                  </div>
                 </div>
               )}
 
@@ -13701,7 +13726,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                 <Btn onClick={()=>{
                   if(!salAmt||+salAmt<=0){alert("Enter amount");return;}
                   const type = salType||"salary";
-                  const note = salNote||(type==="salary"?`Salary ${salDate.slice(0,7)}`:type==="tafal"?`TAFAL ${salDate.slice(0,7)}`:"Loan Recovery");
+                  const note = salNote||(type==="salary"?`Salary ${salDate.slice(0,7)}`:`TAFAL ${salDate.slice(0,7)}`);
                   const tx={id:uid(),empId:salSheet,type,amount:+salAmt,date:salDate,
                     ref:salRef,note,createdBy:user.username,createdAt:nowTs()};
                   setCashTransfers(prev=>[tx,...(Array.isArray(prev)?prev:[])]);
@@ -13716,19 +13741,23 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                     setExpenses(prev=>[exp,...(Array.isArray(prev)?prev:[])]);
                   }
 
-                  // Loan recovery → update employee loanRecovered
-                  if(type==="loan_recovery"){
-                    const lTxn={id:uid(),type:"recovery",date:salDate,amount:+salAmt,ref:salRef,note,createdBy:user.username};
+                  // Loan recovery embedded in payment
+                  const recovAmt = salRecoverLoan&&+salLoanAmt>0 ? Math.min(+salLoanAmt, loanBal) : 0;
+                  if(recovAmt>0){
+                    const lTxn={id:uid(),type:"recovery",date:salDate,amount:recovAmt,
+                      ref:salRef,note:`${type==="salary"?"Salary":"TAFAL"} recovery · ${note}`,
+                      createdBy:user.username};
                     setEmployees(p=>p.map(x=>x.id===salSheet?{...x,
-                      loanRecovered:(x.loanRecovered||0)+(+salAmt),
+                      loanRecovered:(x.loanRecovered||0)+recovAmt,
                       loanTxns:[...(x.loanTxns||[]),lTxn]
                     }:x));
                   }
 
-                  log(type.toUpperCase(),`${e.name} ₹${fmt(+salAmt)} ${salDate}`);
-                  setSalAmt("");setSalRef("");setSalNote("");setSalDate(today());
-                }} color={salType==="salary"?C.blue:salType==="tafal"?C.purple:C.green} full>
-                  {salType==="salary"?"💰 Record Salary":salType==="tafal"?"🤝 Record TAFAL":"🏦 Record Loan Recovery"}
+                  log(type.toUpperCase(),`${e.name} ₹${fmt(+salAmt)}${recovAmt>0?` · Loan recovery ₹${fmt(recovAmt)}`:""} ${salDate}`);
+                  setSalAmt("");setSalRef("");setSalNote("");setSalDate(today());setSalLoanAmt("");setSalRecoverLoan(false);
+                }} color={salType==="salary"?C.blue:C.purple} full>
+                  {salType==="salary"?"💰 Record Salary":"🤝 Record TAFAL"}
+                  {salRecoverLoan&&+salLoanAmt>0?` + Loan Recovery ₹${fmt(+salLoanAmt)}`:""}
                 </Btn>
               </div>
             </div>
