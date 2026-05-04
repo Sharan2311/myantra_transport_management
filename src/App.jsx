@@ -557,17 +557,17 @@ function BottomNav({tab, setTab, user, trips, driverPays, vehicles, dieselReques
   ] : isFleet ? [
     {id:"dashboard", icon:"⊞", label:"Home",       perm:null},
     {id:"trips",     icon:"🚚", label:"Trips",      perm:"trips"},
-    {id:"billing",   icon:"🧾", label:"Billing",    perm:"billing"},
-    {id:"diesel",    icon:"⛽", label:"Diesel",     perm:"diesel"},
+    {id:"billing",   icon:"🧾", label:"Billing",    perm:"billing",  feat:"payment_scan"},
+    {id:"diesel",    icon:"⛽", label:"Diesel",     perm:"diesel",   feat:"diesel_tab"},
     {id:"more",      icon:"⋯",  label:"More",       perm:null},
   ] : [
     {id:"dashboard",icon:"⊞",label:"Home",    perm:null},
     {id:"trips",    icon:"🚚",label:"Trips",   perm:"trips"},
-    {id:"billing",  icon:"🧾",label:"Billing", perm:"billing"},
-    {id:"diesel",   icon:"⛽",label:"Diesel",  perm:"diesel"},
+    {id:"billing",  icon:"🧾",label:"Billing", perm:"billing",  feat:"payment_scan"},
+    {id:"diesel",   icon:"⛽",label:"Diesel",  perm:"diesel",   feat:"diesel_tab"},
     {id:"more",     icon:"⋯", label:"More",    perm:null},
   ];
-  const visibleItems = items.filter(n => !n.perm || can(user, n.perm));
+  const visibleItems = items.filter(n => (!n.perm || can(user, n.perm)) && canFeature(n.feat));
 
   // Badge counts
   const pendingBills = (trips||[]).filter(t=>t.status==="Pending Bill").length;
@@ -613,17 +613,25 @@ function BottomNav({tab, setTab, user, trips, driverPays, vehicles, dieselReques
   );
 }
 
+// ── Feature gating — reads from CLIENT_CONFIG.features ──────────────────────
+const canFeature = (feat) => {
+  if(!feat) return true; // no feature key = always visible
+  const features = CLIENT_CONFIG.features || {};
+  if(Object.keys(features).length === 0) return true; // no features configured = show all (backward compat)
+  return features[feat] === true;
+};
+
 const MORE_TABS = [
-  {id:"inbound",      icon:"🏭",label:"Raw Material",   perm:"inbound",      group:"ops"},
-  {id:"party_portal", icon:"📋",label:"Party Portal",   perm:"party_portal", group:"ops"},
-  {id:"driverPay", icon:"🏧",label:"Driver Pay",     perm:"driverPay",    group:"money"},
-  {id:"settlement",icon:"💵",label:"Settlement",     perm:"settlement",   group:"money"},
-  {id:"tafal",     icon:"🤝",label:"TAFAL",          perm:"tafal",        group:"money"},
-  {id:"vehicles",  icon:"🚛",label:"Vehicles",       perm:"vehicles",     group:"fleet"},
-  {id:"employees", icon:"👥",label:"Employees",      perm:"employees",    group:"fleet"},
-  {id:"payments",  icon:"💰",label:"Payments",        perm:"payments",   group:"finance"},
-  {id:"expenses",  icon:"🧮",label:"Expenses",       perm:"payments",     group:"finance"},
-  {id:"reports",   icon:"📤",label:"Reports",        perm:"reports",      group:"info"},
+  {id:"inbound",      icon:"🏭",label:"Raw Material",   perm:"inbound",      group:"ops",     feat:"inbound_trips"},
+  {id:"party_portal", icon:"📋",label:"Party Portal",   perm:"party_portal", group:"ops",     feat:"party_billing"},
+  {id:"driverPay", icon:"🏧",label:"Driver Pay",     perm:"driverPay",    group:"money",   feat:"driver_pay"},
+  {id:"settlement",icon:"💵",label:"Settlement",     perm:"settlement",   group:"money",   feat:"driver_pay"},
+  {id:"tafal",     icon:"🤝",label:"TAFAL",          perm:"tafal",        group:"money",   feat:"tafal"},
+  {id:"vehicles",  icon:"🚛",label:"Vehicles",       perm:"vehicles",     group:"fleet",   feat:"vehicles"},
+  {id:"employees", icon:"👥",label:"Employees",      perm:"employees",    group:"fleet",   feat:"employees"},
+  {id:"payments",  icon:"💰",label:"Payments",        perm:"payments",   group:"finance", feat:"payment_scan"},
+  {id:"expenses",  icon:"🧮",label:"Expenses",       perm:"payments",     group:"finance", feat:"expense_tracking"},
+  {id:"reports",   icon:"📤",label:"Reports",        perm:"reports",      group:"info",    feat:"pdf_reports"},
   {id:"reminders", icon:"📲",label:"Reminders",      perm:"reminders",    group:"info"},
   {id:"activity",  icon:"📋",label:"Activity Log",   perm:"reports",      group:"info"},
   {id:"admin",     icon:"⚙", label:"User Admin",     perm:"admin",        group:"info"},
@@ -656,8 +664,8 @@ function MoreMenu({user, setTab, trips, driverPays, vehicles}) {
           style={{width:56,height:56,borderRadius:"50%",objectFit:"cover",flexShrink:0,
             border:`2px solid ${C.border}`,boxShadow:"0 2px 8px rgba(0,0,0,0.12)"}} />
         <div>
-          <div style={{color:C.accent,fontWeight:900,fontSize:16,letterSpacing:0.5}}>M. YANTRA ENTERPRISES</div>
-          <div style={{color:C.muted,fontSize:11,letterSpacing:2,marginTop:2}}>TRANSPORT MANAGEMENT</div>
+          <div style={{color:C.accent,fontWeight:900,fontSize:16,letterSpacing:0.5}}>{CLIENT_CONFIG.companyName.toUpperCase()}</div>
+          <div style={{color:C.muted,fontSize:11,letterSpacing:2,marginTop:2}}>{CLIENT_CONFIG.tagline || "TRANSPORT MANAGEMENT"}</div>
           <div style={{color:C.text,fontSize:12,marginTop:4,fontWeight:600}}>
             {user.name} · <span style={{color:C.muted,textTransform:"capitalize"}}>{user.role}</span>
           </div>
@@ -665,7 +673,7 @@ function MoreMenu({user, setTab, trips, driverPays, vehicles}) {
       </div>
 
       {MORE_GROUPS.map(g => {
-        const tabs = MORE_TABS.filter(t=>t.group===g.id&&can(user,t.perm));
+        const tabs = MORE_TABS.filter(t=>t.group===g.id&&can(user,t.perm)&&canFeature(t.feat));
         if(!tabs.length) return null;
         return (
           <div key={g.id}>
@@ -877,7 +885,7 @@ function Login({onLogin}) {
             backgroundClip:"text",
             animation:"titleShimmer 3s linear infinite",
             marginBottom:4,
-          }}>M. YANTRA ENTERPRISES</div>
+          }}>{CLIENT_CONFIG.companyName.toUpperCase()}</div>
 
           <div style={{
             color:"rgba(255,255,255,0.45)",
@@ -1337,7 +1345,7 @@ export default function App() {
           background:"linear-gradient(90deg,#90caf9,#ffffff,#ffd54f,#ffffff,#90caf9)",
           backgroundSize:"200% auto",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",
           backgroundClip:"text",animation:"dbShimmer 3s linear infinite",marginBottom:6}}>
-          M. YANTRA ENTERPRISES
+          ${CLIENT_CONFIG.companyName.toUpperCase()}
         </div>
 
         {/* Truck animation strip */}
@@ -1378,8 +1386,8 @@ export default function App() {
           <img src={LOGO_SRC} alt={CLIENT_CONFIG.companyShort}
             style={{width:36,height:36,borderRadius:"50%",objectFit:"cover",flexShrink:0}} />
           <div>
-            <div style={{color:C.accent,fontWeight:900,fontSize:14}}>M. YANTRA</div>
-            <div style={{color:C.muted,fontSize:10,letterSpacing:1}}>TRANSPORT MANAGEMENT</div>
+            <div style={{color:C.accent,fontWeight:900,fontSize:14}}>{CLIENT_CONFIG.companyShort}</div>
+            <div style={{color:C.muted,fontSize:10,letterSpacing:1}}>{CLIENT_CONFIG.tagline || "TRANSPORT MANAGEMENT"}</div>
           </div>
         </div>
         <div style={{display:"flex",gap:10,alignItems:"center"}}>
@@ -12346,7 +12354,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
       @media print{body{margin:12px}table{font-size:9px}th{background:#0d9488!important;-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}}
     </style>
     <div class="header">
-      ${logoSrc?`<img src="${logoSrc}" class="logo-img" alt="${CLIENT_CONFIG.companyShort}"/>`:'<div class="logo-fallback"><span>${CLIENT_CONFIG.companyShort}</span></div>'}
+      ${logoSrc?`<img src="${logoSrc}" class="logo-img" alt="${CLIENT_CONFIG.companyShort}"/>`:'<div class="logo-fallback"><span>{CLIENT_CONFIG.companyShort}</span></div>'}
       <div>
         <div style="font-size:8px;text-transform:uppercase;letter-spacing:2px;color:#0d9488;font-weight:700">${CLIENT_CONFIG.companyName}</div>
         <div style="font-size:18px;font-weight:800;line-height:1.2">Owner Report — ${selectedOwner}</div>
@@ -15617,7 +15625,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   @media print{*{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}}
                   </style></head><body onload="window.print()">
                   <div style="display:flex;align-items:center;border-bottom:2px solid #1565c0;padding-bottom:8px;margin-bottom:12px">
-                    <div class="logo"><span>${CLIENT_CONFIG.companyShort}</span></div>
+                    <div class="logo"><span>{CLIENT_CONFIG.companyShort}</span></div>
                     <div><div style="font-size:18px;font-weight:800">Invoice Report</div>
                     <div style="font-size:10px;color:#888">${CLIENT_CONFIG.companyName}${invFrom||invTo?` · ${invFrom||"start"} to ${invTo||"today"}`:""}  · Generated ${new Date().toLocaleDateString("en-IN")}</div></div>
                   </div>
@@ -15796,7 +15804,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   @media print{*{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}}
                   </style></head><body onload="window.print()">
                   <div style="display:flex;align-items:center;border-bottom:2px solid #1565c0;padding-bottom:8px;margin-bottom:12px">
-                    <div class="logo"><span>${CLIENT_CONFIG.companyShort}</span></div>
+                    <div class="logo"><span>{CLIENT_CONFIG.companyShort}</span></div>
                     <div><div style="font-size:18px;font-weight:800">Payment Advice Report</div>
                     <div style="font-size:10px;color:#888">${CLIENT_CONFIG.companyName}${advFrom||advTo?` · ${advFrom||"start"} to ${advTo||"today"}`:""}  · Generated ${new Date().toLocaleDateString("en-IN")}</div></div>
                   </div>
@@ -17439,7 +17447,7 @@ This will auto-recover in the next trip.`);
       <img src="${LOGO_SRC}" alt="${CLIENT_CONFIG.companyShort}" style="width:54px;height:54px;border-radius:50%;object-fit:cover;border:2px solid #f97316"/>
       <div>
         <h1 style="margin:0 0 2px">Driver Payment Statement</h1>
-        <div class="meta" style="font-weight:700;font-size:13px;color:#333">M. YANTRA ENTERPRISES</div>
+        <div class="meta" style="font-weight:700;font-size:13px;color:#333">{CLIENT_CONFIG.companyName.toUpperCase()}</div>
         <div class="meta">Transport Management · Kodla, Karnataka</div>
       </div>
     </div>
@@ -18640,7 +18648,7 @@ function Reports({trips, vehicles, employees, payments, settlements, indents, us
 
         {/* Print cement dispatch */}
         <button onClick={()=>{
-          let html="<h2>M.YANTRA — Cement Dispatch Report</h2><div>Period: "+df+" to "+dt+" | State: "+stateFilter+" | Orders: "+orderFilter+"</div>";
+          let html="<h2>${CLIENT_CONFIG.companyName} — Cement Dispatch Report</h2><div>Period: "+df+" to "+dt+" | State: "+stateFilter+" | Orders: "+orderFilter+"</div>";
           if(!stateFilter||stateFilter==="All"){
             stateBreakdown.forEach(s=>{ html+=dispatchTableHTML(s.rows.filter(t=>orderFilter==="All"||t.orderType===orderFilter||(orderFilter==="godown"&&!t.orderType)), s.state); });
           } else {
@@ -18705,7 +18713,7 @@ function Reports({trips, vehicles, employees, payments, settlements, indents, us
           {l:"🚛 Vehicle Loan CSV", c:C.red,    fn:()=>exportCSV(vehicles.map(v=>({Truck:v.truckNo,Owner:v.ownerName,Loan:v.loan,Recovered:v.loanRecovered,Balance:v.loan-v.loanRecovered})),"loans.csv")},
           {l:"💵 Settlements CSV",  c:C.green,  fn:()=>exportCSV(settlements,"settlements.csv")},
           {l:"⛽ Diesel Indents CSV",c:C.teal,  fn:()=>exportCSV(indents.map(i=>({Date:i.date,Truck:i.truckNo,Indent:i.indentNo,Litres:i.litres,Rate:i.ratePerLitre,Amount:i.amount,Confirmed:i.confirmed,Paid:i.paid,PaidRef:i.paidRef})),"diesel.csv")},
-          {l:"🖨 Print Loan Report", c:C.red,   fn:()=>{const vr=vehicles.map(v=>"<tr><td>"+v.truckNo+"</td><td>"+v.ownerName+"</td><td>"+fmtN(v.loan)+"</td><td>"+fmtN(v.loanRecovered)+"</td><td>"+fmtN(v.loan-v.loanRecovered)+"</td></tr>").join(""); printR("<h2>M.YANTRA — Loan Report</h2><table><thead><tr><th>Truck</th><th>Owner</th><th>Loan</th><th>Recovered</th><th>Balance</th></tr></thead><tbody>"+vr+"</tbody></table>","Loan Report");}},
+          {l:"🖨 Print Loan Report", c:C.red,   fn:()=>{const vr=vehicles.map(v=>"<tr><td>"+v.truckNo+"</td><td>"+v.ownerName+"</td><td>"+fmtN(v.loan)+"</td><td>"+fmtN(v.loanRecovered)+"</td><td>"+fmtN(v.loan-v.loanRecovered)+"</td></tr>").join(""); printR("<h2>${CLIENT_CONFIG.companyName} — Loan Report</h2><table><thead><tr><th>Truck</th><th>Owner</th><th>Loan</th><th>Recovered</th><th>Balance</th></tr></thead><tbody>"+vr+"</tbody></table>","Loan Report");}},
         ].map(r=>(
           <button key={r.l} onClick={r.fn} style={{background:C.bg,border:"1px solid "+C.border,borderRadius:12,padding:"12px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer",width:"100%",marginBottom:6}}>
             <span style={{color:C.text,fontWeight:700,fontSize:13}}>{r.l}</span>
@@ -18843,7 +18851,7 @@ function Reports({trips, vehicles, employees, payments, settlements, indents, us
                     @media print{*{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}}
                     </style></head><body onload="window.print()">
                     <div style="display:flex;align-items:center;border-bottom:2px solid #1565c0;padding-bottom:8px;margin-bottom:16px">
-                      <div class="logo"><span>${CLIENT_CONFIG.companyShort}</span></div>
+                      <div class="logo"><span>{CLIENT_CONFIG.companyShort}</span></div>
                       <div>
                         <div style="font-size:18px;font-weight:800">Destination-wise Tonnage Summary</div>
                         <div style="font-size:10px;color:#888">${CLIENT_CONFIG.companyName} · Period: ${df} to ${dt} · Generated ${new Date().toLocaleDateString("en-IN")}</div>

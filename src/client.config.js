@@ -12,7 +12,7 @@ const CLIENT_CONFIG = {
   ownerName:         "Sharan",
   pan:               "ABBFM6370M",
   gstn:              "29ABBFM6370M1ZR",
-  phone:             "9008420384",
+  phone:             "9606477257",
   address:           "Kodla, Karnataka",
 
   // ── Logo (base64 data URI) ──────────────────────────────────
@@ -79,6 +79,33 @@ const CLIENT_CONFIG = {
   primaryColor:  "#1565c0",
   accentColor:   "#0d9488",
   headerBg:      "#0d1b2a",
+  tagline:       "TRANSPORT MANAGEMENT",
+
+  // ── Feature Flags ───────────────────────────────────────────
+  // true = visible, false = hidden. Empty object = show all (backward compat)
+  // For M Yantra (enterprise): all enabled
+  features: {
+    trips:              true,
+    vehicles:           true,
+    employees:          true,
+    driver_pay:         true,
+    di_scan:            true,
+    payment_scan:       true,
+    diesel_tab:         true,
+    tafal:              true,
+    pdf_reports:        true,
+    shortage_recovery:  true,
+    loan_ledger:        true,
+    party_billing:      true,
+    pump_portal:        true,
+    batch_di_scanner:   true,
+    gst_reconciliation: true,
+    owner_reports:      true,
+    inbound_trips:      true,
+    expense_tracking:   true,
+    custom_branding:    true,
+    husk_manager:       true,
+  },
 };
 
 export default CLIENT_CONFIG;
