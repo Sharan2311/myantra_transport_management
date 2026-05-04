@@ -42,6 +42,8 @@ const ROLES = {
   operator:      {label:"Trip Operator",       color:C.teal,    perms:["trips","billing","diesel"]},
   accounts:      {label:"Accounts",            color:C.purple,  perms:["billing","payments","reports","diesel","tafal"]},
   pump_operator: {label:"Pump Operator",       color:C.orange,  perms:["pump_portal"]},
+  party_manager: {label:"Party Bill Manager",  color:"#7c3aed", perms:["party_portal"]},
+  email_followup:{label:"Email Followup",      color:"#0369a1", perms:["party_portal"]},
   viewer:        {label:"Viewer",              color:C.muted,   perms:["reports"]},
 };
 const can = (user, p) => {
@@ -78,7 +80,7 @@ function useDB(fetcher, initial = [], delay = 0) {
       // (receiptFilePath, mergedPdfPath, orderType, grFilePath, invoiceFilePath)
       const PARTY_FIELDS = ["receiptFilePath","receiptUploadedAt","mergedPdfPath",
         "orderType","grFilePath","invoiceFilePath","emailSentAt","partyEmail",
-        "district","state","sealedInvoicePath"];
+        "district","state","sealedInvoicePath","confirmFollowupUserId","confirmPdfPath"];
       setData(prev => {
         if(!Array.isArray(result)||!Array.isArray(prev)) return result;
         const prevMap = {};
@@ -166,7 +168,7 @@ const mkTrip = (o) => ({
 const Badge = ({label, color}) => (
   <span style={{background:color+"22",color,border:`1px solid ${color}44`,borderRadius:20,padding:"3px 10px",fontSize:11,fontWeight:700,whiteSpace:"nowrap"}}>{label}</span>
 );
-const SC = s => ({"Pending Bill":C.accent,"Billed":C.blue,"Paid":C.green,"Unpaid":C.red}[s]||C.muted);
+const SC = s => ({"Pending Bill":C.accent,"Yet to Bill":"#7c3aed","Billed":C.blue,"Paid":C.green,"Unpaid":C.red}[s]||C.muted);
 
 const Field = ({label, value, onChange, type="text", placeholder="", opts=null, half=false, note=""}) => {
   const isNum = type === "number";
@@ -546,8 +548,11 @@ const MAIN_IDS = ["dashboard","trips","billing","diesel","more"];
 function BottomNav({tab, setTab, user, trips, driverPays, vehicles, dieselRequests=[]}) {
   const isFleet = user?.role === "fleet_manager";
   const isPump  = user?.role === "pump_operator";
+  const isParty = user?.role === "party_manager" || user?.role === "email_followup";
   const items = isPump ? [
     {id:"pump_portal", icon:"⛽", label:"Indents", perm:"pump_portal"},
+  ] : isParty ? [
+    {id:"party_portal", icon:"📋", label:"Party", perm:"party_portal"},
   ] : isFleet ? [
     {id:"dashboard", icon:"⊞", label:"Home",       perm:null},
     {id:"trips",     icon:"🚚", label:"Trips",      perm:"trips"},
@@ -1357,6 +1362,7 @@ export default function App() {
       try { sessionStorage.setItem("mye_user", JSON.stringify(u)); } catch{}
       setUser(u);
       if(u.role==="pump_operator") setTab("pump_portal");
+      if(u.role==="party_manager" || u.role==="email_followup") setTab("party_portal");
       log("LOGIN",`${u.name} signed in`);
     }} />;
   }
@@ -1460,6 +1466,7 @@ export default function App() {
         {tab==="tafal"      && can(user,"tafal")      && <TafalMod   {...sp} />}
         {tab==="diesel"     && can(user,"diesel")     && <DieselMod  {...sp} viewOnly={!canEdit(user,"diesel")} />}
         {tab==="pump_portal"&& can(user,"pump_portal")&& <PumpPortal {...sp} />}
+        {tab==="party_portal"&&can(user,"party_portal")&&<PartyPortal {...sp} />}
         {tab==="vehicles"   && can(user,"vehicles")   && <Vehicles   {...sp} />}
         {tab==="employees"  && can(user,"employees")  && <Employees  {...sp} />}
         {tab==="payments"   && can(user,"payments")   && <Payments   {...sp} />}
@@ -6124,7 +6131,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
           style={{background:"none",border:"none",color:C.muted,fontSize:18,cursor:"pointer",padding:"0 4px"}}>✕</button>}
       </div>
 
-      <PillBar items={["All","Pending Bill","Billed","Paid"].map(s=>({id:s,label:s+(s!=="All"?` (${list.filter(t=>t.status===s).length})`:""  ),color:SC(s)}))} active={filter} onSelect={setFilter} />
+      <PillBar items={["All","Pending Bill","Yet to Bill","Billed","Paid"].map(s=>({id:s,label:s+(s!=="All"?` (${list.filter(t=>t.status===s).length})`:""),color:SC(s)}))} active={filter} onSelect={setFilter} />
 
       {/* Order type filter — only for outbound trips */}
       {!isIn && (
@@ -9310,6 +9317,233 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance: tripWithBalancePr
 }
 
 // ─── DIESEL MODULE ────────────────────────────────────────────────────────────
+// ─── PARTY PORTAL ─────────────────────────────────────────────────────────────
+function PartyPortal({trips, setTrips, employees, user, log}) {
+  const [activeTab, setActiveTab] = useState("pending");
+  const [selected, setSelected]  = useState(new Set()); // selected trip ids
+  const [assignTo, setAssignTo]  = useState("");
+  const [showAssign, setShowAssign] = useState(false);
+  const [pdfUploading, setPdfUploading] = useState(false);
+  const [searchQ, setSearchQ]    = useState("");
+
+  const isOwnerOrManager = ["owner","manager","party_manager"].includes(user?.role);
+  const isFollowup = user?.role==="email_followup";
+  const userId = user?.username||user?.id||"";
+
+  // All party trips
+  const partyTrips = (trips||[]).filter(t=>t.orderType==="party");
+
+  // PENDING: party trips not yet emailed AND no sealed invoice
+  const pendingTrips = partyTrips.filter(t=>
+    !t.emailSentAt && !t.sealedInvoicePath && t.status!=="Billed" && t.status!=="Yet to Bill"
+  );
+
+  // YET TO BILL: emailed (or sealed) but not yet invoiced
+  const yetToBillTrips = partyTrips.filter(t=>
+    (t.emailSentAt || t.sealedInvoicePath) && t.status!=="Billed"
+  );
+
+  // Followup user sees only their assigned trips in Yet to Bill
+  const visibleYetToBill = isFollowup
+    ? yetToBillTrips.filter(t=>t.confirmFollowupUserId===userId)
+    : yetToBillTrips;
+
+  const visiblePending = isOwnerOrManager ? pendingTrips
+    : isFollowup ? pendingTrips.filter(t=>!t.confirmFollowupUserId||t.confirmFollowupUserId===userId)
+    : pendingTrips;
+
+  const activeList = (activeTab==="pending" ? visiblePending : visibleYetToBill)
+    .filter(t=>!searchQ || (t.truckNo||"").toLowerCase().includes(searchQ.toLowerCase())
+      || (t.lrNo||"").toLowerCase().includes(searchQ.toLowerCase())
+      || (t.to||"").toLowerCase().includes(searchQ.toLowerCase()));
+
+  const toggle = (id) => setSelected(prev=>{const s=new Set(prev); s.has(id)?s.delete(id):s.add(id); return s;});
+  const toggleAll = () => setSelected(prev=>prev.size===activeList.length?new Set():new Set(activeList.map(t=>t.id)));
+  const selectedTrips = activeList.filter(t=>selected.has(t.id));
+
+  const followupUsers = (employees||[]).filter(e=>e.role==="email_followup"||e.role==="Email Followup");
+
+  // Mark selected trips email sent + assign + move to Yet to Bill
+  const markEmailSent = () => {
+    if(selected.size===0){alert("Select at least one trip");return;}
+    const ts = new Date().toISOString();
+    const updatedIds = [...selected];
+    setTrips(prev=>prev.map(t=>{
+      if(!updatedIds.includes(t.id)) return t;
+      const updated={...t, emailSentAt:ts, status:"Yet to Bill",
+        confirmFollowupUserId:assignTo||t.confirmFollowupUserId||""};
+      DB.saveTrip(updated).catch(e=>console.error("saveTrip party email:",e));
+      return updated;
+    }));
+    log&&log("PARTY EMAIL SENT",`${selected.size} trips marked email sent`);
+    setSelected(new Set()); setAssignTo(""); setShowAssign(false);
+  };
+
+  // Upload confirmation PDF and mark all selected
+  const uploadConfirmPdf = async(file) => {
+    if(!file||selected.size===0) return;
+    setPdfUploading(true);
+    try {
+      const path = `party_confirm/${Date.now()}_${file.name.replace(/\s/g,"_")}`;
+      const {error} = await supabase.storage.from("trip-files").upload(path,file,{upsert:true});
+      if(error) throw error;
+      const {data:{publicUrl}} = supabase.storage.from("trip-files").getPublicUrl(path);
+      const ts = new Date().toISOString();
+      const updatedIds = [...selected];
+      setTrips(prev=>prev.map(t=>{
+        if(!updatedIds.includes(t.id)) return t;
+        const updated={...t, emailSentAt:ts, confirmPdfPath:publicUrl, status:"Yet to Bill"};
+        DB.saveTrip(updated).catch(e=>console.error("saveTrip confirm pdf:",e));
+        return updated;
+      }));
+      log&&log("CONFIRM PDF UPLOADED",`${selected.size} trips · ${file.name}`);
+      setSelected(new Set());
+    } catch(e){alert("Upload failed: "+e.message);}
+    finally{setPdfUploading(false);}
+  };
+
+  const TripCard = ({t}) => {
+    const isSel = selected.has(t.id);
+    return (
+      <div onClick={()=>toggle(t.id)} style={{background:isSel?C.accent+"11":C.card,
+        borderRadius:10,padding:"12px 14px",cursor:"pointer",
+        border:`1.5px solid ${isSel?C.accent:C.border}`,transition:"all 0.15s"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            <div style={{width:18,height:18,borderRadius:4,background:isSel?C.accent:"transparent",
+              border:`2px solid ${isSel?C.accent:C.muted}`,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+              {isSel&&<span style={{color:"#fff",fontSize:11,fontWeight:800}}>✓</span>}
+            </div>
+            <div>
+              <div style={{fontWeight:700,fontSize:13}}>{t.truckNo} <span style={{color:C.muted,fontWeight:400,fontSize:11}}>· {t.lrNo}</span></div>
+              <div style={{color:C.muted,fontSize:11}}>{t.to||"—"} · {t.date} · {t.qty}MT</div>
+            </div>
+          </div>
+          <div style={{textAlign:"right"}}>
+            <div style={{fontWeight:800,color:C.accent,fontSize:13}}>₹{((t.qty||0)*(t.frRate||0)).toLocaleString("en-IN")}</div>
+            {t.emailSentAt && <div style={{fontSize:10,color:C.blue,marginTop:2}}>📧 {t.emailSentAt.slice(0,10)}</div>}
+            {t.sealedInvoicePath && <div style={{fontSize:10,color:C.orange,marginTop:2}}>🏷️ Sealed</div>}
+            {t.confirmFollowupUserId && <div style={{fontSize:10,color:C.purple,marginTop:2}}>👤 {(employees||[]).find(e=>e.username===t.confirmFollowupUserId||e.id===t.confirmFollowupUserId)?.name||t.confirmFollowupUserId}</div>}
+            {t.confirmPdfPath && <a href={t.confirmPdfPath} target="_blank" rel="noreferrer" onClick={e=>e.stopPropagation()} style={{fontSize:10,color:C.teal,display:"block",marginTop:2}}>📄 Confirm PDF</a>}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      {/* Header */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div>
+          <div style={{fontWeight:800,fontSize:16,color:"#7c3aed"}}>📋 Party Portal</div>
+          <div style={{fontSize:11,color:C.muted}}>{user?.name||user?.username} · {ROLES[user?.role]?.label}</div>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",borderRadius:10,overflow:"hidden",
+        border:`1px solid ${C.border}`}}>
+        {[{id:"pending",label:`⏳ Pending (${visiblePending.length})`},
+          {id:"yet",    label:`📬 Yet to Bill (${visibleYetToBill.length})`}
+        ].map(tab=>(
+          <button key={tab.id} onClick={()=>{setActiveTab(tab.id);setSelected(new Set());}}
+            style={{padding:"10px",border:"none",cursor:"pointer",fontWeight:700,fontSize:13,
+              background:activeTab===tab.id?"#7c3aed":C.bg,
+              color:activeTab===tab.id?"#fff":C.text}}>
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Search */}
+      <input value={searchQ} onChange={e=>setSearchQ(e.target.value)}
+        placeholder="🔍 Search truck, LR, destination..."
+        style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,
+          color:C.text,padding:"10px 12px",fontSize:13,outline:"none",width:"100%",boxSizing:"border-box"}}/>
+
+      {/* Bulk actions bar */}
+      {selected.size>0 && (
+        <div style={{background:C.accent+"11",border:`1.5px solid ${C.accent}`,borderRadius:10,
+          padding:"10px 14px",display:"flex",flexDirection:"column",gap:8}}>
+          <div style={{fontWeight:700,fontSize:13,color:C.accent}}>
+            {selected.size} trip{selected.size>1?"s":""} selected
+          </div>
+
+          {/* Email sent + assign (Pending tab, party_manager or owner) */}
+          {activeTab==="pending" && isOwnerOrManager && (
+            <>
+              {showAssign && followupUsers.length>0 && (
+                <select value={assignTo} onChange={e=>setAssignTo(e.target.value)}
+                  style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:7,
+                    color:C.text,padding:"7px 10px",fontSize:12,outline:"none"}}>
+                  <option value="">— Assign to followup (optional) —</option>
+                  {followupUsers.map(e=><option key={e.id} value={e.username||e.id}>{e.name}</option>)}
+                </select>
+              )}
+              <div style={{display:"flex",gap:8}}>
+                <button onClick={()=>setShowAssign(p=>!p)}
+                  style={{flex:1,padding:"8px",borderRadius:7,fontWeight:700,fontSize:12,cursor:"pointer",
+                    background:"transparent",border:`1.5px solid ${"#0369a1"}`,color:"#0369a1"}}>
+                  👤 {showAssign?"Hide":"Assign Followup"}
+                </button>
+                <button onClick={markEmailSent}
+                  style={{flex:2,padding:"8px",borderRadius:7,fontWeight:700,fontSize:12,cursor:"pointer",
+                    background:C.accent,border:"none",color:"#fff"}}>
+                  📧 Mark Email Sent → Yet to Bill
+                </button>
+              </div>
+            </>
+          )}
+
+          {/* Upload confirmation PDF (Yet to Bill tab, followup or manager) */}
+          {activeTab==="yet" && (
+            <div>
+              <div style={{fontSize:11,color:C.muted,marginBottom:6}}>
+                Upload one PDF — will be attached to all {selected.size} selected trip{selected.size>1?"s":""}
+              </div>
+              <label style={{display:"flex",alignItems:"center",gap:8,background:C.teal,borderRadius:7,
+                padding:"8px 14px",cursor:"pointer",width:"fit-content"}}>
+                {pdfUploading?"⏳ Uploading...":"📄 Upload Confirmation PDF"}
+                <input type="file" accept=".pdf,image/*" style={{display:"none"}}
+                  disabled={pdfUploading}
+                  onChange={e=>{if(e.target.files[0]) uploadConfirmPdf(e.target.files[0]);}} />
+              </label>
+            </div>
+          )}
+
+          <button onClick={()=>setSelected(new Set())}
+            style={{alignSelf:"flex-end",background:"none",border:"none",color:C.muted,
+              cursor:"pointer",fontSize:12}}>✕ Deselect all</button>
+        </div>
+      )}
+
+      {/* Select all / count */}
+      {activeList.length>0 && (
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{fontSize:12,color:C.muted}}>{activeList.length} trip{activeList.length>1?"s":""}</span>
+          <button onClick={toggleAll}
+            style={{background:"none",border:`1px solid ${C.accent}`,borderRadius:6,
+              color:C.accent,fontSize:11,padding:"3px 10px",cursor:"pointer",fontWeight:700}}>
+            {selected.size===activeList.length?"Deselect All":"Select All"}
+          </button>
+        </div>
+      )}
+
+      {/* Trip list */}
+      {activeList.length===0 ? (
+        <div style={{textAlign:"center",color:C.muted,padding:40,fontSize:14}}>
+          {activeTab==="pending" ? "✅ No pending party trips" : "📭 No trips waiting to be billed"}
+        </div>
+      ) : (
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {activeList.map(t=><TripCard key={t.id} t={t}/>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── PUMP PORTAL ─────────────────────────────────────────────────────────────
 // Dedicated view for pump_operator role — shows only open diesel requests
 // Pump operator can update amount + reason using driver's PIN
