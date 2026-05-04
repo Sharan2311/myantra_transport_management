@@ -13630,14 +13630,33 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                 <div style={{color:C.muted,fontSize:11,fontWeight:700}}>HISTORY</div>
                 {loanTxns.map(tx=>(
                   <div key={tx.id} style={{background:C.bg,borderRadius:8,padding:"8px 10px",
-                    borderLeft:`3px solid ${tx.type==="given"?C.red:C.green}`}}>
-                    <div style={{display:"flex",justifyContent:"space-between"}}>
-                      <span style={{fontSize:12,fontWeight:700,color:tx.type==="given"?C.red:C.green}}>
-                        {tx.type==="given"?"Given":"Recovery"} · ₹{fmt(tx.amount||0)}
-                      </span>
-                      <span style={{fontSize:11,color:C.muted}}>{fmtD(tx.date)}</span>
+                    borderLeft:`3px solid ${tx.type==="given"?C.red:C.green}`,
+                    display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                    <div style={{flex:1}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                        <span style={{fontSize:12,fontWeight:700,color:tx.type==="given"?C.red:C.green}}>
+                          {tx.type==="given"?"Given":"Recovery"} · ₹{fmt(tx.amount||0)}
+                        </span>
+                        <span style={{fontSize:11,color:C.muted}}>{fmtD(tx.date)}</span>
+                      </div>
+                      {tx.ref&&<div style={{fontSize:10,color:C.muted,marginTop:2}}>Ref: {tx.ref}</div>}
                     </div>
-                    {tx.ref&&<div style={{fontSize:10,color:C.muted,marginTop:2}}>Ref: {tx.ref}</div>}
+                    {isOwner&&(
+                      <button onClick={()=>{
+                        if(!window.confirm(`Delete this ${tx.type==="given"?"loan given":"recovery"} entry of ₹${fmt(tx.amount)}?`)) return;
+                        setEmployees(p=>p.map(x=>{
+                          if(x.id!==lSheet) return x;
+                          const filtered = (x.loanTxns||[]).filter(t=>t.id!==tx.id);
+                          // Recalculate loan/loanRecovered from remaining txns
+                          const newLoan = filtered.filter(t=>t.type==="given").reduce((s,t)=>s+(t.amount||0),0);
+                          const newRecov= filtered.filter(t=>t.type==="recovery").reduce((s,t)=>s+(t.amount||0),0);
+                          return {...x, loan:newLoan, loanRecovered:newRecov, loanTxns:filtered};
+                        }));
+                      }} style={{marginLeft:8,background:"none",border:`1px solid ${C.red}44`,
+                        borderRadius:5,color:C.red,cursor:"pointer",fontSize:11,padding:"2px 7px",flexShrink:0}}>
+                        🗑
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
@@ -13767,12 +13786,16 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
               <div>
                 <div style={{color:C.blue,fontSize:11,fontWeight:700,marginBottom:4}}>SALARY HISTORY</div>
                 {salTxns.map(tx=>(
-                  <div key={tx.id} style={{background:C.bg,borderRadius:8,padding:"8px 10px",marginBottom:4,borderLeft:`3px solid ${C.blue}`}}>
-                    <div style={{display:"flex",justifyContent:"space-between"}}>
-                      <span style={{fontSize:12,fontWeight:700,color:C.blue}}>₹{fmt(tx.amount||0)}</span>
-                      <span style={{fontSize:11,color:C.muted}}>{fmtD(tx.date)}</span>
+                  <div key={tx.id} style={{background:C.bg,borderRadius:8,padding:"8px 10px",marginBottom:4,
+                    borderLeft:`3px solid ${C.blue}`,display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                    <div style={{flex:1}}>
+                      <div style={{display:"flex",justifyContent:"space-between"}}>
+                        <span style={{fontSize:12,fontWeight:700,color:C.blue}}>₹{fmt(tx.amount||0)}</span>
+                        <span style={{fontSize:11,color:C.muted}}>{fmtD(tx.date)}</span>
+                      </div>
+                      <div style={{fontSize:10,color:C.muted}}>{tx.note||""}{tx.ref?` · ${tx.ref}`:""}</div>
                     </div>
-                    <div style={{fontSize:10,color:C.muted}}>{tx.note||""}{tx.ref?` · ${tx.ref}`:""}</div>
+                    {isOwner&&<button onClick={()=>{if(!window.confirm(`Delete salary entry ₹${fmt(tx.amount)}?`))return; setCashTransfers(prev=>(prev||[]).filter(t=>t.id!==tx.id)); DB.deleteCashTransfer(tx.id).catch(console.warn);}} style={{marginLeft:8,background:"none",border:`1px solid ${C.red}44`,borderRadius:5,color:C.red,cursor:"pointer",fontSize:11,padding:"2px 7px",flexShrink:0}}>🗑</button>}
                   </div>
                 ))}
               </div>
@@ -13781,12 +13804,16 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
               <div>
                 <div style={{color:C.purple,fontSize:11,fontWeight:700,marginBottom:4}}>TAFAL HISTORY</div>
                 {tafalTxns.map(tx=>(
-                  <div key={tx.id} style={{background:C.bg,borderRadius:8,padding:"8px 10px",marginBottom:4,borderLeft:`3px solid ${C.purple}`}}>
-                    <div style={{display:"flex",justifyContent:"space-between"}}>
-                      <span style={{fontSize:12,fontWeight:700,color:C.purple}}>₹{fmt(tx.amount||0)}</span>
-                      <span style={{fontSize:11,color:C.muted}}>{fmtD(tx.date)}</span>
+                  <div key={tx.id} style={{background:C.bg,borderRadius:8,padding:"8px 10px",marginBottom:4,
+                    borderLeft:`3px solid ${C.purple}`,display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                    <div style={{flex:1}}>
+                      <div style={{display:"flex",justifyContent:"space-between"}}>
+                        <span style={{fontSize:12,fontWeight:700,color:C.purple}}>₹{fmt(tx.amount||0)}</span>
+                        <span style={{fontSize:11,color:C.muted}}>{fmtD(tx.date)}</span>
+                      </div>
+                      <div style={{fontSize:10,color:C.muted}}>{tx.note||""}{tx.ref?` · ${tx.ref}`:""}</div>
                     </div>
-                    <div style={{fontSize:10,color:C.muted}}>{tx.note||""}{tx.ref?` · ${tx.ref}`:""}</div>
+                    {isOwner&&<button onClick={()=>{if(!window.confirm(`Delete TAFAL entry ₹${fmt(tx.amount)}?`))return; setCashTransfers(prev=>(prev||[]).filter(t=>t.id!==tx.id)); DB.deleteCashTransfer(tx.id).catch(console.warn);}} style={{marginLeft:8,background:"none",border:`1px solid ${C.red}44`,borderRadius:5,color:C.red,cursor:"pointer",fontSize:11,padding:"2px 7px",flexShrink:0}}>🗑</button>}
                   </div>
                 ))}
               </div>
@@ -13795,12 +13822,24 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
               <div>
                 <div style={{color:C.green,fontSize:11,fontWeight:700,marginBottom:4}}>LOAN RECOVERY HISTORY</div>
                 {loanTxns2.map(tx=>(
-                  <div key={tx.id} style={{background:C.bg,borderRadius:8,padding:"8px 10px",marginBottom:4,borderLeft:`3px solid ${C.green}`}}>
-                    <div style={{display:"flex",justifyContent:"space-between"}}>
-                      <span style={{fontSize:12,fontWeight:700,color:C.green}}>₹{fmt(tx.amount||0)}</span>
-                      <span style={{fontSize:11,color:C.muted}}>{fmtD(tx.date)}</span>
+                  <div key={tx.id} style={{background:C.bg,borderRadius:8,padding:"8px 10px",marginBottom:4,
+                    borderLeft:`3px solid ${C.green}`,display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                    <div style={{flex:1}}>
+                      <div style={{display:"flex",justifyContent:"space-between"}}>
+                        <span style={{fontSize:12,fontWeight:700,color:C.green}}>₹{fmt(tx.amount||0)}</span>
+                        <span style={{fontSize:11,color:C.muted}}>{fmtD(tx.date)}</span>
+                      </div>
+                      <div style={{fontSize:10,color:C.muted}}>{tx.note||""}{tx.ref?` · ${tx.ref}`:""}</div>
                     </div>
-                    <div style={{fontSize:10,color:C.muted}}>{tx.note||""}{tx.ref?` · ${tx.ref}`:""}</div>
+                    {isOwner&&<button onClick={()=>{
+                      if(!window.confirm(`Delete loan recovery ₹${fmt(tx.amount)}? This will add back to loan balance.`)) return;
+                      setEmployees(p=>p.map(x=>{
+                        if(x.id!==salSheet) return x;
+                        const filtered=(x.loanTxns||[]).filter(t=>t.id!==tx.id);
+                        const newRecov=filtered.filter(t=>t.type==="recovery").reduce((s,t)=>s+(t.amount||0),0);
+                        return {...x, loanRecovered:newRecov, loanTxns:filtered};
+                      }));
+                    }} style={{marginLeft:8,background:"none",border:`1px solid ${C.red}44`,borderRadius:5,color:C.red,cursor:"pointer",fontSize:11,padding:"2px 7px",flexShrink:0}}>🗑</button>}
                   </div>
                 ))}
               </div>
