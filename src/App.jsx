@@ -6571,7 +6571,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         const contacts = (employees||[])
           .filter(e=>e.phone&&e.phone.trim())
           .map(e=>({name:e.name, phone:e.phone.replace(/\D/g,""), role:e.role||""}));
-        const msgText = "Dear {name},\n\nReminder: "+pending.length+" party trip"+(pending.length>1?"s are":"is")+" pending email confirmation at "+CLIENT_CONFIG.companyName+".\n\nPlease send the confirmation email at the earliest.\n\n- "+CLIENT_CONFIG.companyShort+" System\n"+CLIENT_CONFIG.phone";
+        const msgText = "Dear {name},\n\nReminder: "+pending.length+" party trip"+(pending.length>1?"s are":"is")+" pending email confirmation at "+CLIENT_CONFIG.companyName+".\n\nPlease send the confirmation email at the earliest.\n\n- "+CLIENT_CONFIG.companyShort+" System\n"+CLIENT_CONFIG.phone;
         return (
           <Sheet title="📲 WhatsApp Reminder" onClose={()=>setWaSheet(false)}>
             <div style={{display:"flex",flexDirection:"column",gap:14}}>
