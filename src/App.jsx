@@ -9439,6 +9439,7 @@ function PartyPortal({trips, setTrips, employees, user, log}) {
     } catch(e){alert("Upload failed: "+e.message);}
     finally{setPdfUploading(false);}
   };
+  const uploadConfirmPdf = async(file) => {
     if(!file||!selected.size)return;
     setPdfUploading(true);
     try{
