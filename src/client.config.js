@@ -19,12 +19,12 @@ const CLIENT_CONFIG = {
   logoSrc: "",  // paste their logo base64 or leave empty for fallback
 
   // ── Client's Own Supabase ───────────────────────────────────
-  supabaseUrl:       "https://PASTE_ABC_PROJECT_ID.supabase.co",
-  supabaseAnonKey:   "PASTE_ABC_ANON_KEY",
+  supabaseUrl:       "https://thowscasaacsuzplqjfd.supabase.co",
+  supabaseAnonKey:   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRob3dzY2FzYWFjc3V6cGxxamZkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc5MjMyMDYsImV4cCI6MjA5MzQ5OTIwNn0.0T9BdbInnaPjsatO7CoEbYQg_EzLycrYajEqbrRxj_8",
 
   // ── Admin Supabase (fill after admin project is created) ────
-  adminSupabaseUrl:     "",
-  adminSupabaseAnonKey: "",
+  adminSupabaseUrl:     "https://rthxunzrwwcrarinhqnz.supabase.co",
+  adminSupabaseAnonKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJ0aHh1bnpyd3djcmFyaW5ocW56Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc5MTk4MjgsImV4cCI6MjA5MzQ5NTgyOH0.cM9Ya4Tfki7HAzx-Ny1cWmi82NJq52ofrQy9S7FT-xQ",
 
   // ── Business Config ─────────────────────────────────────────
   clients: ["ACC Cement"],
