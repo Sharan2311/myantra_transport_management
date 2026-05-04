@@ -9488,6 +9488,7 @@ function PartyPortal({trips, setTrips, employees, user, log}) {
             <span>{selected.size} trip{selected.size>1?"s":""} · <span style={{color:C.muted,fontWeight:400}}>₹{totalAmt(activeList.filter(t=>selected.has(t.id))).toLocaleString("en-IN")}</span></span>
             <button onClick={()=>setSelected(new Set())} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:12}}>✕</button>
           </div>
+          {/* Pending tab actions — party manager only */}
           {activeTab==="pending"&&isPartyMgr&&(
             <>
               {showAssign&&(
@@ -9501,6 +9502,38 @@ function PartyPortal({trips, setTrips, employees, user, log}) {
                 {followupEmps.length>0&&<button onClick={()=>setShowAssign(p=>!p)} style={{flex:1,padding:"8px",borderRadius:7,fontWeight:700,fontSize:12,cursor:"pointer",background:showAssign?C.blue+"22":"transparent",border:`1.5px solid ${C.blue}`,color:C.blue}}>👤 {showAssign?"Hide":"Assign Followup"}</button>}
                 <button onClick={markEmailSent} style={{flex:2,padding:"8px",borderRadius:7,fontWeight:700,fontSize:12,cursor:"pointer",background:C.accent,border:"none",color:"#fff"}}>📧 Mark Email Sent → Yet to Bill</button>
               </div>
+            </>
+          )}
+
+          {/* Yet to Bill tab — assign followup + upload PDF */}
+          {activeTab==="yet"&&isPartyMgr&&(
+            <>
+              {showAssign&&(
+                <select value={assignTo} onChange={e=>setAssignTo(e.target.value)}
+                  style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:7,color:C.text,padding:"7px 10px",fontSize:12,outline:"none",width:"100%"}}>
+                  <option value="">— Select followup employee —</option>
+                  {followupEmps.map(e=><option key={e.id} value={e.username||e.id}>{e.name}</option>)}
+                </select>
+              )}
+              {followupEmps.length>0&&(
+                <button onClick={()=>{
+                  if(!showAssign){setShowAssign(true);return;}
+                  if(!assignTo){alert("Select an employee first");return;}
+                  // Save assignment
+                  const assigned=[];
+                  setTrips(prev=>prev.map(t=>{
+                    if(!selected.has(t.id))return t;
+                    const u={...t,confirmFollowupUserId:assignTo};
+                    assigned.push(u);return u;
+                  }));
+                  setTimeout(()=>assigned.forEach(u=>DB.saveTrip(u).catch(e=>console.error("assign yet:",e))),0);
+                  log&&log("ASSIGN FOLLOWUP",`${selected.size} trips → ${assignTo}`);
+                  setShowAssign(false);setAssignTo("");
+                }} style={{padding:"8px 14px",borderRadius:7,fontWeight:700,fontSize:12,cursor:"pointer",
+                  background:showAssign&&assignTo?C.blue:"transparent",border:`1.5px solid ${C.blue}`,color:showAssign&&assignTo?"#fff":C.blue}}>
+                  👤 {showAssign&&assignTo?"✓ Assign Now":showAssign?"Select employee above":"Assign Followup"}
+                </button>
+              )}
             </>
           )}
           {activeTab==="yet"&&(isPartyMgr||isFollowup)&&(
