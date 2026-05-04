@@ -9422,7 +9422,23 @@ function PartyPortal({trips, setTrips, employees, user, log}) {
     setSelected(new Set()); setAssignTo(""); setShowAssign(false);
   };
 
-  const uploadConfirmPdf = async(file) => {
+  const uploadSealedForTrip = async(tripId, file) => {
+    setPdfUploading(true);
+    try {
+      const path=`${tripId}/sealed_invoice.${file.name.split(".").pop()||"pdf"}`;
+      const {error}=await supabase.storage.from("party-trip-files").upload(path,file,{upsert:true});
+      if(error) throw error;
+      setTrips(prev=>prev.map(t=>{
+        if(t.id!==tripId) return t;
+        const u={...t, sealedInvoicePath:path, status:"Yet to Bill"};
+        setTimeout(()=>DB.saveTrip(u).catch(e=>console.error("saveTrip sealed:",e)),0);
+        return u;
+      }));
+      setSelected(new Set());
+      log&&log("SEALED INVOICE UPLOADED",tripId);
+    } catch(e){alert("Upload failed: "+e.message);}
+    finally{setPdfUploading(false);}
+  };
     if(!file||!selected.size)return;
     setPdfUploading(true);
     try{
@@ -9495,45 +9511,65 @@ function PartyPortal({trips, setTrips, employees, user, log}) {
                 <select value={assignTo} onChange={e=>setAssignTo(e.target.value)}
                   style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:7,color:C.text,padding:"7px 10px",fontSize:12,outline:"none",width:"100%"}}>
                   <option value="">— Select followup employee —</option>
+                  {followupEmps.length===0&&<option disabled>No followup employees — add in User Admin</option>}
                   {followupEmps.map(e=><option key={e.id} value={e.username||e.id}>{e.name}</option>)}
                 </select>
               )}
-              <div style={{display:"flex",gap:8}}>
-                {followupEmps.length>0&&<button onClick={()=>setShowAssign(p=>!p)} style={{flex:1,padding:"8px",borderRadius:7,fontWeight:700,fontSize:12,cursor:"pointer",background:showAssign?C.blue+"22":"transparent",border:`1.5px solid ${C.blue}`,color:C.blue}}>👤 {showAssign?"Hide":"Assign Followup"}</button>}
-                <button onClick={markEmailSent} style={{flex:2,padding:"8px",borderRadius:7,fontWeight:700,fontSize:12,cursor:"pointer",background:C.accent,border:"none",color:"#fff"}}>📧 Mark Email Sent → Yet to Bill</button>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                <button onClick={()=>setShowAssign(p=>!p)}
+                  style={{flex:1,padding:"8px",borderRadius:7,fontWeight:700,fontSize:12,cursor:"pointer",
+                    background:showAssign?C.blue+"22":"transparent",border:`1.5px solid ${C.blue}`,color:C.blue,minWidth:120}}>
+                  👤 {showAssign?"Hide":"Assign Followup"}
+                </button>
+                {selected.size===1&&(()=>{
+                  const selT=activeList.find(t=>selected.has(t.id));
+                  return selT?(
+                    <label style={{flex:1,padding:"8px",borderRadius:7,fontWeight:700,fontSize:11,
+                      cursor:pdfUploading?"not-allowed":"pointer",background:C.orange,color:"#fff",
+                      textAlign:"center",minWidth:130,display:"inline-flex",alignItems:"center",justifyContent:"center",gap:4}}>
+                      {pdfUploading?"⏳":"🏷️"} Sealed Invoice
+                      <input type="file" accept=".pdf,image/*" style={{display:"none"}} disabled={pdfUploading}
+                        onChange={e=>{if(e.target.files[0]) uploadSealedForTrip(selT.id, e.target.files[0]);}}/>
+                    </label>
+                  ):null;
+                })()}
+                <button onClick={markEmailSent}
+                  style={{flex:2,padding:"8px",borderRadius:7,fontWeight:700,fontSize:12,cursor:"pointer",
+                    background:C.accent,border:"none",color:"#fff",minWidth:150}}>
+                  📧 Mark Email Sent
+                </button>
               </div>
             </>
           )}
 
-          {/* Yet to Bill tab — assign followup + upload PDF */}
+          {/* Yet to Bill tab — assign followup + upload confirmation PDF */}
           {activeTab==="yet"&&isPartyMgr&&(
             <>
               {showAssign&&(
                 <select value={assignTo} onChange={e=>setAssignTo(e.target.value)}
                   style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:7,color:C.text,padding:"7px 10px",fontSize:12,outline:"none",width:"100%"}}>
                   <option value="">— Select followup employee —</option>
+                  {followupEmps.length===0&&<option disabled>No followup employees — add in User Admin</option>}
                   {followupEmps.map(e=><option key={e.id} value={e.username||e.id}>{e.name}</option>)}
                 </select>
               )}
-              {followupEmps.length>0&&(
-                <button onClick={()=>{
-                  if(!showAssign){setShowAssign(true);return;}
-                  if(!assignTo){alert("Select an employee first");return;}
-                  // Save assignment
-                  const assigned=[];
-                  setTrips(prev=>prev.map(t=>{
-                    if(!selected.has(t.id))return t;
-                    const u={...t,confirmFollowupUserId:assignTo};
-                    assigned.push(u);return u;
-                  }));
-                  setTimeout(()=>assigned.forEach(u=>DB.saveTrip(u).catch(e=>console.error("assign yet:",e))),0);
-                  log&&log("ASSIGN FOLLOWUP",`${selected.size} trips → ${assignTo}`);
-                  setShowAssign(false);setAssignTo("");
-                }} style={{padding:"8px 14px",borderRadius:7,fontWeight:700,fontSize:12,cursor:"pointer",
-                  background:showAssign&&assignTo?C.blue:"transparent",border:`1.5px solid ${C.blue}`,color:showAssign&&assignTo?"#fff":C.blue}}>
-                  👤 {showAssign&&assignTo?"✓ Assign Now":showAssign?"Select employee above":"Assign Followup"}
-                </button>
-              )}
+              <button onClick={()=>{
+                if(!showAssign){setShowAssign(true);return;}
+                if(!assignTo){alert("Select an employee first");return;}
+                const assigned=[];
+                setTrips(prev=>prev.map(t=>{
+                  if(!selected.has(t.id))return t;
+                  const u={...t,confirmFollowupUserId:assignTo};
+                  assigned.push(u);return u;
+                }));
+                setTimeout(()=>assigned.forEach(u=>DB.saveTrip(u).catch(e=>console.error("assign:",e))),0);
+                log&&log("ASSIGN FOLLOWUP",`${selected.size} trips → ${assignTo}`);
+                setShowAssign(false);setAssignTo("");
+              }} style={{padding:"8px 14px",borderRadius:7,fontWeight:700,fontSize:12,cursor:"pointer",
+                background:showAssign&&assignTo?C.blue:"transparent",border:`1.5px solid ${C.blue}`,
+                color:showAssign&&assignTo?"#fff":C.blue,width:"100%"}}>
+                👤 {showAssign&&assignTo?"✓ Assign Now":showAssign?"Select employee above":"Assign Followup"}
+              </button>
             </>
           )}
           {activeTab==="yet"&&(isPartyMgr||isFollowup)&&(
