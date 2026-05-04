@@ -1845,7 +1845,7 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
                             <span style={{color:C.red,fontWeight:800,fontSize:13}}>{fmt(inv.total)}</span>
                           </div>
                           <div style={{color:C.muted,fontSize:10,marginTop:2}}>
-                            {inv.trips.length} trip{inv.trips.length!==1?"s":""} · {inv.trips.reduce((s,t)=>s+(t.qty||0),0)} MT · {inv.trips[0]?.client?||"—"}
+                            {inv.trips.length} trip{inv.trips.length!==1?"s":""} · {inv.trips.reduce((s,t)=>s+(t.qty||0),0)} MT · {inv.trips[0]?.client||"—"}
                           </div>
                         </div>
                       ))}
@@ -1879,7 +1879,7 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
                             <span style={{color:C.green,fontWeight:800,fontSize:13}}>{fmt(inv.total)}</span>
                           </div>
                           <div style={{color:C.muted,fontSize:10,marginTop:2}}>
-                            {inv.trips.length} trip{inv.trips.length!==1?"s":""} · {inv.trips.reduce((s,t)=>s+(t.qty||0),0)} MT · {inv.trips[0]?.client?||"—"}
+                            {inv.trips.length} trip{inv.trips.length!==1?"s":""} · {inv.trips.reduce((s,t)=>s+(t.qty||0),0)} MT · {inv.trips[0]?.client||"—"}
                           </div>
                         </div>
                       ))}
