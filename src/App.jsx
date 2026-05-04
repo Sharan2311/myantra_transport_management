@@ -13482,6 +13482,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
     </body></html>`);
     w.document.close(); w.print();
   };
+  const deleteTx = async (txId) => {
     if(!window.confirm("Delete this wallet transaction?")) return;
     setCashTransfers(prev=>(prev||[]).filter(t=>t.id!==txId));
     try { await DB.deleteCashTransfer(txId); } catch(e){ console.warn("deleteCashTransfer:",e); }
