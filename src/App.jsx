@@ -13586,6 +13586,22 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
               ))}
             </div>
 
+            {/* Orphan loan reset — shown when loan>0 but no "given" txns exist */}
+            {(e.loan||0)>0 && loanTxns.filter(t=>t.type==="given").length===0 && (
+              <div style={{background:"#fef2f2",border:`1px solid ${C.red}33`,borderRadius:10,padding:"12px 14px"}}>
+                <div style={{color:C.red,fontWeight:700,fontSize:12,marginBottom:6}}>⚠️ Orphan Loan Detected</div>
+                <div style={{color:C.muted,fontSize:11,marginBottom:10}}>
+                  ₹{fmt(e.loan)} was set directly without a transaction record. Loan History &amp; PDF report cannot show it.
+                  Reset to ₹0 and re-add via "Give Loan" below so it appears everywhere.
+                </div>
+                <Btn onClick={()=>{
+                  if(!window.confirm(`Reset orphan loan of ₹${fmt(e.loan)} to ₹0 for ${e.name}?\n\nYou can re-add it fresh using "Give Loan" below.`)) return;
+                  log("RESET ORPHAN LOAN",`${e.name} ₹${fmt(e.loan)} → 0`);
+                  setEmployees(p=>p.map(x=>x.id===lSheet?{...x,loan:0,loanRecovered:0,loanTxns:[]}:x));
+                }} color={C.red} full>🗑 Reset Orphan Loan (₹{fmt(e.loan||0)})</Btn>
+              </div>
+            )}
+
             {/* Give Loan */}
             <div style={{background:C.card,borderRadius:10,padding:"12px 14px"}}>
               <div style={{color:C.red,fontWeight:700,fontSize:12,marginBottom:8}}>Give Loan</div>
