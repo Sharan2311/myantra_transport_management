@@ -13476,7 +13476,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
       <div class="kpi"><div class="kv" style="color:#7c3aed">${fmtAmt(walBal)}</div><div class="kl">WALLET BALANCE</div></div>
     </div>
     <h2>Loan History (${loanTxns.length})</h2>
-    ${loanTxns.length===0?"<p style='color:#999;font-style:italic'>No loan transactions.</p>":`<table><tr><th>Date</th><th>Type</th><th>Amount</th><th>Reference</th></tr>${loanTxns.map(t=>`<tr style="background:${t.type==="given"?"#fef2f2":"#f0fdf4"}"><td>${fmtDate(t.date)}</td><td>${t.type==="given"?"Given":"Recovery"}</td><td>${fmtAmt(t.amount||0)}</td><td>${t.ref||"—"}</td></tr>`).join("")}</table>`}
+    ${loanTxns.length===0?"<p style='color:#999;font-style:italic'>No loan transactions.</p>":`<table><tr><th>Date</th><th>Type</th><th>Amount</th><th>Reference</th><th>Note</th></tr>${loanTxns.map(t=>`<tr style="background:${t.type==="given"?"#fef2f2":"#f0fdf4"}"><td>${fmtDate(t.date)}</td><td>${t.type==="given"?"Given":"Recovery"}</td><td>${fmtAmt(t.amount||0)}</td><td>${t.ref||"—"}</td><td>${t.note||"—"}</td></tr>`).join("")}</table>`}
     <h2>Salary History (${salTxns.length})</h2>
     ${salTxns.length===0?"<p style='color:#999;font-style:italic'>No salary payments recorded.</p>":`<table><tr><th>Date</th><th>Amount</th><th>Note</th><th>Reference</th></tr>${salTxns.map(t=>`<tr style="background:#eff6ff"><td>${fmtDate(t.date)}</td><td>${fmtAmt(t.amount||0)}</td><td>${t.note||"—"}</td><td>${t.ref||"—"}</td></tr>`).join("")}</table>`}
     <h2>Wallet History (${walTxns.length})</h2>
@@ -13657,6 +13657,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                         <span style={{fontSize:11,color:C.muted}}>{fmtD(tx.date)}</span>
                       </div>
                       {tx.ref&&<div style={{fontSize:10,color:C.muted,marginTop:2}}>Ref: {tx.ref}</div>}
+                      {tx.note&&<div style={{fontSize:10,color:C.blue,marginTop:2}}>{tx.note}</div>}
                     </div>
                     {isOwner&&(
                       <button onClick={()=>{
