@@ -14314,6 +14314,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
           {id:"overview",  label:"Overview",  badge:null},
           {id:"invoices",  label:"Invoices",  badge:shreeInvoices.length||null},
           {id:"payments",  label:"Advice",    badge:shreePayments.length||null},
+          {id:"tds",       label:"TDS",       badge:null},
           {id:"shortages", label:"Shortages", badge:allShortages.length||null},
           {id:"gst",       label:"GST Hold",  badge:gstHoldPending>0?gstHoldItems.filter(g=>g.balance>0).length:null},
           {id:"gstpay",    label:"GST Recon", badge:null},
@@ -15270,6 +15271,76 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
 
         {/* ══ PROFIT ════════════════════════════════════════════════ */}
         {/* ══ GST HOLD ══════════════════════════════════════════════ */}
+        {/* ── TDS TAB ── */}
+        {activeTab==="tds"&&(()=>{
+          const tdsRows = (shreePayments||[])
+            .filter(p=>Number(p.tdsDeducted||p.tds||0)>0)
+            .sort((a,b)=>(b.paymentDate||b.date||"").localeCompare(a.paymentDate||a.date||""));
+          const totalTDS = tdsRows.reduce((s,p)=>s+Number(p.tdsDeducted||p.tds||0),0);
+          const totalNet = tdsRows.reduce((s,p)=>s+Number(p.totalPaid||0),0);
+          const totalGross = tdsRows.reduce((s,p)=>s+Number(p.totalBilled||0),0);
+          return (
+            <div style={{display:"flex",flexDirection:"column",gap:10}}>
+              {/* Summary KPIs */}
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+                {[
+                  {l:"Total TDS Deducted", v:fmt(totalTDS), c:"#c67c00"},
+                  {l:"Total Net Received", v:fmt(totalNet),  c:C.green},
+                  {l:"Total Gross Billed", v:fmt(totalGross),c:C.blue},
+                ].map(x=>(
+                  <div key={x.l} style={{background:C.card,borderRadius:10,padding:"10px 12px",textAlign:"center",border:`1px solid ${C.border}`}}>
+                    <div style={{color:x.c,fontWeight:800,fontSize:14}}>{x.v}</div>
+                    <div style={{color:C.muted,fontSize:9,textTransform:"uppercase",marginTop:3}}>{x.l}</div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Effective TDS rate */}
+              {totalGross>0 && (
+                <div style={{background:"#fff8ec",border:"1px solid #f59e0b44",borderRadius:8,padding:"8px 12px",fontSize:12,color:"#92400e"}}>
+                  Effective TDS Rate: <b>{((totalTDS/totalGross)*100).toFixed(2)}%</b>
+                  <span style={{color:C.muted,marginLeft:10}}>({fmt(totalTDS)} of {fmt(totalGross)})</span>
+                </div>
+              )}
+
+              {/* TDS per payment row */}
+              {tdsRows.length===0 ? (
+                <div style={{textAlign:"center",color:C.muted,padding:30}}>No TDS deductions recorded yet.</div>
+              ) : (
+                <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr 1fr",gap:0,
+                    background:C.blue,borderRadius:"8px 8px 0 0",padding:"7px 10px"}}>
+                    {["Date","UTR","Gross Billed","TDS","Net Paid"].map(h=>(
+                      <div key={h} style={{color:"#fff",fontWeight:700,fontSize:10,textTransform:"uppercase"}}>{h}</div>
+                    ))}
+                  </div>
+                  {tdsRows.map((p,i)=>(
+                    <div key={p.id||p.utr} style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr 1fr",
+                      background:i%2===0?C.bg:C.card,padding:"8px 10px",
+                      borderBottom:`1px solid ${C.border}22`,gap:0}}>
+                      <div style={{fontSize:12,color:C.muted}}>{p.paymentDate||p.date||"—"}</div>
+                      <div style={{fontSize:12,color:C.blue,fontWeight:600,fontFamily:"monospace"}}>{p.utr||"—"}</div>
+                      <div style={{fontSize:12,color:C.text}}>₹{fmtINR(p.totalBilled||0)}</div>
+                      <div style={{fontSize:12,color:"#c67c00",fontWeight:700}}>-₹{fmtINR(p.tdsDeducted||p.tds||0)}</div>
+                      <div style={{fontSize:12,color:C.green,fontWeight:700}}>₹{fmtINR(p.totalPaid||0)}</div>
+                    </div>
+                  ))}
+                  {/* Total row */}
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr 1fr",
+                    background:C.blue+"11",padding:"8px 10px",borderRadius:"0 0 8px 8px",
+                    border:`1px solid ${C.border}`,gap:0}}>
+                    <div style={{fontSize:12,fontWeight:800,color:C.text,gridColumn:"1/3"}}>TOTAL ({tdsRows.length} advices)</div>
+                    <div style={{fontSize:12,fontWeight:800,color:C.blue}}>₹{fmtINR(totalGross)}</div>
+                    <div style={{fontSize:12,fontWeight:800,color:"#c67c00"}}>-₹{fmtINR(totalTDS)}</div>
+                    <div style={{fontSize:12,fontWeight:800,color:C.green}}>₹{fmtINR(totalNet)}</div>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
+        {/* ── GST HOLD TAB ── */}
         {activeTab==="gst"&&(
           <div style={{display:"flex",flexDirection:"column",gap:14}}>
 
