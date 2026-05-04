@@ -1525,7 +1525,11 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   const totalDieselPaid = (pumpPayments||[]).reduce((s,p) => s+(+(p.amount)||0), 0);
   const unpaidDiesel = Math.max(0, totalDieselOwed - totalDieselPaid);
   const tafalPool   = displayTrips.reduce((s,t) => s+(t.tafal||0), 0);
-  const tafalPaid   = (cashTransfers||[]).filter(t=>t.type==="tafal").reduce((s,t)=>s+Number(t.amount||0),0);
+  // Only reduce pool for TAFAL payments where forMonth falls within this FY
+  // Old TAFAL txns without forMonth (paid before system tracked month) are excluded
+  const fyMonthFrom = fyRange.from.slice(0,7); // e.g. "2025-04"
+  const fyMonthTo   = fyRange.to.slice(0,7);   // e.g. "2026-03"
+  const tafalPaid   = (cashTransfers||[]).filter(t=>t.type==="tafal" && t.forMonth && t.forMonth>=fyMonthFrom && t.forMonth<=fyMonthTo).reduce((s,t)=>s+Number(t.amount||0),0);
   const tafalBalance= Math.max(0, tafalPool - tafalPaid);
   // Vehicle loans — filter by client's trucks if client selected
   const clientTrucks = selectedClient ? new Set(displayTrips.map(t=>t.truckNo)) : null;
@@ -13417,6 +13421,8 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
   const [salType,setSalType]= useState("salary");
   const [salRecoverLoan, setSalRecoverLoan] = useState(false);
   const [salLoanAmt, setSalLoanAmt] = useState("");
+  const [tafalForMonth, setTafalForMonth] = useState(today().slice(0,7));
+  const [salForMonth, setSalForMonth] = useState(today().slice(0,7));
   const [txAmt,  setTxAmt]  = useState("");
   const [txDate, setTxDate] = useState(today());
   const [txNote, setTxNote] = useState("");
@@ -13432,8 +13438,8 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
   const isOwner = user?.role==="owner";
   const fmtD = d => { if(!d) return "—"; try { const [y,m,dy]=d.split("-"); return `${dy}-${m}-${y}`; } catch { return d; } };
 
-  // ── Wallet calculations ──────────────────────────────────────────────────────
-  const empTx = empId => (cashTransfers||[]).filter(t=>t.empId===empId);
+  // ── Wallet calculations (exclude salary & tafal — those are separate ledgers) ──
+  const empTx = empId => (cashTransfers||[]).filter(t=>t.empId===empId && t.type!=="salary" && t.type!=="tafal");
   const totalTransferred = empId => empTx(empId).filter(t=>Number(t.amount||0)>0).reduce((s,t)=>s+Number(t.amount||0),0);
   const totalAdvanceGiven = empId => Math.abs(empTx(empId).filter(t=>Number(t.amount||0)<0).reduce((s,t)=>s+Number(t.amount||0),0));
   const walletBalance = empId => totalTransferred(empId) - totalAdvanceGiven(empId);
@@ -13445,7 +13451,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
     const fmtAmt  = n => "&#8377;" + Number(n||0).toLocaleString("en-IN",{maximumFractionDigits:2});
     const loanTxns = (e.loanTxns||[]).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
     const salTxns  = ((cashTransfers||[]).filter(t=>t.empId===e.id&&t.type==="salary")).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
-    const walTxns  = ((cashTransfers||[]).filter(t=>t.empId===e.id&&t.type!=="salary")).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+    const walTxns  = ((cashTransfers||[]).filter(t=>t.empId===e.id&&t.type!=="salary"&&t.type!=="tafal")).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
     const loanBal  = (e.loan||0)-(e.loanRecovered||0);
     const totalSal = salTxns.reduce((s,t)=>s+Number(t.amount||0),0);
     const walBal   = walTxns.filter(t=>t.amount>0).reduce((s,t)=>s+t.amount,0) - Math.abs(walTxns.filter(t=>t.amount<0).reduce((s,t)=>s+t.amount,0));
@@ -13694,7 +13700,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
         const totalTaf = tafalTxns.reduce((s,t)=>s+Number(t.amount||0),0);
         const loanBal  = (e.loan||0)-(e.loanRecovered||0);
         return(
-        <Sheet title={`💼 Payments — ${e.name}`} onClose={()=>{setSalSheet(null);setSalAmt("");setSalDate(today());setSalRef("");setSalNote("");setSalType("salary");setSalRecoverLoan(false);setSalLoanAmt("");}}>
+        <Sheet title={`💼 Payments — ${e.name}`} onClose={()=>{setSalSheet(null);setSalAmt("");setSalDate(today());setSalRef("");setSalNote("");setSalType("salary");setSalRecoverLoan(false);setSalLoanAmt("");setSalForMonth(today().slice(0,7));setTafalForMonth(today().slice(0,7));}}>
           <div style={{display:"flex",flexDirection:"column",gap:14}}>
             {/* Summary */}
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
@@ -13719,6 +13725,34 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                   <option value="salary">💰 Salary</option>
                   <option value="tafal">🤝 TAFAL</option>
                 </select>
+              </div>
+
+              {/* Month/year selector — for both salary and tafal */}
+              <div style={{marginBottom:8}}>
+                <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
+                  {salType==="tafal"?"TAFAL FOR MONTH":"SALARY FOR MONTH"}
+                </div>
+                <select value={salType==="tafal"?tafalForMonth:salForMonth}
+                  onChange={e=>{
+                    const v=e.target.value;
+                    const label=new Date(v+"-01").toLocaleDateString("en-IN",{month:"long",year:"numeric"});
+                    if(salType==="tafal"){setTafalForMonth(v);setSalNote(`TAFAL ${label}`);}
+                    else{setSalForMonth(v);setSalNote(`${label} Salary`);}
+                  }}
+                  style={{width:"100%",background:C.bg,border:`1.5px solid ${salType==="tafal"?C.purple:C.blue}`,borderRadius:8,
+                    color:C.text,padding:"9px 10px",fontSize:14,outline:"none"}}>{
+                  (()=>{
+                    const opts=[];
+                    const now=new Date();
+                    for(let i=0;i<48;i++){
+                      const d=new Date(now.getFullYear(),now.getMonth()-i,1);
+                      const val=d.toISOString().slice(0,7);
+                      const label=d.toLocaleDateString("en-IN",{month:"long",year:"numeric"});
+                      opts.push(<option key={val} value={val}>{label}</option>);
+                    }
+                    return opts;
+                  })()
+                }</select>
               </div>
 
               {/* Recover loan toggle */}
@@ -13763,9 +13797,10 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                 <Btn onClick={()=>{
                   if(!salAmt||+salAmt<=0){alert("Enter amount");return;}
                   const type = salType||"salary";
-                  const note = salNote||(type==="salary"?`Salary ${salDate.slice(0,7)}`:`TAFAL ${salDate.slice(0,7)}`);
+                  const forMonth = type==="tafal" ? tafalForMonth : salForMonth;
+                  const note = salNote||(type==="salary"?`Salary ${new Date(forMonth+"-01").toLocaleDateString("en-IN",{month:"long",year:"numeric"})}`:`TAFAL ${new Date(forMonth+"-01").toLocaleDateString("en-IN",{month:"long",year:"numeric"})}`);
                   const tx={id:uid(),empId:salSheet,type,amount:+salAmt,date:salDate,
-                    ref:salRef,note,createdBy:user.username,createdAt:nowTs()};
+                    forMonth,ref:salRef,note,createdBy:user.username,createdAt:nowTs()};
                   setCashTransfers(prev=>[tx,...(Array.isArray(prev)?prev:[])]);
 
                   // Salary → also save as expense
@@ -13791,7 +13826,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                   }
 
                   log(type.toUpperCase(),`${e.name} ₹${fmt(+salAmt)}${recovAmt>0?` · Loan recovery ₹${fmt(recovAmt)}`:""} ${salDate}`);
-                  setSalAmt("");setSalRef("");setSalNote("");setSalDate(today());setSalLoanAmt("");setSalRecoverLoan(false);
+                  setSalAmt("");setSalRef("");setSalNote("");setSalDate(today());setSalLoanAmt("");setSalRecoverLoan(false);setSalForMonth(today().slice(0,7));setTafalForMonth(today().slice(0,7));
                 }} color={salType==="salary"?C.blue:C.purple} full>
                   {salType==="salary"?"💰 Record Salary":"🤝 Record TAFAL"}
                   {salRecoverLoan&&+salLoanAmt>0?` + Loan Recovery ₹${fmt(+salLoanAmt)}`:""}
