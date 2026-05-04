@@ -13947,7 +13947,8 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
           shreeStatus:"billed",
           ...(chosenClient ? {client:chosenClient} : {}),
           ...(typeOverride  ? {type:typeOverride}   : {}),
-          billedToShree: Number(lineMatch.st.frtAmt||t.billedToShree||0) || t.billedToShree};
+          // Always ensure billedToShree is set — fall back to qty×frRate
+          billedToShree: Number(lineMatch.st.frtAmt||0) || Number(t.billedToShree||0) || (t.qty||0)*(t.frRate||0)};
         updatedTrips.push(updated);
         return updated;
       }
