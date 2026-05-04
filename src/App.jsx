@@ -1363,9 +1363,7 @@ export default function App() {
       try { sessionStorage.setItem("mye_user", JSON.stringify(u)); } catch{}
       setUser(u);
       if(u.role==="pump_operator") setTab("pump_portal");
-      if(u.role==="party_manager" || u.role==="email_followup") setTab("party_portal");
-      // combo roles
-      if(u.role&&u.role.includes("party_manager")) setTab("party_portal");
+      if(["party_manager","email_followup"].includes(u.role)) setTab("party_portal");
       log("LOGIN",`${u.name} signed in`);
     }} />;
   }
@@ -1461,7 +1459,7 @@ export default function App() {
 
       <div style={{padding:"14px 16px 8px"}}>
         <ErrorBoundary>
-        {tab==="dashboard"  && user?.role!=="pump_operator" && !can(user,"party_portal") && <Dashboard {...sp} setTab={setTab} />}
+        {tab==="dashboard"  && user?.role!=="pump_operator" && !["party_manager","email_followup"].includes(user?.role) && <Dashboard {...sp} setTab={setTab} />}
         {tab==="trips"      && can(user,"trips")      && <Trips      {...sp} tripType="outbound" />}
         {tab==="inbound"    && can(user,"inbound")    && <Trips      {...sp} tripType="inbound" />}
         {tab==="billing"    && can(user,"billing")    && <Billing    {...sp} />}
@@ -9331,8 +9329,9 @@ function PartyPortal({trips, setTrips, employees, user, log}) {
 
   const roles      = (user?.role||"").split(",").map(r=>r.trim());
   const isOwner    = ["owner","manager"].includes(user?.role);
-  const isPartyMgr = isOwner || roles.includes("party_manager");
-  const isFollowup = isOwner || roles.includes("email_followup");
+  // email_followup ONLY gets followup view — never party manager view
+  const isPartyMgr = isOwner || (roles.includes("party_manager") && !roles.every(r=>r==="email_followup"));
+  const isFollowup = roles.includes("email_followup") || roles.includes("party_manager") || isOwner;
   const userId     = user?.username || user?.id || "";
 
   const partyTrips     = (trips||[]).filter(t=>t.orderType==="party");
