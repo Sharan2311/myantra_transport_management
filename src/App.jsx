@@ -9319,227 +9319,183 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance: tripWithBalancePr
 // ─── DIESEL MODULE ────────────────────────────────────────────────────────────
 // ─── PARTY PORTAL ─────────────────────────────────────────────────────────────
 function PartyPortal({trips, setTrips, employees, user, log}) {
-  const [activeTab, setActiveTab] = useState("pending");
-  const [selected, setSelected]  = useState(new Set()); // selected trip ids
-  const [assignTo, setAssignTo]  = useState("");
-  const [showAssign, setShowAssign] = useState(false);
-  const [pdfUploading, setPdfUploading] = useState(false);
-  const [searchQ, setSearchQ]    = useState("");
+  const [activeTab,    setActiveTab]   = useState("pending");
+  const [selected,     setSelected]    = useState(new Set());
+  const [assignTo,     setAssignTo]    = useState("");
+  const [showAssign,   setShowAssign]  = useState(false);
+  const [pdfUploading, setPdfUploading]= useState(false);
+  const [searchQ,      setSearchQ]     = useState("");
 
-  const isOwnerOrManager = ["owner","manager","party_manager"].includes(user?.role);
-  const isFollowup = user?.role==="email_followup";
-  const userId = user?.username||user?.id||"";
+  const roles      = (user?.role||"").split(",").map(r=>r.trim());
+  const isOwner    = ["owner","manager"].includes(user?.role);
+  const isPartyMgr = isOwner || roles.includes("party_manager");
+  const isFollowup = isOwner || roles.includes("email_followup");
+  const userId     = user?.username || user?.id || "";
 
-  // All party trips
-  const partyTrips = (trips||[]).filter(t=>t.orderType==="party");
+  const partyTrips     = (trips||[]).filter(t=>t.orderType==="party");
+  const pendingTrips   = partyTrips.filter(t=>!t.emailSentAt&&!t.sealedInvoicePath&&t.status!=="Billed"&&t.status!=="Yet to Bill");
+  const yetToBillTrips = partyTrips.filter(t=>(t.emailSentAt||t.sealedInvoicePath)&&t.status!=="Billed");
 
-  // PENDING: party trips not yet emailed AND no sealed invoice
-  const pendingTrips = partyTrips.filter(t=>
-    !t.emailSentAt && !t.sealedInvoicePath && t.status!=="Billed" && t.status!=="Yet to Bill"
-  );
+  const visiblePending    = isPartyMgr ? pendingTrips   : pendingTrips.filter(t=>!t.confirmFollowupUserId||t.confirmFollowupUserId===userId);
+  const visibleYetToBill  = isPartyMgr ? yetToBillTrips : yetToBillTrips.filter(t=>t.confirmFollowupUserId===userId);
 
-  // YET TO BILL: emailed (or sealed) but not yet invoiced
-  const yetToBillTrips = partyTrips.filter(t=>
-    (t.emailSentAt || t.sealedInvoicePath) && t.status!=="Billed"
-  );
+  const currentList = activeTab==="pending" ? visiblePending : visibleYetToBill;
+  const activeList  = currentList.filter(t=>!searchQ||(t.truckNo||"").toLowerCase().includes(searchQ.toLowerCase())||(t.lrNo||"").toLowerCase().includes(searchQ.toLowerCase())||(t.to||"").toLowerCase().includes(searchQ.toLowerCase()));
+  const totalAmt    = (list) => list.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
+  const toggle      = (id) => setSelected(p=>{const s=new Set(p);s.has(id)?s.delete(id):s.add(id);return s;});
+  const toggleAll   = () => setSelected(p=>p.size===activeList.length?new Set():new Set(activeList.map(t=>t.id)));
+  const followupEmps= (employees||[]).filter(e=>(e.role||"").includes("email_followup")||(e.role||"").includes("party_manager"));
+  const saveT       = (u) => DB.saveTrip(u).catch(e=>console.error("saveTrip party:",e));
+  const getEmpName  = (id) => {if(!id)return null;const e=(employees||[]).find(x=>(x.username||x.id)===id);return e?.name||id;};
 
-  // Followup user sees only their assigned trips in Yet to Bill
-  const visibleYetToBill = isFollowup
-    ? yetToBillTrips.filter(t=>t.confirmFollowupUserId===userId)
-    : yetToBillTrips;
-
-  const visiblePending = isOwnerOrManager ? pendingTrips
-    : isFollowup ? pendingTrips.filter(t=>!t.confirmFollowupUserId||t.confirmFollowupUserId===userId)
-    : pendingTrips;
-
-  const activeList = (activeTab==="pending" ? visiblePending : visibleYetToBill)
-    .filter(t=>!searchQ || (t.truckNo||"").toLowerCase().includes(searchQ.toLowerCase())
-      || (t.lrNo||"").toLowerCase().includes(searchQ.toLowerCase())
-      || (t.to||"").toLowerCase().includes(searchQ.toLowerCase()));
-
-  const toggle = (id) => setSelected(prev=>{const s=new Set(prev); s.has(id)?s.delete(id):s.add(id); return s;});
-  const toggleAll = () => setSelected(prev=>prev.size===activeList.length?new Set():new Set(activeList.map(t=>t.id)));
-  const selectedTrips = activeList.filter(t=>selected.has(t.id));
-
-  const followupUsers = (employees||[]).filter(e=>e.role==="email_followup"||e.role==="Email Followup");
-
-  // Mark selected trips email sent + assign + move to Yet to Bill
   const markEmailSent = () => {
-    if(selected.size===0){alert("Select at least one trip");return;}
-    const ts = new Date().toISOString();
-    const updatedIds = [...selected];
+    if(!selected.size){alert("Select at least one trip");return;}
+    const ts=new Date().toISOString();
     setTrips(prev=>prev.map(t=>{
-      if(!updatedIds.includes(t.id)) return t;
-      const updated={...t, emailSentAt:ts, status:"Yet to Bill",
-        confirmFollowupUserId:assignTo||t.confirmFollowupUserId||""};
-      DB.saveTrip(updated).catch(e=>console.error("saveTrip party email:",e));
-      return updated;
+      if(!selected.has(t.id))return t;
+      const u={...t,emailSentAt:ts,status:"Yet to Bill",confirmFollowupUserId:assignTo||t.confirmFollowupUserId||""};
+      saveT(u);return u;
     }));
-    log&&log("PARTY EMAIL SENT",`${selected.size} trips marked email sent`);
-    setSelected(new Set()); setAssignTo(""); setShowAssign(false);
+    log&&log("PARTY EMAIL SENT",`${selected.size} trips`);
+    setSelected(new Set());setAssignTo("");setShowAssign(false);
   };
 
-  // Upload confirmation PDF and mark all selected
   const uploadConfirmPdf = async(file) => {
-    if(!file||selected.size===0) return;
+    if(!file||!selected.size)return;
     setPdfUploading(true);
-    try {
-      const path = `party_confirm/${Date.now()}_${file.name.replace(/\s/g,"_")}`;
-      const {error} = await supabase.storage.from("trip-files").upload(path,file,{upsert:true});
-      if(error) throw error;
-      const {data:{publicUrl}} = supabase.storage.from("trip-files").getPublicUrl(path);
-      const ts = new Date().toISOString();
-      const updatedIds = [...selected];
+    try{
+      const path=`party_confirm/${Date.now()}_${file.name.replace(/\s/g,"_")}`;
+      const {error}=await supabase.storage.from("trip-files").upload(path,file,{upsert:true});
+      if(error)throw error;
+      const {data:{publicUrl}}=supabase.storage.from("trip-files").getPublicUrl(path);
+      const ts=new Date().toISOString();
       setTrips(prev=>prev.map(t=>{
-        if(!updatedIds.includes(t.id)) return t;
-        const updated={...t, emailSentAt:ts, confirmPdfPath:publicUrl, status:"Yet to Bill"};
-        DB.saveTrip(updated).catch(e=>console.error("saveTrip confirm pdf:",e));
-        return updated;
+        if(!selected.has(t.id))return t;
+        const u={...t,emailSentAt:t.emailSentAt||ts,confirmPdfPath:publicUrl,status:"Yet to Bill"};
+        saveT(u);return u;
       }));
-      log&&log("CONFIRM PDF UPLOADED",`${selected.size} trips · ${file.name}`);
-      setSelected(new Set());
-    } catch(e){alert("Upload failed: "+e.message);}
+      log&&log("CONFIRM PDF",`${selected.size} trips`);setSelected(new Set());
+    }catch(e){alert("Upload failed: "+e.message);}
     finally{setPdfUploading(false);}
   };
 
-  const TripCard = ({t}) => {
-    const isSel = selected.has(t.id);
-    return (
-      <div onClick={()=>toggle(t.id)} style={{background:isSel?C.accent+"11":C.card,
-        borderRadius:10,padding:"12px 14px",cursor:"pointer",
-        border:`1.5px solid ${isSel?C.accent:C.border}`,transition:"all 0.15s"}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
-          <div style={{display:"flex",gap:8,alignItems:"center"}}>
-            <div style={{width:18,height:18,borderRadius:4,background:isSel?C.accent:"transparent",
-              border:`2px solid ${isSel?C.accent:C.muted}`,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
-              {isSel&&<span style={{color:"#fff",fontSize:11,fontWeight:800}}>✓</span>}
+  const undoEmailSent=(t)=>{
+    if(!window.confirm(`Undo email sent for ${t.lrNo}?`))return;
+    const u={...t,emailSentAt:"",status:"Pending Bill",confirmFollowupUserId:"",confirmPdfPath:""};
+    setTrips(prev=>prev.map(x=>x.id===t.id?u:x));saveT(u);log&&log("UNDO EMAIL SENT",t.lrNo);
+  };
+  const undoAssign=(t)=>{
+    const u={...t,confirmFollowupUserId:""};
+    setTrips(prev=>prev.map(x=>x.id===t.id?u:x));saveT(u);
+  };
+
+  const TripCard=({t})=>{
+    const isSel=selected.has(t.id);
+    const amt=(t.qty||0)*(t.frRate||0);
+    const empName=getEmpName(t.confirmFollowupUserId);
+    return(
+      <div onClick={()=>toggle(t.id)} style={{background:isSel?C.accent+"11":C.card,borderRadius:10,
+        padding:"12px 14px",cursor:"pointer",border:`1.5px solid ${isSel?C.accent:C.border}`,transition:"all 0.12s"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+          <div style={{width:18,height:18,borderRadius:4,flexShrink:0,marginTop:2,
+            background:isSel?C.accent:"transparent",border:`2px solid ${isSel?C.accent:C.muted}`,
+            display:"flex",alignItems:"center",justifyContent:"center"}}>
+            {isSel&&<span style={{color:"#fff",fontSize:10,fontWeight:800}}>✓</span>}
+          </div>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontWeight:700,fontSize:13,display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+              <span>{t.truckNo}</span>
+              <span style={{color:C.muted,fontWeight:400,fontSize:11}}>· {t.lrNo}</span>
+              {empName&&<span style={{fontSize:10,color:"#7c3aed",background:"#7c3aed11",borderRadius:4,padding:"1px 6px"}}>👤 {empName}</span>}
             </div>
-            <div>
-              <div style={{fontWeight:700,fontSize:13}}>{t.truckNo} <span style={{color:C.muted,fontWeight:400,fontSize:11}}>· {t.lrNo}</span></div>
-              <div style={{color:C.muted,fontSize:11}}>{t.to||"—"} · {t.date} · {t.qty}MT</div>
+            <div style={{color:C.muted,fontSize:11,marginTop:2}}>{t.to||"—"} · {t.date} · {t.qty}MT</div>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:4}}>
+              {t.emailSentAt&&<span style={{fontSize:10,color:C.blue,background:C.blue+"11",borderRadius:4,padding:"1px 6px"}}>📧 {t.emailSentAt.slice(0,10)}</span>}
+              {t.sealedInvoicePath&&<a href={t.sealedInvoicePath} target="_blank" rel="noreferrer" onClick={e=>e.stopPropagation()} style={{fontSize:10,color:C.orange,background:C.orange+"11",borderRadius:4,padding:"1px 6px",textDecoration:"none"}}>🏷️ Sealed ↗</a>}
+              {t.confirmPdfPath&&<a href={t.confirmPdfPath} target="_blank" rel="noreferrer" onClick={e=>e.stopPropagation()} style={{fontSize:10,color:C.teal,background:C.teal+"11",borderRadius:4,padding:"1px 6px",textDecoration:"none"}}>📄 Confirm PDF ↗</a>}
             </div>
           </div>
-          <div style={{textAlign:"right"}}>
-            <div style={{fontWeight:800,color:C.accent,fontSize:13}}>₹{((t.qty||0)*(t.frRate||0)).toLocaleString("en-IN")}</div>
-            {t.emailSentAt && <div style={{fontSize:10,color:C.blue,marginTop:2}}>📧 {t.emailSentAt.slice(0,10)}</div>}
-            {t.sealedInvoicePath && <div style={{fontSize:10,color:C.orange,marginTop:2}}>🏷️ Sealed</div>}
-            {t.confirmFollowupUserId && <div style={{fontSize:10,color:C.purple,marginTop:2}}>👤 {(employees||[]).find(e=>e.username===t.confirmFollowupUserId||e.id===t.confirmFollowupUserId)?.name||t.confirmFollowupUserId}</div>}
-            {t.confirmPdfPath && <a href={t.confirmPdfPath} target="_blank" rel="noreferrer" onClick={e=>e.stopPropagation()} style={{fontSize:10,color:C.teal,display:"block",marginTop:2}}>📄 Confirm PDF</a>}
+          <div style={{textAlign:"right",flexShrink:0}}>
+            <div style={{fontWeight:800,color:C.accent,fontSize:13}}>₹{amt.toLocaleString("en-IN")}</div>
+            {isOwner&&(
+              <div style={{display:"flex",gap:4,justifyContent:"flex-end",marginTop:4,flexWrap:"wrap"}}>
+                {t.emailSentAt&&<button onClick={e=>{e.stopPropagation();undoEmailSent(t);}} style={{fontSize:9,color:C.red,background:"none",border:`1px solid ${C.red}44`,borderRadius:4,padding:"2px 5px",cursor:"pointer"}}>↩ Undo Email</button>}
+                {t.confirmFollowupUserId&&<button onClick={e=>{e.stopPropagation();undoAssign(t);}} style={{fontSize:9,color:C.orange,background:"none",border:`1px solid ${C.orange}44`,borderRadius:4,padding:"2px 5px",cursor:"pointer"}}>↩ Unassign</button>}
+              </div>
+            )}
           </div>
         </div>
       </div>
     );
   };
 
-  return (
+  return(
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
-      {/* Header */}
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-        <div>
-          <div style={{fontWeight:800,fontSize:16,color:"#7c3aed"}}>📋 Party Portal</div>
-          <div style={{fontSize:11,color:C.muted}}>{user?.name||user?.username} · {ROLES[user?.role]?.label}</div>
-        </div>
+      <div>
+        <div style={{fontWeight:800,fontSize:16,color:"#7c3aed"}}>📋 Party Portal</div>
+        <div style={{fontSize:11,color:C.muted}}>{user?.name||user?.username} · {ROLES[user?.role]?.label||user?.role}</div>
       </div>
 
-      {/* Tabs */}
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",borderRadius:10,overflow:"hidden",
-        border:`1px solid ${C.border}`}}>
-        {[{id:"pending",label:`⏳ Pending (${visiblePending.length})`},
-          {id:"yet",    label:`📬 Yet to Bill (${visibleYetToBill.length})`}
-        ].map(tab=>(
-          <button key={tab.id} onClick={()=>{setActiveTab(tab.id);setSelected(new Set());}}
-            style={{padding:"10px",border:"none",cursor:"pointer",fontWeight:700,fontSize:13,
-              background:activeTab===tab.id?"#7c3aed":C.bg,
-              color:activeTab===tab.id?"#fff":C.text}}>
-            {tab.label}
-          </button>
-        ))}
+      {/* Tabs with amounts */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",borderRadius:10,overflow:"hidden",border:`1px solid ${C.border}`}}>
+        {[{id:"pending",icon:"⏳",label:"Pending",list:visiblePending},{id:"yet",icon:"📬",label:"Yet to Bill",list:visibleYetToBill}].map(tab=>{
+          const isAct=activeTab===tab.id;
+          return(
+            <button key={tab.id} onClick={()=>{setActiveTab(tab.id);setSelected(new Set());}}
+              style={{padding:"10px 8px",border:"none",cursor:"pointer",background:isAct?"#7c3aed":C.bg,color:isAct?"#fff":C.text}}>
+              <div style={{fontWeight:700,fontSize:13}}>{tab.icon} {tab.label} ({tab.list.length})</div>
+              <div style={{fontSize:11,opacity:0.85,marginTop:2}}>₹{totalAmt(tab.list).toLocaleString("en-IN")}</div>
+            </button>
+          );
+        })}
       </div>
 
-      {/* Search */}
-      <input value={searchQ} onChange={e=>setSearchQ(e.target.value)}
-        placeholder="🔍 Search truck, LR, destination..."
-        style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,
-          color:C.text,padding:"10px 12px",fontSize:13,outline:"none",width:"100%",boxSizing:"border-box"}}/>
+      <input value={searchQ} onChange={e=>setSearchQ(e.target.value)} placeholder="🔍 Search truck, LR, destination..."
+        style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,color:C.text,padding:"10px 12px",fontSize:13,outline:"none",width:"100%",boxSizing:"border-box"}}/>
 
-      {/* Bulk actions bar */}
-      {selected.size>0 && (
-        <div style={{background:C.accent+"11",border:`1.5px solid ${C.accent}`,borderRadius:10,
-          padding:"10px 14px",display:"flex",flexDirection:"column",gap:8}}>
-          <div style={{fontWeight:700,fontSize:13,color:C.accent}}>
-            {selected.size} trip{selected.size>1?"s":""} selected
+      {selected.size>0&&(
+        <div style={{background:C.accent+"11",border:`1.5px solid ${C.accent}`,borderRadius:10,padding:"10px 14px",display:"flex",flexDirection:"column",gap:8}}>
+          <div style={{fontWeight:700,fontSize:13,color:C.accent,display:"flex",justifyContent:"space-between"}}>
+            <span>{selected.size} trip{selected.size>1?"s":""} · <span style={{color:C.muted,fontWeight:400}}>₹{totalAmt(activeList.filter(t=>selected.has(t.id))).toLocaleString("en-IN")}</span></span>
+            <button onClick={()=>setSelected(new Set())} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:12}}>✕</button>
           </div>
-
-          {/* Email sent + assign (Pending tab, party_manager or owner) */}
-          {activeTab==="pending" && isOwnerOrManager && (
+          {activeTab==="pending"&&isPartyMgr&&(
             <>
-              {showAssign && followupUsers.length>0 && (
+              {showAssign&&(
                 <select value={assignTo} onChange={e=>setAssignTo(e.target.value)}
-                  style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:7,
-                    color:C.text,padding:"7px 10px",fontSize:12,outline:"none"}}>
-                  <option value="">— Assign to followup (optional) —</option>
-                  {followupUsers.map(e=><option key={e.id} value={e.username||e.id}>{e.name}</option>)}
+                  style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:7,color:C.text,padding:"7px 10px",fontSize:12,outline:"none",width:"100%"}}>
+                  <option value="">— Select followup employee —</option>
+                  {followupEmps.map(e=><option key={e.id} value={e.username||e.id}>{e.name}</option>)}
                 </select>
               )}
               <div style={{display:"flex",gap:8}}>
-                <button onClick={()=>setShowAssign(p=>!p)}
-                  style={{flex:1,padding:"8px",borderRadius:7,fontWeight:700,fontSize:12,cursor:"pointer",
-                    background:"transparent",border:`1.5px solid ${"#0369a1"}`,color:"#0369a1"}}>
-                  👤 {showAssign?"Hide":"Assign Followup"}
-                </button>
-                <button onClick={markEmailSent}
-                  style={{flex:2,padding:"8px",borderRadius:7,fontWeight:700,fontSize:12,cursor:"pointer",
-                    background:C.accent,border:"none",color:"#fff"}}>
-                  📧 Mark Email Sent → Yet to Bill
-                </button>
+                {followupEmps.length>0&&<button onClick={()=>setShowAssign(p=>!p)} style={{flex:1,padding:"8px",borderRadius:7,fontWeight:700,fontSize:12,cursor:"pointer",background:showAssign?C.blue+"22":"transparent",border:`1.5px solid ${C.blue}`,color:C.blue}}>👤 {showAssign?"Hide":"Assign Followup"}</button>}
+                <button onClick={markEmailSent} style={{flex:2,padding:"8px",borderRadius:7,fontWeight:700,fontSize:12,cursor:"pointer",background:C.accent,border:"none",color:"#fff"}}>📧 Mark Email Sent → Yet to Bill</button>
               </div>
             </>
           )}
-
-          {/* Upload confirmation PDF (Yet to Bill tab, followup or manager) */}
-          {activeTab==="yet" && (
-            <div>
-              <div style={{fontSize:11,color:C.muted,marginBottom:6}}>
-                Upload one PDF — will be attached to all {selected.size} selected trip{selected.size>1?"s":""}
-              </div>
-              <label style={{display:"flex",alignItems:"center",gap:8,background:C.teal,borderRadius:7,
-                padding:"8px 14px",cursor:"pointer",width:"fit-content"}}>
-                {pdfUploading?"⏳ Uploading...":"📄 Upload Confirmation PDF"}
-                <input type="file" accept=".pdf,image/*" style={{display:"none"}}
-                  disabled={pdfUploading}
-                  onChange={e=>{if(e.target.files[0]) uploadConfirmPdf(e.target.files[0]);}} />
-              </label>
-            </div>
+          {activeTab==="yet"&&(isPartyMgr||isFollowup)&&(
+            <label style={{display:"inline-flex",alignItems:"center",gap:8,background:C.teal,borderRadius:7,padding:"8px 14px",cursor:pdfUploading?"not-allowed":"pointer",color:"#fff",fontWeight:700,fontSize:12,width:"fit-content"}}>
+              {pdfUploading?"⏳ Uploading...":"📄 Upload Confirmation PDF — attach to all selected"}
+              <input type="file" accept=".pdf,image/*" style={{display:"none"}} disabled={pdfUploading} onChange={e=>e.target.files[0]&&uploadConfirmPdf(e.target.files[0])}/>
+            </label>
           )}
-
-          <button onClick={()=>setSelected(new Set())}
-            style={{alignSelf:"flex-end",background:"none",border:"none",color:C.muted,
-              cursor:"pointer",fontSize:12}}>✕ Deselect all</button>
         </div>
       )}
 
-      {/* Select all / count */}
-      {activeList.length>0 && (
+      {activeList.length>0&&(
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <span style={{fontSize:12,color:C.muted}}>{activeList.length} trip{activeList.length>1?"s":""}</span>
-          <button onClick={toggleAll}
-            style={{background:"none",border:`1px solid ${C.accent}`,borderRadius:6,
-              color:C.accent,fontSize:11,padding:"3px 10px",cursor:"pointer",fontWeight:700}}>
+          <span style={{fontSize:12,color:C.muted}}>{activeList.length} trips · <b>₹{totalAmt(activeList).toLocaleString("en-IN")}</b></span>
+          <button onClick={toggleAll} style={{background:"none",border:`1px solid ${C.accent}`,borderRadius:6,color:C.accent,fontSize:11,padding:"3px 10px",cursor:"pointer",fontWeight:700}}>
             {selected.size===activeList.length?"Deselect All":"Select All"}
           </button>
         </div>
       )}
 
-      {/* Trip list */}
-      {activeList.length===0 ? (
-        <div style={{textAlign:"center",color:C.muted,padding:40,fontSize:14}}>
-          {activeTab==="pending" ? "✅ No pending party trips" : "📭 No trips waiting to be billed"}
-        </div>
-      ) : (
-        <div style={{display:"flex",flexDirection:"column",gap:8}}>
-          {activeList.map(t=><TripCard key={t.id} t={t}/>)}
-        </div>
-      )}
+      {activeList.length===0
+        ?<div style={{textAlign:"center",color:C.muted,padding:40,fontSize:14}}>{activeTab==="pending"?"✅ No pending party trips":"📭 No trips waiting to be billed"}</div>
+        :<div style={{display:"flex",flexDirection:"column",gap:8}}>{activeList.map(t=><TripCard key={t.id} t={t}/>)}</div>
+      }
     </div>
   );
 }
