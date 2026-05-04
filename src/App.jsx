@@ -12244,6 +12244,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
         const net = gross-(t.advance||0)-(t.tafal||0)-(t.dieselEstimate||0)-(t.shortageRecovery||0)-(t.loanRecovery||0);
         const shortAmt = (t.shortage||0)*(t.givenRate||0);
         const paidForTrip = vPays.filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
+        const currentEst = Math.max(0, net - paidForTrip);
         return '<tr>'
           +'<td class="l">'+( t.lrNo||"—")+'</td>'
           +'<td class="l">'+fmtDate(t.date)+'</td>'
@@ -12254,13 +12255,14 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
           +'<td class="c">'+((t.shortage||0)>0?t.shortage+'MT ('+fmt(shortAmt)+')':'—')+'</td>'
           +'<td class="c">'+(t.loanRecovery>0?'-'+fmt(t.loanRecovery):'—')+'</td>'
           +'<td class="r b">'+fmt(Math.max(0,net))+'</td>'
-          +'<td class="r" style="color:#16a34a">'+(paidForTrip>0?fmt(paidForTrip):'—')+'</td>'
+          +'<td class="r" style="color:#16a34a;font-weight:'+(paidForTrip>0?'700':'400')+'">'+(paidForTrip>0?fmt(paidForTrip):'—')+'</td>'
+          +'<td class="r" style="color:'+(currentEst>0?'#b45309':'#16a34a')+';font-weight:700">'+(t.driverSettled?'✓ Settled':fmt(currentEst))+'</td>'
           +'<td class="c" style="color:'+(t.driverSettled?'#16a34a':'#b45309')+'">'+( t.driverSettled?'Settled':'Pending')+'</td>'
           +'</tr>';
       }).join("");
       return '<h3>🚛 Trip History — '+v.truckNo+' ('+vTrips.length+')</h3>'
-        +'<table><colgroup><col style="width:8%"><col style="width:9%"><col style="width:20%"><col style="width:7%"><col style="width:9%"><col style="width:9%"><col style="width:10%"><col style="width:8%"><col style="width:8%"><col style="width:7%"><col style="width:6%"></colgroup>'
-        +'<thead><tr><th class="l">LR No</th><th class="l">Date</th><th class="l">Route</th><th class="c">Qty</th><th class="r">Billed</th><th class="r">Gross</th><th class="c">Shortage</th><th class="c">Loan Recov.</th><th class="r">Net Pay</th><th class="r">Paid</th><th class="c">Status</th></tr></thead>'
+        +'<table><colgroup><col style="width:7%"><col style="width:8%"><col style="width:17%"><col style="width:6%"><col style="width:8%"><col style="width:8%"><col style="width:9%"><col style="width:7%"><col style="width:8%"><col style="width:7%"><col style="width:8%"><col style="width:6%"></colgroup>'
+        +'<thead><tr><th class="l">LR No</th><th class="l">Date</th><th class="l">Route</th><th class="c">Qty</th><th class="r">Billed</th><th class="r">Gross</th><th class="c">Shortage</th><th class="c">Loan Recov.</th><th class="r">Net Pay</th><th class="r">Paid</th><th class="r">Est. Current Due</th><th class="c">Status</th></tr></thead>'
         +'<tbody>'+rows+'</tbody></table>';
     }).join("");
 
