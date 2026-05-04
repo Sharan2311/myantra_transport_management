@@ -13620,7 +13620,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
   const [payMaterial, setPayMaterial] = useState("All");
   const [scanClient,   setScanClient]   = useState(""); // for invoice scan override
   const [scanMaterial, setScanMaterial] = useState("Cement"); // default to Cement
-  const displayTrips = fyTrips || trips;
+  const displayTrips = trips || []; // Payments tab uses ALL trips across all FYs
   const payTrips = (displayTrips||[]).filter(t=> {
     if(payClient && (t.client||DEFAULT_CLIENT)!==payClient) return false;
     if(payMaterial!=="All") {
