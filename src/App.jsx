@@ -36,8 +36,8 @@ const FY_LABEL  = fy => `FY ${fy-1}–${String(fy).slice(2)}`; // "FY 2025–26"
 
 // ─── ROLES ────────────────────────────────────────────────────────────────────
 const ROLES = {
-  owner:         {label:"Owner",               color:C.accent,  perms:["trips","inbound","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","admin","driverPay"]},
-  manager:       {label:"Manager",             color:C.blue,    perms:["trips","inbound","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","driverPay"]},
+  owner:         {label:"Owner",               color:C.accent,  perms:["trips","inbound","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","admin","driverPay","party_portal"]},
+  manager:       {label:"Manager",             color:C.blue,    perms:["trips","inbound","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","driverPay","party_portal"]},
   fleet_manager: {label:"Cement Fleet Manager",color:C.teal,    perms:["cement_trips","billing","diesel","driverPay_view"]},
   operator:      {label:"Trip Operator",       color:C.teal,    perms:["trips","billing","diesel"]},
   accounts:      {label:"Accounts",            color:C.purple,  perms:["billing","payments","reports","diesel","tafal"]},
@@ -613,7 +613,8 @@ function BottomNav({tab, setTab, user, trips, driverPays, vehicles, dieselReques
 }
 
 const MORE_TABS = [
-  {id:"inbound",   icon:"🏭",label:"Raw Material",   perm:"inbound",      group:"ops"},
+  {id:"inbound",      icon:"🏭",label:"Raw Material",   perm:"inbound",      group:"ops"},
+  {id:"party_portal", icon:"📋",label:"Party Portal",   perm:"party_portal", group:"ops"},
   {id:"driverPay", icon:"🏧",label:"Driver Pay",     perm:"driverPay",    group:"money"},
   {id:"settlement",icon:"💵",label:"Settlement",     perm:"settlement",   group:"money"},
   {id:"tafal",     icon:"🤝",label:"TAFAL",          perm:"tafal",        group:"money"},
@@ -1363,6 +1364,8 @@ export default function App() {
       setUser(u);
       if(u.role==="pump_operator") setTab("pump_portal");
       if(u.role==="party_manager" || u.role==="email_followup") setTab("party_portal");
+      // combo roles
+      if(u.role&&u.role.includes("party_manager")) setTab("party_portal");
       log("LOGIN",`${u.name} signed in`);
     }} />;
   }
@@ -1458,7 +1461,7 @@ export default function App() {
 
       <div style={{padding:"14px 16px 8px"}}>
         <ErrorBoundary>
-        {tab==="dashboard"  && user?.role!=="pump_operator" && <Dashboard {...sp} setTab={setTab} />}
+        {tab==="dashboard"  && user?.role!=="pump_operator" && !can(user,"party_portal") && <Dashboard {...sp} setTab={setTab} />}
         {tab==="trips"      && can(user,"trips")      && <Trips      {...sp} tripType="outbound" />}
         {tab==="inbound"    && can(user,"inbound")    && <Trips      {...sp} tripType="inbound" />}
         {tab==="billing"    && can(user,"billing")    && <Billing    {...sp} />}
@@ -9345,7 +9348,17 @@ function PartyPortal({trips, setTrips, employees, user, log}) {
   const toggle      = (id) => setSelected(p=>{const s=new Set(p);s.has(id)?s.delete(id):s.add(id);return s;});
   const toggleAll   = () => setSelected(p=>p.size===activeList.length?new Set():new Set(activeList.map(t=>t.id)));
   const followupEmps= (employees||[]).filter(e=>(e.role||"").includes("email_followup")||(e.role||"").includes("party_manager"));
-  const saveT       = (u) => DB.saveTrip(u).catch(e=>console.error("saveTrip party:",e));
+  const openFile = async(path,e) => {
+    e.stopPropagation();
+    // If already a full URL (http/https), open directly
+    if(path.startsWith("http")){window.open(path,"_blank");return;}
+    // Otherwise generate signed URL from storage path
+    try{
+      const {data,error}=await supabase.storage.from("party-trip-files").createSignedUrl(path,3600);
+      if(error)throw error;
+      window.open(data.signedUrl,"_blank");
+    }catch(err){alert("Could not open file: "+err.message);}
+  };
   const getEmpName  = (id) => {if(!id)return null;const e=(employees||[]).find(x=>(x.username||x.id)===id);return e?.name||id;};
 
   const markEmailSent = () => {
@@ -9411,8 +9424,8 @@ function PartyPortal({trips, setTrips, employees, user, log}) {
             <div style={{color:C.muted,fontSize:11,marginTop:2}}>{t.to||"—"} · {t.date} · {t.qty}MT</div>
             <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:4}}>
               {t.emailSentAt&&<span style={{fontSize:10,color:C.blue,background:C.blue+"11",borderRadius:4,padding:"1px 6px"}}>📧 {t.emailSentAt.slice(0,10)}</span>}
-              {t.sealedInvoicePath&&<a href={t.sealedInvoicePath} target="_blank" rel="noreferrer" onClick={e=>e.stopPropagation()} style={{fontSize:10,color:C.orange,background:C.orange+"11",borderRadius:4,padding:"1px 6px",textDecoration:"none"}}>🏷️ Sealed ↗</a>}
-              {t.confirmPdfPath&&<a href={t.confirmPdfPath} target="_blank" rel="noreferrer" onClick={e=>e.stopPropagation()} style={{fontSize:10,color:C.teal,background:C.teal+"11",borderRadius:4,padding:"1px 6px",textDecoration:"none"}}>📄 Confirm PDF ↗</a>}
+              {t.sealedInvoicePath&&<span onClick={e=>openFile(t.sealedInvoicePath,e)} style={{fontSize:10,color:C.orange,background:C.orange+"11",borderRadius:4,padding:"1px 6px",cursor:"pointer"}}>🏷️ Sealed ↗</span>}
+              {t.confirmPdfPath&&<span onClick={e=>openFile(t.confirmPdfPath,e)} style={{fontSize:10,color:C.teal,background:C.teal+"11",borderRadius:4,padding:"1px 6px",cursor:"pointer"}}>📄 Confirm PDF ↗</span>}
             </div>
           </div>
           <div style={{textAlign:"right",flexShrink:0}}>
