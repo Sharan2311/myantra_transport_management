@@ -13414,6 +13414,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
   const [salDate,setSalDate]= useState(today());
   const [salRef, setSalRef] = useState("");
   const [salNote,setSalNote]= useState("");
+  const [salType,setSalType]= useState("salary");
   const [txAmt,  setTxAmt]  = useState("");
   const [txDate, setTxDate] = useState(today());
   const [txNote, setTxNote] = useState("");
@@ -13443,27 +13444,26 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
     const loanBal  = (e.loan||0)-(e.loanRecovered||0);
     const totalSal = salTxns.reduce((s,t)=>s+Number(t.amount||0),0);
     const walBal   = walTxns.filter(t=>t.amount>0).reduce((s,t)=>s+t.amount,0) - Math.abs(walTxns.filter(t=>t.amount<0).reduce((s,t)=>s+t.amount,0));
-    const w = window.open("","_blank");
-    if(!w){alert("Allow popups");return;}
-    const row = (cells,bg="transparent") => `<tr style="background:${bg}">${cells.map(c=>`<td style="padding:5px 8px;border-bottom:1px solid #eee;font-size:11px">${c}</td>`).join("")}</tr>`;
-    w.document.write(`<html><head><title>Employee Report — ${e.name}</title><style>
+    const logoSrc  = (typeof LOGO_SRC !== "undefined" && LOGO_SRC) ? LOGO_SRC : "";
+    const htmlContent = `<!DOCTYPE html><html><head><title>Employee Report — ${e.name}</title><style>
       body{font-family:Arial,sans-serif;margin:20px;font-size:11px}
       table{width:100%;border-collapse:collapse;margin-bottom:16px}
       th{background:#1565c0;color:#fff;padding:5px 8px;font-size:10px;text-align:left}
+      td{padding:5px 8px;border-bottom:1px solid #eee;font-size:11px}
       .kpi{display:inline-block;border:1px solid #ddd;border-radius:6px;padding:8px 14px;margin:4px;text-align:center;min-width:110px}
       .kv{font-size:15px;font-weight:800}.kl{font-size:9px;color:#888;margin-top:2px}
       h2{font-size:13px;margin:16px 0 6px;border-bottom:2px solid #eee;padding-bottom:4px;color:#1565c0}
       @media print{*{-webkit-print-color-adjust:exact!important}}
     </style></head><body>
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;padding-bottom:8px;border-bottom:2px solid #1565c0">
-      <img src="${LOGO_SRC}" style="width:48px;height:48px;border-radius:8px;object-fit:cover" alt="MY"/>
+      ${logoSrc?`<img src="${logoSrc}" style="width:48px;height:48px;border-radius:8px;object-fit:cover" alt="MY"/>`:""}
       <div>
         <div style="font-size:7px;text-transform:uppercase;letter-spacing:2px;color:#1565c0;font-weight:700">M Yantra Enterprises</div>
         <div style="font-size:18px;font-weight:800">Employee Report — ${e.name}</div>
         <div style="font-size:10px;color:#888">Generated ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}</div>
       </div>
     </div>
-    <div>
+    <div style="margin-bottom:12px">
       <div class="kpi"><div class="kv" style="color:#dc2626">₹${fmt(e.loan||0)}</div><div class="kl">LOAN GIVEN</div></div>
       <div class="kpi"><div class="kv" style="color:#15803d">₹${fmt(e.loanRecovered||0)}</div><div class="kl">LOAN RECOVERED</div></div>
       <div class="kpi"><div class="kv" style="color:${loanBal>0?"#dc2626":"#15803d"}">₹${fmt(loanBal)}</div><div class="kl">LOAN BALANCE</div></div>
@@ -13471,16 +13471,22 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
       <div class="kpi"><div class="kv" style="color:#7c3aed">₹${fmt(walBal)}</div><div class="kl">WALLET BALANCE</div></div>
     </div>
     <h2>Loan History (${loanTxns.length})</h2>
-    ${loanTxns.length===0?"<p style='color:#999;font-style:italic'>No loan transactions.</p>":`<table><tr><th>Date</th><th>Type</th><th>Amount</th><th>Reference</th></tr>
-    ${loanTxns.map(t=>row([fmtD(t.date),t.type==="given"?"Given":"Recovery","₹"+fmt(t.amount||0),t.ref||"—"],t.type==="given"?"#fef2f2":"#f0fdf4")).join("")}</table>`}
+    ${loanTxns.length===0?"<p style='color:#999;font-style:italic'>No loan transactions.</p>":`<table><tr><th>Date</th><th>Type</th><th>Amount</th><th>Reference</th></tr>${loanTxns.map(t=>`<tr style="background:${t.type==="given"?"#fef2f2":"#f0fdf4"}"><td>${fmtD(t.date)}</td><td>${t.type==="given"?"Given":"Recovery"}</td><td>₹${fmt(t.amount||0)}</td><td>${t.ref||"—"}</td></tr>`).join("")}</table>`}
     <h2>Salary History (${salTxns.length})</h2>
-    ${salTxns.length===0?"<p style='color:#999;font-style:italic'>No salary payments recorded.</p>":`<table><tr><th>Date</th><th>Amount</th><th>Note</th><th>Reference</th></tr>
-    ${salTxns.map(t=>row([fmtD(t.date),"₹"+fmt(t.amount||0),t.note||"—",t.ref||"—"],"#eff6ff")).join("")}</table>`}
+    ${salTxns.length===0?"<p style='color:#999;font-style:italic'>No salary payments recorded.</p>":`<table><tr><th>Date</th><th>Amount</th><th>Note</th><th>Reference</th></tr>${salTxns.map(t=>`<tr style="background:#eff6ff"><td>${fmtD(t.date)}</td><td>₹${fmt(t.amount||0)}</td><td>${t.note||"—"}</td><td>${t.ref||"—"}</td></tr>`).join("")}</table>`}
     <h2>Wallet History (${walTxns.length})</h2>
-    ${walTxns.length===0?"<p style='color:#999;font-style:italic'>No wallet transactions.</p>":`<table><tr><th>Date</th><th>Amount</th><th>Note</th></tr>
-    ${walTxns.map(t=>row([fmtD(t.date),"₹"+fmt(Math.abs(t.amount||0))+(t.amount<0?" (advance)":""),t.note||"—"])).join("")}</table>`}
-    </body></html>`);
-    w.document.close(); w.print();
+    ${walTxns.length===0?"<p style='color:#999;font-style:italic'>No wallet transactions.</p>":`<table><tr><th>Date</th><th>Amount</th><th>Type</th><th>Note</th></tr>${walTxns.map(t=>`<tr><td>${fmtD(t.date)}</td><td>₹${fmt(Math.abs(t.amount||0))}${t.amount<0?" (advance)":""}</td><td>${t.type||"transfer"}</td><td>${t.note||"—"}</td></tr>`).join("")}</table>`}
+    <script>window.onload=function(){window.print();}</script>
+    </body></html>`;
+
+    // Use blob URL instead of window.open to avoid popup blocker
+    const blob = new Blob([htmlContent], {type:"text/html"});
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href = url; a.target = "_blank"; a.rel = "noreferrer";
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a);
+    setTimeout(()=>URL.revokeObjectURL(url), 5000);
   };
   const deleteTx = async (txId) => {
     if(!window.confirm("Delete this wallet transaction?")) return;
@@ -13638,36 +13644,70 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
         </Sheet>
       );})()}
 
-      {/* Salary Sheet */}
+      {/* Salary / Payment Sheet */}
       {salSheet&&(()=>{const e=employees.find(x=>x.id===salSheet); if(!e) return null;
-        const salTxns = ((cashTransfers||[]).filter(t=>t.empId===salSheet&&t.type==="salary")).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+        const salTxns  = ((cashTransfers||[]).filter(t=>t.empId===salSheet&&t.type==="salary")).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+        const tafalTxns= ((cashTransfers||[]).filter(t=>t.empId===salSheet&&t.type==="tafal")).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+        const loanTxns2= (e.loanTxns||[]).filter(t=>t.type==="recovery").sort((a,b)=>(b.date||"").localeCompare(a.date||""));
         const totalSal = salTxns.reduce((s,t)=>s+Number(t.amount||0),0);
+        const totalTaf = tafalTxns.reduce((s,t)=>s+Number(t.amount||0),0);
+        const loanBal  = (e.loan||0)-(e.loanRecovered||0);
         return(
-        <Sheet title={`💼 Salary — ${e.name}`} onClose={()=>{setSalSheet(null);setSalAmt("");setSalDate(today());setSalRef("");setSalNote("");}}>
+        <Sheet title={`💼 Payments — ${e.name}`} onClose={()=>{setSalSheet(null);setSalAmt("");setSalDate(today());setSalRef("");setSalNote("");setSalType("salary");}}>
           <div style={{display:"flex",flexDirection:"column",gap:14}}>
-            <div style={{background:C.bg,borderRadius:10,padding:10,textAlign:"center"}}>
-              <div style={{color:C.blue,fontWeight:800,fontSize:18}}>₹{fmt(totalSal)}</div>
-              <div style={{color:C.muted,fontSize:10}}>TOTAL SALARY PAID</div>
+            {/* Summary */}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+              {[{l:"Salary Paid",v:fmt(totalSal),c:C.blue},{l:"TAFAL Paid",v:fmt(totalTaf),c:C.purple},{l:"Loan Balance",v:fmt(loanBal),c:loanBal>0?C.red:C.green}].map(x=>(
+                <div key={x.l} style={{background:C.bg,borderRadius:10,padding:10,textAlign:"center"}}>
+                  <div style={{color:x.c,fontWeight:800,fontSize:14}}>₹{x.v}</div>
+                  <div style={{color:C.muted,fontSize:9,marginTop:2,textTransform:"uppercase"}}>{x.l}</div>
+                </div>
+              ))}
             </div>
+
+            {/* Payment form */}
             <div style={{background:C.card,borderRadius:10,padding:"12px 14px"}}>
-              <div style={{color:C.blue,fontWeight:700,fontSize:12,marginBottom:8}}>Record Salary Payment</div>
+              <div style={{color:C.blue,fontWeight:700,fontSize:12,marginBottom:8}}>Record Payment</div>
+
+              {/* Type dropdown */}
+              <div style={{marginBottom:8}}>
+                <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>PAYMENT TYPE</div>
+                <select value={salType||"salary"} onChange={e=>setSalType(e.target.value)}
+                  style={{width:"100%",background:C.bg,border:`1.5px solid ${C.teal}`,borderRadius:8,
+                    color:C.text,padding:"9px 10px",fontSize:14,outline:"none"}}>
+                  <option value="salary">💰 Salary</option>
+                  <option value="tafal">🤝 TAFAL</option>
+                  <option value="loan_recovery">🏦 Loan Recovery</option>
+                </select>
+              </div>
+
+              {(salType==="loan_recovery"&&loanBal>0)&&(
+                <div style={{background:C.orange+"11",borderRadius:7,padding:"6px 10px",fontSize:11,
+                  color:C.orange,marginBottom:8,fontWeight:600}}>
+                  Loan balance: ₹{fmt(loanBal)} — enter recovery amount below
+                </div>
+              )}
+
               <div style={{display:"flex",gap:8,marginBottom:8}}>
                 <Field label="Amount ₹" value={salAmt} onChange={setSalAmt} type="number" half />
                 <Field label="Date" value={salDate} onChange={setSalDate} type="date" half />
               </div>
               <Field label="Bank Ref / UTR" value={salRef} onChange={setSalRef} placeholder="HDFC00789..." />
               <div style={{marginTop:8}}>
-                <Field label="Note (e.g. May 2026 Salary)" value={salNote} onChange={setSalNote} placeholder="Month / description" />
+                <Field label="Note" value={salNote} onChange={setSalNote}
+                  placeholder={salType==="salary"?"May 2026 Salary":salType==="tafal"?"TAFAL - May 2026":"Loan recovery"} />
               </div>
               <div style={{marginTop:10}}>
                 <Btn onClick={()=>{
-                  if(!salAmt||+salAmt<=0){alert("Enter salary amount");return;}
-                  const tx={id:uid(),empId:salSheet,type:"salary",amount:+salAmt,date:salDate,
-                    ref:salRef,note:salNote||`Salary ${salDate.slice(0,7)}`,
-                    createdBy:user.username,createdAt:nowTs()};
+                  if(!salAmt||+salAmt<=0){alert("Enter amount");return;}
+                  const type = salType||"salary";
+                  const note = salNote||(type==="salary"?`Salary ${salDate.slice(0,7)}`:type==="tafal"?`TAFAL ${salDate.slice(0,7)}`:"Loan Recovery");
+                  const tx={id:uid(),empId:salSheet,type,amount:+salAmt,date:salDate,
+                    ref:salRef,note,createdBy:user.username,createdAt:nowTs()};
                   setCashTransfers(prev=>[tx,...(Array.isArray(prev)?prev:[])]);
-                  // Also save as expense
-                  if(typeof setExpenses==="function"){
+
+                  // Salary → also save as expense
+                  if(type==="salary" && typeof setExpenses==="function"){
                     const exp={id:"SAL"+uid(),date:salDate,
                       label:`Salary - ${e.name}${salNote?" ("+salNote+")":""}`,
                       amount:+salAmt,category:"salary",
@@ -13675,21 +13715,63 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                       createdBy:user.username,createdAt:nowTs()};
                     setExpenses(prev=>[exp,...(Array.isArray(prev)?prev:[])]);
                   }
-                  log("SALARY",`${e.name} ₹${fmt(+salAmt)} ${salDate}`);
+
+                  // Loan recovery → update employee loanRecovered
+                  if(type==="loan_recovery"){
+                    const lTxn={id:uid(),type:"recovery",date:salDate,amount:+salAmt,ref:salRef,note,createdBy:user.username};
+                    setEmployees(p=>p.map(x=>x.id===salSheet?{...x,
+                      loanRecovered:(x.loanRecovered||0)+(+salAmt),
+                      loanTxns:[...(x.loanTxns||[]),lTxn]
+                    }:x));
+                  }
+
+                  log(type.toUpperCase(),`${e.name} ₹${fmt(+salAmt)} ${salDate}`);
                   setSalAmt("");setSalRef("");setSalNote("");setSalDate(today());
-                }} color={C.blue} full>Record Salary</Btn>
+                }} color={salType==="salary"?C.blue:salType==="tafal"?C.purple:C.green} full>
+                  {salType==="salary"?"💰 Record Salary":salType==="tafal"?"🤝 Record TAFAL":"🏦 Record Loan Recovery"}
+                </Btn>
               </div>
             </div>
+
+            {/* History sections */}
             {salTxns.length>0&&(
-              <div style={{display:"flex",flexDirection:"column",gap:4}}>
-                <div style={{color:C.muted,fontSize:11,fontWeight:700}}>SALARY HISTORY</div>
+              <div>
+                <div style={{color:C.blue,fontSize:11,fontWeight:700,marginBottom:4}}>SALARY HISTORY</div>
                 {salTxns.map(tx=>(
-                  <div key={tx.id} style={{background:C.bg,borderRadius:8,padding:"8px 10px",borderLeft:`3px solid ${C.blue}`}}>
+                  <div key={tx.id} style={{background:C.bg,borderRadius:8,padding:"8px 10px",marginBottom:4,borderLeft:`3px solid ${C.blue}`}}>
                     <div style={{display:"flex",justifyContent:"space-between"}}>
                       <span style={{fontSize:12,fontWeight:700,color:C.blue}}>₹{fmt(tx.amount||0)}</span>
                       <span style={{fontSize:11,color:C.muted}}>{fmtD(tx.date)}</span>
                     </div>
-                    <div style={{fontSize:10,color:C.muted,marginTop:2}}>{tx.note||""}{tx.ref?` · Ref: ${tx.ref}`:""}</div>
+                    <div style={{fontSize:10,color:C.muted}}>{tx.note||""}{tx.ref?` · ${tx.ref}`:""}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {tafalTxns.length>0&&(
+              <div>
+                <div style={{color:C.purple,fontSize:11,fontWeight:700,marginBottom:4}}>TAFAL HISTORY</div>
+                {tafalTxns.map(tx=>(
+                  <div key={tx.id} style={{background:C.bg,borderRadius:8,padding:"8px 10px",marginBottom:4,borderLeft:`3px solid ${C.purple}`}}>
+                    <div style={{display:"flex",justifyContent:"space-between"}}>
+                      <span style={{fontSize:12,fontWeight:700,color:C.purple}}>₹{fmt(tx.amount||0)}</span>
+                      <span style={{fontSize:11,color:C.muted}}>{fmtD(tx.date)}</span>
+                    </div>
+                    <div style={{fontSize:10,color:C.muted}}>{tx.note||""}{tx.ref?` · ${tx.ref}`:""}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {loanTxns2.length>0&&(
+              <div>
+                <div style={{color:C.green,fontSize:11,fontWeight:700,marginBottom:4}}>LOAN RECOVERY HISTORY</div>
+                {loanTxns2.map(tx=>(
+                  <div key={tx.id} style={{background:C.bg,borderRadius:8,padding:"8px 10px",marginBottom:4,borderLeft:`3px solid ${C.green}`}}>
+                    <div style={{display:"flex",justifyContent:"space-between"}}>
+                      <span style={{fontSize:12,fontWeight:700,color:C.green}}>₹{fmt(tx.amount||0)}</span>
+                      <span style={{fontSize:11,color:C.muted}}>{fmtD(tx.date)}</span>
+                    </div>
+                    <div style={{fontSize:10,color:C.muted}}>{tx.note||""}{tx.ref?` · ${tx.ref}`:""}</div>
                   </div>
                 ))}
               </div>
