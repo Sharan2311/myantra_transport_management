@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { DB } from "./db.js";
+import CLIENT_CONFIG from "./client.config.js";
 import { supabase } from "./supabase.js";
 
 
 // ─── LOGO ────────────────────────────────────────────────────────────────────
-const LOGO_SRC = "data:image/jpeg;base64,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";
+const LOGO_SRC = CLIENT_CONFIG.logoSrc;
 
 // ─── THEME ────────────────────────────────────────────────────────────────────
 const C = {
@@ -651,7 +652,7 @@ function MoreMenu({user, setTab, trips, driverPays, vehicles}) {
       {/* Company card at top of More menu */}
       <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,
         padding:"16px",display:"flex",alignItems:"center",gap:14,marginBottom:4}}>
-        <img src={LOGO_SRC} alt="M Yantra Logo"
+        <img src={LOGO_SRC} alt={CLIENT_CONFIG.companyShort + " Logo"}
           style={{width:56,height:56,borderRadius:"50%",objectFit:"cover",flexShrink:0,
             border:`2px solid ${C.border}`,boxShadow:"0 2px 8px rgba(0,0,0,0.12)"}} />
         <div>
@@ -834,7 +835,7 @@ function Login({onLogin}) {
               animation:"pulseRing2 2.4s ease-in-out infinite",
             }} />
             {/* Logo image */}
-            <img src={LOGO_SRC} alt="M Yantra Logo"
+            <img src={LOGO_SRC} alt={CLIENT_CONFIG.companyShort + " Logo"}
               style={{
                 width:148,height:148,
                 borderRadius:"50%",
@@ -1325,7 +1326,7 @@ export default function App() {
         <div style={{position:"relative",display:"inline-flex",alignItems:"center",justifyContent:"center",marginBottom:28,animation:"dbFloat 3s ease-in-out infinite"}}>
           <div style={{position:"absolute",inset:-20,borderRadius:"50%",background:"rgba(21,101,192,0.15)",animation:"dbPulseRing 2.2s ease-in-out infinite"}} />
           <div style={{position:"absolute",inset:-38,borderRadius:"50%",background:"rgba(21,101,192,0.07)",animation:"dbPulseRing2 2.2s ease-in-out infinite"}} />
-          <img src={LOGO_SRC} alt="M Yantra"
+          <img src={LOGO_SRC} alt={CLIENT_CONFIG.companyShort}
             style={{width:130,height:130,borderRadius:"50%",objectFit:"cover",position:"relative",
               border:"3px solid rgba(255,255,255,0.15)",
               animation:"dbLogoGlow 2.2s ease-in-out infinite"}} />
@@ -1374,7 +1375,7 @@ export default function App() {
       {/* TOP BAR */}
       <div style={{position:"sticky",top:0,zIndex:50,background:C.card,borderBottom:`1px solid ${C.border}`,padding:"8px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div style={{display:"flex",alignItems:"center",gap:8}}>
-          <img src={LOGO_SRC} alt="M Yantra"
+          <img src={LOGO_SRC} alt={CLIENT_CONFIG.companyShort}
             style={{width:36,height:36,borderRadius:"50%",objectFit:"cover",flexShrink:0}} />
           <div>
             <div style={{color:C.accent,fontWeight:900,fontSize:14}}>M. YANTRA</div>
@@ -1438,8 +1439,8 @@ export default function App() {
             <div style={{display:"flex",alignItems:"center",gap:6,overflowX:"auto"}}>
               <span style={{color:C.muted,fontSize:10,fontWeight:700,flexShrink:0,letterSpacing:0.5}}>🏭 Client</span>
               {["", ...clientsInData].map(c=>{
-                const label = c==="" ? "All" : c.replace("Shree Cement ","SC ").replace("Ultratech ","UT ");
-                const col = c===""?C.muted:c.includes("Ultratech")?C.orange:c.includes("Guntur")?C.purple:C.blue;
+                const label = c==="" ? "All" : c;
+                const col = c===""?C.muted:clientColor(c, C);
                 const active = selectedClient===c;
                 return (
                   <button key={c||"all"} onClick={()=>setSelectedClient(c)}
@@ -1495,7 +1496,7 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
 
   const allFyTrips = fyTrips || trips;
   // Apply client filter then month filter
-  const clientFiltered = selectedClient ? allFyTrips.filter(t=>(t.client||"Shree Cement Kodla")===selectedClient) : allFyTrips;
+  const clientFiltered = selectedClient ? allFyTrips.filter(t=>(t.client||DEFAULT_CLIENT)===selectedClient) : allFyTrips;
   const displayTrips   = dashMonth ? clientFiltered.filter(t=>(t.date||"").startsWith(dashMonth)) : clientFiltered;
 
   // Available months from FY trips for quick-select chips
@@ -1791,8 +1792,8 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
         // Cement by client
         const clientData = CLIENTS.map(c=>({
           name: c,
-          short: c.replace("Shree Cement ","SC ").replace("Ultratech ","UT "),
-          color: c.includes("Ultratech")?C.orange:c.includes("Guntur")?C.purple:C.blue,
+          short: c,
+          color: clientColor(c, C),
           cement: outbound.filter(t=>(t.client||DEFAULT_CLIENT)===c),
         })).filter(cd=>cd.cement.length>0);
         const huskTrips = outbound.filter(t=>(t.grade||"").toLowerCase().includes("husk"));
@@ -1844,7 +1845,7 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
                             <span style={{color:C.red,fontWeight:800,fontSize:13}}>{fmt(inv.total)}</span>
                           </div>
                           <div style={{color:C.muted,fontSize:10,marginTop:2}}>
-                            {inv.trips.length} trip{inv.trips.length!==1?"s":""} · {inv.trips.reduce((s,t)=>s+(t.qty||0),0)} MT · {inv.trips[0]?.client?.replace("Shree Cement ","SC ")||"—"}
+                            {inv.trips.length} trip{inv.trips.length!==1?"s":""} · {inv.trips.reduce((s,t)=>s+(t.qty||0),0)} MT · {inv.trips[0]?.client?||"—"}
                           </div>
                         </div>
                       ))}
@@ -1878,7 +1879,7 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
                             <span style={{color:C.green,fontWeight:800,fontSize:13}}>{fmt(inv.total)}</span>
                           </div>
                           <div style={{color:C.muted,fontSize:10,marginTop:2}}>
-                            {inv.trips.length} trip{inv.trips.length!==1?"s":""} · {inv.trips.reduce((s,t)=>s+(t.qty||0),0)} MT · {inv.trips[0]?.client?.replace("Shree Cement ","SC ")||"—"}
+                            {inv.trips.length} trip{inv.trips.length!==1?"s":""} · {inv.trips.reduce((s,t)=>s+(t.qty||0),0)} MT · {inv.trips[0]?.client?||"—"}
                           </div>
                         </div>
                       ))}
@@ -1920,7 +1921,7 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
                             <span style={{color:C.orange,fontWeight:800,fontSize:12}}>{fmt((t.qty||0)*(t.frRate||0))}</span>
                           </div>
                           <div style={{color:C.muted,fontSize:10,marginTop:2}}>
-                            {t.date} · {t.qty}MT · {t.to||"—"} · {(t.client||"").replace("Shree Cement ","SC ")}
+                            {t.date} · {t.qty}MT · {t.to||"—"} · {(t.client||"")}
                           </div>
                         </div>
                       ))}
@@ -2154,9 +2155,16 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
 
   const detectClient = ex => {
     const hay = [ex.consignee||"",ex.consignor||"",ex.from||"",ex.to||""].join(" ").toLowerCase();
-    if(hay.includes("ultratech")) return "Ultratech Malkhed";
-    if(hay.includes("guntur"))    return "Shree Cement Guntur";
-    return "Shree Cement Kodla";
+    // Try to match against configured clients
+    const detectionRules = CLIENT_CONFIG.clientDetection || {};
+    for(const [keyword, clientName] of Object.entries(detectionRules)) {
+      if(hay.includes(keyword.toLowerCase())) return clientName;
+    }
+    // Fallback: match client names directly
+    for(const c of CLIENTS) {
+      if(hay.includes(c.toLowerCase()) || hay.includes(c.split(" ")[0].toLowerCase())) return c;
+    }
+    return DEFAULT_CLIENT;
   };
 
   const scanFile = async (id, file) => {
@@ -3138,7 +3146,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
                       style={{background:g.client===c?C.teal+"33":"transparent",
                         border:`1px solid ${g.client===c?C.teal:C.border}`,borderRadius:20,
                         padding:"4px 10px",fontSize:11,fontWeight:700,color:g.client===c?C.teal:C.muted,cursor:"pointer"}}>
-                      {c.replace("Shree Cement ","SC ").replace("Ultratech ","UT ")}
+                      {c}
                     </button>
                   ))}
                 </div>
@@ -3956,7 +3964,7 @@ function openGoogleDrivePicker(onFile) {
     closeBtn.onclick = () => { close(); reject(new Error("cancelled")); };
 
     // ── State ────────────────────────────────────────────────────────────────
-    const stack = [{ id: GDRIVE_ROOT_ID, name: "M Yantra Drive" }];
+    const stack = [{ id: GDRIVE_ROOT_ID, name: `${CLIENT_CONFIG.companyName} Drive` }];
 
     // ── Render breadcrumb ────────────────────────────────────────────────────
     const renderBc = () => {
@@ -4147,7 +4155,7 @@ Extract the following fields from this document image and return ONLY a JSON obj
   "grNo": "GR number / Goods Receipt number",
   "truckNo": "Vehicle/Truck registration number",
   "consignee": "Consignee name / destination party",
-  "consignor": "Consignor name — the cement company/plant name e.g. Shree Cement Limited KARNATAKA CEMENT PROJECT GUNTUR",
+  "consignor": "Consignor name — the cement company/plant name e.g. the cement company plant name",
   "from": "Source/loading location",
   "to": "Destination/unloading location",
   "grade": "Material grade - use exactly 'Cement Packed' or 'Cement Bulk' for cement, else actual material name",
@@ -4163,7 +4171,7 @@ Rules:
 - If a field is not found in the document, use empty string "" for text fields and 0 for number fields
 - For truck numbers, format as uppercase with no spaces e.g. KA34C4617
 - For qty and bags, return only the number e.g. 35 not "35 MT"
-- For frRate: look in the Goods Receipt Particulars table for the "Rate PMT" column — this is the rate per MT that Shree pays M Yantra. It appears as a number like 1030.00 or 1050.00 in the row alongside the quantity and amount. Extract ONLY the rate from THIS specific document — do not reuse rates from other documents. Each GR has its own rate.`;
+- For frRate: look in the Goods Receipt Particulars table for the "Rate PMT" column — this is the rate per MT that the cement company pays the transporter. It appears as a number like 1030.00 or 1050.00 in the row alongside the quantity and amount. Extract ONLY the rate from THIS specific document — do not reuse rates from other documents. Each GR has its own rate.`;
 
   const fileToBase64 = (file) => new Promise((res, rej) => {
     const r = new FileReader();
@@ -4333,8 +4341,26 @@ Rules:
 // ─── PARTY TRIP STORAGE HELPERS ──────────────────────────────────────────────
 // IMPORTANT: Must match bucket name exactly in Supabase Storage
 // ─── CLIENT / PLANT LIST ─────────────────────────────────────────────────────
-const CLIENTS = ["Shree Cement Kodla","Shree Cement Guntur","Ultratech Malkhed"];
-const DEFAULT_CLIENT = "Shree Cement Kodla";
+const CLIENTS = CLIENT_CONFIG.clients;
+const DEFAULT_CLIENT = CLIENT_CONFIG.defaultClient || CLIENT_CONFIG.clients[0] || "";
+
+// Shorten client names for UI display using configured abbreviations
+const shortClient = (name) => {
+  if(!name) return "—";
+  const abbrevs = CLIENT_CONFIG.clientAbbreviations || {};
+  let s = name;
+  for(const [full, short] of Object.entries(abbrevs)) { s = s.replace(full, short); }
+  return s;
+};
+
+// Get color for a client (configurable per client name)
+const clientColor = (name, C) => {
+  const colors = CLIENT_CONFIG.clientColors || {};
+  for(const [keyword, color] of Object.entries(colors)) {
+    if((name||"").toLowerCase().includes(keyword.toLowerCase())) return color;
+  }
+  return C.blue; // default
+};
 
 // Get the list of clients a user is allowed to see (defined early — used throughout)
 const getUserClients = (user) => {
@@ -4355,20 +4381,7 @@ const userCanSeeClient = (user, client) => {
 
 // ─── MATERIAL / LR SEQUENCE HELPERS ─────────────────────────────────────────
 // Maps (client, material) → LR prefix. Must match mye_lr_sequences table.
-const LR_PREFIXES = {
-  "Shree Cement Kodla|Cement":   "SKLC",
-  "Shree Cement Kodla|Gypsum":   "SKLGP",
-  "Shree Cement Kodla|Husk":     "SKLH",
-  "Shree Cement Guntur|Cement":  "SGNC",
-  "Shree Cement Guntur|Gypsum":  "SGNGP",
-  "Shree Cement Guntur|Husk":    "SGNH",
-  "Ultratech Malkhed|Cement":    "UTCC",
-  "Ultratech Malkhed|Gypsum":    "UTCGP",
-  "Ultratech Malkhed|Husk":      "UTCH",
-  "Inbound|Gypsum":              "INBGP",
-  "Inbound|Husk":                "INBH",
-  "Inbound|Limestone":           "INBL",
-};
+const LR_PREFIXES = CLIENT_CONFIG.lrPrefixes || {};
 
 // Derive material category from grade string
 const gradeToMaterial = (grade, tripType) => {
@@ -4389,7 +4402,7 @@ const gradeToMaterial = (grade, tripType) => {
 const getLRPrefix = (client, material) => LR_PREFIXES[`${client}|${material}`] || null;
 
 // Shree Cement plants (used to decide if Shree Payments tab is relevant)
-const SHREE_CLIENTS = ["Shree Cement Kodla","Shree Cement Guntur"];
+const SHREE_CLIENTS = CLIENT_CONFIG.shreeClients || [];
 
 const PARTY_BUCKET = "party-trip-files";
 
@@ -4447,7 +4460,7 @@ function OrderTypeSelector({ onSelect }) {
     <div style={{display:"flex",flexDirection:"column",gap:14,padding:"4px 0"}}>
       <div style={{color:C.text,fontWeight:800,fontSize:15,textAlign:"center"}}>What type of order is this?</div>
       {[
-        {id:"godown", icon:"🏭", label:"Godown Order", sub:"Unloading managed by Shree Cement · standard flow", color:C.teal},
+        {id:"godown", icon:"🏭", label:"Godown Order", sub:"Unloading managed by cement company · standard flow", color:C.teal},
         {id:"party",  icon:"🤝", label:"Party Order",  sub:"Private party · GR + Invoice upload + email required", color:C.accent},
       ].map(o=>(
         <button key={o.id} onClick={()=>onSelect(o.id)} style={{
@@ -4534,7 +4547,7 @@ function PartyEmailModal({ trip, fromEmail, toEmail, onToEmailChange, onMarkSent
   const [opened,  setOpened]  = useState(false);
   const fmtD = d => { if(!d) return "—"; const [y,m,dy]=d.split("-"); return `${dy}-${m}-${y}`; };
 
-  const subject = `Delivery Confirmation Request — M Yantra Enterprises`;
+  const subject = `Delivery Confirmation Request — ${CLIENT_CONFIG.companyName}`;
 
   // Plain text — label: value format works reliably in all mail clients
   const body =
@@ -4542,7 +4555,7 @@ function PartyEmailModal({ trip, fromEmail, toEmail, onToEmailChange, onMarkSent
 
 Please confirm receipt of cement for the following consignment(s) by return mail.
 
-Transport Name    : M YANTRA ENTERPRISES
+Transport Name    : ${CLIENT_CONFIG.companyName.toUpperCase()}
 Shipment Date     : ${fmtD(trip.date)}
 Bill of Lading    : ${trip.lrNo||"—"}
 Delivery Number   : ${trip.diNo||"—"}
@@ -4556,8 +4569,8 @@ State             : ${trip.state||"—"}
 Kindly reply to this email confirming receipt at the earliest.
 
 Regards,
-M Yantra Enterprises
-9606477257`;
+${CLIENT_CONFIG.companyName}
+${CLIENT_CONFIG.phone}`;
 
   const openMail = () => {
     const mailto = `mailto:${localTo}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
@@ -4568,7 +4581,7 @@ M Yantra Enterprises
 
   // Styled table rows for in-app preview
   const previewRows = [
-    ["Transport Name",  "M YANTRA ENTERPRISES"],
+    ["Transport Name",  CLIENT_CONFIG.companyName.toUpperCase()],
     ["Shipment Date",   fmtD(trip.date)],
     ["Bill of Lading",  trip.lrNo||"—"],
     ["Delivery Number", trip.diNo||"—"],
@@ -4609,7 +4622,7 @@ M Yantra Enterprises
         ))}
         <div style={{color:C.muted,fontSize:12,marginTop:10,lineHeight:1.6}}>
           Kindly reply to this email confirming receipt at the earliest.<br/>
-          <br/>Regards,<br/><b style={{color:C.text}}>M Yantra Enterprises</b><br/>9606477257
+          <br/>Regards,<br/><b style={{color:C.text}}>{CLIENT_CONFIG.companyName}</b><br/>{CLIENT_CONFIG.phone}
         </div>
       </div>
 
@@ -4661,10 +4674,10 @@ function PartyBatchEmailSheet({ trips, setTrips, onClose, log }) {
   const selTrips = pending.filter(t => selected.has(t.id));
 
   // Build email body — one row per selected trip
-  const subject = "Delivery Confirmation Request — M Yantra Enterprises";
+  const subject = `Delivery Confirmation Request — ${CLIENT_CONFIG.companyName}`;
   const body = selTrips.length===0 ? "" :
     "Dear Sir,\n\nPlease confirm receipt of cement for the following consignment(s) by return mail.\n\n" +
-    "Transport Name    : M YANTRA ENTERPRISES\n" +
+    `Transport Name    : ${CLIENT_CONFIG.companyName.toUpperCase()}\n` +
     selTrips.map(t =>
       "--------------------------------------------------\n" +
       "Shipment Date     : "+fmtD(t.date)+"\n" +
@@ -4678,7 +4691,7 @@ function PartyBatchEmailSheet({ trips, setTrips, onClose, log }) {
       "State             : "+(t.state||"—")
     ).join("\n") +
     "\n--------------------------------------------------\n\n" +
-    "Kindly reply to this email confirming receipt at the earliest.\n\nRegards,\nM Yantra Enterprises\n9606477257";
+    `Kindly reply to this email confirming receipt at the earliest.\n\nRegards,\n${CLIENT_CONFIG.companyName}\n${CLIENT_CONFIG.phone}`;
 
   const openMail = () => {
     const mailto = "mailto:"+toEmail+"?subject="+encodeURIComponent(subject)+"&body="+encodeURIComponent(body);
@@ -4877,7 +4890,7 @@ function PartyBatchEmailSheet({ trips, setTrips, onClose, log }) {
           ))}
           <div style={{color:C.muted,fontSize:12,marginTop:6,lineHeight:1.6}}>
             Kindly reply confirming receipt.<br/>
-            <b style={{color:C.text}}>M Yantra Enterprises</b> · 9606477257
+            <b style={{color:C.text}}>{CLIENT_CONFIG.companyName}</b> · {CLIENT_CONFIG.phone}
           </div>
         </div>
 
@@ -5375,7 +5388,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
   const blankForm = (isParty=false) => ({
     type:tripType, lrNo:"", diNo:"", truckNo:"", grNo:"", dieselIndentNo:"",
     client: isIn ? DEFAULT_CLIENT : DEFAULT_CLIENT,
-    consignee: isIn ? "Shree Cement Ltd" : "",
+    consignee: isIn ? (CLIENT_CONFIG.defaultConsignee || "") : "",
     from: isIn ? "" : "Kodla", to: isIn ? "Kodla" : "",
     grade: isIn ? "Limestone" : "Cement Packed",
     qty:"", bags:"", frRate:"", givenRate:"",
@@ -5493,12 +5506,12 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       extracted.grNo||"",
       extracted.diNo||"",
     ].join(" ").toLowerCase();
-    if(haystack.includes("ultratech"))  return "Ultratech Malkhed";
-    if(haystack.includes("guntur"))     return "Shree Cement Guntur";
-    if(haystack.includes("malkhed"))    return "Ultratech Malkhed";
+    // Match client from DI text using configured detection rules
+    const rules = CLIENT_CONFIG.clientDetection || {};
+    for(const [kw, cl] of Object.entries(rules)) { if(haystack.includes(kw.toLowerCase())) return cl; }
     // Also check the "from" field specifically for plant location keywords
     const fromStr = (extracted.from||"").toLowerCase();
-    if(fromStr.includes("guntur"))      return "Shree Cement Guntur";
+    for(const [kw, cl] of Object.entries(CLIENT_CONFIG.clientDetection || {})) { if(fromStr.includes(kw.toLowerCase())) return cl; }
     return DEFAULT_CLIENT;
   };
 
@@ -6108,12 +6121,12 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                   const v = vehicles?.find(x=>x.truckNo===t.truckNo);
                   const diesel = t.dieselEstimate||0;
                   const net = (t.qty*(t.givenRate||0)) - (t.advance||0) - (t.tafal||0) - diesel;
-                  return "<tr><td>"+t.date+"</td><td>"+t.truckNo+"</td><td>"+(t.lrNo||"—")+"</td><td>"+(t.client||DEFAULT_CLIENT).replace("Shree Cement ","SC ").replace("Ultratech ","UT ")+"</td><td>"+(t.to||"—")+"</td><td>"+t.qty+"</td><td style='text-align:right'>"+fmt(t.qty*(t.frRate||0))+"</td><td style='text-align:right'>"+fmt(t.advance||0)+"</td><td style='text-align:right'>"+fmt(diesel)+"</td><td style='text-align:right'>"+fmt(net)+"</td><td>"+(t.status||"—")+"</td></tr>";
+                  return "<tr><td>"+t.date+"</td><td>"+t.truckNo+"</td><td>"+(t.lrNo||"—")+"</td><td>"+(t.client||DEFAULT_CLIENT)+"</td><td>"+(t.to||"—")+"</td><td>"+t.qty+"</td><td style='text-align:right'>"+fmt(t.qty*(t.frRate||0))+"</td><td style='text-align:right'>"+fmt(t.advance||0)+"</td><td style='text-align:right'>"+fmt(diesel)+"</td><td style='text-align:right'>"+fmt(net)+"</td><td>"+(t.status||"—")+"</td></tr>";
                 }).join("");
                 const totalFreight = shown.reduce((s,t)=>s+t.qty*(t.frRate||0),0);
                 const totalQty = shown.reduce((s,t)=>s+t.qty,0);
                 const html = "<html><head><style>body{font-family:Arial,sans-serif;font-size:12px;padding:16px}h2{color:#f97316;margin-bottom:4px}table{width:100%;border-collapse:collapse;margin-top:12px}th{background:#f97316;color:#fff;padding:6px 8px;text-align:left;font-size:11px}td{padding:5px 8px;border-bottom:1px solid #eee;font-size:11px}.summary{display:flex;gap:24px;margin:8px 0;font-size:13px;color:#555}.sv{font-weight:bold;color:#111}</style></head>"
-                  +"<body><h2>M. Yantra — Trip Report</h2>"
+                  +"<body><h2>${CLIENT_CONFIG.companyName} — Trip Report</h2>"
                   +"<div style='color:#888;font-size:12px'>Period: "+(dateFrom||"all")+" to "+(dateTo||"all")+" &nbsp;|&nbsp; Filter: "+filter+"</div>"
                   +"<div class='summary'><div>Trips: <span class='sv'>"+shown.length+"</span></div><div>Total Qty: <span class='sv'>"+totalQty+"MT</span></div><div>Total Freight: <span class='sv'>"+fmt(totalFreight)+"</span></div></div>"
                   +"<table><thead><tr><th>Date</th><th>Truck</th><th>LR</th><th>To</th><th>Qty(MT)</th><th>Freight</th><th>Advance</th><th>Diesel</th><th>Net</th><th>Status</th></tr></thead>"
@@ -6179,7 +6192,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                     border:`1.5px solid ${active?C.teal:C.border}`,
                     background:active?C.teal+"22":"none",
                     color:active?C.teal:C.muted}}>
-                  {c==="All"?"All":c.replace("Shree Cement ","SC·").replace("Ultratech ","UT·")} ({cnt})
+                  {c==="All"?"All":c} ({cnt})
                 </button>
               );
             })}
@@ -6293,8 +6306,8 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                         {t.orderType==="party" && <span style={{fontSize:10,color:C.accent,fontWeight:600}}>🤝</span>}
                         {(()=>{
                           const c=t.client||DEFAULT_CLIENT;
-                          const col=c.includes("Ultratech")?C.orange:c.includes("Guntur")?C.purple:C.blue;
-                          const lbl=c.replace("Shree Cement ","").replace("Ultratech ","UT·");
+                          const col=clientColor(c, C);
+                          const lbl=c;
                           return <span style={{fontSize:9,color:col,fontWeight:700,background:col+"18",borderRadius:8,padding:"1px 6px"}}>{lbl}</span>;
                         })()}
                       </div>
@@ -6320,7 +6333,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
                       <div style={{flex:1,minWidth:0}}>
                         <div style={{fontWeight:800,fontSize:15}}>{t.truckNo}
-                        <span style={{fontSize:11,fontWeight:400,color:(t.client||DEFAULT_CLIENT).includes("Ultratech")?C.orange:(t.client||DEFAULT_CLIENT).includes("Guntur")?C.purple:C.blue,marginLeft:8}}>
+                        <span style={{fontSize:11,fontWeight:400,color:clientColor(t.client||DEFAULT_CLIENT, C),marginLeft:8}}>
                           {(t.client||DEFAULT_CLIENT)}
                         </span>
                       </div>
@@ -6558,7 +6571,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         const contacts = (employees||[])
           .filter(e=>e.phone&&e.phone.trim())
           .map(e=>({name:e.name, phone:e.phone.replace(/\D/g,""), role:e.role||""}));
-        const msgText = "Dear {name},\n\nReminder: "+pending.length+" party trip"+(pending.length>1?"s are":"is")+" pending email confirmation at M Yantra Enterprises.\n\nPlease send the confirmation email at the earliest.\n\n- M Yantra System\n9606477257";
+        const msgText = "Dear {name},\n\nReminder: "+pending.length+" party trip"+(pending.length>1?"s are":"is")+" pending email confirmation at "+CLIENT_CONFIG.companyName+".\n\nPlease send the confirmation email at the earliest.\n\n- "+CLIENT_CONFIG.companyShort+" System\n"+CLIENT_CONFIG.phone";
         return (
           <Sheet title="📲 WhatsApp Reminder" onClose={()=>setWaSheet(false)}>
             <div style={{display:"flex",flexDirection:"column",gap:14}}>
@@ -10561,7 +10574,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
                   const indRows=filtI.map(i=>"<tr><td>"+i.date+"</td><td>"+i.truckNo+"</td><td>"+i.indentNo+"</td><td>"+(pumpMap[i.pumpId]||"—")+"</td><td>"+(tripMap[i.tripId]||"—")+"</td><td style='text-align:right'>"+fmt(i.amount)+"</td></tr>").join("");
                   const pmtRows=filtP.map(p=>"<tr><td>"+p.date+"</td><td colspan='3'>"+(pumpMap[p.pumpId]||"—")+" — "+p.utr+"</td><td>"+(p.note||"")+"</td><td style='text-align:right'>"+fmt(p.amount)+"</td></tr>").join("");
                   const html="<html><head><style>body{font-family:Arial,sans-serif;font-size:13px;padding:20px}h2{color:#f97316}table{width:100%;border-collapse:collapse;margin-bottom:20px}th{background:#f97316;color:#fff;padding:7px 10px;text-align:left}td{padding:6px 10px;border-bottom:1px solid #eee}.summary{display:flex;gap:30px;margin-bottom:16px;font-size:14px}.sum-lbl{color:#888}.sum-val{font-weight:bold}</style></head><body>"
-                    +"<h2>M. Yantra Enterprises — Diesel Statement</h2>"
+                    +"<h2>${CLIENT_CONFIG.companyName} — Diesel Statement</h2>"
                     +"<div style='color:#888;margin-bottom:12px'>Period: "+(filterFrom||"all")+" to "+(filterTo||"all")+"</div>"
                     +"<div class='summary'><div><span class='sum-lbl'>Total HSD </span><span class='sum-val'>"+fmt(totalI)+"</span></div><div><span class='sum-lbl'>Payments Made </span><span class='sum-val'>"+fmt(totalPmt)+"</span></div><div><span class='sum-lbl'>Balance </span><span class='sum-val'>"+fmt(totalI-totalPmt)+"</span></div></div>"
                     +"<h3>Indents ("+filtI.length+")</h3><table><thead><tr><th>Date</th><th>Truck</th><th>Indent No</th><th>Pump</th><th>LR</th><th>Amount</th></tr></thead><tbody>"+indRows+"</tbody></table>"
@@ -11169,7 +11182,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
                       +".kpi .label{font-size:9px;color:#888;text-transform:uppercase}.kpi .value{font-size:16px;font-weight:800;color:#f97316}"
                       +"@media print{body{margin:10px}th{background:#f97316!important;-webkit-print-color-adjust:exact!important}}"
                       +"</style></head><body>"
-                      +"<h2>M. Yantra Enterprises — Diesel Requests Report</h2>"
+                      +"<h2>${CLIENT_CONFIG.companyName} — Diesel Requests Report</h2>"
                       +"<h4>Period: "+(filterFrom||"all")+" to "+(filterTo||"all")+"</h4>"
                       +"<div class='summary'>"
                       +"<div class='kpi'><div class='label'>Requests</div><div class='value'>"+filtered.length+"</div></div>"
@@ -11179,7 +11192,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
                       +"</div>"
                       +"<table><thead><tr><th>Date</th><th>Indent</th><th>Truck</th><th>Pump</th><th>Diesel ₹</th><th>Cash ₹</th><th>Total ₹</th><th>Status</th><th>By</th></tr></thead>"
                       +"<tbody>"+rows+"</tbody></table>"
-                      +"<div style='margin-top:16px;font-size:9px;color:#999;border-top:1px solid #ddd;padding-top:6px'>M Yantra Enterprises · PAN: ABBFM6370M · GSTN: 29ABBFM6370M1ZR</div>"
+                      +"<div style='margin-top:16px;font-size:9px;color:#999;border-top:1px solid #ddd;padding-top:6px'>${CLIENT_CONFIG.companyName} · PAN: ${CLIENT_CONFIG.pan} · GSTN: 29${CLIENT_CONFIG.pan}1ZR</div>"
                       +"</body></html>";
                     const w=window.open("","_blank");
                     w.document.write(html);
@@ -12124,9 +12137,9 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
       @media print { * { -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; } }
     </style>
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;padding-bottom:8px;border-bottom:2px solid #1565c0">
-      <img src="${LOGO_SRC}" class="logo-img" alt="M Yantra" />
+      <img src="${LOGO_SRC}" class="logo-img" alt="${CLIENT_CONFIG.companyShort}" />
       <div>
-        <div style="font-size:7px;text-transform:uppercase;letter-spacing:2px;color:#1565c0;font-weight:700">M Yantra Enterprises</div>
+        <div style="font-size:7px;text-transform:uppercase;letter-spacing:2px;color:#1565c0;font-weight:700">${CLIENT_CONFIG.companyName}</div>
         <div style="font-size:20px;font-weight:800;line-height:1.2">Vehicle Report — ${v.truckNo}</div>
         <div style="font-size:10px;color:#888">Generated ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}${pdfFrom||pdfTo ? ` &nbsp;·&nbsp; Period: <b>${pdfFrom||"start"}</b> to <b>${pdfTo||"today"}</b>` : ""}</div>
       </div>
@@ -12179,7 +12192,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
       <tr><th>Balance Owed</th><td style="font-weight:800;color:#d97706">₹${fmt((v.shortageOwed||0)-vShortRecovPDF)}</td></tr>
     </table>
 
-    <div class="footer">M Yantra Enterprises · PAN: ABBFM6370M · GSTN: 29ABBFM6370M1ZR · Report generated ${new Date().toLocaleString("en-IN")}</div>`;
+    <div class="footer">${CLIENT_CONFIG.companyName} · PAN: ${CLIENT_CONFIG.pan} · GSTN: 29${CLIENT_CONFIG.pan}1ZR · Report generated ${new Date().toLocaleString("en-IN")}</div>`;
 
     const w = window.open("","_blank");
     w.document.write(`<!DOCTYPE html><html><head><title>${v.truckNo} — Vehicle Report</title></head><body onload="window.print()">${html}</body></html>`);
@@ -12333,9 +12346,9 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
       @media print{body{margin:12px}table{font-size:9px}th{background:#0d9488!important;-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}}
     </style>
     <div class="header">
-      ${logoSrc?`<img src="${logoSrc}" class="logo-img" alt="M Yantra"/>`:'<div class="logo-fallback"><span>MY</span></div>'}
+      ${logoSrc?`<img src="${logoSrc}" class="logo-img" alt="${CLIENT_CONFIG.companyShort}"/>`:'<div class="logo-fallback"><span>${CLIENT_CONFIG.companyShort}</span></div>'}
       <div>
-        <div style="font-size:8px;text-transform:uppercase;letter-spacing:2px;color:#0d9488;font-weight:700">M Yantra Enterprises</div>
+        <div style="font-size:8px;text-transform:uppercase;letter-spacing:2px;color:#0d9488;font-weight:700">${CLIENT_CONFIG.companyName}</div>
         <div style="font-size:18px;font-weight:800;line-height:1.2">Owner Report — ${selectedOwner}</div>
         <div style="font-size:10px;color:#888">Generated: ${new Date().toLocaleString("en-IN")} · Vehicles: ${ownerVehs.map(v=>v.truckNo).join(", ")}</div>
       </div>
@@ -12357,7 +12370,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
     ${allLoanTxns.length>0?'<h3>Loan Transactions ('+allLoanTxns.length+')</h3><table><colgroup><col style="width:14%"><col style="width:12%"><col style="width:16%"><col style="width:14%"><col style="width:12%"><col style="width:32%"></colgroup><thead><tr><th class="l">Date</th><th class="l">LR</th><th class="l">Vehicle</th><th class="r">Amount</th><th class="c">Type</th><th class="l">Notes</th></tr></thead><tbody>'+loanRows+'</tbody></table>':""}
     ${allShortTxns.length>0?'<h3>Shortage Transactions ('+allShortTxns.length+')</h3><table><colgroup><col style="width:14%"><col style="width:12%"><col style="width:16%"><col style="width:14%"><col style="width:12%"><col style="width:32%"></colgroup><thead><tr><th class="l">Date</th><th class="l">LR</th><th class="l">Vehicle</th><th class="r">Amount</th><th class="c">Type</th><th class="l">Notes</th></tr></thead><tbody>'+shortRows+'</tbody></table>':""}
     ${ownerPays.length>0?'<h3>Driver Payment History ('+ownerPays.length+')</h3><table><colgroup><col style="width:12%"><col style="width:12%"><col style="width:14%"><col style="width:12%"><col style="width:18%"><col style="width:32%"></colgroup><thead><tr><th class="l">Date</th><th class="l">LR</th><th class="l">Vehicle</th><th class="r">Amount</th><th class="l">Paid To</th><th class="l">UTR</th></tr></thead><tbody>'+payRows+'</tbody></table>':""}
-    <div class="footer">M Yantra Enterprises · PAN: ABBFM6370M · GSTN: 29ABBFM6370M1ZR</div>`;
+    <div class="footer">${CLIENT_CONFIG.companyName} · PAN: ${CLIENT_CONFIG.pan} · GSTN: 29${CLIENT_CONFIG.pan}1ZR</div>`;
 
     const w = window.open("","_blank");
     w.document.write('<!DOCTYPE html><html><head><title>Owner Report — '+selectedOwner+'</title></head><body onload="window.print()">'+html+'</body></html>');
@@ -13233,9 +13246,9 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                   @media print{*{-webkit-print-color-adjust:exact!important}}
                 </style></head><body>
                 <div class="header">
-                  <img src="${LOGO_SRC}" class="logo" alt="M Yantra"/>
+                  <img src="${LOGO_SRC}" class="logo" alt="${CLIENT_CONFIG.companyShort}"/>
                   <div>
-                    <div style="font-size:7px;text-transform:uppercase;letter-spacing:2px;color:#1565c0;font-weight:700">M Yantra Enterprises</div>
+                    <div style="font-size:7px;text-transform:uppercase;letter-spacing:2px;color:#1565c0;font-weight:700">${CLIENT_CONFIG.companyName}</div>
                     <div style="font-size:18px;font-weight:800">Loan Report — ${ownerNameL}</div>
                     <div style="font-size:10px;color:#888">Generated ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}</div>
                   </div>
@@ -13253,10 +13266,10 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                 w.document.close(); w.print();
               }} sm outline color={C.purple}>🏦 Loan Report</Btn>
               {v.driverPhone&&(
-                <Btn onClick={()=>window.open(`https://wa.me/91${v.driverPhone.replace(/\D/g,"")}?text=${encodeURIComponent(`Dear ${v.driverName||"Driver"}, this is M Yantra Enterprises. - 9606477257`)}`,`_blank`)} sm outline color={C.teal}>📲 Driver</Btn>
+                <Btn onClick={()=>window.open(`https://wa.me/91${v.driverPhone.replace(/\D/g,"")}?text=${encodeURIComponent(`Dear ${v.driverName||"Driver"}, this is ${CLIENT_CONFIG.companyName}. - ${CLIENT_CONFIG.phone}`)}`,`_blank`)} sm outline color={C.teal}>📲 Driver</Btn>
               )}
               {v.phone&&(
-                <Btn onClick={()=>window.open(`https://wa.me/91${v.phone.replace(/\D/g,"")}?text=${encodeURIComponent(`Dear ${v.ownerName}, loan balance ₹${fmt(bal)}. - M.Yantra 9606477257`)}`,`_blank`)} sm outline color={C.green}>📲 Owner</Btn>
+                <Btn onClick={()=>window.open(`https://wa.me/91${v.phone.replace(/\D/g,"")}?text=${encodeURIComponent(`Dear ${v.ownerName}, loan balance ₹${fmt(bal)}. - M.Yantra ${CLIENT_CONFIG.phone}`)}`,`_blank`)} sm outline color={C.green}>📲 Owner</Btn>
               )}
             </div>
           </div>
@@ -13513,7 +13526,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;padding-bottom:8px;border-bottom:2px solid #1565c0">
       ${logoSrc?`<img src="${logoSrc}" style="width:48px;height:48px;border-radius:8px;object-fit:cover" alt="MY"/>`:""}
       <div>
-        <div style="font-size:7px;text-transform:uppercase;letter-spacing:2px;color:#1565c0;font-weight:700">M Yantra Enterprises</div>
+        <div style="font-size:7px;text-transform:uppercase;letter-spacing:2px;color:#1565c0;font-weight:700">${CLIENT_CONFIG.companyName}</div>
         <div style="font-size:18px;font-weight:800">Employee Report - ${e.name}</div>
         <div style="font-size:10px;color:#888">Generated ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}</div>
       </div>
@@ -13590,9 +13603,9 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
       .total{text-align:right;font-weight:bold;font-size:14px;margin-top:12px}
     </style></head><body>
       <div class="header">
-        <img src="${LOGO_SRC}" class="logo" alt="M Yantra" />
+        <img src="${LOGO_SRC}" class="logo" alt="${CLIENT_CONFIG.companyShort}" />
         <div>
-          <h2>M. Yantra — Cash Wallet: ${emp.name}</h2>
+          <h2>${CLIENT_CONFIG.companyName} — Cash Wallet: ${emp.name}</h2>
         </div>
       </div>
       <div class="sub">Role: ${emp.role} | Period: ${wFrom||"All"} → ${wTo||"All"}</div>
@@ -14984,7 +14997,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
 
       {/* header + KPIs */}
       <div style={{background:C.card,borderBottom:`1px solid ${C.border}`,padding:"14px 16px"}}>
-        <div style={{fontSize:10,letterSpacing:3,color:C.muted,marginBottom:2}}>M YANTRA ENTERPRISES</div>
+        <div style={{fontSize:10,letterSpacing:3,color:C.muted,marginBottom:2}}>{CLIENT_CONFIG.companyName.toUpperCase()}</div>
         <div style={{fontSize:17,fontWeight:800,color:C.text,marginBottom:12}}>💰 Payments</div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8}}>
           {[
@@ -15021,8 +15034,8 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
       <div style={{padding:"10px 14px 0",display:"flex",flexDirection:"column",gap:6}}>
         <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
           <span style={{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:0.5}}>CLIENT</span>
-          {[{v:"", l:"All Clients"},...CLIENTS.map(c=>({v:c,l:c.replace("Shree Cement ","SC ").replace("Ultratech ","UT ")}))].map(({v,l})=>{
-            const col = v===""?C.muted:v.includes("Ultratech")?C.orange:v.includes("Guntur")?C.purple:C.blue;
+          {[{v:"", l:"All Clients"},...CLIENTS.map(c=>({v:c,l:c}))].map(({v,l})=>{
+            const col = v===""?C.muted:clientColor(v, C);
             const cnt = v===""?(trips||[]).filter(t=>t.billedToShree).length:(trips||[]).filter(t=>(t.client||DEFAULT_CLIENT)===v&&t.billedToShree).length;
             const active = payClient===v;
             return (
@@ -15274,7 +15287,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                                 style={{width:"100%",background:C.bg,border:`1px solid ${scanClient?C.teal:C.orange}`,borderRadius:6,
                                   color:C.text,padding:"6px 8px",fontSize:12,outline:"none"}}>
                                 <option value="">— Select Client —</option>
-                                {CLIENTS.map(c=><option key={c} value={c}>{c.replace("Shree Cement ","SC ").replace("Ultratech ","UT ")}</option>)}
+                                {CLIENTS.map(c=><option key={c} value={c}>{c}</option>)}
                               </select>
                             </div>
                             <div style={{flex:1}}>
@@ -15604,9 +15617,9 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   @media print{*{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}}
                   </style></head><body onload="window.print()">
                   <div style="display:flex;align-items:center;border-bottom:2px solid #1565c0;padding-bottom:8px;margin-bottom:12px">
-                    <div class="logo"><span>MY</span></div>
+                    <div class="logo"><span>${CLIENT_CONFIG.companyShort}</span></div>
                     <div><div style="font-size:18px;font-weight:800">Invoice Report</div>
-                    <div style="font-size:10px;color:#888">M Yantra Enterprises${invFrom||invTo?` · ${invFrom||"start"} to ${invTo||"today"}`:""}  · Generated ${new Date().toLocaleDateString("en-IN")}</div></div>
+                    <div style="font-size:10px;color:#888">${CLIENT_CONFIG.companyName}${invFrom||invTo?` · ${invFrom||"start"} to ${invTo||"today"}`:""}  · Generated ${new Date().toLocaleDateString("en-IN")}</div></div>
                   </div>
                   <table><thead><tr><th>Invoice No</th><th>Date</th><th>Trips</th><th>Amount</th><th>Status</th></tr></thead>
                   <tbody>${rows}</tbody>
@@ -15783,9 +15796,9 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   @media print{*{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}}
                   </style></head><body onload="window.print()">
                   <div style="display:flex;align-items:center;border-bottom:2px solid #1565c0;padding-bottom:8px;margin-bottom:12px">
-                    <div class="logo"><span>MY</span></div>
+                    <div class="logo"><span>${CLIENT_CONFIG.companyShort}</span></div>
                     <div><div style="font-size:18px;font-weight:800">Payment Advice Report</div>
-                    <div style="font-size:10px;color:#888">M Yantra Enterprises${advFrom||advTo?` · ${advFrom||"start"} to ${advTo||"today"}`:""}  · Generated ${new Date().toLocaleDateString("en-IN")}</div></div>
+                    <div style="font-size:10px;color:#888">${CLIENT_CONFIG.companyName}${advFrom||advTo?` · ${advFrom||"start"} to ${advTo||"today"}`:""}  · Generated ${new Date().toLocaleDateString("en-IN")}</div></div>
                   </div>
                   <table><thead><tr><th>UTR / Reference</th><th>Date</th><th>Invoices</th><th>Billed</th><th>TDS</th><th>Hold</th><th>Net Paid</th></tr></thead>
                   <tbody>${rows}</tbody>
@@ -17423,7 +17436,7 @@ This will auto-recover in the next trip.`);
   <button class="print-btn" onclick="window.print()">🖨 Print / Save as PDF</button>
   <div class="header">
     <div style="display:flex;align-items:center;gap:14px;margin-bottom:8px">
-      <img src="${LOGO_SRC}" alt="M Yantra" style="width:54px;height:54px;border-radius:50%;object-fit:cover;border:2px solid #f97316"/>
+      <img src="${LOGO_SRC}" alt="${CLIENT_CONFIG.companyShort}" style="width:54px;height:54px;border-radius:50%;object-fit:cover;border:2px solid #f97316"/>
       <div>
         <h1 style="margin:0 0 2px">Driver Payment Statement</h1>
         <div class="meta" style="font-weight:700;font-size:13px;color:#333">M. YANTRA ENTERPRISES</div>
@@ -18830,10 +18843,10 @@ function Reports({trips, vehicles, employees, payments, settlements, indents, us
                     @media print{*{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}}
                     </style></head><body onload="window.print()">
                     <div style="display:flex;align-items:center;border-bottom:2px solid #1565c0;padding-bottom:8px;margin-bottom:16px">
-                      <div class="logo"><span>MY</span></div>
+                      <div class="logo"><span>${CLIENT_CONFIG.companyShort}</span></div>
                       <div>
                         <div style="font-size:18px;font-weight:800">Destination-wise Tonnage Summary</div>
-                        <div style="font-size:10px;color:#888">M Yantra Enterprises · Period: ${df} to ${dt} · Generated ${new Date().toLocaleDateString("en-IN")}</div>
+                        <div style="font-size:10px;color:#888">${CLIENT_CONFIG.companyName} · Period: ${df} to ${dt} · Generated ${new Date().toLocaleDateString("en-IN")}</div>
                       </div>
                     </div>
                     <table><thead><tr><th>Destination</th><th style="text-align:right">Total MT</th><th style="text-align:right">Trips</th></tr></thead>
@@ -18866,8 +18879,8 @@ function Reminders({trips, vehicles, employees}) {
   const contacts=[...vehicles.map(v=>({name:v.ownerName,phone:v.phone,type:"Vehicle",ref:v.truckNo,bal:v.loan-v.loanRecovered})),...employees.map(e=>({name:e.name,phone:e.phone,type:"Employee",ref:e.role,bal:e.loan-e.loanRecovered}))];
   const due=contacts.filter(c=>c.bal>0);
   const T=[
-    {l:"Loan Reminder",  c:C.red,   m:c=>`Dear ${c.name}, your loan balance is ${fmt(c.bal)}. Kindly repay. - M.Yantra 9606477257`},
-    {l:"New Trips",      c:C.green, m:c=>`Dear ${c.name}, new trips available from Kodla. Call: 9606477257. - M.Yantra`},
+    {l:"Loan Reminder",  c:C.red,   m:c=>`Dear ${c.name}, your loan balance is ${fmt(c.bal)}. Kindly repay. - M.Yantra ${CLIENT_CONFIG.phone}`},
+    {l:"New Trips",      c:C.green, m:c=>`Dear ${c.name}, new trips available from Kodla. Call: ${CLIENT_CONFIG.phone}. - M.Yantra`},
     {l:"LR Pouch Return",c:C.purple,m:c=>`Dear ${c.name}, please return Lorry Pouch for ${c.ref} within 15 days. - M.Yantra`},
     {l:"Settlement Ready",c:C.blue, m:c=>`Dear ${c.name}, your payment is ready. Visit office. - M.Yantra`},
   ];
@@ -19008,7 +19021,7 @@ function UserAdmin({users, setUsers, user, log, pumps=[]}) {
                 {(u.assignedClients||[]).length>0&&(
                   <div style={{marginTop:4,display:"flex",gap:4,flexWrap:"wrap"}}>
                     {(u.assignedClients||[]).map(c=>(
-                      <Badge key={c} label={c.replace("Shree Cement ","SC ").replace("Ultratech ","UT ")} color={C.teal} />
+                      <Badge key={c} label={c} color={C.teal} />
                     ))}
                   </div>
                 )}
