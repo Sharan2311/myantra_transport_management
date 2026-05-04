@@ -13452,9 +13452,11 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
     const fmtAmt  = n => "&#8377;" + Number(n||0).toLocaleString("en-IN",{maximumFractionDigits:2});
     const loanTxns = (e.loanTxns||[]).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
     const salTxns  = ((cashTransfers||[]).filter(t=>t.empId===e.id&&t.type==="salary")).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+    const tafalTxns= ((cashTransfers||[]).filter(t=>t.empId===e.id&&t.type==="tafal")).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
     const walTxns  = ((cashTransfers||[]).filter(t=>t.empId===e.id&&t.type!=="salary"&&t.type!=="tafal")).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
     const loanBal  = (e.loan||0)-(e.loanRecovered||0);
     const totalSal = salTxns.reduce((s,t)=>s+Number(t.amount||0),0);
+    const totalTaf = tafalTxns.reduce((s,t)=>s+Number(t.amount||0),0);
     const walBal   = walTxns.filter(t=>t.amount>0).reduce((s,t)=>s+t.amount,0) - Math.abs(walTxns.filter(t=>t.amount<0).reduce((s,t)=>s+t.amount,0));
     const logoSrc  = (typeof LOGO_SRC !== "undefined" && LOGO_SRC) ? LOGO_SRC : "";
     const htmlContent = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Employee Report - ${e.name}</title><style>
@@ -13480,12 +13482,15 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
       <div class="kpi"><div class="kv" style="color:#15803d">${fmtAmt(e.loanRecovered||0)}</div><div class="kl">LOAN RECOVERED</div></div>
       <div class="kpi"><div class="kv" style="color:${loanBal>0?"#dc2626":"#15803d"}">${fmtAmt(loanBal)}</div><div class="kl">LOAN BALANCE</div></div>
       <div class="kpi"><div class="kv" style="color:#1565c0">${fmtAmt(totalSal)}</div><div class="kl">TOTAL SALARY PAID</div></div>
+      <div class="kpi"><div class="kv" style="color:#7c3aed">${fmtAmt(totalTaf)}</div><div class="kl">TOTAL TAFAL PAID</div></div>
       <div class="kpi"><div class="kv" style="color:#7c3aed">${fmtAmt(walBal)}</div><div class="kl">WALLET BALANCE</div></div>
     </div>
     <h2>Loan History (${loanTxns.length})</h2>
     ${loanTxns.length===0?"<p style='color:#999;font-style:italic'>No loan transactions.</p>":`<table><tr><th>Date</th><th>Type</th><th>Amount</th><th>Reference</th><th>Note</th></tr>${loanTxns.map(t=>`<tr style="background:${t.type==="given"?"#fef2f2":"#f0fdf4"}"><td>${fmtDate(t.date)}</td><td>${t.type==="given"?"Given":"Recovery"}</td><td>${fmtAmt(t.amount||0)}</td><td>${t.ref||"—"}</td><td>${t.note||"—"}</td></tr>`).join("")}</table>`}
     <h2>Salary History (${salTxns.length})</h2>
     ${salTxns.length===0?"<p style='color:#999;font-style:italic'>No salary payments recorded.</p>":`<table><tr><th>Date</th><th>Amount</th><th>Note</th><th>Reference</th></tr>${salTxns.map(t=>`<tr style="background:#eff6ff"><td>${fmtDate(t.date)}</td><td>${fmtAmt(t.amount||0)}</td><td>${t.note||"—"}</td><td>${t.ref||"—"}</td></tr>`).join("")}</table>`}
+    <h2 style="color:#7c3aed">TAFAL History (${tafalTxns.length})</h2>
+    ${tafalTxns.length===0?"<p style='color:#999;font-style:italic'>No TAFAL payments recorded.</p>":`<table><tr><th>Date</th><th>Amount</th><th>For Month</th><th>Note</th><th>Reference</th></tr>${tafalTxns.map(t=>`<tr style="background:#f5f3ff"><td>${fmtDate(t.date)}</td><td>${fmtAmt(t.amount||0)}</td><td>${t.forMonth?new Date(t.forMonth+"-01").toLocaleDateString("en-IN",{month:"long",year:"numeric"}):"—"}</td><td>${t.note||"—"}</td><td>${t.ref||"—"}</td></tr>`).join("")}</table>`}
     <h2>Wallet History (${walTxns.length})</h2>
     ${walTxns.length===0?"<p style='color:#999;font-style:italic'>No wallet transactions.</p>":`<table><tr><th>Date</th><th>Amount</th><th>Type</th><th>Note</th></tr>${walTxns.map(t=>`<tr><td>${fmtDate(t.date)}</td><td>${fmtAmt(Math.abs(t.amount||0))}${t.amount<0?" (advance)":""}</td><td>${t.type||"transfer"}</td><td>${t.note||"—"}</td></tr>`).join("")}</table>`}
     <script>window.onload=function(){window.print();}</script>
