@@ -9338,7 +9338,7 @@ function PartyPortal({trips, setTrips, employees, user, log}) {
   const pendingTrips   = partyTrips.filter(t=>!t.emailSentAt&&!t.sealedInvoicePath&&t.status!=="Billed"&&t.status!=="Yet to Bill");
   const yetToBillTrips = partyTrips.filter(t=>(t.emailSentAt||t.sealedInvoicePath)&&t.status!=="Billed");
 
-  const visiblePending    = isPartyMgr ? pendingTrips   : pendingTrips.filter(t=>!t.confirmFollowupUserId||t.confirmFollowupUserId===userId);
+  const visiblePending    = isPartyMgr ? pendingTrips   : pendingTrips.filter(t=>t.confirmFollowupUserId===userId);
   const visibleYetToBill  = isPartyMgr ? yetToBillTrips : yetToBillTrips.filter(t=>t.confirmFollowupUserId===userId);
 
   const currentList = activeTab==="pending" ? visiblePending : visibleYetToBill;
@@ -9505,7 +9505,13 @@ function PartyPortal({trips, setTrips, employees, user, log}) {
       )}
 
       {activeList.length===0
-        ?<div style={{textAlign:"center",color:C.muted,padding:40,fontSize:14}}>{activeTab==="pending"?"✅ No pending party trips":"📭 No trips waiting to be billed"}</div>
+        ?<div style={{textAlign:"center",color:C.muted,padding:40}}>
+            <div style={{fontSize:32,marginBottom:10}}>{activeTab==="pending"?"📭":"✅"}</div>
+            <div style={{fontSize:14,fontWeight:600,color:C.text,marginBottom:6}}>
+              {activeTab==="pending"?"No trips assigned to you yet":"No trips waiting to be billed"}
+            </div>
+            {!isPartyMgr&&activeTab==="pending"&&<div style={{fontSize:12,color:C.muted}}>The Party Manager will assign trips to you for followup.</div>}
+          </div>
         :<div style={{display:"flex",flexDirection:"column",gap:8}}>{activeList.map(t=><TripCard key={t.id} t={t}/>)}</div>
       }
     </div>
