@@ -9318,6 +9318,49 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance: tripWithBalancePr
 }
 
 // ─── DIESEL MODULE ────────────────────────────────────────────────────────────
+function PartyTripCard({t, selected, toggle, isOwner, isPartyMgr, employees, openFile, undoEmailSent, undoAssign}) {
+    const isSel=selected.has(t.id);
+    const amt=(t.qty||0)*(t.frRate||0);
+    const empName = (()=>{
+      const id=t.confirmFollowupUserId; if(!id) return null;
+      const e=(employees||[]).find(x=>(x.username||x.id)===id); return e?.name||id;
+    })();
+    return(
+      <div onClick={()=>toggle(t.id)} style={{background:isSel?C.accent+"11":C.card,borderRadius:10,
+        padding:"12px 14px",cursor:"pointer",border:`1.5px solid ${isSel?C.accent:C.border}`,transition:"all 0.12s"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+          <div style={{width:18,height:18,borderRadius:4,flexShrink:0,marginTop:2,
+            background:isSel?C.accent:"transparent",border:`2px solid ${isSel?C.accent:C.muted}`,
+            display:"flex",alignItems:"center",justifyContent:"center"}}>
+            {isSel&&<span style={{color:"#fff",fontSize:10,fontWeight:800}}>✓</span>}
+          </div>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontWeight:700,fontSize:13,display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+              <span>{t.truckNo}</span>
+              <span style={{color:C.muted,fontWeight:400,fontSize:11}}>· {t.lrNo}</span>
+              {empName&&<span style={{fontSize:10,color:"#7c3aed",background:"#7c3aed11",borderRadius:4,padding:"1px 6px"}}>👤 {empName}</span>}
+            </div>
+            <div style={{color:C.muted,fontSize:11,marginTop:2}}>{t.to||"—"} · {t.date} · {t.qty}MT</div>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:4}}>
+              {t.emailSentAt&&<span style={{fontSize:10,color:C.blue,background:C.blue+"11",borderRadius:4,padding:"1px 6px"}}>📧 {t.emailSentAt.slice(0,10)}</span>}
+              {t.sealedInvoicePath&&<span onClick={e=>openFile(t.sealedInvoicePath,e)} style={{fontSize:10,color:C.orange,background:C.orange+"11",borderRadius:4,padding:"1px 6px",cursor:"pointer"}}>🏷️ Sealed ↗</span>}
+              {t.confirmPdfPath&&<span onClick={e=>openFile(t.confirmPdfPath,e)} style={{fontSize:10,color:C.teal,background:C.teal+"11",borderRadius:4,padding:"1px 6px",cursor:"pointer"}}>📄 Confirm PDF ↗</span>}
+            </div>
+          </div>
+          <div style={{textAlign:"right",flexShrink:0}}>
+            <div style={{fontWeight:800,color:C.accent,fontSize:13}}>₹{amt.toLocaleString("en-IN")}</div>
+            {isOwner&&(
+              <div style={{display:"flex",gap:4,justifyContent:"flex-end",marginTop:4,flexWrap:"wrap"}}>
+                {t.emailSentAt&&<button onClick={e=>{e.stopPropagation();undoEmailSent(t);}} style={{fontSize:9,color:C.red,background:"none",border:`1px solid ${C.red}44`,borderRadius:4,padding:"2px 5px",cursor:"pointer"}}>↩ Undo Email</button>}
+                {t.confirmFollowupUserId&&<button onClick={e=>{e.stopPropagation();undoAssign(t);}} style={{fontSize:9,color:C.orange,background:"none",border:`1px solid ${C.orange}44`,borderRadius:4,padding:"2px 5px",cursor:"pointer"}}>↩ Unassign</button>}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+}
+
 // ─── PARTY PORTAL ─────────────────────────────────────────────────────────────
 function PartyPortal({trips, setTrips, employees, user, log}) {
   const [activeTab,    setActiveTab]   = useState("pending");
@@ -9362,14 +9405,21 @@ function PartyPortal({trips, setTrips, employees, user, log}) {
 
   const markEmailSent = () => {
     if(!selected.size){alert("Select at least one trip");return;}
-    const ts=new Date().toISOString();
+    const ts = new Date().toISOString();
+    const updatedTrips = [];
     setTrips(prev=>prev.map(t=>{
-      if(!selected.has(t.id))return t;
-      const u={...t,emailSentAt:ts,status:"Yet to Bill",confirmFollowupUserId:assignTo||t.confirmFollowupUserId||""};
-      saveT(u);return u;
+      if(!selected.has(t.id)) return t;
+      const u={...t, emailSentAt:ts, status:"Yet to Bill",
+        confirmFollowupUserId:assignTo||t.confirmFollowupUserId||""};
+      updatedTrips.push(u);
+      return u;
     }));
+    // Save to DB AFTER state update, outside the updater
+    setTimeout(()=>{
+      updatedTrips.forEach(u=>DB.saveTrip(u).catch(e=>console.error("saveTrip party:",e)));
+    }, 0);
     log&&log("PARTY EMAIL SENT",`${selected.size} trips`);
-    setSelected(new Set());setAssignTo("");setShowAssign(false);
+    setSelected(new Set()); setAssignTo(""); setShowAssign(false);
   };
 
   const uploadConfirmPdf = async(file) => {
@@ -9381,11 +9431,13 @@ function PartyPortal({trips, setTrips, employees, user, log}) {
       if(error)throw error;
       const {data:{publicUrl}}=supabase.storage.from("trip-files").getPublicUrl(path);
       const ts=new Date().toISOString();
+      const pdfUpdated=[];
       setTrips(prev=>prev.map(t=>{
         if(!selected.has(t.id))return t;
         const u={...t,emailSentAt:t.emailSentAt||ts,confirmPdfPath:publicUrl,status:"Yet to Bill"};
-        saveT(u);return u;
+        pdfUpdated.push(u); return u;
       }));
+      setTimeout(()=>pdfUpdated.forEach(u=>DB.saveTrip(u).catch(e=>console.error("saveTrip confirm pdf:",e))),0);
       log&&log("CONFIRM PDF",`${selected.size} trips`);setSelected(new Set());
     }catch(e){alert("Upload failed: "+e.message);}
     finally{setPdfUploading(false);}
@@ -9394,52 +9446,17 @@ function PartyPortal({trips, setTrips, employees, user, log}) {
   const undoEmailSent=(t)=>{
     if(!window.confirm(`Undo email sent for ${t.lrNo}?`))return;
     const u={...t,emailSentAt:"",status:"Pending Bill",confirmFollowupUserId:"",confirmPdfPath:""};
-    setTrips(prev=>prev.map(x=>x.id===t.id?u:x));saveT(u);log&&log("UNDO EMAIL SENT",t.lrNo);
+    setTrips(prev=>prev.map(x=>x.id===t.id?u:x));
+    setTimeout(()=>DB.saveTrip(u).catch(e=>console.error("undo email:",e)),0);
+    log&&log("UNDO EMAIL SENT",t.lrNo);
   };
   const undoAssign=(t)=>{
     const u={...t,confirmFollowupUserId:""};
-    setTrips(prev=>prev.map(x=>x.id===t.id?u:x));saveT(u);
+    setTrips(prev=>prev.map(x=>x.id===t.id?u:x));
+    setTimeout(()=>DB.saveTrip(u).catch(e=>console.error("undo assign:",e)),0);
   };
 
-  const TripCard=({t})=>{
-    const isSel=selected.has(t.id);
-    const amt=(t.qty||0)*(t.frRate||0);
-    const empName=getEmpName(t.confirmFollowupUserId);
-    return(
-      <div onClick={()=>toggle(t.id)} style={{background:isSel?C.accent+"11":C.card,borderRadius:10,
-        padding:"12px 14px",cursor:"pointer",border:`1.5px solid ${isSel?C.accent:C.border}`,transition:"all 0.12s"}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
-          <div style={{width:18,height:18,borderRadius:4,flexShrink:0,marginTop:2,
-            background:isSel?C.accent:"transparent",border:`2px solid ${isSel?C.accent:C.muted}`,
-            display:"flex",alignItems:"center",justifyContent:"center"}}>
-            {isSel&&<span style={{color:"#fff",fontSize:10,fontWeight:800}}>✓</span>}
-          </div>
-          <div style={{flex:1,minWidth:0}}>
-            <div style={{fontWeight:700,fontSize:13,display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
-              <span>{t.truckNo}</span>
-              <span style={{color:C.muted,fontWeight:400,fontSize:11}}>· {t.lrNo}</span>
-              {empName&&<span style={{fontSize:10,color:"#7c3aed",background:"#7c3aed11",borderRadius:4,padding:"1px 6px"}}>👤 {empName}</span>}
-            </div>
-            <div style={{color:C.muted,fontSize:11,marginTop:2}}>{t.to||"—"} · {t.date} · {t.qty}MT</div>
-            <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:4}}>
-              {t.emailSentAt&&<span style={{fontSize:10,color:C.blue,background:C.blue+"11",borderRadius:4,padding:"1px 6px"}}>📧 {t.emailSentAt.slice(0,10)}</span>}
-              {t.sealedInvoicePath&&<span onClick={e=>openFile(t.sealedInvoicePath,e)} style={{fontSize:10,color:C.orange,background:C.orange+"11",borderRadius:4,padding:"1px 6px",cursor:"pointer"}}>🏷️ Sealed ↗</span>}
-              {t.confirmPdfPath&&<span onClick={e=>openFile(t.confirmPdfPath,e)} style={{fontSize:10,color:C.teal,background:C.teal+"11",borderRadius:4,padding:"1px 6px",cursor:"pointer"}}>📄 Confirm PDF ↗</span>}
-            </div>
-          </div>
-          <div style={{textAlign:"right",flexShrink:0}}>
-            <div style={{fontWeight:800,color:C.accent,fontSize:13}}>₹{amt.toLocaleString("en-IN")}</div>
-            {isOwner&&(
-              <div style={{display:"flex",gap:4,justifyContent:"flex-end",marginTop:4,flexWrap:"wrap"}}>
-                {t.emailSentAt&&<button onClick={e=>{e.stopPropagation();undoEmailSent(t);}} style={{fontSize:9,color:C.red,background:"none",border:`1px solid ${C.red}44`,borderRadius:4,padding:"2px 5px",cursor:"pointer"}}>↩ Undo Email</button>}
-                {t.confirmFollowupUserId&&<button onClick={e=>{e.stopPropagation();undoAssign(t);}} style={{fontSize:9,color:C.orange,background:"none",border:`1px solid ${C.orange}44`,borderRadius:4,padding:"2px 5px",cursor:"pointer"}}>↩ Unassign</button>}
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    );
-  };
+  const cardProps = {selected, toggle, isOwner, isPartyMgr, employees, openFile, undoEmailSent, undoAssign};
 
   return(
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
@@ -9512,7 +9529,7 @@ function PartyPortal({trips, setTrips, employees, user, log}) {
             </div>
             {!isPartyMgr&&activeTab==="pending"&&<div style={{fontSize:12,color:C.muted}}>The Party Manager will assign trips to you for followup.</div>}
           </div>
-        :<div style={{display:"flex",flexDirection:"column",gap:8}}>{activeList.map(t=><TripCard key={t.id} t={t}/>)}</div>
+        :<div style={{display:"flex",flexDirection:"column",gap:8}}>{activeList.map(t=><PartyTripCard key={t.id} t={t} {...cardProps}/>)}</div>
       }
     </div>
   );
