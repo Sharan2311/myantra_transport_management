@@ -1527,6 +1527,7 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   const tafalPool   = displayTrips.reduce((s,t) => s+(t.tafal||0), 0);
   // Only reduce pool for TAFAL payments where forMonth falls within this FY
   // Old TAFAL txns without forMonth (paid before system tracked month) are excluded
+  const fyRange     = getFYRange(selectedFY);
   const fyMonthFrom = fyRange.from.slice(0,7); // e.g. "2025-04"
   const fyMonthTo   = fyRange.to.slice(0,7);   // e.g. "2026-03"
   const tafalPaid   = (cashTransfers||[]).filter(t=>t.type==="tafal" && t.forMonth && t.forMonth>=fyMonthFrom && t.forMonth<=fyMonthTo).reduce((s,t)=>s+Number(t.amount||0),0);
