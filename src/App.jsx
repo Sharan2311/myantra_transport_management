@@ -13430,6 +13430,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
   const [f,setF] = useState(blank);
   const ff = k => v => setF(p=>({...p,[k]:v}));
   const isOwner = user?.role==="owner";
+  const fmtD = d => { if(!d) return "—"; try { const [y,m,dy]=d.split("-"); return `${dy}-${m}-${y}`; } catch { return d; } };
 
   // ── Wallet calculations ──────────────────────────────────────────────────────
   const empTx = empId => (cashTransfers||[]).filter(t=>t.empId===empId);
