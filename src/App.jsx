@@ -1525,6 +1525,8 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   const totalDieselPaid = (pumpPayments||[]).reduce((s,p) => s+(+(p.amount)||0), 0);
   const unpaidDiesel = Math.max(0, totalDieselOwed - totalDieselPaid);
   const tafalPool   = displayTrips.reduce((s,t) => s+(t.tafal||0), 0);
+  const tafalPaid   = (cashTransfers||[]).filter(t=>t.type==="tafal").reduce((s,t)=>s+Number(t.amount||0),0);
+  const tafalBalance= Math.max(0, tafalPool - tafalPaid);
   // Vehicle loans — filter by client's trucks if client selected
   const clientTrucks = selectedClient ? new Set(displayTrips.map(t=>t.truckNo)) : null;
   const loanVehicles = clientTrucks ? vehicles.filter(v=>clientTrucks.has(v.truckNo)) : vehicles;
@@ -2017,7 +2019,7 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
       {/* KPI grid — fleet_manager sees only total trips + tafal pool */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
         <KPI icon="🚚" label="Total Trips"     value={displayTrips.filter(t=>t.type==="outbound").length} color={C.blue} sub={[selectedClient,fyLabel].filter(Boolean).join(" · ")||"cement trips"} />
-        <KPI icon="🤝" label="TAFAL Pool"      value={fmt(tafalPool)}   color={C.purple} sub={`₹${settings?.tafalPerTrip||300}/trip`} />
+        <KPI icon="🤝" label="TAFAL Pool" value={fmt(tafalBalance)} color={C.purple} sub={`₹${tafalPaid?fmt(tafalPaid)+" paid · ":""} Pool: ${fmt(tafalPool)}`} />
         {user.role!=="fleet_manager" && <>
           <KPI icon="📈" label="Total Margin"  value={fmt(margin)}      color={C.green} sub={[selectedClient,fyLabel].filter(Boolean).join(" · ")||"all time"} />
           <KPI icon="🔴" label="Vehicle Loans" value={fmt(vLoan)}       color={C.red} />
@@ -13397,15 +13399,25 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
 }
 
 // ─── EMPLOYEES ────────────────────────────────────────────────────────────────
-function Employees({employees, setEmployees, trips, cashTransfers, setCashTransfers, user, log}) {
+function Employees({employees, setEmployees, trips, cashTransfers, setCashTransfers, setExpenses, user, log}) {
   const [sheet,  setSheet]  = useState(false);
   const [lSheet, setLSheet] = useState(null);
   const [wSheet, setWSheet] = useState(null);
+  const [salSheet, setSalSheet] = useState(null); // salary sheet
   const [lAmt,   setLAmt]   = useState("");
+  const [lDate,  setLDate]  = useState(today());
+  const [lRef,   setLRef]   = useState("");
   const [rAmt,   setRAmt]   = useState("");
+  const [rDate,  setRDate]  = useState(today());
+  const [rRef,   setRRef]   = useState("");
+  const [salAmt, setSalAmt] = useState("");
+  const [salDate,setSalDate]= useState(today());
+  const [salRef, setSalRef] = useState("");
+  const [salNote,setSalNote]= useState("");
   const [txAmt,  setTxAmt]  = useState("");
   const [txDate, setTxDate] = useState(today());
   const [txNote, setTxNote] = useState("");
+  const [txType, setTxType] = useState("transfer");
   const [empSearch, setEmpSearch] = useState("");
   const [empMonth,  setEmpMonth]  = useState(today().slice(0,7)); // default current month
   // wallet PDF date filter
@@ -13424,7 +13436,52 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
 
   const txHistory = empId => empTx(empId).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
 
-  const deleteTx = async (txId) => {
+  const generateEmpPDF = (e) => {
+    const loanTxns = (e.loanTxns||[]).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+    const salTxns  = ((cashTransfers||[]).filter(t=>t.empId===e.id&&t.type==="salary")).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+    const walTxns  = ((cashTransfers||[]).filter(t=>t.empId===e.id&&t.type!=="salary")).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+    const loanBal  = (e.loan||0)-(e.loanRecovered||0);
+    const totalSal = salTxns.reduce((s,t)=>s+Number(t.amount||0),0);
+    const walBal   = walTxns.filter(t=>t.amount>0).reduce((s,t)=>s+t.amount,0) - Math.abs(walTxns.filter(t=>t.amount<0).reduce((s,t)=>s+t.amount,0));
+    const w = window.open("","_blank");
+    if(!w){alert("Allow popups");return;}
+    const row = (cells,bg="transparent") => `<tr style="background:${bg}">${cells.map(c=>`<td style="padding:5px 8px;border-bottom:1px solid #eee;font-size:11px">${c}</td>`).join("")}</tr>`;
+    w.document.write(`<html><head><title>Employee Report — ${e.name}</title><style>
+      body{font-family:Arial,sans-serif;margin:20px;font-size:11px}
+      table{width:100%;border-collapse:collapse;margin-bottom:16px}
+      th{background:#1565c0;color:#fff;padding:5px 8px;font-size:10px;text-align:left}
+      .kpi{display:inline-block;border:1px solid #ddd;border-radius:6px;padding:8px 14px;margin:4px;text-align:center;min-width:110px}
+      .kv{font-size:15px;font-weight:800}.kl{font-size:9px;color:#888;margin-top:2px}
+      h2{font-size:13px;margin:16px 0 6px;border-bottom:2px solid #eee;padding-bottom:4px;color:#1565c0}
+      @media print{*{-webkit-print-color-adjust:exact!important}}
+    </style></head><body>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;padding-bottom:8px;border-bottom:2px solid #1565c0">
+      <img src="${LOGO_SRC}" style="width:48px;height:48px;border-radius:8px;object-fit:cover" alt="MY"/>
+      <div>
+        <div style="font-size:7px;text-transform:uppercase;letter-spacing:2px;color:#1565c0;font-weight:700">M Yantra Enterprises</div>
+        <div style="font-size:18px;font-weight:800">Employee Report — ${e.name}</div>
+        <div style="font-size:10px;color:#888">Generated ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}</div>
+      </div>
+    </div>
+    <div>
+      <div class="kpi"><div class="kv" style="color:#dc2626">₹${fmt(e.loan||0)}</div><div class="kl">LOAN GIVEN</div></div>
+      <div class="kpi"><div class="kv" style="color:#15803d">₹${fmt(e.loanRecovered||0)}</div><div class="kl">LOAN RECOVERED</div></div>
+      <div class="kpi"><div class="kv" style="color:${loanBal>0?"#dc2626":"#15803d"}">₹${fmt(loanBal)}</div><div class="kl">LOAN BALANCE</div></div>
+      <div class="kpi"><div class="kv" style="color:#1565c0">₹${fmt(totalSal)}</div><div class="kl">TOTAL SALARY PAID</div></div>
+      <div class="kpi"><div class="kv" style="color:#7c3aed">₹${fmt(walBal)}</div><div class="kl">WALLET BALANCE</div></div>
+    </div>
+    <h2>Loan History (${loanTxns.length})</h2>
+    ${loanTxns.length===0?"<p style='color:#999;font-style:italic'>No loan transactions.</p>":`<table><tr><th>Date</th><th>Type</th><th>Amount</th><th>Reference</th></tr>
+    ${loanTxns.map(t=>row([fmtD(t.date),t.type==="given"?"Given":"Recovery","₹"+fmt(t.amount||0),t.ref||"—"],t.type==="given"?"#fef2f2":"#f0fdf4")).join("")}</table>`}
+    <h2>Salary History (${salTxns.length})</h2>
+    ${salTxns.length===0?"<p style='color:#999;font-style:italic'>No salary payments recorded.</p>":`<table><tr><th>Date</th><th>Amount</th><th>Note</th><th>Reference</th></tr>
+    ${salTxns.map(t=>row([fmtD(t.date),"₹"+fmt(t.amount||0),t.note||"—",t.ref||"—"],"#eff6ff")).join("")}</table>`}
+    <h2>Wallet History (${walTxns.length})</h2>
+    ${walTxns.length===0?"<p style='color:#999;font-style:italic'>No wallet transactions.</p>":`<table><tr><th>Date</th><th>Amount</th><th>Note</th></tr>
+    ${walTxns.map(t=>row([fmtD(t.date),"₹"+fmt(Math.abs(t.amount||0))+(t.amount<0?" (advance)":""),t.note||"—"])).join("")}</table>`}
+    </body></html>`);
+    w.document.close(); w.print();
+  };
     if(!window.confirm("Delete this wallet transaction?")) return;
     setCashTransfers(prev=>(prev||[]).filter(t=>t.id!==txId));
     try { await DB.deleteCashTransfer(txId); } catch(e){ console.warn("deleteCashTransfer:",e); }
@@ -13506,20 +13563,136 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
         </div>
       </Sheet>}
 
-      {lSheet&&(()=>{const e=employees.find(x=>x.id===lSheet); return (
-        <Sheet title={`Loan — ${e.name}`} onClose={()=>{setLSheet(null);setLAmt("");setRAmt("");}}>
+      {lSheet&&(()=>{const e=employees.find(x=>x.id===lSheet); if(!e) return null;
+        const loanTxns = (e.loanTxns||[]).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+        const loanBal = (e.loan||0)-(e.loanRecovered||0);
+        return (
+        <Sheet title={`🏦 Loan — ${e.name}`} onClose={()=>{setLSheet(null);setLAmt("");setRAmt("");setLDate(today());setRDate(today());setLRef("");setRRef("");}}>
           <div style={{display:"flex",flexDirection:"column",gap:14}}>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
-              {[{l:"Loan",v:fmt(e.loan),c:C.red},{l:"Recovered",v:fmt(e.loanRecovered),c:C.green},{l:"Balance",v:fmt(e.loan-e.loanRecovered),c:C.accent}].map(x=>(
+              {[{l:"Loan",v:fmt(e.loan||0),c:C.red},{l:"Recovered",v:fmt(e.loanRecovered||0),c:C.green},{l:"Balance",v:fmt(loanBal),c:loanBal>0?C.red:C.green}].map(x=>(
                 <div key={x.l} style={{background:C.bg,borderRadius:10,padding:12,textAlign:"center"}}><div style={{color:x.c,fontWeight:800}}>{x.v}</div><div style={{color:C.muted,fontSize:10}}>{x.l}</div></div>
               ))}
             </div>
-            <Field label="Give Loan ₹" value={lAmt} onChange={setLAmt} type="number" />
-            <Btn onClick={()=>{setEmployees(p=>p.map(x=>x.id===lSheet?{...x,loan:x.loan+ +lAmt}:x)); log("EMP LOAN",`${e.name} +${fmt(+lAmt)}`); setLAmt("");}} color={C.red} full>Add Loan</Btn>
-            <Field label="Record Recovery ₹" value={rAmt} onChange={setRAmt} type="number" />
-            <Btn onClick={()=>{setEmployees(p=>p.map(x=>x.id===lSheet?{...x,loanRecovered:x.loanRecovered+ +rAmt}:x)); log("EMP RECOVERY",`${e.name} ${fmt(+rAmt)}`); setRAmt("");}} color={C.green} full>Record Recovery</Btn>
+
+            {/* Give Loan */}
+            <div style={{background:C.card,borderRadius:10,padding:"12px 14px"}}>
+              <div style={{color:C.red,fontWeight:700,fontSize:12,marginBottom:8}}>Give Loan</div>
+              <div style={{display:"flex",gap:8,marginBottom:8}}>
+                <Field label="Amount ₹" value={lAmt} onChange={setLAmt} type="number" half />
+                <Field label="Date" value={lDate} onChange={setLDate} type="date" half />
+              </div>
+              <Field label="Bank Reference / UTR" value={lRef} onChange={setLRef} placeholder="HDFC00123..." />
+              <div style={{marginTop:10}}>
+                <Btn onClick={()=>{
+                  if(!lAmt||+lAmt<=0){alert("Enter loan amount");return;}
+                  const txn={id:uid(),type:"given",date:lDate,amount:+lAmt,ref:lRef,createdBy:user.username};
+                  setEmployees(p=>p.map(x=>x.id===lSheet?{...x,loan:(x.loan||0)+ +lAmt,loanTxns:[...(x.loanTxns||[]),txn]}:x));
+                  log("EMP LOAN",`${e.name} +₹${fmt(+lAmt)} ref:${lRef}`);
+                  setLAmt("");setLRef("");setLDate(today());
+                }} color={C.red} full>Add Loan</Btn>
+              </div>
+            </div>
+
+            {/* Record Recovery */}
+            <div style={{background:C.card,borderRadius:10,padding:"12px 14px"}}>
+              <div style={{color:C.green,fontWeight:700,fontSize:12,marginBottom:8}}>Record Recovery</div>
+              <div style={{display:"flex",gap:8,marginBottom:8}}>
+                <Field label="Amount ₹" value={rAmt} onChange={setRAmt} type="number" half />
+                <Field label="Date" value={rDate} onChange={setRDate} type="date" half />
+              </div>
+              <Field label="Bank Reference / UTR" value={rRef} onChange={setRRef} placeholder="HDFC00456..." />
+              <div style={{marginTop:10}}>
+                <Btn onClick={()=>{
+                  if(!rAmt||+rAmt<=0){alert("Enter recovery amount");return;}
+                  const txn={id:uid(),type:"recovery",date:rDate,amount:+rAmt,ref:rRef,createdBy:user.username};
+                  setEmployees(p=>p.map(x=>x.id===lSheet?{...x,loanRecovered:(x.loanRecovered||0)+ +rAmt,loanTxns:[...(x.loanTxns||[]),txn]}:x));
+                  log("EMP RECOVERY",`${e.name} ₹${fmt(+rAmt)} ref:${rRef}`);
+                  setRAmt("");setRRef("");setRDate(today());
+                }} color={C.green} full>Record Recovery</Btn>
+              </div>
+            </div>
+
+            {/* Loan history */}
+            {loanTxns.length>0&&(
+              <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                <div style={{color:C.muted,fontSize:11,fontWeight:700}}>HISTORY</div>
+                {loanTxns.map(tx=>(
+                  <div key={tx.id} style={{background:C.bg,borderRadius:8,padding:"8px 10px",
+                    borderLeft:`3px solid ${tx.type==="given"?C.red:C.green}`}}>
+                    <div style={{display:"flex",justifyContent:"space-between"}}>
+                      <span style={{fontSize:12,fontWeight:700,color:tx.type==="given"?C.red:C.green}}>
+                        {tx.type==="given"?"Given":"Recovery"} · ₹{fmt(tx.amount||0)}
+                      </span>
+                      <span style={{fontSize:11,color:C.muted}}>{fmtD(tx.date)}</span>
+                    </div>
+                    {tx.ref&&<div style={{fontSize:10,color:C.muted,marginTop:2}}>Ref: {tx.ref}</div>}
+                  </div>
+                ))}
+              </div>
+            )}
             <div style={{color:C.muted,fontSize:12,marginTop:4}}>Linked trucks:</div>
-            <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>{e.linkedTrucks.map(t=><Badge key={t} label={t} color={C.blue} />)}</div>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>{(e.linkedTrucks||[]).map(t=><Badge key={t} label={t} color={C.blue} />)}</div>
+          </div>
+        </Sheet>
+      );})()}
+
+      {/* Salary Sheet */}
+      {salSheet&&(()=>{const e=employees.find(x=>x.id===salSheet); if(!e) return null;
+        const salTxns = ((cashTransfers||[]).filter(t=>t.empId===salSheet&&t.type==="salary")).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+        const totalSal = salTxns.reduce((s,t)=>s+Number(t.amount||0),0);
+        return(
+        <Sheet title={`💼 Salary — ${e.name}`} onClose={()=>{setSalSheet(null);setSalAmt("");setSalDate(today());setSalRef("");setSalNote("");}}>
+          <div style={{display:"flex",flexDirection:"column",gap:14}}>
+            <div style={{background:C.bg,borderRadius:10,padding:10,textAlign:"center"}}>
+              <div style={{color:C.blue,fontWeight:800,fontSize:18}}>₹{fmt(totalSal)}</div>
+              <div style={{color:C.muted,fontSize:10}}>TOTAL SALARY PAID</div>
+            </div>
+            <div style={{background:C.card,borderRadius:10,padding:"12px 14px"}}>
+              <div style={{color:C.blue,fontWeight:700,fontSize:12,marginBottom:8}}>Record Salary Payment</div>
+              <div style={{display:"flex",gap:8,marginBottom:8}}>
+                <Field label="Amount ₹" value={salAmt} onChange={setSalAmt} type="number" half />
+                <Field label="Date" value={salDate} onChange={setSalDate} type="date" half />
+              </div>
+              <Field label="Bank Ref / UTR" value={salRef} onChange={setSalRef} placeholder="HDFC00789..." />
+              <div style={{marginTop:8}}>
+                <Field label="Note (e.g. May 2026 Salary)" value={salNote} onChange={setSalNote} placeholder="Month / description" />
+              </div>
+              <div style={{marginTop:10}}>
+                <Btn onClick={()=>{
+                  if(!salAmt||+salAmt<=0){alert("Enter salary amount");return;}
+                  const tx={id:uid(),empId:salSheet,type:"salary",amount:+salAmt,date:salDate,
+                    ref:salRef,note:salNote||`Salary ${salDate.slice(0,7)}`,
+                    createdBy:user.username,createdAt:nowTs()};
+                  setCashTransfers(prev=>[tx,...(Array.isArray(prev)?prev:[])]);
+                  // Also save as expense
+                  if(typeof setExpenses==="function"){
+                    const exp={id:"SAL"+uid(),date:salDate,
+                      label:`Salary - ${e.name}${salNote?" ("+salNote+")":""}`,
+                      amount:+salAmt,category:"salary",
+                      notes:`Ref: ${salRef||"—"} · Employee: ${e.name}`,
+                      createdBy:user.username,createdAt:nowTs()};
+                    setExpenses(prev=>[exp,...(Array.isArray(prev)?prev:[])]);
+                  }
+                  log("SALARY",`${e.name} ₹${fmt(+salAmt)} ${salDate}`);
+                  setSalAmt("");setSalRef("");setSalNote("");setSalDate(today());
+                }} color={C.blue} full>Record Salary</Btn>
+              </div>
+            </div>
+            {salTxns.length>0&&(
+              <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                <div style={{color:C.muted,fontSize:11,fontWeight:700}}>SALARY HISTORY</div>
+                {salTxns.map(tx=>(
+                  <div key={tx.id} style={{background:C.bg,borderRadius:8,padding:"8px 10px",borderLeft:`3px solid ${C.blue}`}}>
+                    <div style={{display:"flex",justifyContent:"space-between"}}>
+                      <span style={{fontSize:12,fontWeight:700,color:C.blue}}>₹{fmt(tx.amount||0)}</span>
+                      <span style={{fontSize:11,color:C.muted}}>{fmtD(tx.date)}</span>
+                    </div>
+                    <div style={{fontSize:10,color:C.muted,marginTop:2}}>{tx.note||""}{tx.ref?` · Ref: ${tx.ref}`:""}</div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </Sheet>
       );})()}
@@ -13555,15 +13728,27 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                   <Field label="Amount ₹" value={txAmt} onChange={setTxAmt} type="number" half />
                   <Field label="Date"     value={txDate} onChange={setTxDate} type="date" half />
                 </div>
-                <Field label="Note (optional)" value={txNote} onChange={setTxNote} placeholder="UPI / NEFT / Cash" />
+                <div style={{display:"flex",gap:8,marginBottom:8}}>
+                  <Field label="Note (optional)" value={txNote} onChange={setTxNote} placeholder="UPI / NEFT / Cash" />
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>TYPE</div>
+                    <select value={txType||"transfer"} onChange={e=>setTxType(e.target.value)}
+                      style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,color:C.text,padding:"9px 8px",fontSize:13,outline:"none"}}>
+                      <option value="transfer">Cash Transfer</option>
+                      <option value="tafal">TAFAL Payment</option>
+                    </select>
+                  </div>
+                </div>
                 <div style={{marginTop:10}}>
                   <Btn onClick={()=>{
                     if(!txAmt||+txAmt<=0){alert("Enter transfer amount.\nವರ್ಗಾವಣೆ ಮೊತ್ತ ನಮೂದಿಸಿ.");return;}
                     const tx={id:uid(),empId:wSheet,amount:+txAmt,date:txDate,lrNo:"",
-                      note:txNote.trim(),createdBy:user.username,createdAt:nowTs()};
+                      type:txType||"transfer",
+                      note:(txNote.trim()||(txType==="tafal"?"TAFAL Payment":"")),
+                      createdBy:user.username,createdAt:nowTs()};
                     setCashTransfers(prev=>[tx,...(Array.isArray(prev)?prev:[])]);
-                    log("CASH TRANSFER",`${e.name} ₹${fmt(+txAmt)}`);
-                    setTxAmt("");setTxNote("");setTxDate(today());
+                    log(txType==="tafal"?"TAFAL PAYMENT":"CASH TRANSFER",`${e.name} ₹${fmt(+txAmt)}`);
+                    setTxAmt("");setTxNote("");setTxDate(today());setTxType("transfer");
                   }} full color={C.green}>Save Transfer</Btn>
                 </div>
               </div>
@@ -13695,6 +13880,8 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
               <Btn onClick={()=>setWSheet(e.id)} sm color={C.green}>💵 Wallet</Btn>
               <Btn onClick={()=>setLSheet(e.id)} sm outline color={C.purple}>Manage Loan</Btn>
+              <Btn onClick={()=>setSalSheet(e.id)} sm outline color={C.blue}>💼 Salary</Btn>
+              <Btn onClick={()=>generateEmpPDF(e)} sm outline color={C.orange}>📄 PDF</Btn>
               <Btn onClick={()=>window.open(`https://wa.me/91${e.phone.replace(/\D/g,"")}?text=${encodeURIComponent(`Dear ${e.name}, wallet balance ${fmt(walBal)}. - M.Yantra`)}`,`_blank`)} sm outline color={C.teal}>📲</Btn>
             </div>
           </div>
