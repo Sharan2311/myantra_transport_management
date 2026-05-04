@@ -13441,7 +13441,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
 
   const generateEmpPDF = (e) => {
     const fmtDate = d => {try{return new Date(d).toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"});}catch{return d||"—";}};
-    const fmtAmt  = n => Number(n||0).toLocaleString("en-IN",{maximumFractionDigits:2});
+    const fmtAmt  = n => "&#8377;" + Number(n||0).toLocaleString("en-IN",{maximumFractionDigits:2});
     const loanTxns = (e.loanTxns||[]).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
     const salTxns  = ((cashTransfers||[]).filter(t=>t.empId===e.id&&t.type==="salary")).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
     const walTxns  = ((cashTransfers||[]).filter(t=>t.empId===e.id&&t.type!=="salary")).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
@@ -13449,7 +13449,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
     const totalSal = salTxns.reduce((s,t)=>s+Number(t.amount||0),0);
     const walBal   = walTxns.filter(t=>t.amount>0).reduce((s,t)=>s+t.amount,0) - Math.abs(walTxns.filter(t=>t.amount<0).reduce((s,t)=>s+t.amount,0));
     const logoSrc  = (typeof LOGO_SRC !== "undefined" && LOGO_SRC) ? LOGO_SRC : "";
-    const htmlContent = `<!DOCTYPE html><html><head><title>Employee Report — ${e.name}</title><style>
+    const htmlContent = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Employee Report - ${e.name}</title><style>
       body{font-family:Arial,sans-serif;margin:20px;font-size:11px}
       table{width:100%;border-collapse:collapse;margin-bottom:16px}
       th{background:#1565c0;color:#fff;padding:5px 8px;font-size:10px;text-align:left}
@@ -13463,28 +13463,28 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
       ${logoSrc?`<img src="${logoSrc}" style="width:48px;height:48px;border-radius:8px;object-fit:cover" alt="MY"/>`:""}
       <div>
         <div style="font-size:7px;text-transform:uppercase;letter-spacing:2px;color:#1565c0;font-weight:700">M Yantra Enterprises</div>
-        <div style="font-size:18px;font-weight:800">Employee Report — ${e.name}</div>
+        <div style="font-size:18px;font-weight:800">Employee Report - ${e.name}</div>
         <div style="font-size:10px;color:#888">Generated ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}</div>
       </div>
     </div>
     <div style="margin-bottom:12px">
-      <div class="kpi"><div class="kv" style="color:#dc2626">₹${fmtAmt(e.loan||0)}</div><div class="kl">LOAN GIVEN</div></div>
-      <div class="kpi"><div class="kv" style="color:#15803d">₹${fmtAmt(e.loanRecovered||0)}</div><div class="kl">LOAN RECOVERED</div></div>
-      <div class="kpi"><div class="kv" style="color:${loanBal>0?"#dc2626":"#15803d"}">₹${fmtAmt(loanBal)}</div><div class="kl">LOAN BALANCE</div></div>
-      <div class="kpi"><div class="kv" style="color:#1565c0">₹${fmtAmt(totalSal)}</div><div class="kl">TOTAL SALARY PAID</div></div>
-      <div class="kpi"><div class="kv" style="color:#7c3aed">₹${fmtAmt(walBal)}</div><div class="kl">WALLET BALANCE</div></div>
+      <div class="kpi"><div class="kv" style="color:#dc2626">${fmtAmt(e.loan||0)}</div><div class="kl">LOAN GIVEN</div></div>
+      <div class="kpi"><div class="kv" style="color:#15803d">${fmtAmt(e.loanRecovered||0)}</div><div class="kl">LOAN RECOVERED</div></div>
+      <div class="kpi"><div class="kv" style="color:${loanBal>0?"#dc2626":"#15803d"}">${fmtAmt(loanBal)}</div><div class="kl">LOAN BALANCE</div></div>
+      <div class="kpi"><div class="kv" style="color:#1565c0">${fmtAmt(totalSal)}</div><div class="kl">TOTAL SALARY PAID</div></div>
+      <div class="kpi"><div class="kv" style="color:#7c3aed">${fmtAmt(walBal)}</div><div class="kl">WALLET BALANCE</div></div>
     </div>
     <h2>Loan History (${loanTxns.length})</h2>
-    ${loanTxns.length===0?"<p style='color:#999;font-style:italic'>No loan transactions.</p>":`<table><tr><th>Date</th><th>Type</th><th>Amount</th><th>Reference</th></tr>${loanTxns.map(t=>`<tr style="background:${t.type==="given"?"#fef2f2":"#f0fdf4"}"><td>${fmtDate(t.date)}</td><td>${t.type==="given"?"Given":"Recovery"}</td><td>₹${fmtAmt(t.amount||0)}</td><td>${t.ref||"—"}</td></tr>`).join("")}</table>`}
+    ${loanTxns.length===0?"<p style='color:#999;font-style:italic'>No loan transactions.</p>":`<table><tr><th>Date</th><th>Type</th><th>Amount</th><th>Reference</th></tr>${loanTxns.map(t=>`<tr style="background:${t.type==="given"?"#fef2f2":"#f0fdf4"}"><td>${fmtDate(t.date)}</td><td>${t.type==="given"?"Given":"Recovery"}</td><td>${fmtAmt(t.amount||0)}</td><td>${t.ref||"—"}</td></tr>`).join("")}</table>`}
     <h2>Salary History (${salTxns.length})</h2>
-    ${salTxns.length===0?"<p style='color:#999;font-style:italic'>No salary payments recorded.</p>":`<table><tr><th>Date</th><th>Amount</th><th>Note</th><th>Reference</th></tr>${salTxns.map(t=>`<tr style="background:#eff6ff"><td>${fmtDate(t.date)}</td><td>₹${fmtAmt(t.amount||0)}</td><td>${t.note||"—"}</td><td>${t.ref||"—"}</td></tr>`).join("")}</table>`}
+    ${salTxns.length===0?"<p style='color:#999;font-style:italic'>No salary payments recorded.</p>":`<table><tr><th>Date</th><th>Amount</th><th>Note</th><th>Reference</th></tr>${salTxns.map(t=>`<tr style="background:#eff6ff"><td>${fmtDate(t.date)}</td><td>${fmtAmt(t.amount||0)}</td><td>${t.note||"—"}</td><td>${t.ref||"—"}</td></tr>`).join("")}</table>`}
     <h2>Wallet History (${walTxns.length})</h2>
-    ${walTxns.length===0?"<p style='color:#999;font-style:italic'>No wallet transactions.</p>":`<table><tr><th>Date</th><th>Amount</th><th>Type</th><th>Note</th></tr>${walTxns.map(t=>`<tr><td>${fmtDate(t.date)}</td><td>₹${fmtAmt(Math.abs(t.amount||0))}${t.amount<0?" (advance)":""}</td><td>${t.type||"transfer"}</td><td>${t.note||"—"}</td></tr>`).join("")}</table>`}
+    ${walTxns.length===0?"<p style='color:#999;font-style:italic'>No wallet transactions.</p>":`<table><tr><th>Date</th><th>Amount</th><th>Type</th><th>Note</th></tr>${walTxns.map(t=>`<tr><td>${fmtDate(t.date)}</td><td>${fmtAmt(Math.abs(t.amount||0))}${t.amount<0?" (advance)":""}</td><td>${t.type||"transfer"}</td><td>${t.note||"—"}</td></tr>`).join("")}</table>`}
     <script>window.onload=function(){window.print();}</script>
     </body></html>`;
 
     // Use blob URL instead of window.open to avoid popup blocker
-    const blob = new Blob([htmlContent], {type:"text/html"});
+    const blob = new Blob(['\ufeff' + htmlContent], {type:"text/html;charset=utf-8"});
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement("a");
     a.href = url; a.target = "_blank"; a.rel = "noreferrer";
