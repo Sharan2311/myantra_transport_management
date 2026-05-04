@@ -108,12 +108,14 @@ const employeeFromDB = r => ({
   loan: +r.loan, loanRecovered: +r.loan_recovered,
   linkedTrucks: r.linked_trucks||[], createdBy: r.created_by,
   accounts: r.accounts||[],
+  loanTxns: r.loan_txns||[],
 })
 const employeeToDB = e => ({
   id: e.id, name: e.name, phone: e.phone, role: e.role,
   loan: e.loan, loan_recovered: e.loanRecovered,
   linked_trucks: e.linkedTrucks||[], created_by: e.createdBy,
   accounts: e.accounts||[],
+  loan_txns: e.loanTxns||[],
 })
 
 const paymentFromDB = r => ({
@@ -231,12 +233,14 @@ const gstToDB = g => ({
 const cashTransferFromDB = r => ({
   id: r.id, empId: r.emp_id, amount: +r.amount,
   date: r.date, note: r.note||'', lrNo: r.lr_no||'', tripId: r.trip_id||'',
-  utr: r.utr||'', createdBy: r.created_by, createdAt: r.created_at,
+  utr: r.utr||'', type: r.type||'transfer', ref: r.ref||'',
+  createdBy: r.created_by, createdAt: r.created_at,
 })
 const cashTransferToDB = t => ({
   id: t.id, emp_id: t.empId, amount: t.amount,
   date: t.date, note: t.note||'', lr_no: t.lrNo||'', trip_id: t.tripId||null,
-  utr: t.utr||'', created_by: t.createdBy, created_at: t.createdAt,
+  utr: t.utr||'', type: t.type||'transfer', ref: t.ref||'',
+  created_by: t.createdBy, created_at: t.createdAt,
 })
 
 const activityFromDB = r => ({
