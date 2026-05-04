@@ -11735,16 +11735,19 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
     const tripRows = vtrips.map(t => {
       const isMultiDI = t.diLines&&t.diLines.length>1;
       const gross = isMultiDI ? t.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0) : (t.qty||0)*(t.givenRate||0);
-      // Use actual recorded values — NOT deductPerTrip (which would double-count loanRecovery)
       const net = gross-(t.advance||0)-(t.tafal||0)-(t.dieselEstimate||0)-(t.shortageRecovery||0)-(t.loanRecovery||0);
+      const paidForTrip = (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
+      const currentEst = Math.max(0, net - paidForTrip);
       const shortAmt = (t.shortage||0)*(t.givenRate||0);
       return `<tr>
         <td>${t.lrNo||"—"}</td><td>${fmtD(t.date)}</td>
         <td>${t.from||"—"} → ${t.to||"—"}</td><td>${t.qty||0} MT</td>
         <td>₹${fmt(t.billedToShree||t.qty*(t.frRate||0)||0)}</td><td>₹${fmt(gross)}</td>
         <td>${(t.shortage||0)>0?`${t.shortage}MT (₹${fmt(shortAmt)})`:"—"}</td>
-        <td>${t.loanRecovery>0?`-₹${fmt(t.loanRecovery||0)} loan`:""}</td>
+        <td>${t.loanRecovery>0?`-₹${fmt(t.loanRecovery||0)}`:"—"}</td>
         <td>₹${fmt(Math.max(0,net))}</td>
+        <td style="color:#15803d;font-weight:${paidForTrip>0?"700":"400"}">${paidForTrip>0?`₹${fmt(paidForTrip)}`:"—"}</td>
+        <td style="color:${currentEst>0?"#b45309":"#15803d"};font-weight:700">${t.driverSettled?"✓ Settled":`₹${fmt(currentEst)}`}</td>
         <td style="color:${t.driverSettled?"#1a7f37":"#b45309"}">${t.driverSettled?"Settled":"Pending"}</td>
       </tr>`;
     }).join("");
@@ -11832,7 +11835,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
     </div>
 
     <h2>📦 Trip History (${vtrips.length})</h2>
-    ${vtrips.length===0?'<div class="empty">No trips recorded.</div>':`<table><tr><th>LR No</th><th>Date</th><th>Route</th><th>Qty</th><th>Billed</th><th>Gross</th><th>Shortage</th><th>Loan Recov.</th><th>Net Pay</th><th>Status</th></tr>${tripRows}</table>`}
+    ${vtrips.length===0?'<div class="empty">No trips recorded.</div>':`<table><tr><th>LR No</th><th>Date</th><th>Route</th><th>Qty</th><th>Billed</th><th>Gross</th><th>Shortage</th><th>Loan Recov.</th><th>Net Pay</th><th>Paid</th><th>Est. Current Due</th><th>Status</th></tr>${tripRows}</table>`}
 
     <h2>💳 Driver Payment History (${pays.length})</h2>
     ${pays.length===0?'<div class="empty">No payments recorded.</div>':`<table><tr><th>Date</th><th>LR No</th><th>UTR / Reference</th><th>Amount</th><th>Paid To</th><th>Note</th></tr>${payRows}</table>`}
@@ -13097,6 +13100,8 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
   const [txAmt,  setTxAmt]  = useState("");
   const [txDate, setTxDate] = useState(today());
   const [txNote, setTxNote] = useState("");
+  const [empSearch, setEmpSearch] = useState("");
+  const [empMonth,  setEmpMonth]  = useState(today().slice(0,7)); // default current month
   // wallet PDF date filter
   const [wFrom,  setWFrom]  = useState("");
   const [wTo,    setWTo]    = useState("");
@@ -13311,7 +13316,49 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
         );
       })()}
 
-      {employees.map(e=>{
+      {/* Month filter */}
+      {(()=>{
+        const allMonths = [...new Set((cashTransfers||[]).map(t=>(t.date||"").slice(0,7)).filter(Boolean))].sort().reverse();
+        return (
+          <div style={{background:C.card,borderRadius:12,padding:"10px 14px"}}>
+            <div style={{fontSize:11,color:C.muted,fontWeight:700,marginBottom:8,textTransform:"uppercase",letterSpacing:1}}>
+              Filter by Month {empMonth&&<span style={{color:C.accent,fontWeight:400,textTransform:"none",fontSize:10}}>· {new Date(empMonth+"-01").toLocaleDateString("en-IN",{month:"long",year:"numeric"})}</span>}
+            </div>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+              <button onClick={()=>setEmpMonth("")}
+                style={{background:!empMonth?C.blue:"transparent",border:`1.5px solid ${C.blue}`,
+                  borderRadius:20,color:!empMonth?"#fff":C.blue,fontSize:11,fontWeight:700,padding:"4px 12px",cursor:"pointer"}}>
+                All
+              </button>
+              {allMonths.map(m=>{
+                const label=new Date(m+"-01").toLocaleDateString("en-IN",{month:"short",year:"2-digit"});
+                return (
+                  <button key={m} onClick={()=>setEmpMonth(m===empMonth?"":m)}
+                    style={{background:empMonth===m?C.blue:"transparent",border:`1.5px solid ${C.blue}`,
+                      borderRadius:20,color:empMonth===m?"#fff":C.blue,fontSize:11,fontWeight:700,
+                      padding:"4px 12px",cursor:"pointer"}}>{label}</button>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Search */}
+      <input value={empSearch} onChange={e=>setEmpSearch(e.target.value)}
+        placeholder="🔍 Search employee..."
+        style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,
+          color:C.text,padding:"10px 12px",fontSize:14,outline:"none",width:"100%",boxSizing:"border-box"}} />
+
+      {employees.filter(e=>{
+        if(empSearch && !e.name.toLowerCase().includes(empSearch.toLowerCase())) return false;
+        if(empMonth) {
+          // Only show employees who have wallet transactions in selected month
+          const hasTx = (cashTransfers||[]).some(t=>t.empId===e.id&&(t.date||"").startsWith(empMonth));
+          if(!hasTx) return false;
+        }
+        return true;
+      }).map(e=>{
         const loanBal=e.loan-e.loanRecovered, walBal=walletBalance(e.id);
         return (
           <div key={e.id} style={{background:C.card,borderRadius:14,padding:"14px 16px",borderLeft:`4px solid ${loanBal>0?C.red:C.green}`,marginBottom:8}}>
@@ -13882,11 +13929,11 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     const invDate = parseDD(scanResult.invoiceDate);
     const chosenClient   = scanClient   || "";
     const chosenMaterial = scanMaterial || "";
-    // Map material label to trip type
     const typeOverride = chosenMaterial==="Cement" ? "outbound"
                        : chosenMaterial==="Raw Material" ? "inbound"
                        : null;
     let matched = 0;
+    const updatedTrips = [];
     setTrips(prev=>prev.map(t=>{
       const lineMatch = scTrips.reduce((found, st) => {
         if(found) return found;
@@ -13895,15 +13942,20 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
       }, null);
       if(lineMatch) {
         matched++;
-        return {...t, invoiceNo:invNo, invoiceDate:invDate,
+        const updated = {...t, invoiceNo:invNo, invoiceDate:invDate,
           status:"Billed", billedBy:"scan", billedAt:nowTs(),
           shreeStatus:"billed",
           ...(chosenClient ? {client:chosenClient} : {}),
           ...(typeOverride  ? {type:typeOverride}   : {}),
           billedToShree: Number(lineMatch.st.frtAmt||t.billedToShree||0) || t.billedToShree};
+        updatedTrips.push(updated);
+        return updated;
       }
       return t;
     }));
+    // Persist each updated trip to DB
+    Promise.all(updatedTrips.map(t => DB.saveTrip(t).catch(e=>console.error("saveTrip invoice scan:",e))))
+      .then(()=>console.log(`Invoice ${invNo}: ${matched} trips saved to DB`));
     log && log("Invoice "+invNo+" scanned — "+matched+" trip(s) marked Billed · "+chosenClient+" · "+chosenMaterial);
     setScanResult(null);
     setScanClient("");
@@ -13986,18 +14038,24 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
 
     // Apply trip updates — mark paid, attach shreeShortage
     const paidTrips = [];
+    const paidTripObjects = [];
     setTrips(prev=>prev.map(t=>{
       if(invListFull.some(i=>(i.invoiceNo||i._matchInv||"").trim()===t.invoiceNo)){
         const lrKey=(t.lrNo||t.lr||"").trim();
         const short=shorts.find(s=>(s.lrNo||"").trim()===lrKey);
-        if(t.orderType==="party" && t.id) paidTrips.push(t.id); // track for file deletion
-        return {...t, paidAmount:Number(t.billedToShree||0), paymentDate:pDate, utr,
+        if(t.orderType==="party" && t.id) paidTrips.push(t.id);
+        const updated = {...t, paidAmount:Number(t.billedToShree||0), paymentDate:pDate, utr,
           shreeStatus:"paid",
           shortage: short ? (t.shortage||0)+Number(short.tonnes||0) : t.shortage,
           shreeShortage:short?{tonnes:Number(short.tonnes||0),deduction:Number(short.deduction||0)}:t.shreeShortage};
+        paidTripObjects.push(updated);
+        return updated;
       }
       return t;
     }));
+    // Persist paid trips to DB
+    Promise.all(paidTripObjects.map(t=>DB.saveTrip(t).catch(e=>console.error("saveTrip payment scan:",e))))
+      .then(()=>console.log(`Payment UTR ${utr}: ${paidTripObjects.length} trips marked paid in DB`));
     // Delete party files from Supabase Storage for paid trips
     if(paidTrips.length>0){
       paidTrips.forEach(tid => deletePartyFiles(tid).catch(e=>console.warn("File delete error:",e)));
