@@ -1467,7 +1467,7 @@ export default function App() {
         {tab==="tafal"      && can(user,"tafal")      && <TafalMod   {...sp} />}
         {tab==="diesel"     && can(user,"diesel")     && <DieselMod  {...sp} viewOnly={!canEdit(user,"diesel")} />}
         {tab==="pump_portal"&& can(user,"pump_portal")&& <PumpPortal {...sp} />}
-        {tab==="party_portal"&&can(user,"party_portal")&&<PartyPortal {...sp} />}
+        {tab==="party_portal"&&can(user,"party_portal")&&<PartyPortal {...sp} users={users} />}
         {tab==="vehicles"   && can(user,"vehicles")   && <Vehicles   {...sp} />}
         {tab==="employees"  && can(user,"employees")  && <Employees  {...sp} />}
         {tab==="payments"   && can(user,"payments")   && <Payments   {...sp} />}
@@ -9362,7 +9362,7 @@ function PartyTripCard({t, selected, toggle, isOwner, isPartyMgr, employees, ope
 }
 
 // ─── PARTY PORTAL ─────────────────────────────────────────────────────────────
-function PartyPortal({trips, setTrips, employees, user, log}) {
+function PartyPortal({trips, setTrips, employees, users, user, log}) {
   const [activeTab,    setActiveTab]   = useState("pending");
   const [selected,     setSelected]    = useState(new Set());
   const [assignTo,     setAssignTo]    = useState("");
@@ -9389,7 +9389,12 @@ function PartyPortal({trips, setTrips, employees, user, log}) {
   const totalAmt    = (list) => list.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
   const toggle      = (id) => setSelected(p=>{const s=new Set(p);s.has(id)?s.delete(id):s.add(id);return s;});
   const toggleAll   = () => setSelected(p=>p.size===activeList.length?new Set():new Set(activeList.map(t=>t.id)));
-  const followupEmps= (employees||[]).filter(e=>(e.role||"").includes("email_followup")||(e.role||"").includes("party_manager"));
+  const followupEmps = (users||[]).filter(u=>
+    u.active!==false && (
+      (u.role||"").includes("email_followup") ||
+      (u.role||"").includes("party_manager")
+    ) && u.username !== user?.username // exclude self
+  );
   const openFile = async(path,e) => {
     e.stopPropagation();
     // If already a full URL (http/https), open directly
@@ -9401,7 +9406,13 @@ function PartyPortal({trips, setTrips, employees, user, log}) {
       window.open(data.signedUrl,"_blank");
     }catch(err){alert("Could not open file: "+err.message);}
   };
-  const getEmpName  = (id) => {if(!id)return null;const e=(employees||[]).find(x=>(x.username||x.id)===id);return e?.name||id;};
+  const getEmpName  = (id) => {
+    if(!id) return null;
+    const u=(users||[]).find(x=>(x.username||x.id)===id);
+    if(u) return u.name||u.username;
+    const e=(employees||[]).find(x=>(x.username||x.id)===id);
+    return e?.name||id;
+  };
 
   const markEmailSent = () => {
     if(!selected.size){alert("Select at least one trip");return;}
