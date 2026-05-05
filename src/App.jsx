@@ -8999,7 +8999,7 @@ function ScanPaymentBtn({ onResult }) {
       const resp = await fetch("/.netlify/functions/scan-payment", {
         method: "POST",
         headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({ base64: b64, mediaType: file.type||"image/jpeg" })
+        body: JSON.stringify({ base64: b64, anthropicKey: RC.anthropicKey, mediaType: file.type||"image/jpeg" })
       });
       const parsed = await resp.json();
       if (parsed.error) throw new Error(parsed.error);
@@ -17381,7 +17381,7 @@ This will auto-recover in the next trip.`);
       });
       const resp = await fetch("/.netlify/functions/scan-payment", {
         method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({base64:b64, mediaType:file.type||"image/jpeg"})
+        body: JSON.stringify({base64:b64, anthropicKey:RC.anthropicKey, mediaType:file.type||"image/jpeg"})
       });
       const data = await resp.json();
       if (data.error) throw new Error(data.error);
