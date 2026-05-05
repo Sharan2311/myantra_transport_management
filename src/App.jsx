@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { DB } from "./db.js";
-import CLIENT_CONFIG from "./client.config.js";
+import { loadRuntimeConfig, RC, canFeature as canFeatureRC, logScan } from "./runtime_config.js";
+import { initSupabase } from "./supabase.js";
 import { supabase } from "./supabase.js";
 
 
 // ─── LOGO ────────────────────────────────────────────────────────────────────
-const LOGO_SRC = CLIENT_CONFIG.logoSrc;
+// LOGO_SRC now comes from RC.logoSrc (loaded at runtime)
 
 // ─── THEME ────────────────────────────────────────────────────────────────────
 const C = {
@@ -613,13 +614,8 @@ function BottomNav({tab, setTab, user, trips, driverPays, vehicles, dieselReques
   );
 }
 
-// ── Feature gating — reads from CLIENT_CONFIG.features ──────────────────────
-const canFeature = (feat) => {
-  if(!feat) return true; // no feature key = always visible
-  const features = CLIENT_CONFIG.features || {};
-  if(Object.keys(features).length === 0) return true; // no features configured = show all (backward compat)
-  return features[feat] === true;
-};
+// canFeature imported from runtime_config.js as canFeatureRC
+const canFeature = canFeatureRC;
 
 const MORE_TABS = [
   {id:"inbound",      icon:"🏭",label:"Raw Material",   perm:"inbound",      group:"ops",     feat:"inbound_trips"},
@@ -660,12 +656,12 @@ function MoreMenu({user, setTab, trips, driverPays, vehicles}) {
       {/* Company card at top of More menu */}
       <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,
         padding:"16px",display:"flex",alignItems:"center",gap:14,marginBottom:4}}>
-        <img src={LOGO_SRC} alt={CLIENT_CONFIG.companyShort + " Logo"}
+        <img src={RC.logoSrc} alt={RC.companyShort + " Logo"}
           style={{width:56,height:56,borderRadius:"50%",objectFit:"cover",flexShrink:0,
             border:`2px solid ${C.border}`,boxShadow:"0 2px 8px rgba(0,0,0,0.12)"}} />
         <div>
-          <div style={{color:C.accent,fontWeight:900,fontSize:16,letterSpacing:0.5}}>{CLIENT_CONFIG.companyName.toUpperCase()}</div>
-          <div style={{color:C.muted,fontSize:11,letterSpacing:2,marginTop:2}}>{CLIENT_CONFIG.tagline || "TRANSPORT MANAGEMENT"}</div>
+          <div style={{color:C.accent,fontWeight:900,fontSize:16,letterSpacing:0.5}}>{RC.companyName.toUpperCase()}</div>
+          <div style={{color:C.muted,fontSize:11,letterSpacing:2,marginTop:2}}>{RC.tagline || "TRANSPORT MANAGEMENT"}</div>
           <div style={{color:C.text,fontSize:12,marginTop:4,fontWeight:600}}>
             {user.name} · <span style={{color:C.muted,textTransform:"capitalize"}}>{user.role}</span>
           </div>
@@ -843,7 +839,7 @@ function Login({onLogin}) {
               animation:"pulseRing2 2.4s ease-in-out infinite",
             }} />
             {/* Logo image */}
-            <img src={LOGO_SRC} alt={CLIENT_CONFIG.companyShort + " Logo"}
+            <img src={RC.logoSrc} alt={RC.companyShort + " Logo"}
               style={{
                 width:148,height:148,
                 borderRadius:"50%",
@@ -885,7 +881,7 @@ function Login({onLogin}) {
             backgroundClip:"text",
             animation:"titleShimmer 3s linear infinite",
             marginBottom:4,
-          }}>{CLIENT_CONFIG.companyName.toUpperCase()}</div>
+          }}>{RC.companyName.toUpperCase()}</div>
 
           <div style={{
             color:"rgba(255,255,255,0.45)",
@@ -994,12 +990,46 @@ class ErrorBoundary extends React.Component {
 }
 
 export default function App() {
+  const [booted, setBooted] = useState(false);
+  const [bootError, setBootError] = useState("");
   const [user, setUser] = useState(() => {
     try {
       const saved = sessionStorage.getItem("mye_user");
       return saved ? JSON.parse(saved) : null;
     } catch { return null; }
   });
+
+  // ── Boot: load config from admin Supabase, then init client Supabase ──
+  useEffect(() => {
+    (async () => {
+      try {
+        const ok = await loadRuntimeConfig();
+        if (!ok) { setBootError("Failed to load config from server."); return; }
+        initSupabase(RC.supabaseUrl, RC.supabaseAnonKey);
+        document.title = RC.companyName || "Transport Management";
+        if (RC.logoSrc) {
+          let link = document.querySelector("link[rel~='icon']");
+          if (!link) { link = document.createElement("link"); link.rel = "icon"; document.head.appendChild(link); }
+          link.href = RC.logoSrc;
+        }
+        setBooted(true);
+      } catch (e) { setBootError("Boot failed: " + e.message); }
+    })();
+  }, []);
+
+  if (!booted) return (
+    <div style={{minHeight:"100vh",background:"#0d1b2a",display:"flex",flexDirection:"column",
+      alignItems:"center",justifyContent:"center",color:"#fff"}}>
+      {bootError ? (
+        <div style={{textAlign:"center"}}>
+          <div style={{fontSize:18,fontWeight:700,color:"#ef4444",marginBottom:8}}>⚠ {bootError}</div>
+          <div style={{fontSize:12,color:"#94a3b8"}}>Check client.config.js has correct clientId and adminSupabaseUrl</div>
+        </div>
+      ) : (
+        <div style={{fontSize:14,color:"#94a3b8"}}>Loading configuration...</div>
+      )}
+    </div>
+  );
   const [tab,  setTab]  = useState("dashboard");
   const [saving, setSaving] = useState(false);
   const [saveErr, setSaveErr] = useState("");
@@ -1334,7 +1364,7 @@ export default function App() {
         <div style={{position:"relative",display:"inline-flex",alignItems:"center",justifyContent:"center",marginBottom:28,animation:"dbFloat 3s ease-in-out infinite"}}>
           <div style={{position:"absolute",inset:-20,borderRadius:"50%",background:"rgba(21,101,192,0.15)",animation:"dbPulseRing 2.2s ease-in-out infinite"}} />
           <div style={{position:"absolute",inset:-38,borderRadius:"50%",background:"rgba(21,101,192,0.07)",animation:"dbPulseRing2 2.2s ease-in-out infinite"}} />
-          <img src={LOGO_SRC} alt={CLIENT_CONFIG.companyShort}
+          <img src={RC.logoSrc} alt={RC.companyShort}
             style={{width:130,height:130,borderRadius:"50%",objectFit:"cover",position:"relative",
               border:"3px solid rgba(255,255,255,0.15)",
               animation:"dbLogoGlow 2.2s ease-in-out infinite"}} />
@@ -1345,7 +1375,7 @@ export default function App() {
           background:"linear-gradient(90deg,#90caf9,#ffffff,#ffd54f,#ffffff,#90caf9)",
           backgroundSize:"200% auto",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",
           backgroundClip:"text",animation:"dbShimmer 3s linear infinite",marginBottom:6}}>
-          {CLIENT_CONFIG.companyName.toUpperCase()}
+          {RC.companyName.toUpperCase()}
         </div>
 
         {/* Truck animation strip */}
@@ -1383,11 +1413,11 @@ export default function App() {
       {/* TOP BAR */}
       <div style={{position:"sticky",top:0,zIndex:50,background:C.card,borderBottom:`1px solid ${C.border}`,padding:"8px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div style={{display:"flex",alignItems:"center",gap:8}}>
-          <img src={LOGO_SRC} alt={CLIENT_CONFIG.companyShort}
+          <img src={RC.logoSrc} alt={RC.companyShort}
             style={{width:36,height:36,borderRadius:"50%",objectFit:"cover",flexShrink:0}} />
           <div>
-            <div style={{color:C.accent,fontWeight:900,fontSize:14}}>{CLIENT_CONFIG.companyShort}</div>
-            <div style={{color:C.muted,fontSize:10,letterSpacing:1}}>{CLIENT_CONFIG.tagline || "TRANSPORT MANAGEMENT"}</div>
+            <div style={{color:C.accent,fontWeight:900,fontSize:14}}>{RC.companyShort}</div>
+            <div style={{color:C.muted,fontSize:10,letterSpacing:1}}>{RC.tagline || "TRANSPORT MANAGEMENT"}</div>
           </div>
         </div>
         <div style={{display:"flex",gap:10,alignItems:"center"}}>
@@ -2130,8 +2160,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       const resp = await fetch("/.netlify/functions/scan-di", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({
-          base64,
+        body: JSON.stringify({ base64, anthropicKey: RC.anthropicKey,
           mediaType: isImage ? file.type : "application/pdf",
           promptType: "di"
         }),
@@ -2164,7 +2193,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
   const detectClient = ex => {
     const hay = [ex.consignee||"",ex.consignor||"",ex.from||"",ex.to||""].join(" ").toLowerCase();
     // Try to match against configured clients
-    const detectionRules = CLIENT_CONFIG.clientDetection || {};
+    const detectionRules = RC.clientDetection || {};
     for(const [keyword, clientName] of Object.entries(detectionRules)) {
       if(hay.includes(keyword.toLowerCase())) return clientName;
     }
@@ -2181,7 +2210,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       const base64 = await fileToBase64(file);
       const resp = await fetch("/.netlify/functions/scan-di", {
         method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ base64, mediaType: file.type, prompt: DI_PROMPT }),
+        body: JSON.stringify({ base64, anthropicKey: RC.anthropicKey, mediaType: file.type, prompt: DI_PROMPT }),
       });
       const data = await resp.json();
       if(!resp.ok||data.error) throw new Error(data.error||"Scan failed");
@@ -3972,7 +4001,7 @@ function openGoogleDrivePicker(onFile) {
     closeBtn.onclick = () => { close(); reject(new Error("cancelled")); };
 
     // ── State ────────────────────────────────────────────────────────────────
-    const stack = [{ id: GDRIVE_ROOT_ID, name: `${CLIENT_CONFIG.companyName} Drive` }];
+    const stack = [{ id: GDRIVE_ROOT_ID, name: `${RC.companyName} Drive` }];
 
     // ── Render breadcrumb ────────────────────────────────────────────────────
     const renderBc = () => {
@@ -4212,7 +4241,7 @@ Rules:
       const resp = await fetch("/.netlify/functions/scan-di", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ base64, mediaType: file.type, prompt: PROMPT }),
+        body: JSON.stringify({ base64, anthropicKey: RC.anthropicKey, mediaType: file.type, prompt: PROMPT }),
       });
 
       const data = await resp.json();
@@ -4349,13 +4378,13 @@ Rules:
 // ─── PARTY TRIP STORAGE HELPERS ──────────────────────────────────────────────
 // IMPORTANT: Must match bucket name exactly in Supabase Storage
 // ─── CLIENT / PLANT LIST ─────────────────────────────────────────────────────
-const CLIENTS = CLIENT_CONFIG.clients;
-const DEFAULT_CLIENT = CLIENT_CONFIG.defaultClient || CLIENT_CONFIG.clients[0] || "";
+const CLIENTS = RC.clients || [];
+const DEFAULT_CLIENT = RC.defaultClient || (RC.clients||[])[0] || "";
 
 // Shorten client names for UI display using configured abbreviations
 const shortClient = (name) => {
   if(!name) return "—";
-  const abbrevs = CLIENT_CONFIG.clientAbbreviations || {};
+  const abbrevs = RC.clientAbbreviations || {};
   let s = name;
   for(const [full, short] of Object.entries(abbrevs)) { s = s.replace(full, short); }
   return s;
@@ -4363,7 +4392,7 @@ const shortClient = (name) => {
 
 // Get color for a client (configurable per client name)
 const clientColor = (name, C) => {
-  const colors = CLIENT_CONFIG.clientColors || {};
+  const colors = RC.clientColors || {};
   for(const [keyword, color] of Object.entries(colors)) {
     if((name||"").toLowerCase().includes(keyword.toLowerCase())) return color;
   }
@@ -4389,7 +4418,7 @@ const userCanSeeClient = (user, client) => {
 
 // ─── MATERIAL / LR SEQUENCE HELPERS ─────────────────────────────────────────
 // Maps (client, material) → LR prefix. Must match mye_lr_sequences table.
-const LR_PREFIXES = CLIENT_CONFIG.lrPrefixes || {};
+const LR_PREFIXES = RC.lrPrefixes || {};
 
 // Derive material category from grade string
 const gradeToMaterial = (grade, tripType) => {
@@ -4410,7 +4439,7 @@ const gradeToMaterial = (grade, tripType) => {
 const getLRPrefix = (client, material) => LR_PREFIXES[`${client}|${material}`] || null;
 
 // Shree Cement plants (used to decide if Shree Payments tab is relevant)
-const SHREE_CLIENTS = CLIENT_CONFIG.shreeClients || [];
+const SHREE_CLIENTS = RC.shreeClients || [];
 
 const PARTY_BUCKET = "party-trip-files";
 
@@ -4555,7 +4584,7 @@ function PartyEmailModal({ trip, fromEmail, toEmail, onToEmailChange, onMarkSent
   const [opened,  setOpened]  = useState(false);
   const fmtD = d => { if(!d) return "—"; const [y,m,dy]=d.split("-"); return `${dy}-${m}-${y}`; };
 
-  const subject = `Delivery Confirmation Request — ${CLIENT_CONFIG.companyName}`;
+  const subject = `Delivery Confirmation Request — ${RC.companyName}`;
 
   // Plain text — label: value format works reliably in all mail clients
   const body =
@@ -4563,7 +4592,7 @@ function PartyEmailModal({ trip, fromEmail, toEmail, onToEmailChange, onMarkSent
 
 Please confirm receipt of cement for the following consignment(s) by return mail.
 
-Transport Name    : ${CLIENT_CONFIG.companyName.toUpperCase()}
+Transport Name    : ${RC.companyName.toUpperCase()}
 Shipment Date     : ${fmtD(trip.date)}
 Bill of Lading    : ${trip.lrNo||"—"}
 Delivery Number   : ${trip.diNo||"—"}
@@ -4577,8 +4606,8 @@ State             : ${trip.state||"—"}
 Kindly reply to this email confirming receipt at the earliest.
 
 Regards,
-${CLIENT_CONFIG.companyName}
-${CLIENT_CONFIG.phone}`;
+${RC.companyName}
+${RC.phone}`;
 
   const openMail = () => {
     const mailto = `mailto:${localTo}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
@@ -4589,7 +4618,7 @@ ${CLIENT_CONFIG.phone}`;
 
   // Styled table rows for in-app preview
   const previewRows = [
-    ["Transport Name",  CLIENT_CONFIG.companyName.toUpperCase()],
+    ["Transport Name",  RC.companyName.toUpperCase()],
     ["Shipment Date",   fmtD(trip.date)],
     ["Bill of Lading",  trip.lrNo||"—"],
     ["Delivery Number", trip.diNo||"—"],
@@ -4630,7 +4659,7 @@ ${CLIENT_CONFIG.phone}`;
         ))}
         <div style={{color:C.muted,fontSize:12,marginTop:10,lineHeight:1.6}}>
           Kindly reply to this email confirming receipt at the earliest.<br/>
-          <br/>Regards,<br/><b style={{color:C.text}}>{CLIENT_CONFIG.companyName}</b><br/>{CLIENT_CONFIG.phone}
+          <br/>Regards,<br/><b style={{color:C.text}}>{RC.companyName}</b><br/>{RC.phone}
         </div>
       </div>
 
@@ -4682,10 +4711,10 @@ function PartyBatchEmailSheet({ trips, setTrips, onClose, log }) {
   const selTrips = pending.filter(t => selected.has(t.id));
 
   // Build email body — one row per selected trip
-  const subject = `Delivery Confirmation Request — ${CLIENT_CONFIG.companyName}`;
+  const subject = `Delivery Confirmation Request — ${RC.companyName}`;
   const body = selTrips.length===0 ? "" :
     "Dear Sir,\n\nPlease confirm receipt of cement for the following consignment(s) by return mail.\n\n" +
-    `Transport Name    : ${CLIENT_CONFIG.companyName.toUpperCase()}\n` +
+    `Transport Name    : ${RC.companyName.toUpperCase()}\n` +
     selTrips.map(t =>
       "--------------------------------------------------\n" +
       "Shipment Date     : "+fmtD(t.date)+"\n" +
@@ -4699,7 +4728,7 @@ function PartyBatchEmailSheet({ trips, setTrips, onClose, log }) {
       "State             : "+(t.state||"—")
     ).join("\n") +
     "\n--------------------------------------------------\n\n" +
-    `Kindly reply to this email confirming receipt at the earliest.\n\nRegards,\n${CLIENT_CONFIG.companyName}\n${CLIENT_CONFIG.phone}`;
+    `Kindly reply to this email confirming receipt at the earliest.\n\nRegards,\n${RC.companyName}\n${RC.phone}`;
 
   const openMail = () => {
     const mailto = "mailto:"+toEmail+"?subject="+encodeURIComponent(subject)+"&body="+encodeURIComponent(body);
@@ -4898,7 +4927,7 @@ function PartyBatchEmailSheet({ trips, setTrips, onClose, log }) {
           ))}
           <div style={{color:C.muted,fontSize:12,marginTop:6,lineHeight:1.6}}>
             Kindly reply confirming receipt.<br/>
-            <b style={{color:C.text}}>{CLIENT_CONFIG.companyName}</b> · {CLIENT_CONFIG.phone}
+            <b style={{color:C.text}}>{RC.companyName}</b> · {RC.phone}
           </div>
         </div>
 
@@ -5396,7 +5425,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
   const blankForm = (isParty=false) => ({
     type:tripType, lrNo:"", diNo:"", truckNo:"", grNo:"", dieselIndentNo:"",
     client: isIn ? DEFAULT_CLIENT : DEFAULT_CLIENT,
-    consignee: isIn ? (CLIENT_CONFIG.defaultConsignee || "") : "",
+    consignee: isIn ? (RC.defaultConsignee || "") : "",
     from: isIn ? "" : "Kodla", to: isIn ? "Kodla" : "",
     grade: isIn ? "Limestone" : "Cement Packed",
     qty:"", bags:"", frRate:"", givenRate:"",
@@ -5515,11 +5544,11 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       extracted.diNo||"",
     ].join(" ").toLowerCase();
     // Match client from DI text using configured detection rules
-    const rules = CLIENT_CONFIG.clientDetection || {};
+    const rules = RC.clientDetection || {};
     for(const [kw, cl] of Object.entries(rules)) { if(haystack.includes(kw.toLowerCase())) return cl; }
     // Also check the "from" field specifically for plant location keywords
     const fromStr = (extracted.from||"").toLowerCase();
-    for(const [kw, cl] of Object.entries(CLIENT_CONFIG.clientDetection || {})) { if(fromStr.includes(kw.toLowerCase())) return cl; }
+    for(const [kw, cl] of Object.entries(RC.clientDetection || {})) { if(fromStr.includes(kw.toLowerCase())) return cl; }
     return DEFAULT_CLIENT;
   };
 
@@ -6134,7 +6163,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                 const totalFreight = shown.reduce((s,t)=>s+t.qty*(t.frRate||0),0);
                 const totalQty = shown.reduce((s,t)=>s+t.qty,0);
                 const html = "<html><head><style>body{font-family:Arial,sans-serif;font-size:12px;padding:16px}h2{color:#f97316;margin-bottom:4px}table{width:100%;border-collapse:collapse;margin-top:12px}th{background:#f97316;color:#fff;padding:6px 8px;text-align:left;font-size:11px}td{padding:5px 8px;border-bottom:1px solid #eee;font-size:11px}.summary{display:flex;gap:24px;margin:8px 0;font-size:13px;color:#555}.sv{font-weight:bold;color:#111}</style></head>"
-                  +`<body><h2>${CLIENT_CONFIG.companyName} — Trip Report</h2>`
+                  +`<body><h2>${RC.companyName} — Trip Report</h2>`
                   +"<div style='color:#888;font-size:12px'>Period: "+(dateFrom||"all")+" to "+(dateTo||"all")+" &nbsp;|&nbsp; Filter: "+filter+"</div>"
                   +"<div class='summary'><div>Trips: <span class='sv'>"+shown.length+"</span></div><div>Total Qty: <span class='sv'>"+totalQty+"MT</span></div><div>Total Freight: <span class='sv'>"+fmt(totalFreight)+"</span></div></div>"
                   +"<table><thead><tr><th>Date</th><th>Truck</th><th>LR</th><th>To</th><th>Qty(MT)</th><th>Freight</th><th>Advance</th><th>Diesel</th><th>Net</th><th>Status</th></tr></thead>"
@@ -6579,7 +6608,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         const contacts = (employees||[])
           .filter(e=>e.phone&&e.phone.trim())
           .map(e=>({name:e.name, phone:e.phone.replace(/\D/g,""), role:e.role||""}));
-        const msgText = "Dear {name},\n\nReminder: "+pending.length+" party trip"+(pending.length>1?"s are":"is")+" pending email confirmation at "+CLIENT_CONFIG.companyName+".\n\nPlease send the confirmation email at the earliest.\n\n- "+CLIENT_CONFIG.companyShort+" System\n"+CLIENT_CONFIG.phone;
+        const msgText = "Dear {name},\n\nReminder: "+pending.length+" party trip"+(pending.length>1?"s are":"is")+" pending email confirmation at "+RC.companyName+".\n\nPlease send the confirmation email at the earliest.\n\n- "+RC.companyShort+" System\n"+RC.phone;
         return (
           <Sheet title="📲 WhatsApp Reminder" onClose={()=>setWaSheet(false)}>
             <div style={{display:"flex",flexDirection:"column",gap:14}}>
@@ -8817,7 +8846,7 @@ function PumpSlipScanner({ pumps, trips, user, onResults }) {
     try {
       const resp = await fetch("/.netlify/functions/scan-di", {
         method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ base64, mediaType: file.type, prompt: PUMP_PROMPT }),
+        body: JSON.stringify({ base64, anthropicKey: RC.anthropicKey, mediaType: file.type, prompt: PUMP_PROMPT }),
       });
       const data = await resp.json();
       if (!resp.ok || data.error) throw new Error(data.error || "Server error");
@@ -10582,7 +10611,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
                   const indRows=filtI.map(i=>"<tr><td>"+i.date+"</td><td>"+i.truckNo+"</td><td>"+i.indentNo+"</td><td>"+(pumpMap[i.pumpId]||"—")+"</td><td>"+(tripMap[i.tripId]||"—")+"</td><td style='text-align:right'>"+fmt(i.amount)+"</td></tr>").join("");
                   const pmtRows=filtP.map(p=>"<tr><td>"+p.date+"</td><td colspan='3'>"+(pumpMap[p.pumpId]||"—")+" — "+p.utr+"</td><td>"+(p.note||"")+"</td><td style='text-align:right'>"+fmt(p.amount)+"</td></tr>").join("");
                   const html="<html><head><style>body{font-family:Arial,sans-serif;font-size:13px;padding:20px}h2{color:#f97316}table{width:100%;border-collapse:collapse;margin-bottom:20px}th{background:#f97316;color:#fff;padding:7px 10px;text-align:left}td{padding:6px 10px;border-bottom:1px solid #eee}.summary{display:flex;gap:30px;margin-bottom:16px;font-size:14px}.sum-lbl{color:#888}.sum-val{font-weight:bold}</style></head><body>"
-                    +`<h2>${CLIENT_CONFIG.companyName} — Diesel Statement</h2>`
+                    +`<h2>${RC.companyName} — Diesel Statement</h2>`
                     +"<div style='color:#888;margin-bottom:12px'>Period: "+(filterFrom||"all")+" to "+(filterTo||"all")+"</div>"
                     +"<div class='summary'><div><span class='sum-lbl'>Total HSD </span><span class='sum-val'>"+fmt(totalI)+"</span></div><div><span class='sum-lbl'>Payments Made </span><span class='sum-val'>"+fmt(totalPmt)+"</span></div><div><span class='sum-lbl'>Balance </span><span class='sum-val'>"+fmt(totalI-totalPmt)+"</span></div></div>"
                     +"<h3>Indents ("+filtI.length+")</h3><table><thead><tr><th>Date</th><th>Truck</th><th>Indent No</th><th>Pump</th><th>LR</th><th>Amount</th></tr></thead><tbody>"+indRows+"</tbody></table>"
@@ -11190,7 +11219,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
                       +".kpi .label{font-size:9px;color:#888;text-transform:uppercase}.kpi .value{font-size:16px;font-weight:800;color:#f97316}"
                       +"@media print{body{margin:10px}th{background:#f97316!important;-webkit-print-color-adjust:exact!important}}"
                       +"</style></head><body>"
-                      +`<h2>${CLIENT_CONFIG.companyName} — Diesel Requests Report</h2>`
+                      +`<h2>${RC.companyName} — Diesel Requests Report</h2>`
                       +"<h4>Period: "+(filterFrom||"all")+" to "+(filterTo||"all")+"</h4>"
                       +"<div class='summary'>"
                       +"<div class='kpi'><div class='label'>Requests</div><div class='value'>"+filtered.length+"</div></div>"
@@ -11200,7 +11229,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
                       +"</div>"
                       +"<table><thead><tr><th>Date</th><th>Indent</th><th>Truck</th><th>Pump</th><th>Diesel ₹</th><th>Cash ₹</th><th>Total ₹</th><th>Status</th><th>By</th></tr></thead>"
                       +"<tbody>"+rows+"</tbody></table>"
-                      +`<div style='margin-top:16px;font-size:9px;color:#999;border-top:1px solid #ddd;padding-top:6px'>${CLIENT_CONFIG.companyName} · PAN: ${CLIENT_CONFIG.pan} · GSTN: 29${CLIENT_CONFIG.pan}1ZR</div>`
+                      +`<div style='margin-top:16px;font-size:9px;color:#999;border-top:1px solid #ddd;padding-top:6px'>${RC.companyName} · PAN: ${RC.pan} · GSTN: 29${RC.pan}1ZR</div>`
                       +"</body></html>";
                     const w=window.open("","_blank");
                     w.document.write(html);
@@ -12145,9 +12174,9 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
       @media print { * { -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; } }
     </style>
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;padding-bottom:8px;border-bottom:2px solid #1565c0">
-      <img src="${LOGO_SRC}" class="logo-img" alt="${CLIENT_CONFIG.companyShort}" />
+      <img src="${RC.logoSrc}" class="logo-img" alt="${RC.companyShort}" />
       <div>
-        <div style="font-size:7px;text-transform:uppercase;letter-spacing:2px;color:#1565c0;font-weight:700">${CLIENT_CONFIG.companyName}</div>
+        <div style="font-size:7px;text-transform:uppercase;letter-spacing:2px;color:#1565c0;font-weight:700">${RC.companyName}</div>
         <div style="font-size:20px;font-weight:800;line-height:1.2">Vehicle Report — ${v.truckNo}</div>
         <div style="font-size:10px;color:#888">Generated ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}${pdfFrom||pdfTo ? ` &nbsp;·&nbsp; Period: <b>${pdfFrom||"start"}</b> to <b>${pdfTo||"today"}</b>` : ""}</div>
       </div>
@@ -12200,7 +12229,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
       <tr><th>Balance Owed</th><td style="font-weight:800;color:#d97706">₹${fmt((v.shortageOwed||0)-vShortRecovPDF)}</td></tr>
     </table>
 
-    <div class="footer">${CLIENT_CONFIG.companyName} · PAN: ${CLIENT_CONFIG.pan} · GSTN: 29${CLIENT_CONFIG.pan}1ZR · Report generated ${new Date().toLocaleString("en-IN")}</div>`;
+    <div class="footer">${RC.companyName} · PAN: ${RC.pan} · GSTN: 29${RC.pan}1ZR · Report generated ${new Date().toLocaleString("en-IN")}</div>`;
 
     const w = window.open("","_blank");
     w.document.write(`<!DOCTYPE html><html><head><title>${v.truckNo} — Vehicle Report</title></head><body onload="window.print()">${html}</body></html>`);
@@ -12333,7 +12362,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
         +'</tr>'
     ).join("");
 
-    const logoSrc = (typeof LOGO_SRC !== "undefined" && LOGO_SRC) ? LOGO_SRC : "";
+    const logoSrc = RC.logoSrc || "";
     const html = `<style>
       body{font-family:-apple-system,sans-serif;margin:24px;color:#222;font-size:12px}
       .header{display:flex;align-items:center;gap:14px;margin-bottom:14px;padding-bottom:10px;border-bottom:3px solid #0d9488}
@@ -12354,9 +12383,9 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
       @media print{body{margin:12px}table{font-size:9px}th{background:#0d9488!important;-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}}
     </style>
     <div class="header">
-      ${logoSrc?`<img src="${logoSrc}" class="logo-img" alt="${CLIENT_CONFIG.companyShort}"/>`:'<div class="logo-fallback"><span>{CLIENT_CONFIG.companyShort}</span></div>'}
+      ${logoSrc?`<img src="${logoSrc}" class="logo-img" alt="${RC.companyShort}"/>`:'<div class="logo-fallback"><span>{RC.companyShort}</span></div>'}
       <div>
-        <div style="font-size:8px;text-transform:uppercase;letter-spacing:2px;color:#0d9488;font-weight:700">${CLIENT_CONFIG.companyName}</div>
+        <div style="font-size:8px;text-transform:uppercase;letter-spacing:2px;color:#0d9488;font-weight:700">${RC.companyName}</div>
         <div style="font-size:18px;font-weight:800;line-height:1.2">Owner Report — ${selectedOwner}</div>
         <div style="font-size:10px;color:#888">Generated: ${new Date().toLocaleString("en-IN")} · Vehicles: ${ownerVehs.map(v=>v.truckNo).join(", ")}</div>
       </div>
@@ -12378,7 +12407,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
     ${allLoanTxns.length>0?'<h3>Loan Transactions ('+allLoanTxns.length+')</h3><table><colgroup><col style="width:14%"><col style="width:12%"><col style="width:16%"><col style="width:14%"><col style="width:12%"><col style="width:32%"></colgroup><thead><tr><th class="l">Date</th><th class="l">LR</th><th class="l">Vehicle</th><th class="r">Amount</th><th class="c">Type</th><th class="l">Notes</th></tr></thead><tbody>'+loanRows+'</tbody></table>':""}
     ${allShortTxns.length>0?'<h3>Shortage Transactions ('+allShortTxns.length+')</h3><table><colgroup><col style="width:14%"><col style="width:12%"><col style="width:16%"><col style="width:14%"><col style="width:12%"><col style="width:32%"></colgroup><thead><tr><th class="l">Date</th><th class="l">LR</th><th class="l">Vehicle</th><th class="r">Amount</th><th class="c">Type</th><th class="l">Notes</th></tr></thead><tbody>'+shortRows+'</tbody></table>':""}
     ${ownerPays.length>0?'<h3>Driver Payment History ('+ownerPays.length+')</h3><table><colgroup><col style="width:12%"><col style="width:12%"><col style="width:14%"><col style="width:12%"><col style="width:18%"><col style="width:32%"></colgroup><thead><tr><th class="l">Date</th><th class="l">LR</th><th class="l">Vehicle</th><th class="r">Amount</th><th class="l">Paid To</th><th class="l">UTR</th></tr></thead><tbody>'+payRows+'</tbody></table>':""}
-    <div class="footer">${CLIENT_CONFIG.companyName} · PAN: ${CLIENT_CONFIG.pan} · GSTN: 29${CLIENT_CONFIG.pan}1ZR</div>`;
+    <div class="footer">${RC.companyName} · PAN: ${RC.pan} · GSTN: 29${RC.pan}1ZR</div>`;
 
     const w = window.open("","_blank");
     w.document.write('<!DOCTYPE html><html><head><title>Owner Report — '+selectedOwner+'</title></head><body onload="window.print()">'+html+'</body></html>');
@@ -13254,9 +13283,9 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                   @media print{*{-webkit-print-color-adjust:exact!important}}
                 </style></head><body>
                 <div class="header">
-                  <img src="${LOGO_SRC}" class="logo" alt="${CLIENT_CONFIG.companyShort}"/>
+                  <img src="${RC.logoSrc}" class="logo" alt="${RC.companyShort}"/>
                   <div>
-                    <div style="font-size:7px;text-transform:uppercase;letter-spacing:2px;color:#1565c0;font-weight:700">${CLIENT_CONFIG.companyName}</div>
+                    <div style="font-size:7px;text-transform:uppercase;letter-spacing:2px;color:#1565c0;font-weight:700">${RC.companyName}</div>
                     <div style="font-size:18px;font-weight:800">Loan Report — ${ownerNameL}</div>
                     <div style="font-size:10px;color:#888">Generated ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}</div>
                   </div>
@@ -13274,10 +13303,10 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                 w.document.close(); w.print();
               }} sm outline color={C.purple}>🏦 Loan Report</Btn>
               {v.driverPhone&&(
-                <Btn onClick={()=>window.open(`https://wa.me/91${v.driverPhone.replace(/\D/g,"")}?text=${encodeURIComponent(`Dear ${v.driverName||"Driver"}, this is ${CLIENT_CONFIG.companyName}. - ${CLIENT_CONFIG.phone}`)}`,`_blank`)} sm outline color={C.teal}>📲 Driver</Btn>
+                <Btn onClick={()=>window.open(`https://wa.me/91${v.driverPhone.replace(/\D/g,"")}?text=${encodeURIComponent(`Dear ${v.driverName||"Driver"}, this is ${RC.companyName}. - ${RC.phone}`)}`,`_blank`)} sm outline color={C.teal}>📲 Driver</Btn>
               )}
               {v.phone&&(
-                <Btn onClick={()=>window.open(`https://wa.me/91${v.phone.replace(/\D/g,"")}?text=${encodeURIComponent(`Dear ${v.ownerName}, loan balance ₹${fmt(bal)}. - M.Yantra ${CLIENT_CONFIG.phone}`)}`,`_blank`)} sm outline color={C.green}>📲 Owner</Btn>
+                <Btn onClick={()=>window.open(`https://wa.me/91${v.phone.replace(/\D/g,"")}?text=${encodeURIComponent(`Dear ${v.ownerName}, loan balance ₹${fmt(bal)}. - M.Yantra ${RC.phone}`)}`,`_blank`)} sm outline color={C.green}>📲 Owner</Btn>
               )}
             </div>
           </div>
@@ -13520,7 +13549,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
     const totalSal = salTxns.reduce((s,t)=>s+Number(t.amount||0),0);
     const totalTaf = tafalTxns.reduce((s,t)=>s+Number(t.amount||0),0);
     const walBal   = walTxns.filter(t=>t.amount>0).reduce((s,t)=>s+t.amount,0) - Math.abs(walTxns.filter(t=>t.amount<0).reduce((s,t)=>s+t.amount,0));
-    const logoSrc  = (typeof LOGO_SRC !== "undefined" && LOGO_SRC) ? LOGO_SRC : "";
+    const logoSrc  = RC.logoSrc || "";
     const htmlContent = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Employee Report - ${e.name}</title><style>
       body{font-family:Arial,sans-serif;margin:20px;font-size:11px}
       table{width:100%;border-collapse:collapse;margin-bottom:16px}
@@ -13534,7 +13563,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;padding-bottom:8px;border-bottom:2px solid #1565c0">
       ${logoSrc?`<img src="${logoSrc}" style="width:48px;height:48px;border-radius:8px;object-fit:cover" alt="MY"/>`:""}
       <div>
-        <div style="font-size:7px;text-transform:uppercase;letter-spacing:2px;color:#1565c0;font-weight:700">${CLIENT_CONFIG.companyName}</div>
+        <div style="font-size:7px;text-transform:uppercase;letter-spacing:2px;color:#1565c0;font-weight:700">${RC.companyName}</div>
         <div style="font-size:18px;font-weight:800">Employee Report - ${e.name}</div>
         <div style="font-size:10px;color:#888">Generated ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}</div>
       </div>
@@ -13611,9 +13640,9 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
       .total{text-align:right;font-weight:bold;font-size:14px;margin-top:12px}
     </style></head><body>
       <div class="header">
-        <img src="${LOGO_SRC}" class="logo" alt="${CLIENT_CONFIG.companyShort}" />
+        <img src="${RC.logoSrc}" class="logo" alt="${RC.companyShort}" />
         <div>
-          <h2>${CLIENT_CONFIG.companyName} — Cash Wallet: ${emp.name}</h2>
+          <h2>${RC.companyName} — Cash Wallet: ${emp.name}</h2>
         </div>
       </div>
       <div class="sub">Role: ${emp.role} | Period: ${wFrom||"All"} → ${wTo||"All"}</div>
@@ -14530,7 +14559,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
       });
       const resp = await fetch("/.netlify/functions/scan-shree",{
         method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({base64, mediaType:file.type||"application/pdf", scanType}),
+        body:JSON.stringify({ base64, anthropicKey: RC.anthropicKey, mediaType:file.type||"application/pdf", scanType}),
       });
       const data = await resp.json();
       if(data.error) setScanError(data.error);
@@ -15005,7 +15034,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
 
       {/* header + KPIs */}
       <div style={{background:C.card,borderBottom:`1px solid ${C.border}`,padding:"14px 16px"}}>
-        <div style={{fontSize:10,letterSpacing:3,color:C.muted,marginBottom:2}}>{CLIENT_CONFIG.companyName.toUpperCase()}</div>
+        <div style={{fontSize:10,letterSpacing:3,color:C.muted,marginBottom:2}}>{RC.companyName.toUpperCase()}</div>
         <div style={{fontSize:17,fontWeight:800,color:C.text,marginBottom:12}}>💰 Payments</div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8}}>
           {[
@@ -15625,9 +15654,9 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   @media print{*{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}}
                   </style></head><body onload="window.print()">
                   <div style="display:flex;align-items:center;border-bottom:2px solid #1565c0;padding-bottom:8px;margin-bottom:12px">
-                    <div class="logo"><span>{CLIENT_CONFIG.companyShort}</span></div>
+                    <div class="logo"><span>{RC.companyShort}</span></div>
                     <div><div style="font-size:18px;font-weight:800">Invoice Report</div>
-                    <div style="font-size:10px;color:#888">${CLIENT_CONFIG.companyName}${invFrom||invTo?` · ${invFrom||"start"} to ${invTo||"today"}`:""}  · Generated ${new Date().toLocaleDateString("en-IN")}</div></div>
+                    <div style="font-size:10px;color:#888">${RC.companyName}${invFrom||invTo?` · ${invFrom||"start"} to ${invTo||"today"}`:""}  · Generated ${new Date().toLocaleDateString("en-IN")}</div></div>
                   </div>
                   <table><thead><tr><th>Invoice No</th><th>Date</th><th>Trips</th><th>Amount</th><th>Status</th></tr></thead>
                   <tbody>${rows}</tbody>
@@ -15804,9 +15833,9 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   @media print{*{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}}
                   </style></head><body onload="window.print()">
                   <div style="display:flex;align-items:center;border-bottom:2px solid #1565c0;padding-bottom:8px;margin-bottom:12px">
-                    <div class="logo"><span>{CLIENT_CONFIG.companyShort}</span></div>
+                    <div class="logo"><span>{RC.companyShort}</span></div>
                     <div><div style="font-size:18px;font-weight:800">Payment Advice Report</div>
-                    <div style="font-size:10px;color:#888">${CLIENT_CONFIG.companyName}${advFrom||advTo?` · ${advFrom||"start"} to ${advTo||"today"}`:""}  · Generated ${new Date().toLocaleDateString("en-IN")}</div></div>
+                    <div style="font-size:10px;color:#888">${RC.companyName}${advFrom||advTo?` · ${advFrom||"start"} to ${advTo||"today"}`:""}  · Generated ${new Date().toLocaleDateString("en-IN")}</div></div>
                   </div>
                   <table><thead><tr><th>UTR / Reference</th><th>Date</th><th>Invoices</th><th>Billed</th><th>TDS</th><th>Hold</th><th>Net Paid</th></tr></thead>
                   <tbody>${rows}</tbody>
@@ -17444,10 +17473,10 @@ This will auto-recover in the next trip.`);
   <button class="print-btn" onclick="window.print()">🖨 Print / Save as PDF</button>
   <div class="header">
     <div style="display:flex;align-items:center;gap:14px;margin-bottom:8px">
-      <img src="${LOGO_SRC}" alt="${CLIENT_CONFIG.companyShort}" style="width:54px;height:54px;border-radius:50%;object-fit:cover;border:2px solid #f97316"/>
+      <img src="${RC.logoSrc}" alt="${RC.companyShort}" style="width:54px;height:54px;border-radius:50%;object-fit:cover;border:2px solid #f97316"/>
       <div>
         <h1 style="margin:0 0 2px">Driver Payment Statement</h1>
-        <div class="meta" style="font-weight:700;font-size:13px;color:#333">{CLIENT_CONFIG.companyName.toUpperCase()}</div>
+        <div class="meta" style="font-weight:700;font-size:13px;color:#333">{RC.companyName.toUpperCase()}</div>
         <div class="meta">Transport Management · Kodla, Karnataka</div>
       </div>
     </div>
@@ -18648,7 +18677,7 @@ function Reports({trips, vehicles, employees, payments, settlements, indents, us
 
         {/* Print cement dispatch */}
         <button onClick={()=>{
-          let html=`<h2>${CLIENT_CONFIG.companyName} — Cement Dispatch Report</h2><div>Period: ${df} to ${dt} | State: ${stateFilter} | Orders: ${orderFilter}</div>`;
+          let html=`<h2>${RC.companyName} — Cement Dispatch Report</h2><div>Period: ${df} to ${dt} | State: ${stateFilter} | Orders: ${orderFilter}</div>`;
           if(!stateFilter||stateFilter==="All"){
             stateBreakdown.forEach(s=>{ html+=dispatchTableHTML(s.rows.filter(t=>orderFilter==="All"||t.orderType===orderFilter||(orderFilter==="godown"&&!t.orderType)), s.state); });
           } else {
@@ -18713,7 +18742,7 @@ function Reports({trips, vehicles, employees, payments, settlements, indents, us
           {l:"🚛 Vehicle Loan CSV", c:C.red,    fn:()=>exportCSV(vehicles.map(v=>({Truck:v.truckNo,Owner:v.ownerName,Loan:v.loan,Recovered:v.loanRecovered,Balance:v.loan-v.loanRecovered})),"loans.csv")},
           {l:"💵 Settlements CSV",  c:C.green,  fn:()=>exportCSV(settlements,"settlements.csv")},
           {l:"⛽ Diesel Indents CSV",c:C.teal,  fn:()=>exportCSV(indents.map(i=>({Date:i.date,Truck:i.truckNo,Indent:i.indentNo,Litres:i.litres,Rate:i.ratePerLitre,Amount:i.amount,Confirmed:i.confirmed,Paid:i.paid,PaidRef:i.paidRef})),"diesel.csv")},
-          {l:"🖨 Print Loan Report", c:C.red,   fn:()=>{const vr=vehicles.map(v=>"<tr><td>"+v.truckNo+"</td><td>"+v.ownerName+"</td><td>"+fmtN(v.loan)+"</td><td>"+fmtN(v.loanRecovered)+"</td><td>"+fmtN(v.loan-v.loanRecovered)+"</td></tr>").join(""); printR("<h2>${CLIENT_CONFIG.companyName} — Loan Report</h2><table><thead><tr><th>Truck</th><th>Owner</th><th>Loan</th><th>Recovered</th><th>Balance</th></tr></thead><tbody>"+vr+"</tbody></table>","Loan Report");}},
+          {l:"🖨 Print Loan Report", c:C.red,   fn:()=>{const vr=vehicles.map(v=>"<tr><td>"+v.truckNo+"</td><td>"+v.ownerName+"</td><td>"+fmtN(v.loan)+"</td><td>"+fmtN(v.loanRecovered)+"</td><td>"+fmtN(v.loan-v.loanRecovered)+"</td></tr>").join(""); printR("<h2>${RC.companyName} — Loan Report</h2><table><thead><tr><th>Truck</th><th>Owner</th><th>Loan</th><th>Recovered</th><th>Balance</th></tr></thead><tbody>"+vr+"</tbody></table>","Loan Report");}},
         ].map(r=>(
           <button key={r.l} onClick={r.fn} style={{background:C.bg,border:"1px solid "+C.border,borderRadius:12,padding:"12px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer",width:"100%",marginBottom:6}}>
             <span style={{color:C.text,fontWeight:700,fontSize:13}}>{r.l}</span>
@@ -18851,10 +18880,10 @@ function Reports({trips, vehicles, employees, payments, settlements, indents, us
                     @media print{*{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}}
                     </style></head><body onload="window.print()">
                     <div style="display:flex;align-items:center;border-bottom:2px solid #1565c0;padding-bottom:8px;margin-bottom:16px">
-                      <div class="logo"><span>{CLIENT_CONFIG.companyShort}</span></div>
+                      <div class="logo"><span>{RC.companyShort}</span></div>
                       <div>
                         <div style="font-size:18px;font-weight:800">Destination-wise Tonnage Summary</div>
-                        <div style="font-size:10px;color:#888">${CLIENT_CONFIG.companyName} · Period: ${df} to ${dt} · Generated ${new Date().toLocaleDateString("en-IN")}</div>
+                        <div style="font-size:10px;color:#888">${RC.companyName} · Period: ${df} to ${dt} · Generated ${new Date().toLocaleDateString("en-IN")}</div>
                       </div>
                     </div>
                     <table><thead><tr><th>Destination</th><th style="text-align:right">Total MT</th><th style="text-align:right">Trips</th></tr></thead>
@@ -18887,8 +18916,8 @@ function Reminders({trips, vehicles, employees}) {
   const contacts=[...vehicles.map(v=>({name:v.ownerName,phone:v.phone,type:"Vehicle",ref:v.truckNo,bal:v.loan-v.loanRecovered})),...employees.map(e=>({name:e.name,phone:e.phone,type:"Employee",ref:e.role,bal:e.loan-e.loanRecovered}))];
   const due=contacts.filter(c=>c.bal>0);
   const T=[
-    {l:"Loan Reminder",  c:C.red,   m:c=>`Dear ${c.name}, your loan balance is ${fmt(c.bal)}. Kindly repay. - M.Yantra ${CLIENT_CONFIG.phone}`},
-    {l:"New Trips",      c:C.green, m:c=>`Dear ${c.name}, new trips available from Kodla. Call: ${CLIENT_CONFIG.phone}. - M.Yantra`},
+    {l:"Loan Reminder",  c:C.red,   m:c=>`Dear ${c.name}, your loan balance is ${fmt(c.bal)}. Kindly repay. - M.Yantra ${RC.phone}`},
+    {l:"New Trips",      c:C.green, m:c=>`Dear ${c.name}, new trips available from Kodla. Call: ${RC.phone}. - M.Yantra`},
     {l:"LR Pouch Return",c:C.purple,m:c=>`Dear ${c.name}, please return Lorry Pouch for ${c.ref} within 15 days. - M.Yantra`},
     {l:"Settlement Ready",c:C.blue, m:c=>`Dear ${c.name}, your payment is ready. Visit office. - M.Yantra`},
   ];
