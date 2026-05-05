@@ -78,8 +78,8 @@ function useDB(fetcher, initial = [], delay = 0) {
   const load = useCallback(async () => {
     try {
       const result = await fetcher();
+      console.log('[useDB] fetched:', result?.length, 'items', result?.[0]?.id||result?.[0]?.name||'');
       // Merge: preserve locally-set party fields that may not be in DB yet
-      // (receiptFilePath, mergedPdfPath, orderType, grFilePath, invoiceFilePath)
       const PARTY_FIELDS = ["receiptFilePath","receiptUploadedAt","mergedPdfPath",
         "orderType","grFilePath","invoiceFilePath","emailSentAt","partyEmail",
         "district","state","sealedInvoicePath","confirmFollowupUserId","confirmPdfPath"];
@@ -87,16 +87,15 @@ function useDB(fetcher, initial = [], delay = 0) {
         if(!Array.isArray(result)||!Array.isArray(prev)) return result;
         const prevMap = {};
         (prev||[]).forEach(t=>{ if(t.id) prevMap[t.id]=t; });
-        return result.map(r => {
+        const merged = result.map(r => {
           const p = prevMap[r.id];
           if(!p) return r;
-          // For each party field: use local value if DB value is empty/missing
-          const merged = {...r};
-          PARTY_FIELDS.forEach(f => {
-            if(!merged[f] && p[f]) merged[f] = p[f];
-          });
-          return merged;
+          const m = {...r};
+          PARTY_FIELDS.forEach(f => { if(!m[f] && p[f]) m[f] = p[f]; });
+          return m;
         });
+        console.log('[useDB] setData:', prev.length, '→', merged.length);
+        return merged;
       });
       setError(null);
     } catch(e) {
@@ -1069,6 +1068,9 @@ function AppMain() {
 
   // ── Phase 2 (300ms) — 5 connections ──────────────────────────────────────────
   const [employees,   setEmployees,   rE, reloadEmployees]   = useDB(DB.getEmployees,   [],             300);
+
+  // DEBUG: track employees state changes
+  useEffect(() => { console.log('[DEBUG] employees state:', employees.length, employees.map(e=>e.name).join(',')); }, [employees]);
   const [payments,    setPayments,    rP, reloadPayments]    = useDB(DB.getPayments,    [],             300);
   const [pumps,       setPumps,       rPu,reloadPumps]       = useDB(DB.getPumps,       [],             300);
   const [indents,        setIndents,        rI,  reloadIndents]       = useDB(DB.getIndents,       [],  300);
@@ -8997,7 +8999,7 @@ function ScanPaymentBtn({ onResult }) {
       const resp = await fetch("/.netlify/functions/scan-payment", {
         method: "POST",
         headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({ base64: b64, mediaType: file.type||"image/jpeg" })
+        body: JSON.stringify({ base64: b64, anthropicKey: RC.anthropicKey, mediaType: file.type||"image/jpeg" })
       });
       const parsed = await resp.json();
       if (parsed.error) throw new Error(parsed.error);
@@ -17379,7 +17381,7 @@ This will auto-recover in the next trip.`);
       });
       const resp = await fetch("/.netlify/functions/scan-payment", {
         method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({base64:b64, mediaType:file.type||"image/jpeg"})
+        body: JSON.stringify({base64:b64, anthropicKey:RC.anthropicKey, mediaType:file.type||"image/jpeg"})
       });
       const data = await resp.json();
       if (data.error) throw new Error(data.error);
