@@ -1006,6 +1006,10 @@ export default function App() {
           if (!link) { link = document.createElement("link"); link.rel = "icon"; document.head.appendChild(link); }
           link.href = RC.logoSrc;
         }
+        // Debug: expose RC for console inspection (remove in production)
+        window.RC = RC;
+        window.DB = DB;
+        console.log('[BOOT] RC loaded:', { supabaseUrl: RC.supabaseUrl, companyName: RC.companyName, clients: RC.clients, features: Object.keys(RC.features).filter(k=>RC.features[k]).length + ' features enabled' });
         setBooted(true);
       } catch (e) { setBootError("Boot failed: " + e.message); }
     })();
