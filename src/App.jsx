@@ -989,17 +989,11 @@ class ErrorBoundary extends React.Component {
   }
 }
 
+// ── BOOT WRAPPER — loads config before mounting the real app ──────────────────
 export default function App() {
   const [booted, setBooted] = useState(false);
   const [bootError, setBootError] = useState("");
-  const [user, setUser] = useState(() => {
-    try {
-      const saved = sessionStorage.getItem("mye_user");
-      return saved ? JSON.parse(saved) : null;
-    } catch { return null; }
-  });
 
-  // ── Boot: load config from admin Supabase, then init client Supabase ──
   useEffect(() => {
     (async () => {
       try {
@@ -1030,6 +1024,18 @@ export default function App() {
       )}
     </div>
   );
+
+  return <AppMain />;
+}
+
+// ── MAIN APP — only mounts after supabase is initialized ────────────────────
+function AppMain() {
+  const [user, setUser] = useState(() => {
+    try {
+      const saved = sessionStorage.getItem("mye_user");
+      return saved ? JSON.parse(saved) : null;
+    } catch { return null; }
+  });
   const [tab,  setTab]  = useState("dashboard");
   const [saving, setSaving] = useState(false);
   const [saveErr, setSaveErr] = useState("");
