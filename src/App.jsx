@@ -1345,7 +1345,7 @@ export default function App() {
           background:"linear-gradient(90deg,#90caf9,#ffffff,#ffd54f,#ffffff,#90caf9)",
           backgroundSize:"200% auto",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",
           backgroundClip:"text",animation:"dbShimmer 3s linear infinite",marginBottom:6}}>
-          ${CLIENT_CONFIG.companyName.toUpperCase()}
+          {CLIENT_CONFIG.companyName.toUpperCase()}
         </div>
 
         {/* Truck animation strip */}
@@ -6134,7 +6134,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                 const totalFreight = shown.reduce((s,t)=>s+t.qty*(t.frRate||0),0);
                 const totalQty = shown.reduce((s,t)=>s+t.qty,0);
                 const html = "<html><head><style>body{font-family:Arial,sans-serif;font-size:12px;padding:16px}h2{color:#f97316;margin-bottom:4px}table{width:100%;border-collapse:collapse;margin-top:12px}th{background:#f97316;color:#fff;padding:6px 8px;text-align:left;font-size:11px}td{padding:5px 8px;border-bottom:1px solid #eee;font-size:11px}.summary{display:flex;gap:24px;margin:8px 0;font-size:13px;color:#555}.sv{font-weight:bold;color:#111}</style></head>"
-                  +"<body><h2>${CLIENT_CONFIG.companyName} — Trip Report</h2>"
+                  +`<body><h2>${CLIENT_CONFIG.companyName} — Trip Report</h2>`
                   +"<div style='color:#888;font-size:12px'>Period: "+(dateFrom||"all")+" to "+(dateTo||"all")+" &nbsp;|&nbsp; Filter: "+filter+"</div>"
                   +"<div class='summary'><div>Trips: <span class='sv'>"+shown.length+"</span></div><div>Total Qty: <span class='sv'>"+totalQty+"MT</span></div><div>Total Freight: <span class='sv'>"+fmt(totalFreight)+"</span></div></div>"
                   +"<table><thead><tr><th>Date</th><th>Truck</th><th>LR</th><th>To</th><th>Qty(MT)</th><th>Freight</th><th>Advance</th><th>Diesel</th><th>Net</th><th>Status</th></tr></thead>"
@@ -10582,7 +10582,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
                   const indRows=filtI.map(i=>"<tr><td>"+i.date+"</td><td>"+i.truckNo+"</td><td>"+i.indentNo+"</td><td>"+(pumpMap[i.pumpId]||"—")+"</td><td>"+(tripMap[i.tripId]||"—")+"</td><td style='text-align:right'>"+fmt(i.amount)+"</td></tr>").join("");
                   const pmtRows=filtP.map(p=>"<tr><td>"+p.date+"</td><td colspan='3'>"+(pumpMap[p.pumpId]||"—")+" — "+p.utr+"</td><td>"+(p.note||"")+"</td><td style='text-align:right'>"+fmt(p.amount)+"</td></tr>").join("");
                   const html="<html><head><style>body{font-family:Arial,sans-serif;font-size:13px;padding:20px}h2{color:#f97316}table{width:100%;border-collapse:collapse;margin-bottom:20px}th{background:#f97316;color:#fff;padding:7px 10px;text-align:left}td{padding:6px 10px;border-bottom:1px solid #eee}.summary{display:flex;gap:30px;margin-bottom:16px;font-size:14px}.sum-lbl{color:#888}.sum-val{font-weight:bold}</style></head><body>"
-                    +"<h2>${CLIENT_CONFIG.companyName} — Diesel Statement</h2>"
+                    +`<h2>${CLIENT_CONFIG.companyName} — Diesel Statement</h2>`
                     +"<div style='color:#888;margin-bottom:12px'>Period: "+(filterFrom||"all")+" to "+(filterTo||"all")+"</div>"
                     +"<div class='summary'><div><span class='sum-lbl'>Total HSD </span><span class='sum-val'>"+fmt(totalI)+"</span></div><div><span class='sum-lbl'>Payments Made </span><span class='sum-val'>"+fmt(totalPmt)+"</span></div><div><span class='sum-lbl'>Balance </span><span class='sum-val'>"+fmt(totalI-totalPmt)+"</span></div></div>"
                     +"<h3>Indents ("+filtI.length+")</h3><table><thead><tr><th>Date</th><th>Truck</th><th>Indent No</th><th>Pump</th><th>LR</th><th>Amount</th></tr></thead><tbody>"+indRows+"</tbody></table>"
@@ -11190,7 +11190,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
                       +".kpi .label{font-size:9px;color:#888;text-transform:uppercase}.kpi .value{font-size:16px;font-weight:800;color:#f97316}"
                       +"@media print{body{margin:10px}th{background:#f97316!important;-webkit-print-color-adjust:exact!important}}"
                       +"</style></head><body>"
-                      +"<h2>${CLIENT_CONFIG.companyName} — Diesel Requests Report</h2>"
+                      +`<h2>${CLIENT_CONFIG.companyName} — Diesel Requests Report</h2>`
                       +"<h4>Period: "+(filterFrom||"all")+" to "+(filterTo||"all")+"</h4>"
                       +"<div class='summary'>"
                       +"<div class='kpi'><div class='label'>Requests</div><div class='value'>"+filtered.length+"</div></div>"
@@ -11200,7 +11200,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
                       +"</div>"
                       +"<table><thead><tr><th>Date</th><th>Indent</th><th>Truck</th><th>Pump</th><th>Diesel ₹</th><th>Cash ₹</th><th>Total ₹</th><th>Status</th><th>By</th></tr></thead>"
                       +"<tbody>"+rows+"</tbody></table>"
-                      +"<div style='margin-top:16px;font-size:9px;color:#999;border-top:1px solid #ddd;padding-top:6px'>${CLIENT_CONFIG.companyName} · PAN: ${CLIENT_CONFIG.pan} · GSTN: 29${CLIENT_CONFIG.pan}1ZR</div>"
+                      +`<div style='margin-top:16px;font-size:9px;color:#999;border-top:1px solid #ddd;padding-top:6px'>${CLIENT_CONFIG.companyName} · PAN: ${CLIENT_CONFIG.pan} · GSTN: 29${CLIENT_CONFIG.pan}1ZR</div>`
                       +"</body></html>";
                     const w=window.open("","_blank");
                     w.document.write(html);
@@ -18648,7 +18648,7 @@ function Reports({trips, vehicles, employees, payments, settlements, indents, us
 
         {/* Print cement dispatch */}
         <button onClick={()=>{
-          let html="<h2>${CLIENT_CONFIG.companyName} — Cement Dispatch Report</h2><div>Period: "+df+" to "+dt+" | State: "+stateFilter+" | Orders: "+orderFilter+"</div>";
+          let html=`<h2>${CLIENT_CONFIG.companyName} — Cement Dispatch Report</h2><div>Period: ${df} to ${dt} | State: ${stateFilter} | Orders: ${orderFilter}</div>`;
           if(!stateFilter||stateFilter==="All"){
             stateBreakdown.forEach(s=>{ html+=dispatchTableHTML(s.rows.filter(t=>orderFilter==="All"||t.orderType===orderFilter||(orderFilter==="godown"&&!t.orderType)), s.state); });
           } else {
