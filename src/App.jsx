@@ -1270,8 +1270,8 @@ function AppMain() {
   const fyTrips = trips.filter(t => t.date >= fyRange.from && t.date <= fyRange.to);
   // Role-filtered trips — non-owners only see trips for their assigned clients
   // This is the single source of truth used by ALL tabs via sp.trips
-  const roleTrips = trips.filter(t => userCanSeeClient(user, t.client||DEFAULT_CLIENT));
-  const roleFyTrips = fyTrips.filter(t => userCanSeeClient(user, t.client||DEFAULT_CLIENT));
+  const roleTrips = trips.filter(t => userCanSeeClient(user, t.client||getDEFAULT_CLIENT()));
+  const roleFyTrips = fyTrips.filter(t => userCanSeeClient(user, t.client||getDEFAULT_CLIENT()));
 
   const sp = {
     trips: roleTrips, setTrips:dbSetTrips,
@@ -1456,8 +1456,8 @@ function AppMain() {
         (trips||[]).forEach(t=>{ const fy=getFY(t.date); if(fy) fySet.add(fy); });
         const fyList = [...fySet].sort((a,b)=>b-a);
         // Build client list — always show (even single client, so user knows filter is active)
-        const clientsInData = CLIENTS.filter(c=>
-          userCanSeeClient(user,c) && (trips||[]).some(t=>(t.client||DEFAULT_CLIENT)===c)
+        const clientsInData = getCLIENTS().filter(c=>
+          userCanSeeClient(user,c) && (trips||[]).some(t=>(t.client||getDEFAULT_CLIENT())===c)
         );
         const showBar = fyList.length > 1 || clientsInData.length >= 1;
         if(!showBar) return null;
@@ -1540,7 +1540,7 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
 
   const allFyTrips = fyTrips || trips;
   // Apply client filter then month filter
-  const clientFiltered = selectedClient ? allFyTrips.filter(t=>(t.client||DEFAULT_CLIENT)===selectedClient) : allFyTrips;
+  const clientFiltered = selectedClient ? allFyTrips.filter(t=>(t.client||getDEFAULT_CLIENT())===selectedClient) : allFyTrips;
   const displayTrips   = dashMonth ? clientFiltered.filter(t=>(t.date||"").startsWith(dashMonth)) : clientFiltered;
 
   // Available months from FY trips for quick-select chips
@@ -1834,11 +1834,11 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
         const outbound = displayTrips.filter(t=>t.type==="outbound");
         const inbound  = displayTrips.filter(t=>t.type==="inbound");
         // Cement by client
-        const clientData = CLIENTS.map(c=>({
+        const clientData = getCLIENTS().map(c=>({
           name: c,
           short: c,
           color: clientColor(c, C),
-          cement: outbound.filter(t=>(t.client||DEFAULT_CLIENT)===c),
+          cement: outbound.filter(t=>(t.client||getDEFAULT_CLIENT())===c),
         })).filter(cd=>cd.cement.length>0);
         const huskTrips = outbound.filter(t=>(t.grade||"").toLowerCase().includes("husk"));
         return (
@@ -2204,10 +2204,10 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       if(hay.includes(keyword.toLowerCase())) return clientName;
     }
     // Fallback: match client names directly
-    for(const c of CLIENTS) {
+    for(const c of getCLIENTS()) {
       if(hay.includes(c.toLowerCase()) || hay.includes(c.split(" ")[0].toLowerCase())) return c;
     }
-    return DEFAULT_CLIENT;
+    return getDEFAULT_CLIENT();
   };
 
   const scanFile = async (id, file) => {
@@ -2223,7 +2223,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       const extracted = JSON.parse(data.text.replace(/```json|```/g,"").trim());
       const client = detectClient(extracted);
       // Check if scanned client is in user's allowed clients
-      if(userClients.length < CLIENTS.length && !userClients.includes(client)) {
+      if(userClients.length < getCLIENTS().length && !userClients.includes(client)) {
         setItems(prev => prev.map(x => x.id===id
           ? {...x, status:"error",
               error:`You are not assigned to "${client}". Contact owner to get access.`}
@@ -2291,7 +2291,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
     });
     const newGroups = Object.entries(byTruck).map(([truckNo, diIds]) => {
       const firstItem = doneItems.find(x=>x.id===diIds[0]);
-      const client = firstItem?.extracted?.client || DEFAULT_CLIENT;
+      const client = firstItem?.extracted?.client || getDEFAULT_CLIENT();
       // Auto loan recovery from owner's deductPerTrip, capped at balance
       const vehG = (vehicles||[]).find(v=>v.truckNo===truckNo);
       const ownerNameG = (vehG?.ownerName||"").trim();
@@ -2541,7 +2541,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       const groupItems = doneItems.filter(x=>g.diIds.includes(x.id));
       const primary    = groupItems[0];
       const ex0        = primary.extracted;
-      const client     = g.client || ex0.client || DEFAULT_CLIENT;
+      const client     = g.client || ex0.client || getDEFAULT_CLIENT();
       const material   = gradeToMaterial(ex0.grade, "outbound");
 
       // ── Get auto-assigned LR from DB ──────────────────────────────────────
@@ -3746,7 +3746,7 @@ function AskLRSheet({ extracted, trips, vehicles, employees=[], onConfirm, onCan
                   onChange={()=>setSelectedMerge("new")} style={{width:16,height:16}} />
                 <div>
                   <div style={{fontWeight:700,fontSize:13,color:C.green}}>🆕 New Trip</div>
-                  <div style={{fontSize:11,color:C.muted}}>Auto-assign next LR number for {extracted.client||DEFAULT_CLIENT}</div>
+                  <div style={{fontSize:11,color:C.muted}}>Auto-assign next LR number for {extracted.client||getDEFAULT_CLIENT()}</div>
                 </div>
               </label>
 
@@ -4384,8 +4384,9 @@ Rules:
 // ─── PARTY TRIP STORAGE HELPERS ──────────────────────────────────────────────
 // IMPORTANT: Must match bucket name exactly in Supabase Storage
 // ─── CLIENT / PLANT LIST ─────────────────────────────────────────────────────
-const CLIENTS = RC.clients || [];
-const DEFAULT_CLIENT = RC.defaultClient || (RC.clients||[])[0] || "";
+const getCLIENTS = () => RC.clients || [];
+const CLIENTS_STATIC = RC.clients; // DO NOT USE — use getCLIENTS()
+const getDEFAULT_CLIENT = () => RC.defaultClient || (RC.clients||[])[0] || "";
 
 // Shorten client names for UI display using configured abbreviations
 const shortClient = (name) => {
@@ -4407,10 +4408,10 @@ const clientColor = (name, C) => {
 
 // Get the list of clients a user is allowed to see (defined early — used throughout)
 const getUserClients = (user) => {
-  if(!user) return CLIENTS;
-  if(user.role==="owner"||user.role==="manager") return CLIENTS;
+  if(!user) return getCLIENTS();
+  if(user.role==="owner"||user.role==="manager") return getCLIENTS();
   const ac = user.assignedClients||[];
-  return ac.length>0 ? CLIENTS.filter(c=>ac.includes(c)) : CLIENTS;
+  return ac.length>0 ? getCLIENTS().filter(c=>ac.includes(c)) : getCLIENTS();
 };
 
 // Returns true if the user can see trips for the given client
@@ -4419,12 +4420,12 @@ const userCanSeeClient = (user, client) => {
   if(user.role==="owner"||user.role==="manager") return true;
   const ac = user.assignedClients||[];
   if(ac.length===0) return true; // no restriction set → see all
-  return ac.includes(client||DEFAULT_CLIENT);
+  return ac.includes(client||getDEFAULT_CLIENT());
 };
 
 // ─── MATERIAL / LR SEQUENCE HELPERS ─────────────────────────────────────────
 // Maps (client, material) → LR prefix. Must match mye_lr_sequences table.
-const LR_PREFIXES = RC.lrPrefixes || {};
+const getLR_PREFIXES = () => RC.lrPrefixes || {};
 
 // Derive material category from grade string
 const gradeToMaterial = (grade, tripType) => {
@@ -4442,10 +4443,10 @@ const gradeToMaterial = (grade, tripType) => {
 };
 
 // Get LR prefix for a (client, material) pair
-const getLRPrefix = (client, material) => LR_PREFIXES[`${client}|${material}`] || null;
+const getLRPrefix = (client, material) => getLR_PREFIXES()[`${client}|${material}`] || null;
 
 // Shree Cement plants (used to decide if Shree Payments tab is relevant)
-const SHREE_CLIENTS = RC.shreeClients || [];
+const getSHREE_CLIENTS = () => RC.shreeClients || [];
 
 const PARTY_BUCKET = "party-trip-files";
 
@@ -5430,7 +5431,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
 
   const blankForm = (isParty=false) => ({
     type:tripType, lrNo:"", diNo:"", truckNo:"", grNo:"", dieselIndentNo:"",
-    client: isIn ? DEFAULT_CLIENT : DEFAULT_CLIENT,
+    client: isIn ? getDEFAULT_CLIENT() : getDEFAULT_CLIENT(),
     consignee: isIn ? (RC.defaultConsignee || "") : "",
     from: isIn ? "" : "Kodla", to: isIn ? "Kodla" : "",
     grade: isIn ? "Limestone" : "Cement Packed",
@@ -5456,7 +5457,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
   // Role-based client restriction — non-owners only see their assigned clients
   // trips already role-filtered via sp — list is safe to use directly
   const olist  = orderTypeFilter==="All" ? list : orderTypeFilter==="party" ? list.filter(t=>t.orderType==="party") : list.filter(t=>!t.orderType||t.orderType==="godown");
-  const clist  = selectedClient ? olist.filter(t => (t.client||DEFAULT_CLIENT)===selectedClient) : (clientFilter ? olist.filter(t => (t.client||DEFAULT_CLIENT)===clientFilter) : olist);
+  const clist  = selectedClient ? olist.filter(t => (t.client||getDEFAULT_CLIENT())===selectedClient) : (clientFilter ? olist.filter(t => (t.client||getDEFAULT_CLIENT())===clientFilter) : olist);
   const dlist  = (dateFrom||dateTo) ? clist.filter(t => t.date>=(dateFrom||"2000-01-01") && t.date<=(dateTo||"2099-12-31")) : clist;
   const slist  = search ? dlist.filter(t => {
     const q = search.trim().toLowerCase();
@@ -5555,7 +5556,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     // Also check the "from" field specifically for plant location keywords
     const fromStr = (extracted.from||"").toLowerCase();
     for(const [kw, cl] of Object.entries(RC.clientDetection || {})) { if(fromStr.includes(kw.toLowerCase())) return cl; }
-    return DEFAULT_CLIENT;
+    return getDEFAULT_CLIENT();
   };
 
   const onDIExtracted = (extracted, _ignored) => {
@@ -5644,7 +5645,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
 
   const saveNew = async () => {
     // ── LR assignment: auto from DB sequence, or manual entry ─────────────────
-    const tripClient   = isIn ? "Inbound" : (f.client || DEFAULT_CLIENT);
+    const tripClient   = isIn ? "Inbound" : (f.client || getDEFAULT_CLIENT());
     const tripMaterial = gradeToMaterial(f.grade, tripType);
     let assignedLR = "";
     if(manualLrMode) {
@@ -6164,7 +6165,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                   const v = vehicles?.find(x=>x.truckNo===t.truckNo);
                   const diesel = t.dieselEstimate||0;
                   const net = (t.qty*(t.givenRate||0)) - (t.advance||0) - (t.tafal||0) - diesel;
-                  return "<tr><td>"+t.date+"</td><td>"+t.truckNo+"</td><td>"+(t.lrNo||"—")+"</td><td>"+(t.client||DEFAULT_CLIENT)+"</td><td>"+(t.to||"—")+"</td><td>"+t.qty+"</td><td style='text-align:right'>"+fmt(t.qty*(t.frRate||0))+"</td><td style='text-align:right'>"+fmt(t.advance||0)+"</td><td style='text-align:right'>"+fmt(diesel)+"</td><td style='text-align:right'>"+fmt(net)+"</td><td>"+(t.status||"—")+"</td></tr>";
+                  return "<tr><td>"+t.date+"</td><td>"+t.truckNo+"</td><td>"+(t.lrNo||"—")+"</td><td>"+(t.client||getDEFAULT_CLIENT())+"</td><td>"+(t.to||"—")+"</td><td>"+t.qty+"</td><td style='text-align:right'>"+fmt(t.qty*(t.frRate||0))+"</td><td style='text-align:right'>"+fmt(t.advance||0)+"</td><td style='text-align:right'>"+fmt(diesel)+"</td><td style='text-align:right'>"+fmt(net)+"</td><td>"+(t.status||"—")+"</td></tr>";
                 }).join("");
                 const totalFreight = shown.reduce((s,t)=>s+t.qty*(t.frRate||0),0);
                 const totalQty = shown.reduce((s,t)=>s+t.qty,0);
@@ -6220,12 +6221,12 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       {/* Client / Plant filter — only shows when multiple clients present */}
       {(()=>{
         const cc={};
-        list.forEach(t=>{const c=t.client||DEFAULT_CLIENT;cc[c]=(cc[c]||0)+1;});
+        list.forEach(t=>{const c=t.client||getDEFAULT_CLIENT();cc[c]=(cc[c]||0)+1;});
         if(Object.keys(cc).length<2) return null;
         return (
           <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
             <span style={{color:C.muted,fontSize:11,fontWeight:700}}>Plant:</span>
-            {["All",...CLIENTS].map(c=>{
+            {["All",...getCLIENTS()].map(c=>{
               const cnt=c==="All"?list.length:(cc[c]||0);
               if(c!=="All"&&!cc[c]) return null;
               const active=(clientFilter||"")===(c==="All"?"":c);
@@ -6348,7 +6349,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                         {t.diLines&&t.diLines.length>1 && <span style={{fontSize:10,color:C.teal,fontWeight:600}}>{t.diLines.length} DIs</span>}
                         {t.orderType==="party" && <span style={{fontSize:10,color:C.accent,fontWeight:600}}>🤝</span>}
                         {(()=>{
-                          const c=t.client||DEFAULT_CLIENT;
+                          const c=t.client||getDEFAULT_CLIENT();
                           const col=clientColor(c, C);
                           const lbl=c;
                           return <span style={{fontSize:9,color:col,fontWeight:700,background:col+"18",borderRadius:8,padding:"1px 6px"}}>{lbl}</span>;
@@ -6376,8 +6377,8 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
                       <div style={{flex:1,minWidth:0}}>
                         <div style={{fontWeight:800,fontSize:15}}>{t.truckNo}
-                        <span style={{fontSize:11,fontWeight:400,color:clientColor(t.client||DEFAULT_CLIENT, C),marginLeft:8}}>
-                          {(t.client||DEFAULT_CLIENT)}
+                        <span style={{fontSize:11,fontWeight:400,color:clientColor(t.client||getDEFAULT_CLIENT(), C),marginLeft:8}}>
+                          {(t.client||getDEFAULT_CLIENT())}
                         </span>
                       </div>
                         <div style={{fontSize:12,marginTop:2}}>
@@ -6885,7 +6886,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                       // Carry party fields through confirm
                       onLRConfirmed(existingTrip, driverPhone);
                       setF(p=>({...p, orderType:"party",
-                        client: detectClient(diConflict.extracted)||p.client||DEFAULT_CLIENT,
+                        client: detectClient(diConflict.extracted)||p.client||getDEFAULT_CLIENT(),
                         district:diConflict.extracted.district||p.district||"",
                         state:diConflict.extracted.state||p.state||""}));
                     }}
@@ -6965,7 +6966,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                           }
                         }
                         // LR: manual or auto
-                        const _partyClient   = f.client || DEFAULT_CLIENT;
+                        const _partyClient   = f.client || getDEFAULT_CLIENT();
                         const _partyMaterial = gradeToMaterial(f.grade, tripType);
                         let _partyLR = "";
                         if(manualLrMode) {
@@ -7026,7 +7027,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                             dieselEstimate:+f.dieselEstimate,
                             dieselIndentNo:(f.dieselIndentNo||"").trim(),
                             orderType:"party", district:f.district||"", state:f.state||"",
-                            client: f.client||DEFAULT_CLIENT,
+                            client: f.client||getDEFAULT_CLIENT(),
                             grFilePath:grUrl, invoiceFilePath:invUrl, mergedPdfPath:"",
                             emailSentAt:"", partyEmail:"", batchId:"", sealedInvoicePath:"",
                             receiptFilePath:"", receiptUploadedAt:"",
@@ -7554,9 +7555,9 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
           {getUserClients(user).map(c => (
             <button key={c} onClick={()=>ff("client")(c)}
               style={{padding:"8px 14px",borderRadius:20,fontSize:12,fontWeight:700,cursor:"pointer",
-                border:`2px solid ${(f.client||DEFAULT_CLIENT)===c?ac:C.border}`,
-                background:(f.client||DEFAULT_CLIENT)===c?ac+"22":"none",
-                color:(f.client||DEFAULT_CLIENT)===c?ac:C.muted}}>
+                border:`2px solid ${(f.client||getDEFAULT_CLIENT())===c?ac:C.border}`,
+                background:(f.client||getDEFAULT_CLIENT())===c?ac+"22":"none",
+                color:(f.client||getDEFAULT_CLIENT())===c?ac:C.muted}}>
               {c}
             </button>
           ))}
@@ -8038,7 +8039,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
 // ─── BILLING ──────────────────────────────────────────────────────────────────
 function Billing({trips, setTrips, fyTrips, selectedClient, user, log}) {
   const baseTrips = fyTrips || trips; // already role-filtered via sp
-  const filteredTrips = selectedClient ? baseTrips.filter(t=>(t.client||DEFAULT_CLIENT)===selectedClient) : baseTrips;
+  const filteredTrips = selectedClient ? baseTrips.filter(t=>(t.client||getDEFAULT_CLIENT())===selectedClient) : baseTrips;
   const pending = filteredTrips.filter(t => t.status==="Pending Bill");
   const billed  = filteredTrips.filter(t => t.status==="Billed");
   const paid    = filteredTrips.filter(t => t.status==="Paid");
@@ -14422,7 +14423,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
   const [scanMaterial, setScanMaterial] = useState("Cement"); // default to Cement
   const displayTrips = trips || []; // Payments tab uses ALL trips across all FYs
   const payTrips = (displayTrips||[]).filter(t=> {
-    if(payClient && (t.client||DEFAULT_CLIENT)!==payClient) return false;
+    if(payClient && (t.client||getDEFAULT_CLIENT())!==payClient) return false;
     if(payMaterial!=="All") {
       if(payMaterial==="Cement"      && t.type!=="outbound") return false;
       if(payMaterial==="RawMaterial" && t.type!=="inbound")  return false;
@@ -15077,9 +15078,9 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
       <div style={{padding:"10px 14px 0",display:"flex",flexDirection:"column",gap:6}}>
         <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
           <span style={{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:0.5}}>CLIENT</span>
-          {[{v:"", l:"All Clients"},...CLIENTS.map(c=>({v:c,l:c}))].map(({v,l})=>{
+          {[{v:"", l:"All Clients"},...getCLIENTS().map(c=>({v:c,l:c}))].map(({v,l})=>{
             const col = v===""?C.muted:clientColor(v, C);
-            const cnt = v===""?(trips||[]).filter(t=>t.billedToShree).length:(trips||[]).filter(t=>(t.client||DEFAULT_CLIENT)===v&&t.billedToShree).length;
+            const cnt = v===""?(trips||[]).filter(t=>t.billedToShree).length:(trips||[]).filter(t=>(t.client||getDEFAULT_CLIENT())===v&&t.billedToShree).length;
             const active = payClient===v;
             return (
               <button key={v||"all"} onClick={()=>setPayClient(v)}
@@ -15330,7 +15331,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                                 style={{width:"100%",background:C.bg,border:`1px solid ${scanClient?C.teal:C.orange}`,borderRadius:6,
                                   color:C.text,padding:"6px 8px",fontSize:12,outline:"none"}}>
                                 <option value="">— Select Client —</option>
-                                {CLIENTS.map(c=><option key={c} value={c}>{c}</option>)}
+                                {getCLIENTS().map(c=><option key={c} value={c}>{c}</option>)}
                               </select>
                             </div>
                             <div style={{flex:1}}>
@@ -18743,7 +18744,7 @@ function Reports({trips, vehicles, employees, payments, settlements, indents, us
       <div style={{background:C.card,borderRadius:14,padding:"14px 16px"}}>
         <div style={{color:C.muted,fontWeight:700,fontSize:12,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>CSV Exports</div>
         {[
-          {l:"🚚 Trip Report CSV",  c:C.blue,   fn:()=>exportCSV(cementFiltered.map(t=>({Date:t.date,LR:t.lrNo,DI:t.diNo,Truck:t.truckNo,Client:t.client||DEFAULT_CLIENT,To:t.to,State:getState(t),Grade:t.grade,MT:t.qty,OrderType:t.orderType||"godown",FR:t.frRate,Driver:t.givenRate,Margin:t.qty*(t.frRate-t.givenRate),Status:t.status,By:t.createdBy})),"cement_dispatch.csv")},
+          {l:"🚚 Trip Report CSV",  c:C.blue,   fn:()=>exportCSV(cementFiltered.map(t=>({Date:t.date,LR:t.lrNo,DI:t.diNo,Truck:t.truckNo,Client:t.client||getDEFAULT_CLIENT(),To:t.to,State:getState(t),Grade:t.grade,MT:t.qty,OrderType:t.orderType||"godown",FR:t.frRate,Driver:t.givenRate,Margin:t.qty*(t.frRate-t.givenRate),Status:t.status,By:t.createdBy})),"cement_dispatch.csv")},
           {l:"🏗 Clinker CSV",      c:C.orange, fn:()=>exportCSV(clinkerTrips.map(t=>({Date:t.date,LR:t.lrNo,DI:t.diNo,Truck:t.truckNo,To:t.to,Consignee:t.consignee,MT:t.qty,Status:t.status,By:t.createdBy})),"clinker_dispatch.csv")},
           {l:"🚛 Vehicle Loan CSV", c:C.red,    fn:()=>exportCSV(vehicles.map(v=>({Truck:v.truckNo,Owner:v.ownerName,Loan:v.loan,Recovered:v.loanRecovered,Balance:v.loan-v.loanRecovered})),"loans.csv")},
           {l:"💵 Settlements CSV",  c:C.green,  fn:()=>exportCSV(settlements,"settlements.csv")},
@@ -19017,9 +19018,9 @@ function UserAdmin({users, setUsers, user, log, pumps=[]}) {
           </div>
           {/* Assigned Clients — owner sees all, non-owner restricted to assigned */}
           <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
-            <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:6}}>ASSIGNED CLIENTS <span style={{color:C.teal,fontWeight:400}}>(leave all unchecked = sees all)</span></div>
+            <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:6}}>ASSIGNED getCLIENTS() <span style={{color:C.teal,fontWeight:400}}>(leave all unchecked = sees all)</span></div>
             <div style={{display:"flex",flexDirection:"column",gap:6}}>
-              {CLIENTS.map(c=>{
+              {getCLIENTS().map(c=>{
                 const checked=(f.assignedClients||[]).includes(c);
                 return(
                   <label key={c} style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer"}}>
