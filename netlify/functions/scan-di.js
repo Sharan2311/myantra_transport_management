@@ -72,17 +72,15 @@ exports.handler = async (event) => {
     return { statusCode: 405, body: "Method Not Allowed" };
   }
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    return { statusCode: 500, body: JSON.stringify({ error: "ANTHROPIC_API_KEY not set" }) };
-  }
-
   try {
-    const { base64, mediaType, promptType } = JSON.parse(event.body);
+    const body_parsed = JSON.parse(event.body);
+    const { base64, mediaType, promptType } = body_parsed;
+    const apiKey = body_parsed.anthropicKey || process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      return { statusCode: 500, body: JSON.stringify({ error: "ANTHROPIC_API_KEY not set" }) };
+    }
 
     // promptType: "di" | "pump" | undefined (legacy — falls back to client prompt if passed)
-    // For legacy compatibility, also accept a "prompt" field from old app versions
-    const body_parsed = JSON.parse(event.body);
     const clientPrompt = body_parsed.prompt; // legacy: app sends prompt directly
 
     const selectedPrompt =
