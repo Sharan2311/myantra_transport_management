@@ -9516,6 +9516,8 @@ function PartyPortal({trips, setTrips, employees, users, user, log}) {
   const [showAssign,   setShowAssign]  = useState(false);
   const [pdfUploading, setPdfUploading]= useState(false);
   const [searchQ,      setSearchQ]     = useState("");
+  const [dateFrom,     setDateFrom]    = useState("");
+  const [dateTo,       setDateTo]      = useState("");
 
   const roles      = (user?.role||"").split(",").map(r=>r.trim());
   const isOwner    = ["owner","manager"].includes(user?.role);
@@ -9554,7 +9556,12 @@ function PartyPortal({trips, setTrips, employees, users, user, log}) {
     : filteredByStatus.filter(t=>t.confirmFollowupUserId===userId);
 
   const currentList = visibleTrips;
-  const activeList  = currentList.filter(t=>!searchQ||(t.truckNo||"").toLowerCase().includes(searchQ.toLowerCase())||(t.lrNo||"").toLowerCase().includes(searchQ.toLowerCase())||(t.to||"").toLowerCase().includes(searchQ.toLowerCase()));
+  const activeList  = currentList.filter(t=>{
+    if(searchQ && !(t.truckNo||"").toLowerCase().includes(searchQ.toLowerCase()) && !(t.lrNo||"").toLowerCase().includes(searchQ.toLowerCase()) && !(t.to||"").toLowerCase().includes(searchQ.toLowerCase())) return false;
+    if(dateFrom && (t.date||"") < dateFrom) return false;
+    if(dateTo && (t.date||"") > dateTo) return false;
+    return true;
+  });
   const totalAmt    = (list) => list.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
   const toggle      = (id) => setSelected(p=>{const s=new Set(p);s.has(id)?s.delete(id):s.add(id);return s;});
   const toggleAll   = () => setSelected(p=>p.size===activeList.length?new Set():new Set(activeList.map(t=>t.id)));
@@ -9687,8 +9694,16 @@ function PartyPortal({trips, setTrips, employees, users, user, log}) {
         {isOwner && <>📅 All party trips · Paid trips excluded</>}
       </div>
 
-      <input value={searchQ} onChange={e=>setSearchQ(e.target.value)} placeholder="🔍 Search truck, LR, destination..."
-        style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,color:C.text,padding:"10px 12px",fontSize:13,outline:"none",width:"100%",boxSizing:"border-box"}}/>
+      <div style={{display:"flex",gap:8,alignItems:"center"}}>
+        <input value={searchQ} onChange={e=>setSearchQ(e.target.value)} placeholder="🔍 Search truck, LR..."
+          style={{flex:1,background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,color:C.text,padding:"10px 12px",fontSize:13,outline:"none",boxSizing:"border-box"}}/>
+        <input type="date" value={dateFrom} onChange={e=>setDateFrom(e.target.value)}
+          style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,color:C.text,padding:"9px 8px",fontSize:12,outline:"none"}}/>
+        <span style={{color:C.muted,fontSize:11}}>to</span>
+        <input type="date" value={dateTo} onChange={e=>setDateTo(e.target.value)}
+          style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,color:C.text,padding:"9px 8px",fontSize:12,outline:"none"}}/>
+        {(dateFrom||dateTo)&&<button onClick={()=>{setDateFrom("");setDateTo("");}} style={{background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:14,fontWeight:700}}>✕</button>}
+      </div>
 
       {selected.size>0&&(
         <div style={{background:C.accent+"11",border:`1.5px solid ${C.accent}`,borderRadius:10,padding:"10px 14px",display:"flex",flexDirection:"column",gap:8}}>
