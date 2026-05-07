@@ -39,6 +39,10 @@ const tripFromDB = r => ({
   batchId: r.batch_id || '',
   sealedInvoicePath: r.sealed_invoice_path || '',
   cashEmpId: r.cash_emp_id || '',
+  partyDriverPhone: r.party_driver_phone || '',
+  salesOfficerPhone: r.sales_officer_phone || '',
+  salesOfficerEmail: r.sales_officer_email || '',
+  partyNumber: r.party_number || '',
 })
 const tripToDB = t => ({
   id: t.id, type: t.type, lr_no: t.lrNo, di_no: t.diNo, truck_no: t.truckNo,
@@ -78,6 +82,10 @@ const tripToDB = t => ({
   batch_id: t.batchId || '',
   sealed_invoice_path: t.sealedInvoicePath || '',
   cash_emp_id: t.cashEmpId || '',
+  party_driver_phone: t.partyDriverPhone || '',
+  sales_officer_phone: t.salesOfficerPhone || '',
+  sales_officer_email: t.salesOfficerEmail || '',
+  party_number: t.partyNumber || '',
 })
 
 const vehicleFromDB = r => ({

@@ -549,7 +549,7 @@ const MAIN_IDS = ["dashboard","trips","billing","diesel","more"];
 function BottomNav({tab, setTab, user, trips, driverPays, vehicles, dieselRequests=[]}) {
   const isFleet = user?.role === "fleet_manager";
   const isPump  = user?.role === "pump_operator";
-  const isParty = user?.role === "party_manager" || user?.role === "email_followup";
+  const isParty = (user?.role||"").split(",").some(r=>["party_manager","email_followup"].includes(r.trim()));
   const items = isPump ? [
     {id:"pump_portal", icon:"⛽", label:"Indents", perm:"pump_portal"},
   ] : isParty ? [
@@ -1414,7 +1414,7 @@ function AppMain() {
       try { sessionStorage.setItem("mye_user", JSON.stringify(u)); } catch{}
       setUser(u);
       if(u.role==="pump_operator") setTab("pump_portal");
-      if(["party_manager","email_followup"].includes(u.role)) setTab("party_portal");
+      if((u.role||"").split(",").some(r=>["party_manager","email_followup"].includes(r.trim()))) setTab("party_portal");
       log("LOGIN",`${u.name} signed in`);
     }} />;
   }
@@ -1510,7 +1510,7 @@ function AppMain() {
 
       <div style={{padding:"14px 16px 8px"}}>
         <ErrorBoundary>
-        {tab==="dashboard"  && user?.role!=="pump_operator" && !["party_manager","email_followup"].includes(user?.role) && <Dashboard {...sp} setTab={setTab} />}
+        {tab==="dashboard"  && user?.role!=="pump_operator" && !(user?.role||"").split(",").every(r=>["party_manager","email_followup"].includes(r.trim())) && <Dashboard {...sp} setTab={setTab} />}
         {tab==="trips"      && can(user,"trips")      && <Trips      {...sp} tripType="outbound" />}
         {tab==="inbound"    && can(user,"inbound")    && <Trips      {...sp} tripType="inbound" />}
         {tab==="billing"    && can(user,"billing")    && <Billing    {...sp} />}
@@ -2421,6 +2421,11 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       if(frRate - (+item.givenRate) < 30) return false;
       // Only require GR/Invoice for DIs explicitly set as party order
       if(item.orderType==="party" && (!item.grFile||!item.invoiceFile)) return false;
+      // Party mandatory fields: driver phone, sales officer phone, sales officer email (@shreecement.com), party number
+      if(item.orderType==="party" && (!(item.partyDriverPhone||"").match(/^\d{10}$/))) return false;
+      if(item.orderType==="party" && (!(item.salesOfficerPhone||"").match(/^\d{10}$/))) return false;
+      if(item.orderType==="party" && (!(item.salesOfficerEmail||"").endsWith("shreecement.com"))) return false;
+      if(item.orderType==="party" && !(item.partyNumber||"").trim()) return false;
       // Block save if party file DI verification failed (mismatch)
       if(item.orderType==="party" && item.grFileDiCheck?.status==="error") return false;
       if(item.orderType==="party" && item.invoiceFileDiCheck?.status==="error") return false;
@@ -3105,6 +3110,45 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
 
                         {/* Party files */}
                         {item.orderType==="party"&&(<>
+                          {/* ── Party mandatory fields ── */}
+                          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+                            <div>
+                              <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
+                                📱 DRIVER PHONE {item.partyDriverPhone?<span style={{color:C.green}}>✓</span>:<span style={{color:C.red}}>*</span>}
+                              </div>
+                              <input value={item.partyDriverPhone||""} placeholder="10-digit mobile"
+                                onChange={e=>updateItem(item.id,"partyDriverPhone",e.target.value.replace(/\D/g,"").slice(0,10))}
+                                style={{width:"100%",background:C.bg,border:`1.5px solid ${(item.partyDriverPhone||"").length===10?C.green:C.border}`,
+                                  borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
+                            </div>
+                            <div>
+                              <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
+                                📱 SALES OFFICER PHONE {item.salesOfficerPhone?<span style={{color:C.green}}>✓</span>:<span style={{color:C.red}}>*</span>}
+                              </div>
+                              <input value={item.salesOfficerPhone||""} placeholder="10-digit mobile"
+                                onChange={e=>updateItem(item.id,"salesOfficerPhone",e.target.value.replace(/\D/g,"").slice(0,10))}
+                                style={{width:"100%",background:C.bg,border:`1.5px solid ${(item.salesOfficerPhone||"").length===10?C.green:C.border}`,
+                                  borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
+                            </div>
+                            <div>
+                              <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
+                                ✉ SALES OFFICER EMAIL {item.salesOfficerEmail?.endsWith("shreecement.com")?<span style={{color:C.green}}>✓</span>:<span style={{color:C.red}}>* @shreecement.com</span>}
+                              </div>
+                              <input value={item.salesOfficerEmail||""} placeholder="name@shreecement.com"
+                                onChange={e=>updateItem(item.id,"salesOfficerEmail",e.target.value.trim().toLowerCase())}
+                                style={{width:"100%",background:C.bg,border:`1.5px solid ${item.salesOfficerEmail?.endsWith("shreecement.com")?C.green:C.border}`,
+                                  borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
+                            </div>
+                            <div>
+                              <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
+                                📋 PARTY NUMBER {item.partyNumber?<span style={{color:C.green}}>✓</span>:<span style={{color:C.red}}>*</span>}
+                              </div>
+                              <input value={item.partyNumber||""} placeholder="Party order number"
+                                onChange={e=>updateItem(item.id,"partyNumber",e.target.value)}
+                                style={{width:"100%",background:C.bg,border:`1.5px solid ${item.partyNumber?C.green:C.border}`,
+                                  borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
+                            </div>
+                          </div>
                           <div style={{display:"flex",gap:8}}>
                             <div style={{flex:1}}>
                               <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
@@ -7179,6 +7223,11 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
             showStatus={true}
             wasScanned={user.role !== "owner"}
             isParty={editSheet.orderType==="party"}
+            partyDriverPhone={editSheet.partyDriverPhone||""}
+            salesOfficerPhone={editSheet.salesOfficerPhone||""}
+            salesOfficerEmail={editSheet.salesOfficerEmail||""}
+            partyNumber={editSheet.partyNumber||""}
+            onPartyFieldChange={(k,v)=>setEditSheet(p=>({...p,[k]:v}))}
             trips={trips||[]} indents={indents||[]}
             dieselRequests={dieselRequests||[]} setDieselRequests={setDieselRequests}
             manualLrMode={manualLrMode} manualDiesel={manualDiesel}
@@ -7371,7 +7420,7 @@ function FileUploadRow({ label, path, onFile, disabled }) {
 }
 
 // Shared form for add + edit
-function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit, submitLabel, user, showStatus=false, wasScanned=false, isParty=false, employees=[], cashTransfers=[], recentDestinations=[], recentGrades=[], trips=[], indents=[], dieselRequests=[], setDieselRequests, manualLrMode=false, manualDiesel=false}) {
+function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit, submitLabel, user, showStatus=false, wasScanned=false, isParty=false, partyDriverPhone="", salesOfficerPhone="", salesOfficerEmail="", partyNumber="", onPartyFieldChange, employees=[], cashTransfers=[], recentDestinations=[], recentGrades=[], trips=[], indents=[], dieselRequests=[], setDieselRequests, manualLrMode=false, manualDiesel=false}) {
   // Ensure each diLine has frRate — migrate from trip-level frRate if missing
   const normalizedDiLines = (f.diLines||[]).map(d => ({...d, frRate: d.frRate || +f.frRate || 0}));
   const fWithLines = normalizedDiLines.length > 1 ? {...f, diLines: normalizedDiLines} : f;
@@ -8029,6 +8078,34 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
       )}
 
       <div style={{color:C.muted,fontSize:12}}>Recording as: <b style={{color:ROLES[user.role]?.color}}>{user.name}</b></div>
+      {/* ── Party mandatory fields ── */}
+      {isParty && onPartyFieldChange && (
+        <div style={{background:C.accent+"08",border:`1px solid ${C.accent}33`,borderRadius:10,padding:"10px 12px",marginBottom:8}}>
+          <div style={{fontSize:11,color:C.accent,fontWeight:700,marginBottom:8}}>🤝 PARTY ORDER — MANDATORY FIELDS</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+            <div>
+              <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>📱 DRIVER PHONE {(partyDriverPhone||"").match(/^\d{10}$/)?<span style={{color:C.green}}>✓</span>:<span style={{color:C.red}}>*</span>}</div>
+              <input value={partyDriverPhone} placeholder="10-digit mobile" onChange={e=>onPartyFieldChange("partyDriverPhone",e.target.value.replace(/\D/g,"").slice(0,10))}
+                style={{width:"100%",background:C.bg,border:`1.5px solid ${(partyDriverPhone||"").match(/^\d{10}$/)?C.green:C.border}`,borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
+            </div>
+            <div>
+              <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>📱 SALES OFFICER PHONE {(salesOfficerPhone||"").match(/^\d{10}$/)?<span style={{color:C.green}}>✓</span>:<span style={{color:C.red}}>*</span>}</div>
+              <input value={salesOfficerPhone} placeholder="10-digit mobile" onChange={e=>onPartyFieldChange("salesOfficerPhone",e.target.value.replace(/\D/g,"").slice(0,10))}
+                style={{width:"100%",background:C.bg,border:`1.5px solid ${(salesOfficerPhone||"").match(/^\d{10}$/)?C.green:C.border}`,borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
+            </div>
+            <div>
+              <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>✉ SALES OFFICER EMAIL {salesOfficerEmail?.endsWith("shreecement.com")?<span style={{color:C.green}}>✓</span>:<span style={{color:C.red}}>* @shreecement.com</span>}</div>
+              <input value={salesOfficerEmail} placeholder="name@shreecement.com" onChange={e=>onPartyFieldChange("salesOfficerEmail",e.target.value.trim().toLowerCase())}
+                style={{width:"100%",background:C.bg,border:`1.5px solid ${salesOfficerEmail?.endsWith("shreecement.com")?C.green:C.border}`,borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
+            </div>
+            <div>
+              <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>📋 PARTY NUMBER {partyNumber?<span style={{color:C.green}}>✓</span>:<span style={{color:C.red}}>*</span>}</div>
+              <input value={partyNumber} placeholder="Party order number" onChange={e=>onPartyFieldChange("partyNumber",e.target.value)}
+                style={{width:"100%",background:C.bg,border:`1.5px solid ${partyNumber?C.green:C.border}`,borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
+            </div>
+          </div>
+        </div>
+      )}
       <Btn onClick={onSubmit} full color={ac}
         disabled={!!(f.truckNo && f.truckNo.trim().length>=4 && (()=>{
           const sv=(vehicles||[]).find(v=>v.truckNo===(f.truckNo||"").toUpperCase().trim());
@@ -9433,7 +9510,7 @@ function PartyTripCard({t, selected, toggle, isOwner, isPartyMgr, employees, ope
 
 // ─── PARTY PORTAL ─────────────────────────────────────────────────────────────
 function PartyPortal({trips, setTrips, employees, users, user, log}) {
-  const [activeTab,    setActiveTab]   = useState("pending");
+  const [activeTab,    setActiveTab]   = useState("all");
   const [selected,     setSelected]    = useState(new Set());
   const [assignTo,     setAssignTo]    = useState("");
   const [showAssign,   setShowAssign]  = useState(false);
@@ -9447,14 +9524,36 @@ function PartyPortal({trips, setTrips, employees, users, user, log}) {
   const isFollowup = roles.includes("email_followup") || roles.includes("party_manager") || isOwner;
   const userId     = user?.username || user?.id || "";
 
-  const partyTrips     = (trips||[]).filter(t=>t.orderType==="party");
-  const pendingTrips   = partyTrips.filter(t=>!t.emailSentAt&&!t.sealedInvoicePath&&t.status!=="Billed"&&t.status!=="Yet to Bill");
-  const yetToBillTrips = partyTrips.filter(t=>(t.emailSentAt||t.sealedInvoicePath)&&t.status!=="Billed");
+  // ── 2-day rule: party manager sees trips older than 2 days (not today/yesterday) ──
+  const twoDaysAgo = new Date(Date.now() - 2*24*60*60*1000).toISOString().split("T")[0];
+  const allPartyTrips = (trips||[]).filter(t=>t.orderType==="party");
+  // Party manager only sees trips dated <= 2 days ago AND not paid
+  const partyTrips = isOwner ? allPartyTrips : allPartyTrips.filter(t => (t.date||"") <= twoDaysAgo);
 
-  const visiblePending    = isPartyMgr ? pendingTrips   : pendingTrips.filter(t=>t.confirmFollowupUserId===userId);
-  const visibleYetToBill  = isPartyMgr ? yetToBillTrips : yetToBillTrips.filter(t=>t.confirmFollowupUserId===userId);
+  // Status-based categorization
+  const PARTY_STATUSES = [
+    {id:"all",            label:"All",                    color:C.muted},
+    {id:"pending",        label:"Pending",                color:C.orange},
+    {id:"sealed",         label:"Sealed Invoice Received",color:C.green},
+    {id:"confirmed",      label:"Confirmation Received",  color:C.blue},
+    {id:"yet_to_bill",    label:"Yet to Bill",            color:C.purple},
+    {id:"billed",         label:"Billed",                 color:C.teal},
+  ];
 
-  const currentList = activeTab==="pending" ? visiblePending : visibleYetToBill;
+  // Filter by status (excluding "Paid" — paid trips leave the queue)
+  const notPaid = partyTrips.filter(t=>t.paymentStatus!=="Paid" && t.status!=="Paid");
+  const statusFilter = activeTab;
+  const filteredByStatus = statusFilter==="all" ? notPaid
+    : statusFilter==="pending" ? notPaid.filter(t=>!t.emailSentAt&&!t.sealedInvoicePath&&t.status!=="Sealed Invoice Received"&&t.status!=="Confirmation Email Received"&&t.status!=="Billed"&&t.status!=="Yet to Bill")
+    : statusFilter==="sealed" ? notPaid.filter(t=>t.status==="Sealed Invoice Received")
+    : statusFilter==="confirmed" ? notPaid.filter(t=>t.status==="Confirmation Email Received")
+    : statusFilter==="yet_to_bill" ? notPaid.filter(t=>t.status==="Yet to Bill"||t.status==="Billed")
+    : notPaid;
+
+  const visibleTrips = isPartyMgr ? filteredByStatus
+    : filteredByStatus.filter(t=>t.confirmFollowupUserId===userId);
+
+  const currentList = visibleTrips;
   const activeList  = currentList.filter(t=>!searchQ||(t.truckNo||"").toLowerCase().includes(searchQ.toLowerCase())||(t.lrNo||"").toLowerCase().includes(searchQ.toLowerCase())||(t.to||"").toLowerCase().includes(searchQ.toLowerCase()));
   const totalAmt    = (list) => list.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
   const toggle      = (id) => setSelected(p=>{const s=new Set(p);s.has(id)?s.delete(id):s.add(id);return s;});
@@ -9511,7 +9610,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log}) {
       if(error) throw error;
       setTrips(prev=>prev.map(t=>{
         if(t.id!==tripId) return t;
-        const u={...t, sealedInvoicePath:path, status:"Yet to Bill"};
+        const u={...t, sealedInvoicePath:path, status:"Sealed Invoice Received"};
         setTimeout(()=>DB.saveTrip(u).catch(e=>console.error("saveTrip sealed:",e)),0);
         return u;
       }));
@@ -9532,7 +9631,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log}) {
       const pdfUpdated=[];
       setTrips(prev=>prev.map(t=>{
         if(!selected.has(t.id))return t;
-        const u={...t,emailSentAt:t.emailSentAt||ts,confirmPdfPath:publicUrl,status:"Yet to Bill"};
+        const u={...t,emailSentAt:t.emailSentAt||ts,confirmPdfPath:publicUrl,status:"Confirmation Email Received"};
         pdfUpdated.push(u); return u;
       }));
       setTimeout(()=>pdfUpdated.forEach(u=>DB.saveTrip(u).catch(e=>console.error("saveTrip confirm pdf:",e))),0);
@@ -9563,18 +9662,29 @@ function PartyPortal({trips, setTrips, employees, users, user, log}) {
         <div style={{fontSize:11,color:C.muted}}>{user?.name||user?.username} · {ROLES[user?.role]?.label||user?.role}</div>
       </div>
 
-      {/* Tabs with amounts */}
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",borderRadius:10,overflow:"hidden",border:`1px solid ${C.border}`}}>
-        {[{id:"pending",icon:"⏳",label:"Pending",list:visiblePending},{id:"yet",icon:"📬",label:"Yet to Bill",list:visibleYetToBill}].map(tab=>{
-          const isAct=activeTab===tab.id;
+      {/* Status filter tabs */}
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:4}}>
+        {PARTY_STATUSES.map(s=>{
+          const isAct=activeTab===s.id;
+          const count = s.id==="all" ? notPaid.length
+            : s.id==="pending" ? notPaid.filter(t=>!t.emailSentAt&&!t.sealedInvoicePath&&t.status!=="Sealed Invoice Received"&&t.status!=="Confirmation Email Received"&&t.status!=="Billed"&&t.status!=="Yet to Bill").length
+            : s.id==="sealed" ? notPaid.filter(t=>t.status==="Sealed Invoice Received").length
+            : s.id==="confirmed" ? notPaid.filter(t=>t.status==="Confirmation Email Received").length
+            : s.id==="yet_to_bill" ? notPaid.filter(t=>t.status==="Yet to Bill"||t.status==="Billed").length
+            : 0;
           return(
-            <button key={tab.id} onClick={()=>{setActiveTab(tab.id);setSelected(new Set());}}
-              style={{padding:"10px 8px",border:"none",cursor:"pointer",background:isAct?"#7c3aed":C.bg,color:isAct?"#fff":C.text}}>
-              <div style={{fontWeight:700,fontSize:13}}>{tab.icon} {tab.label} ({tab.list.length})</div>
-              <div style={{fontSize:11,opacity:0.85,marginTop:2}}>₹{totalAmt(tab.list).toLocaleString("en-IN")}</div>
+            <button key={s.id} onClick={()=>{setActiveTab(s.id);setSelected(new Set());}}
+              style={{padding:"6px 12px",borderRadius:20,border:`1.5px solid ${isAct?s.color:C.border}`,
+                background:isAct?s.color+"22":"transparent",color:isAct?s.color:C.muted,
+                fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+              {s.label} ({count})
             </button>
           );
         })}
+      </div>
+      <div style={{fontSize:11,color:C.muted,marginBottom:4}}>
+        {!isOwner && <>📅 Showing party trips older than 2 days · Paid trips auto-removed from queue</>}
+        {isOwner && <>📅 All party trips · Paid trips excluded</>}
       </div>
 
       <input value={searchQ} onChange={e=>setSearchQ(e.target.value)} placeholder="🔍 Search truck, LR, destination..."
@@ -9587,7 +9697,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log}) {
             <button onClick={()=>setSelected(new Set())} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:12}}>✕</button>
           </div>
           {/* Pending tab actions — party manager only */}
-          {activeTab==="pending"&&isPartyMgr&&(
+          {activeTab!=="yet_to_bill"&&isPartyMgr&&(
             <>
               {showAssign&&(
                 <select value={assignTo} onChange={e=>setAssignTo(e.target.value)}
@@ -9625,7 +9735,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log}) {
           )}
 
           {/* Yet to Bill tab — assign followup + upload confirmation PDF */}
-          {activeTab==="yet"&&isPartyMgr&&(
+          {activeTab==="yet_to_bill"&&isPartyMgr&&(
             <>
               {showAssign&&(
                 <select value={assignTo} onChange={e=>setAssignTo(e.target.value)}
@@ -9654,7 +9764,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log}) {
               </button>
             </>
           )}
-          {activeTab==="yet"&&(isPartyMgr||isFollowup)&&(
+          {(activeTab==="sealed"||activeTab==="confirmed"||activeTab==="yet_to_bill")&&(isPartyMgr||isFollowup)&&(
             <label style={{display:"inline-flex",alignItems:"center",gap:8,background:C.teal,borderRadius:7,padding:"8px 14px",cursor:pdfUploading?"not-allowed":"pointer",color:"#fff",fontWeight:700,fontSize:12,width:"fit-content"}}>
               {pdfUploading?"⏳ Uploading...":"📄 Upload Confirmation PDF — attach to all selected"}
               <input type="file" accept=".pdf,image/*" style={{display:"none"}} disabled={pdfUploading} onChange={e=>e.target.files[0]&&uploadConfirmPdf(e.target.files[0])}/>
@@ -9674,9 +9784,9 @@ function PartyPortal({trips, setTrips, employees, users, user, log}) {
 
       {activeList.length===0
         ?<div style={{textAlign:"center",color:C.muted,padding:40}}>
-            <div style={{fontSize:32,marginBottom:10}}>{activeTab==="pending"?"📭":"✅"}</div>
+            <div style={{fontSize:32,marginBottom:10}}>{"📭"}</div>
             <div style={{fontSize:14,fontWeight:600,color:C.text,marginBottom:6}}>
-              {activeTab==="pending"?"No trips assigned to you yet":"No trips waiting to be billed"}
+              {"No trips in this status"}
             </div>
             {!isPartyMgr&&activeTab==="pending"&&<div style={{fontSize:12,color:C.muted}}>The Party Manager will assign trips to you for followup.</div>}
           </div>
@@ -19018,6 +19128,34 @@ function UserAdmin({users, setUsers, user, log, pumps=[]}) {
           <div style={{display:"flex",gap:10}}><Field label="Full Name" value={f.name} onChange={ff("name")} half /><Field label="Username" value={f.username} onChange={ff("username")} half /></div>
           <Field label="PIN (4 digits)" value={f.pin} onChange={ff("pin")} placeholder="1234" />
           <Field label="Role" value={f.role} onChange={ff("role")} opts={Object.entries(ROLES).map(([k,v])=>({v:k,l:`${v.label} — ${v.perms.slice(0,3).join(", ")}…`}))} />
+          {/* Multi-role: add a second role */}
+          <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
+            <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:6}}>ADDITIONAL ROLE <span style={{color:C.teal,fontWeight:400}}>(optional — gives dual permissions)</span></div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+              {Object.entries(ROLES).filter(([k])=>k!==f.role&&k!=="owner").map(([k,v])=>{
+                const currentRoles = (f.role||"").split(",").map(r=>r.trim());
+                const hasRole = currentRoles.includes(k);
+                return (
+                  <button key={k} onClick={()=>{
+                    if(hasRole) {
+                      ff("role")(currentRoles.filter(r=>r!==k).join(","));
+                    } else {
+                      const baseRole = currentRoles[0]||"operator";
+                      ff("role")([baseRole,k].join(","));
+                    }
+                  }} style={{padding:"5px 10px",borderRadius:8,fontSize:11,fontWeight:700,cursor:"pointer",
+                    background:hasRole?v.color+"22":"transparent",
+                    border:`1.5px solid ${hasRole?v.color:C.border}`,
+                    color:hasRole?v.color:C.muted}}>
+                    {hasRole?"✓ ":""}{v.label}
+                  </button>
+                );
+              })}
+            </div>
+            {(f.role||"").includes(",") && (
+              <div style={{fontSize:11,color:C.green,marginTop:6}}>✓ Dual role: {(f.role||"").split(",").map(r=>ROLES[r.trim()]?.label||r).join(" + ")}</div>
+            )}
+          </div>
           <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
             <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:6}}>PERMISSIONS</div>
             <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>{(ROLES[f.role]?.perms||[]).map(p=><Badge key={p} label={p} color={ROLES[f.role].color} />)}</div>
