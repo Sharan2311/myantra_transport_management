@@ -2312,16 +2312,24 @@ Rules:
       const pincodeMatch = consigneeAddr.match(/(\d{6})/);
       const pincode = pincodeMatch ? pincodeMatch[1] : (extracted.pincode || "");
 
-      // Look up district + state from India Post API
+      // Look up district + state from India Post API (non-blocking)
       let autoState = extracted.state || "";
       let autoDistrict = extracted.district || "";
+      // Fire pincode lookup in background — don't block scan
       if (pincode && pincode.length === 6) {
-        const pincodeInfo = await lookupPincode(pincode);
-        if (pincodeInfo) {
-          autoDistrict = pincodeInfo.district || autoDistrict;
-          autoState = pincodeInfo.state || autoState;
-          console.log("[SCAN] Pincode", pincode, "→", pincodeInfo.district, pincodeInfo.state);
-        }
+        lookupPincode(pincode).then(pincodeInfo => {
+          if (pincodeInfo) {
+            console.log("[SCAN] Pincode", pincode, "→", pincodeInfo.district, pincodeInfo.state);
+            // Update the item with district/state after lookup completes
+            setItems(prev => prev.map(x => x.extracted?.diNo === extracted.diNo ? {
+              ...x,
+              extracted: {...(x.extracted||{}),
+                _autoDistrict: pincodeInfo.district || x.extracted?._autoDistrict || "",
+                _autoState: pincodeInfo.state || x.extracted?._autoState || "",
+              }
+            } : x));
+          }
+        }).catch(()=>{});
       }
 
       // Store extracted data
@@ -2771,6 +2779,7 @@ Rules:
           dieselEstimate:+g.diesel||0,
           dieselIndentNo:g.dieselIndentNo.trim()||"",
           cashEmpId:g.cashEmpId||"",
+          ownerName: item.ownerName || g.ownerName || "",
           orderType:item.orderType||"godown", diLines:[],
           assignedEmpId:g.assignedEmpId||"",
           grFilePath:grUrl, invoiceFilePath:invUrl,
@@ -2792,15 +2801,16 @@ Rules:
           new Promise((_,rej)=>setTimeout(()=>rej(new Error("Save timed out — check connection")),15000))
         ]).catch(e=>({success:false, duplicateDI:null, existingLR:null, existingTruck:null, error:e.message}));
         // Auto-update vehicle ownerName if vehicle has none but trip/scan does
-        if(trip.ownerName && trip.truckNo) {
-          const _vUpd = (vehicles||[]).find(v=>v.truckNo===trip.truckNo);
-          if(_vUpd && !(_vUpd.ownerName||"").trim()) {
-            const updVeh = {..._vUpd, ownerName: trip.ownerName};
-            setVehicles(prev => prev.map(v=>v.id===updVeh.id?updVeh:v));
-            DB.saveVehicle(updVeh).catch(e=>console.warn("Vehicle owner update:", e.message));
-            console.log("[SAVE] Updated vehicle", trip.truckNo, "owner →", trip.ownerName);
+        try {
+          if(trip.ownerName && trip.truckNo) {
+            const _vUpd = (vehicles||[]).find(v=>v.truckNo===trip.truckNo);
+            if(_vUpd && !(_vUpd.ownerName||"").trim()) {
+              const updVeh = {..._vUpd, ownerName: trip.ownerName};
+              setVehicles(prev => prev.map(v=>v.id===updVeh.id?updVeh:v));
+              DB.saveVehicle(updVeh).catch(()=>{});
+            }
           }
-        }
+        } catch(e) { console.warn("Vehicle owner update skipped:", e.message); }
         // Auto-save party contact + district officer for future auto-fill
         if(trip.orderType==="party" && trip.partyName) {
           DB.savePartyContact({
