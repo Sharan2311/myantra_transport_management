@@ -148,9 +148,10 @@ function calcNet(t, vehicle, confirmedDiesel) {
   const advance          = t.advance || 0;
   const shortageRecovery = t.shortageRecovery || 0;
   const loanRecovery     = t.loanRecovery || 0;
+  const pouchBalance     = t.pouchBalance || 0;
   // Do NOT subtract loanDeduct — it's already captured in loanRecovery on the saved trip
-  const net              = gross - advance - tafal - diesel - shortageRecovery - loanRecovery;
-  return {gross, billed, tafal, loanDeduct, diesel, advance, shortageRecovery, loanRecovery, net};
+  const net              = gross - advance - tafal - diesel - shortageRecovery - loanRecovery - pouchBalance;
+  return {gross, billed, tafal, loanDeduct, diesel, advance, shortageRecovery, loanRecovery, pouchBalance, net};
 }
 
 const mkTrip = (o) => ({
@@ -2360,8 +2361,10 @@ Rules:
         const updated = prev.map(x => x.id===id
           ? {...x, status:"done", extracted:{...extracted, client},
               orderType: extracted._autoOrderType || "godown",
+              pouchBalance: extracted._autoOrderType === "party" ? 700 : 0,
               partyDriverPhone: "",  // driver phone is manual entry
               partyName: extracted._partyName || "",
+              partyNumber: extracted._partyPhone || "",  // party phone auto-fills party number
               error:null}
           : x);
         // Then auto-remove duplicate diNo within this batch session
@@ -2391,7 +2394,7 @@ Rules:
       extracted:null, error:null,
       // per-DI fields
       orderType:"godown", givenRate:"", grFile:null, invoiceFile:null,
-      partyDriverPhone:"", salesOfficerPhone:"", salesOfficerEmail:"", partyNumber:"", partyName:"",
+      partyDriverPhone:"", salesOfficerPhone:"", salesOfficerEmail:"", partyNumber:"", partyName:"", pouchBalance:0,
     }));
     setItems(prev => [...prev, ...newItems]);
     setGroupsBuilt(false); // new files = rebuild groups
@@ -2778,6 +2781,7 @@ Rules:
           salesOfficerEmail: item.salesOfficerEmail || "",
           partyNumber: item.partyNumber || "",
           partyName: item.partyName || item.extracted?._partyName || "",
+          pouchBalance: item.orderType==="party" ? (item.pouchBalance||700) : 0,
           grParticulars: item.extracted?._grParticulars || null,
           createdBy:user.username, createdAt:nowTs(),
         };
@@ -2938,6 +2942,7 @@ Rules:
           salesOfficerEmail: g.items[0]?.salesOfficerEmail || "",
           partyNumber: g.items[0]?.partyNumber || "",
           partyName: g.items[0]?.partyName || g.items[0]?.extracted?._partyName || "",
+          pouchBalance: g.items[0]?.orderType==="party" ? (g.items[0]?.pouchBalance||700) : 0,
           grParticulars: g.items[0]?.extracted?._grParticulars || null,
           createdBy:user.username, createdAt:nowTs(),
         };
@@ -3237,7 +3242,11 @@ Rules:
                           <div style={{flex:1}}>
                             <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>ORDER TYPE</div>
                             <select value={item.orderType||"godown"}
-                              onChange={e=>updateItem(item.id,"orderType",e.target.value)}
+                              onChange={e=>{
+                                updateItem(item.id,"orderType",e.target.value);
+                                if(e.target.value==="party") updateItem(item.id,"pouchBalance",700);
+                                else updateItem(item.id,"pouchBalance",0);
+                              }}
                               style={{width:"100%",background:C.card,border:`1.5px solid ${C.border}`,
                                 borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none"}}>
                               <option value="godown">🏭 Godown</option>
@@ -3298,6 +3307,19 @@ Rules:
                                 onChange={e=>updateItem(item.id,"partyNumber",e.target.value)}
                                 style={{width:"100%",background:C.bg,border:`1.5px solid ${item.partyNumber?C.green:C.border}`,
                                   borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none",boxSizing:"border-box"}} />
+                            </div>
+                            <div>
+                              <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
+                                💰 POUCH BALANCE ₹ {user.role!=="owner"&&<span style={{fontSize:9,color:C.orange}}>🔒</span>}
+                              </div>
+                              <input type="number" value={item.pouchBalance||700}
+                                onChange={e=>updateItem(item.id,"pouchBalance",+e.target.value||0)}
+                                readOnly={user.role!=="owner"}
+                                style={{width:"100%",background:user.role==="owner"?C.bg:C.dim,
+                                  border:`1.5px solid ${C.orange}`,borderRadius:8,
+                                  color:C.orange,padding:"7px 8px",fontSize:13,fontWeight:700,
+                                  outline:"none",boxSizing:"border-box",
+                                  cursor:user.role==="owner"?"text":"not-allowed"}} />
                             </div>
                           </div>
                           {/* Party name + phone from GR scan (read-only for non-owners) */}
@@ -6718,6 +6740,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                     <span style={{color:ROLES[t.createdBy]?.color||C.muted,fontSize:11}}>by {t.createdBy} · {t.createdAt}</span>
                     <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}}>
                       {t.tafal>0     && <Badge label={"TAFAL ₹"+t.tafal}     color={C.purple} />}
+                      {t.pouchBalance>0 && <Badge label={"Pouch ₹"+t.pouchBalance} color={C.orange} />}
                       {/* Warn if loan deduction not yet applied on this trip */}
                       {(()=>{
                         if(t.loanRecovery>0||t.driverSettled) return null;
@@ -16964,7 +16987,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
   const _diGross = (t.diLines&&t.diLines.length>1)
     ? t.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
     : (t.qty||0)*(t.givenRate||0);
-  const _deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)+(t.shortageRecovery||0)+(t.loanRecovery||0);
+  const _deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)+(t.shortageRecovery||0)+(t.loanRecovery||0)+(t.pouchBalance||0);
   const _netDue  = Math.max(0, _diGross - _deducts);
   const _paidSoFar = (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
   const _balance = Math.max(0, _netDue - _paidSoFar);
@@ -17065,6 +17088,15 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
       }
     }
     if(!finalAcc) { alert("Could not find selected account."); return; }
+
+    // ── Pouch balance validation: block if only pouch remains and no sealed/confirmation ──
+    if(t.orderType==="party" && (t.pouchBalance||0)>0) {
+      const hasSealedOrConfirm = t.sealedInvoicePath || t.status==="Sealed Invoice Received" || t.status==="Confirmation Email Received";
+      if(!hasSealedOrConfirm && _balance <= (t.pouchBalance||0)) {
+        alert("⚠ Cannot request payment.\n\nThe remaining balance (₹"+_balance.toLocaleString("en-IN")+") is only the pouch balance.\nPlease upload sealed invoice or confirmation email first.");
+        return;
+      }
+    }
 
     const recipientId   = recipType==="vehicle_owner" ? (veh?.id||"") : (selAcc?._empId||"");
     const recipientName = recipType==="vehicle_owner"

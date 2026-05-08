@@ -44,6 +44,7 @@ const tripFromDB = r => ({
   salesOfficerEmail: r.sales_officer_email || '',
   partyNumber: r.party_number || '',
   partyName: r.party_name || '',
+  pouchBalance: +(r.pouch_balance || 0),
   grParticulars: r.gr_particulars || null,
 })
 const tripToDB = t => ({
@@ -89,6 +90,7 @@ const tripToDB = t => ({
   sales_officer_email: t.salesOfficerEmail || '',
   party_number: t.partyNumber || '',
   party_name: t.partyName || '',
+  pouch_balance: t.pouchBalance || 0,
   gr_particulars: t.grParticulars || null,
 })
 
