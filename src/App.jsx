@@ -1087,7 +1087,7 @@ function AppMain() {
 
   // ── Phase 3 (650ms) — 6 connections ──────────────────────────────────────────
   const [settlements, setSettlements, rS, reloadSettlements] = useDB(DB.getSettlements, [],             650);
-  const [activity,    setActivity,    rA, reloadActivity]    = useDB(DB.getActivity,    [],             650);
+  const [activity,    setActivity,    rA, reloadActivity]    = useDB(DB.getActivity,    [],             650); // stores all, UI filters to 7d
   const [driverPays,  setDriverPays,  rDP,reloadDriverPays]  = useDB(DB.getDriverPays,  [],             650);
   const [expenses,       setExpenses,       rEx, reloadExpenses]      = useDB(DB.getExpenses,       [], 650);
   const [gstReleases,    setGstReleases,    rGR, reloadGst]           = useDB(DB.getGstReleases,    [], 650);
@@ -1098,6 +1098,10 @@ function AppMain() {
 
   const loading = !rU||!rT||!rV||!rE||!rP||!rS||!rPu||!rI||!rSt||!rDP||!rEx||!rGR;
   const dbError = (!rU && users.length===0) ? "Could not load users from database." : null;
+
+  // Party role checks (supports multi-role like "party_manager,cement_fleet_mgr")
+  const isParty = (user?.role||"").split(",").map(r=>r.trim()).every(r=>["party_manager","email_followup"].includes(r));
+  const hasPartyRole = (user?.role||"").split(",").some(r=>["party_manager","email_followup"].includes(r.trim()));
 
   // ── Wrapped setters that also persist to DB ──────────────────────────────
   const save = async (fn, reload, label="") => {
@@ -1155,6 +1159,11 @@ function AppMain() {
   const dbSetPayments = (updater) => {
     setPayments(prev => {
       const next = typeof updater === "function" ? updater(prev) : updater;
+      // Log payment changes
+      const prevIds = new Set((prev||[]).map(p=>p.id));
+      next.forEach(p => {
+        if(!prevIds.has(p.id)) log("ADD PAYMENT",`₹${p.amount||0} · ${p.truckNo||""}`);
+      });
       const prevIds = new Set((prev||[]).map(p=>p.id));
       next.filter(p => !prevIds.has(p.id)).forEach(p => DB.savePayment(p).catch(e => setSaveErr(e.message)));
       return next;
@@ -1267,6 +1276,7 @@ function AppMain() {
   };
 
   const dbSetSettings = (val) => {
+    log("EDIT SETTINGS", typeof val==="object"?JSON.stringify(val).slice(0,100):"updated");
     setSettings(val);
     DB.saveSettings(val).catch(e => setSaveErr(e.message));
   };
@@ -19277,20 +19287,116 @@ function Reminders({trips, vehicles, employees}) {
 
 // ─── ACTIVITY LOG ─────────────────────────────────────────────────────────────
 function ActivityLog({activity}) {
+  const [days, setDays] = useState(7);
+  const [searchQ, setSearchQ] = useState("");
+  const [filterUser, setFilterUser] = useState("");
+
+  // Filter to last N days
+  const cutoff = new Date(Date.now() - days*24*60*60*1000).toISOString();
+  const filtered = (activity||[]).filter(a => {
+    if ((a.time||"") < cutoff) return false;
+    if (searchQ && !(a.action||"").toLowerCase().includes(searchQ.toLowerCase()) && !(a.detail||"").toLowerCase().includes(searchQ.toLowerCase())) return false;
+    if (filterUser && a.user !== filterUser) return false;
+    return true;
+  });
+
+  // Group by date
+  const groups = {};
+  filtered.forEach(a => {
+    const day = (a.time||"").slice(0,10);
+    if (!groups[day]) groups[day] = [];
+    groups[day].push(a);
+  });
+  const sortedDays = Object.keys(groups).sort((a,b) => b.localeCompare(a));
+
+  // Get unique users for filter
+  const users = [...new Set((activity||[]).map(a=>a.user).filter(Boolean))];
+
+  // Action icon map
+  const actionIcon = a => {
+    if(a.includes("TRIP")) return "🚚";
+    if(a.includes("EMPLOYEE")) return "👤";
+    if(a.includes("VEHICLE")) return "🏗";
+    if(a.includes("PAYMENT")||a.includes("WALLET")) return "💰";
+    if(a.includes("DIESEL")) return "⛽";
+    if(a.includes("SETTLEMENT")) return "✅";
+    if(a.includes("LOGIN")||a.includes("LOGOUT")) return "🔐";
+    if(a.includes("EMAIL")||a.includes("SEALED")||a.includes("RECEIPT")) return "📧";
+    if(a.includes("USER")) return "⚙";
+    if(a.includes("SETTINGS")) return "⚙";
+    return "📋";
+  };
+
+  const relTime = t => {
+    if(!t) return "";
+    const diff = Date.now() - new Date(t).getTime();
+    const m = Math.floor(diff/60000);
+    if(m<1) return "just now";
+    if(m<60) return m+"m ago";
+    const h = Math.floor(m/60);
+    if(h<24) return h+"h ago";
+    const d = Math.floor(h/24);
+    return d+"d ago";
+  };
+
   return (
-    <div style={{display:"flex",flexDirection:"column",gap:12}}>
-      <div style={{color:C.blue,fontWeight:800,fontSize:16}}>📋 Activity Log</div>
-      {(activity||[]).map(a=>(
-        <div key={a.id} style={{background:C.card,borderRadius:12,padding:"11px 12px",display:"flex",gap:10,alignItems:"flex-start"}}>
-          <Av name={a.user} role={a.role} size={32} />
-          <div style={{flex:1,minWidth:0}}>
-            <div style={{fontWeight:700,fontSize:13}}>{a.user} <span style={{color:C.muted,fontWeight:400}}>{a.action}</span></div>
-            <div style={{color:C.muted,fontSize:12}}>{a.detail}</div>
-            <div style={{color:C.dim,fontSize:11,marginTop:2}}>{a.time}</div>
+    <div style={{display:"flex",flexDirection:"column",gap:10}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div style={{color:C.blue,fontWeight:800,fontSize:16}}>📋 Activity Log</div>
+        <span style={{color:C.muted,fontSize:11}}>{filtered.length} entries</span>
+      </div>
+
+      {/* Filters */}
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+        {[7,14,30,90].map(d=>(
+          <button key={d} onClick={()=>setDays(d)}
+            style={{padding:"5px 10px",borderRadius:20,fontSize:11,fontWeight:700,cursor:"pointer",
+              border:`1.5px solid ${days===d?C.accent:C.border}`,
+              background:days===d?C.accent+"22":"transparent",
+              color:days===d?C.accent:C.muted}}>
+            {d}d
+          </button>
+        ))}
+        <input value={searchQ} onChange={e=>setSearchQ(e.target.value)} placeholder="🔍 Search..."
+          style={{flex:1,minWidth:100,background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,
+            color:C.text,padding:"6px 10px",fontSize:12,outline:"none"}} />
+        <select value={filterUser} onChange={e=>setFilterUser(e.target.value)}
+          style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,
+            color:C.text,padding:"6px 8px",fontSize:12,outline:"none"}}>
+          <option value="">All users</option>
+          {users.map(u=><option key={u} value={u}>{u}</option>)}
+        </select>
+      </div>
+
+      {/* Grouped by day */}
+      {sortedDays.map(day => (
+        <div key={day}>
+          <div style={{fontSize:11,fontWeight:700,color:C.muted,padding:"8px 0 4px",borderBottom:`1px solid ${C.border}22`,
+            position:"sticky",top:0,background:C.bg,zIndex:1}}>
+            {day === new Date().toISOString().slice(0,10) ? "Today" :
+             day === new Date(Date.now()-86400000).toISOString().slice(0,10) ? "Yesterday" :
+             new Date(day).toLocaleDateString("en-IN",{weekday:"short",day:"numeric",month:"short"})}
+            <span style={{fontWeight:400,marginLeft:8}}>{groups[day].length} entries</span>
           </div>
+          {groups[day].map(a=>(
+            <div key={a.id} style={{background:C.card,borderRadius:10,padding:"8px 10px",marginTop:4,
+              display:"flex",gap:8,alignItems:"flex-start",borderLeft:`3px solid ${
+                a.action?.includes("DELETE")?C.red:
+                a.action?.includes("ADD")?C.green:
+                a.action?.includes("EDIT")?C.orange:C.border}`}}>
+              <span style={{fontSize:16,flexShrink:0,marginTop:2}}>{actionIcon(a.action||"")}</span>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontWeight:700,fontSize:12}}>
+                  {a.user} <span style={{color:C.muted,fontWeight:400,fontSize:11}}>{a.action}</span>
+                </div>
+                <div style={{color:C.muted,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.detail}</div>
+              </div>
+              <span style={{color:C.dim,fontSize:10,flexShrink:0,whiteSpace:"nowrap"}}>{relTime(a.time)}</span>
+            </div>
+          ))}
         </div>
       ))}
-      {!(activity||[]).length && <div style={{textAlign:"center",color:C.muted,padding:40}}>No activity yet</div>}
+      {!sortedDays.length && <div style={{textAlign:"center",color:C.muted,padding:40}}>No activity in the last {days} days</div>}
     </div>
   );
 }

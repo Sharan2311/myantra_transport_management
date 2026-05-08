@@ -520,6 +520,8 @@ export const DB = {
   },
 
   getActivity: async () => {
+    // Load last 90 days of activity (UI filters further to 7/14/30 days)
+    const cutoff = new Date(Date.now() - 90*24*60*60*1000).toISOString();
     const { data, error } = await supabase
       .from('mye_activity').select('*')
       .order('time', { ascending: false }).limit(200)
