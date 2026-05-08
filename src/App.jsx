@@ -3325,27 +3325,6 @@ Rules:
                               </div>
                             </div>
                           )}
-                          {/* GR Particulars from scan (read-only for non-owners) */}
-                          {item.extracted?._grParticulars && Object.values(item.extracted._grParticulars).some(v=>v) && (
-                            <details style={{background:C.bg,borderRadius:8,padding:"6px 10px",border:`1px solid ${C.border}33`}}>
-                              <summary style={{cursor:"pointer",color:C.accent,fontWeight:700,fontSize:10,listStyle:"none"}}>
-                                📋 GR Particulars ▸
-                              </summary>
-                              <div style={{display:"grid",gridTemplateColumns:"auto 1fr",gap:"2px 8px",marginTop:4,fontSize:11}}>
-                                {item.extracted._grParticulars.goods && <><span style={{color:C.muted}}>Goods:</span><span style={{fontWeight:600}}>{item.extracted._grParticulars.goods}</span></>}
-                                {item.extracted._grParticulars.gstInvNo && <><span style={{color:C.muted}}>GST Inv:</span><span>{item.extracted._grParticulars.gstInvNo}</span></>}
-                                {(item.extracted._grParticulars.invAmt||0)>0 && <><span style={{color:C.muted}}>Inv Amt:</span><span style={{color:C.green,fontWeight:700}}>₹{Number(item.extracted._grParticulars.invAmt).toLocaleString("en-IN")}</span></>}
-                                {item.extracted._grParticulars.ewayBillNo && <><span style={{color:C.muted}}>E-Way Bill:</span><span>{item.extracted._grParticulars.ewayBillNo}</span></>}
-                                {item.extracted._grParticulars.ewayBillDate && <><span style={{color:C.muted}}>E-Way Date:</span><span>{item.extracted._grParticulars.ewayBillDate}</span></>}
-                                {item.extracted._grParticulars.ewayBillExpDate && <><span style={{color:C.muted}}>E-Way Exp:</span><span>{item.extracted._grParticulars.ewayBillExpDate}</span></>}
-                                {item.extracted._grParticulars.incoTerms && <><span style={{color:C.muted}}>Inco Terms:</span><span>{item.extracted._grParticulars.incoTerms}</span></>}
-                                {item.extracted._grParticulars.pincode && <><span style={{color:C.muted}}>Pincode:</span><span>{item.extracted._grParticulars.pincode}</span></>}
-                                {item.extracted._autoDistrict && <><span style={{color:C.muted}}>District:</span><span>{item.extracted._autoDistrict}</span></>}
-                                {item.extracted._autoState && <><span style={{color:C.muted}}>State:</span><span>{item.extracted._autoState}</span></>}
-                                {item.extracted._grParticulars.ownerName && <><span style={{color:C.muted}}>Owner:</span><span>{item.extracted._grParticulars.ownerName}</span></>}
-                              </div>
-                            </details>
-                          )}
                           <div style={{display:"flex",gap:8}}>
                             <div style={{flex:1}}>
                               <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
@@ -3414,6 +3393,28 @@ Rules:
                             </div>
                           )}
                         </>)}
+
+                        {/* GR Particulars — shown for ALL order types (godown + party) */}
+                        {item.extracted?._grParticulars && Object.values(item.extracted._grParticulars).some(v=>v) && (
+                          <details style={{background:C.bg,borderRadius:8,padding:"6px 10px",border:`1px solid ${C.border}33`}}>
+                            <summary style={{cursor:"pointer",color:C.accent,fontWeight:700,fontSize:10,listStyle:"none"}}>
+                              📋 GR Particulars ▸
+                            </summary>
+                            <div style={{display:"grid",gridTemplateColumns:"auto 1fr",gap:"2px 8px",marginTop:4,fontSize:11}}>
+                              {item.extracted._grParticulars.goods && <><span style={{color:C.muted}}>Goods:</span><span style={{fontWeight:600}}>{item.extracted._grParticulars.goods}</span></>}
+                              {item.extracted._grParticulars.gstInvNo && <><span style={{color:C.muted}}>GST Inv:</span><span>{item.extracted._grParticulars.gstInvNo}</span></>}
+                              {(item.extracted._grParticulars.invAmt||0)>0 && <><span style={{color:C.muted}}>Inv Amt:</span><span style={{color:C.green,fontWeight:700}}>₹{Number(item.extracted._grParticulars.invAmt).toLocaleString("en-IN")}</span></>}
+                              {item.extracted._grParticulars.ewayBillNo && <><span style={{color:C.muted}}>E-Way Bill:</span><span>{item.extracted._grParticulars.ewayBillNo}</span></>}
+                              {item.extracted._grParticulars.ewayBillDate && <><span style={{color:C.muted}}>E-Way Date:</span><span>{item.extracted._grParticulars.ewayBillDate}</span></>}
+                              {item.extracted._grParticulars.ewayBillExpDate && <><span style={{color:C.muted}}>E-Way Exp:</span><span>{item.extracted._grParticulars.ewayBillExpDate}</span></>}
+                              {item.extracted._grParticulars.incoTerms && <><span style={{color:C.muted}}>Inco Terms:</span><span>{item.extracted._grParticulars.incoTerms}</span></>}
+                              {item.extracted._grParticulars.pincode && <><span style={{color:C.muted}}>Pincode:</span><span>{item.extracted._grParticulars.pincode}</span></>}
+                              {item.extracted?._autoDistrict && <><span style={{color:C.muted}}>District:</span><span>{item.extracted._autoDistrict}</span></>}
+                              {item.extracted?._autoState && <><span style={{color:C.muted}}>State:</span><span>{item.extracted._autoState}</span></>}
+                              {item.extracted._grParticulars.ownerName && <><span style={{color:C.muted}}>Owner:</span><span>{item.extracted._grParticulars.ownerName}</span></>}
+                            </div>
+                          </details>
+                        )}
                       </div>
                     )}
                   </div>
