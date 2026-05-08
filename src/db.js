@@ -43,6 +43,8 @@ const tripFromDB = r => ({
   salesOfficerPhone: r.sales_officer_phone || '',
   salesOfficerEmail: r.sales_officer_email || '',
   partyNumber: r.party_number || '',
+  partyName: r.party_name || '',
+  grParticulars: r.gr_particulars || null,
 })
 const tripToDB = t => ({
   id: t.id, type: t.type, lr_no: t.lrNo, di_no: t.diNo, truck_no: t.truckNo,
@@ -86,6 +88,8 @@ const tripToDB = t => ({
   sales_officer_phone: t.salesOfficerPhone || '',
   sales_officer_email: t.salesOfficerEmail || '',
   party_number: t.partyNumber || '',
+  party_name: t.partyName || '',
+  gr_particulars: t.grParticulars || null,
 })
 
 const vehicleFromDB = r => ({
@@ -321,6 +325,16 @@ const deleteOne = async (table, id) => {
   if (error) throw error
 }
 
+// ── Party contacts & District officers lookup ──────────────────────────────────
+const partyContactFromDB = r => ({
+  id: r.id, partyName: r.party_name, phone: r.phone,
+  district: r.district, state: r.state, pincode: r.pincode,
+});
+const districtOfficerFromDB = r => ({
+  id: r.id, district: r.district, state: r.state,
+  salesOfficerPhone: r.sales_officer_phone, salesOfficerEmail: r.sales_officer_email,
+});
+
 export const DB = {
   getUsers:       () => fetchAll('mye_users', userFromDB),
   saveUser:       u  => upsertOne('mye_users', userToDB, u),
@@ -548,6 +562,32 @@ export const DB = {
     paid_at: pr.paidAt||'', paid_by: pr.paidBy||'',
   }), pr),
   deletePaymentRequest: id => deleteOne('mye_payment_requests', id),
+
+  // Party contacts lookup
+  getPartyContacts: async () => {
+    try { return await fetchAll('mye_party_contacts', partyContactFromDB); }
+    catch(e) { console.warn('mye_party_contacts not ready:', e.message); return []; }
+  },
+  savePartyContact: async (c) => {
+    const { error } = await supabase.from('mye_party_contacts').upsert({
+      id: c.id, party_name: c.partyName, phone: c.phone,
+      district: c.district||'', state: c.state||'', pincode: c.pincode||'',
+    }, { onConflict: 'id' });
+    if (error) throw error;
+  },
+
+  // District officers lookup
+  getDistrictOfficers: async () => {
+    try { return await fetchAll('mye_district_officers', districtOfficerFromDB); }
+    catch(e) { console.warn('mye_district_officers not ready:', e.message); return []; }
+  },
+  saveDistrictOfficer: async (o) => {
+    const { error } = await supabase.from('mye_district_officers').upsert({
+      id: o.id, district: o.district, state: o.state||'',
+      sales_officer_phone: o.salesOfficerPhone||'', sales_officer_email: o.salesOfficerEmail||'',
+    }, { onConflict: 'id' });
+    if (error) throw error;
+  },
 
   getSettings: async () => {
     const { data } = await supabase.from('mye_settings').select('*').eq('key','app_settings').single()

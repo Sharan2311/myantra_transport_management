@@ -547,13 +547,22 @@ const ErrBanner = ({msg}) => msg ? (
 // ─── BOTTOM NAV ───────────────────────────────────────────────────────────────
 const MAIN_IDS = ["dashboard","trips","billing","diesel","more"];
 function BottomNav({tab, setTab, user, trips, driverPays, vehicles, dieselRequests=[]}) {
-  const isFleet = user?.role === "fleet_manager";
-  const isPump  = user?.role === "pump_operator";
-  const isParty = (user?.role||"").split(",").some(r=>["party_manager","email_followup"].includes(r.trim()));
+  const roles = (user?.role||"").split(",").map(r=>r.trim());
+  const isFleet = roles.includes("fleet_manager") || roles.includes("cement_fleet_mgr");
+  const isPump  = roles.includes("pump_operator");
+  const isPartyOnly = roles.every(r=>["party_manager","email_followup"].includes(r));
+  const hasPartyRole = roles.some(r=>["party_manager","email_followup"].includes(r));
   const items = isPump ? [
     {id:"pump_portal", icon:"⛽", label:"Indents", perm:"pump_portal"},
-  ] : isParty ? [
+  ] : isPartyOnly ? [
     {id:"party_portal", icon:"📋", label:"Party", perm:"party_portal"},
+  ] : hasPartyRole ? [
+    {id:"dashboard",icon:"⊞",label:"Home",    perm:null},
+    {id:"trips",    icon:"🚚",label:"Trips",   perm:"trips"},
+    {id:"billing",  icon:"🧾",label:"Billing", perm:"billing",  feat:"payment_scan"},
+    {id:"diesel",   icon:"⛽",label:"Diesel",  perm:"diesel",   feat:"diesel_tab"},
+    {id:"party_portal", icon:"📋", label:"Party", perm:"party_portal"},
+    {id:"more",     icon:"⋯", label:"More",    perm:null},
   ] : isFleet ? [
     {id:"dashboard", icon:"⊞", label:"Home",       perm:null},
     {id:"trips",     icon:"🚚", label:"Trips",      perm:"trips"},
@@ -1414,7 +1423,7 @@ function AppMain() {
       try { sessionStorage.setItem("mye_user", JSON.stringify(u)); } catch{}
       setUser(u);
       if(u.role==="pump_operator") setTab("pump_portal");
-      if((u.role||"").split(",").some(r=>["party_manager","email_followup"].includes(r.trim()))) setTab("party_portal");
+      if((u.role||"").split(",").every(r=>["party_manager","email_followup"].includes(r.trim()))) setTab("party_portal");
       log("LOGIN",`${u.name} signed in`);
     }} />;
   }
@@ -1510,7 +1519,7 @@ function AppMain() {
 
       <div style={{padding:"14px 16px 8px"}}>
         <ErrorBoundary>
-        {tab==="dashboard"  && user?.role!=="pump_operator" && !(user?.role||"").split(",").every(r=>["party_manager","email_followup"].includes(r.trim())) && <Dashboard {...sp} setTab={setTab} />}
+        {tab==="dashboard"  && user?.role!=="pump_operator" && !isParty && <Dashboard {...sp} setTab={setTab} />}
         {tab==="trips"      && can(user,"trips")      && <Trips      {...sp} tripType="outbound" />}
         {tab==="inbound"    && can(user,"inbound")    && <Trips      {...sp} tripType="inbound" />}
         {tab==="billing"    && can(user,"billing")    && <Billing    {...sp} />}
@@ -2111,6 +2120,20 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
 // Flow: Upload DIs → AI scans → Auto-group by vehicle → User reviews groups
 // (select which DIs merge, set order type + driver rate per DI, group-level fields)
 // → Save All → DB.getNextLR() assigns LR atomically per group
+// ── Pincode → District/State lookup (India Post free API) ───────────────────
+const lookupPincode = async (pincode) => {
+  if (!pincode || pincode.length !== 6) return null;
+  try {
+    const resp = await fetch(`https://api.postalpincode.in/pincode/${pincode}`);
+    const data = await resp.json();
+    if (data?.[0]?.Status === "Success" && data[0].PostOffice?.length > 0) {
+      const post = data[0].PostOffice[0];
+      return { district: post.District || "", state: post.State || "", region: post.Region || "", taluk: post.Block || "" };
+    }
+  } catch (e) { console.warn("Pincode lookup failed:", e.message); }
+  return null;
+};
+
 function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user, log, onClose, employees=[], cashTransfers=[], setCashTransfers, dieselRequests=[], setDieselRequests, manualDiesel=false }) {
 
   // ── Raw scanned items (one per uploaded file) ────────────────────────────────
@@ -2136,25 +2159,47 @@ function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user
   const [groupsBuilt, setGroupsBuilt] = useState(false);
 
   // ── DI SCAN PROMPT (unchanged) ───────────────────────────────────────────────
-  const DI_PROMPT = `You are reading a Delivery Instruction (DI) or GR copy for a cement transport company in India.
-Extract the following fields and return ONLY a JSON object:
+  const DI_PROMPT = `You are reading a Delivery Instruction (DI) or GR (Goods Receipt) copy for a cement transport company in India.
+
+Extract ALL the following fields. Return ONLY a JSON object, no markdown.
+
 {
-  "diNo": "DI number",
-  "grNo": "GR number (e.g. 1070/MYE/3969)",
-  "truckNo": "Vehicle registration number — uppercase no spaces",
-  "consignee": "Consignee name",
+  "diNo": "DI number — exactly 10 digits, join if wrapped across lines",
+  "grNo": "GR number (e.g. 1070/MYE/3969) — must have 2 slashes",
+  "truckNo": "Vehicle registration — UPPERCASE no spaces (e.g. KA28AB4580)",
+  "consignee": "FULL consignee name + complete address as printed — include ALL lines",
+  "consigneePhone": "Phone number from consignee section — 10 digits or empty string",
   "consignor": "Consignor/plant name",
-  "from": "Loading location",
-  "to": "Destination",
-  "grade": "Material grade — exactly 'Cement Packed' or 'Cement Bulk' for cement",
-  "district": "Destination district from consignee address",
-  "state": "Destination state name",
-  "qty": "Quantity in MT as number only",
-  "bags": "Number of bags as number only",
-  "frRate": "Freight rate per MT — look in Rate PMT column, number only",
-  "date": "Date in YYYY-MM-DD format"
+  "from": "Loading location / city",
+  "to": "Destination city or town",
+  "grade": "'Cement Packed' or 'Cement Bulk'",
+  "district": "District from consignee address",
+  "state": "State from consignee address",
+  "pincode": "6-digit pincode from consignee address or empty string",
+  "qty": "Quantity in MT — number only (e.g. 30.00)",
+  "bags": "Number of bags — number only (e.g. 600)",
+  "frRate": "Rate PMT — number only from Rate column",
+  "frtAmt": "Total freight amount — number only from Amount column",
+  "date": "Date in YYYY-MM-DD format",
+  "ownerName": "Truck Owner name if shown, else empty string",
+  "goods": "Full goods description (e.g. 'Bangur POWERMAX TR PPC PP 50KG')",
+  "gstInvNo": "GST Invoice number (e.g. KR2602002755)",
+  "invDate": "Invoice date in YYYY-MM-DD format",
+  "invAmt": "Invoice amount — number only",
+  "ewayBillNo": "E-way Bill number",
+  "ewayBillDate": "E-way Bill date in YYYY-MM-DD",
+  "ewayBillExpDate": "E-way Bill expiry date in YYYY-MM-DD",
+  "incoTerms": "Inco terms (e.g. EXP, FTB, FOB)"
 }
-Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing numbers.`;
+
+Rules:
+- Copy values EXACTLY as printed — do not guess
+- Return empty string "" for missing text, 0 for missing numbers
+- diNo must be exactly 10 digits
+- grNo must contain exactly 2 forward slashes
+- truckNo: UPPERCASE, no spaces
+- Include the FULL consignee with address (join wrapped lines)
+- Extract phone number from consignee section if visible`;
 
   const fileToBase64 = file => new Promise((res, rej) => {
     const r = new FileReader();
@@ -2228,6 +2273,70 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       if(!resp.ok||data.error) throw new Error(data.error||"Scan failed");
       const extracted = JSON.parse(data.text.replace(/```json|```/g,"").trim());
       const client = detectClient(extracted);
+
+      // ── Auto-detect orderType: godown vs party ────────────────────────────
+      const consigneeRaw = (extracted.consignee||"").toUpperCase();
+      const consigneeAddr = (extracted.to||"").toUpperCase() + " " + consigneeRaw;
+      const hasShreeCement = consigneeRaw.includes("SHREE CEMENT") || consigneeRaw.includes("SHREE CEMENT LIMITED");
+      const statePrefix = /(MH|TS|AP|KA)/.test(consigneeAddr);
+
+      let autoOrderType = "godown";  // default
+      let autoPartyName = "";
+      let autoPartyPhone = "";
+
+      if (hasShreeCement && statePrefix) {
+        // Shree Cement godown delivery
+        autoOrderType = "godown";
+      } else if (!hasShreeCement) {
+        // No Shree Cement = party delivery
+        autoOrderType = "party";
+        // Extract party name (first line of consignee, before address)
+        autoPartyName = (extracted.consignee||"").split(/\n/)[0].trim();
+        // Extract phone from consignee text
+        const phoneMatch = (extracted.consignee||"").match(/(\d{10})/);
+        autoPartyPhone = phoneMatch ? phoneMatch[1] : "";
+      }
+
+      // Extract pincode from consignee address
+      const pincodeMatch = consigneeAddr.match(/(\d{6})/);
+      const pincode = pincodeMatch ? pincodeMatch[1] : (extracted.pincode || "");
+
+      // Look up district + state from India Post API
+      let autoState = extracted.state || "";
+      let autoDistrict = extracted.district || "";
+      if (pincode && pincode.length === 6) {
+        const pincodeInfo = await lookupPincode(pincode);
+        if (pincodeInfo) {
+          autoDistrict = pincodeInfo.district || autoDistrict;
+          autoState = pincodeInfo.state || autoState;
+          console.log("[SCAN] Pincode", pincode, "→", pincodeInfo.district, pincodeInfo.state);
+        }
+      }
+
+      // Store extracted data
+      extracted._autoOrderType = autoOrderType;
+      extracted._partyName = autoPartyName;
+      extracted._partyPhone = autoPartyPhone || extracted.consigneePhone || "";
+      extracted._pincode = pincode || extracted.pincode || "";
+      extracted._autoState = autoState || extracted.state || "";
+      extracted._autoDistrict = autoDistrict || extracted.district || "";
+
+      // GR Particulars — store all extracted details for collapsible view
+      extracted._grParticulars = {
+        goods: extracted.goods || "",
+        gstInvNo: extracted.gstInvNo || "",
+        invDate: extracted.invDate || "",
+        invAmt: +(extracted.invAmt || 0),
+        ewayBillNo: extracted.ewayBillNo || "",
+        ewayBillDate: extracted.ewayBillDate || "",
+        ewayBillExpDate: extracted.ewayBillExpDate || "",
+        incoTerms: extracted.incoTerms || "",
+        ownerName: extracted.ownerName || "",
+        frtAmt: +(extracted.frtAmt || 0),
+        consigneePhone: extracted.consigneePhone || autoPartyPhone || "",
+        pincode: pincode || extracted.pincode || "",
+      };
+
       // Check if scanned client is in user's allowed clients
       if(userClients.length < getCLIENTS().length && !userClients.includes(client)) {
         setItems(prev => prev.map(x => x.id===id
@@ -2239,7 +2348,11 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       setItems(prev => {
         // First mark this item done
         const updated = prev.map(x => x.id===id
-          ? {...x, status:"done", extracted:{...extracted, client}, error:null}
+          ? {...x, status:"done", extracted:{...extracted, client},
+              orderType: extracted._autoOrderType || "godown",
+              partyDriverPhone: extracted._partyPhone || "",
+              partyName: extracted._partyName || "",
+              error:null}
           : x);
         // Then auto-remove duplicate diNo within this batch session
         // Keep the FIRST occurrence (lowest index), remove subsequent ones
@@ -2268,6 +2381,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
       extracted:null, error:null,
       // per-DI fields
       orderType:"godown", givenRate:"", grFile:null, invoiceFile:null,
+      partyDriverPhone:"", salesOfficerPhone:"", salesOfficerEmail:"", partyNumber:"", partyName:"",
     }));
     setItems(prev => [...prev, ...newItems]);
     setGroupsBuilt(false); // new files = rebuild groups
@@ -2631,7 +2745,7 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           lrNo, diNo:ex.diNo||"", grNo:ex.grNo||"",
           truckNo, consignee:ex.consignee||"", from:ex.from||"Kodla", to:ex.to||"",
           grade:ex.grade||"Cement Packed",
-          district:ex.district||"", state:ex.state||"",
+          district:ex._autoDistrict||ex.district||"", state:ex._autoState||ex.state||"",
           qty:+ex.qty||0, bags:+ex.bags||0,
           frRate:+ex.frRate||0, givenRate:+item.givenRate||0,
           date:safeTripDate(ex.date), client,
@@ -2649,6 +2763,12 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           emailSentAt:"", partyEmail:"", batchId:"",
           mergedPdfPath:"", receiptFilePath:"", receiptUploadedAt:"",
           sealedInvoicePath:"",
+          partyDriverPhone: item.partyDriverPhone || item.extracted?._partyPhone || "",
+          salesOfficerPhone: item.salesOfficerPhone || "",
+          salesOfficerEmail: item.salesOfficerEmail || "",
+          partyNumber: item.partyNumber || "",
+          partyName: item.partyName || item.extracted?._partyName || "",
+          grParticulars: item.extracted?._grParticulars || null,
           createdBy:user.username, createdAt:nowTs(),
         };
         // Atomic DB save — checks for duplicate DI before inserting
@@ -2656,6 +2776,21 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           DB.saveTripSafe(trip),
           new Promise((_,rej)=>setTimeout(()=>rej(new Error("Save timed out — check connection")),15000))
         ]).catch(e=>({success:false, duplicateDI:null, existingLR:null, existingTruck:null, error:e.message}));
+        // Auto-save party contact + district officer for future auto-fill
+        if(trip.orderType==="party" && trip.partyName) {
+          DB.savePartyContact({
+            id: (trip.partyName||"").replace(/\s+/g,"_").toLowerCase().slice(0,30) + "_" + (trip.partyDriverPhone||"").slice(-4),
+            partyName: trip.partyName, phone: trip.partyDriverPhone||"",
+            district: trip.district||"", state: trip.state||"", pincode: ex._pincode||"",
+          }).catch(e=>console.warn("Party contact save:", e.message));
+        }
+        if(trip.district && trip.salesOfficerPhone) {
+          DB.saveDistrictOfficer({
+            id: (trip.district||"").replace(/\s+/g,"_").toLowerCase(),
+            district: trip.district, state: trip.state||"",
+            salesOfficerPhone: trip.salesOfficerPhone||"", salesOfficerEmail: trip.salesOfficerEmail||"",
+          }).catch(e=>console.warn("District officer save:", e.message));
+        }
         if(!saveResult.success) {
           setLrError(saveResult.duplicateDI
             ? `DI ${saveResult.duplicateDI} already exists in LR ${saveResult.existingLR} (${saveResult.existingTruck}). This trip was not saved — another device may have saved it first.`
@@ -2788,6 +2923,12 @@ Rules: Return ONLY the JSON. Empty string for missing text fields, 0 for missing
           emailSentAt:"", partyEmail:"", batchId:"",
           mergedPdfPath:"", receiptFilePath:"", receiptUploadedAt:"",
           sealedInvoicePath:"",
+          partyDriverPhone: g.items[0]?.partyDriverPhone || g.items[0]?.extracted?._partyPhone || "",
+          salesOfficerPhone: g.items[0]?.salesOfficerPhone || "",
+          salesOfficerEmail: g.items[0]?.salesOfficerEmail || "",
+          partyNumber: g.items[0]?.partyNumber || "",
+          partyName: g.items[0]?.partyName || g.items[0]?.extracted?._partyName || "",
+          grParticulars: g.items[0]?.extracted?._grParticulars || null,
           createdBy:user.username, createdAt:nowTs(),
         };
         // Atomic DB save — checks for duplicate DI before inserting
@@ -5611,7 +5752,14 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
 
   const onDIExtracted = (extracted, _ignored) => {
     // Carry district+state into form if present (party orders)
-    if(extracted.district || extracted.state){
+    if(extracted.district || extracted.state || extracted.pincode){
+      // Auto-lookup district from pincode via India Post API
+      const pin = extracted.pincode || "";
+      if(pin.length === 6) {
+        lookupPincode(pin).then(info => {
+          if(info) setF(p=>({...p, district:info.district||p.district||"", state:info.state||p.state||""}));
+        });
+      }
       setF(p=>({...p, district:extracted.district||p.district||"", state:extracted.state||p.state||""}));
     }
     // Auto-detect client from scanned document
@@ -6538,6 +6686,29 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                       {t.diLines && t.diLines.length > 1 && <Badge label={t.diLines.length+" DIs"} color={C.teal} />}
                     </div>
                   </div>
+                  {/* GR Particulars — collapsible */}
+                  {t.grParticulars && Object.values(t.grParticulars).some(v=>v) && (
+                    <details style={{padding:"6px 12px",borderTop:`1px solid ${C.border}22`}}>
+                      <summary style={{cursor:"pointer",color:C.accent,fontWeight:700,fontSize:11,listStyle:"none",display:"flex",alignItems:"center",gap:4}}>
+                        📋 GR Particulars ▸
+                      </summary>
+                      <div style={{display:"grid",gridTemplateColumns:"auto 1fr",gap:"2px 10px",marginTop:6,fontSize:11}}>
+                        {t.grParticulars.goods && <><span style={{color:C.muted}}>Goods:</span><span style={{fontWeight:600}}>{t.grParticulars.goods}</span></>}
+                        {t.grParticulars.gstInvNo && <><span style={{color:C.muted}}>GST Inv:</span><span>{t.grParticulars.gstInvNo}</span></>}
+                        {t.grParticulars.invDate && <><span style={{color:C.muted}}>Inv Date:</span><span>{t.grParticulars.invDate}</span></>}
+                        {(t.grParticulars.invAmt||0)>0 && <><span style={{color:C.muted}}>Inv Amt:</span><span style={{fontWeight:700,color:C.green}}>₹{Number(t.grParticulars.invAmt).toLocaleString("en-IN")}</span></>}
+                        {t.grParticulars.ewayBillNo && <><span style={{color:C.muted}}>E-Way Bill:</span><span>{t.grParticulars.ewayBillNo}</span></>}
+                        {t.grParticulars.ewayBillDate && <><span style={{color:C.muted}}>E-Way Date:</span><span>{t.grParticulars.ewayBillDate}</span></>}
+                        {t.grParticulars.ewayBillExpDate && <><span style={{color:C.muted}}>E-Way Expiry:</span><span style={{color:new Date(t.grParticulars.ewayBillExpDate)<new Date()?C.red:C.green}}>{t.grParticulars.ewayBillExpDate}</span></>}
+                        {(t.grParticulars.frtAmt||0)>0 && <><span style={{color:C.muted}}>Freight Amt:</span><span>₹{Number(t.grParticulars.frtAmt).toLocaleString("en-IN")}</span></>}
+                        {t.grParticulars.incoTerms && <><span style={{color:C.muted}}>Inco Terms:</span><span>{t.grParticulars.incoTerms}</span></>}
+                        {t.grParticulars.ownerName && <><span style={{color:C.muted}}>Owner:</span><span>{t.grParticulars.ownerName}</span></>}
+                        {t.grParticulars.consigneePhone && <><span style={{color:C.muted}}>Phone:</span><span>{t.grParticulars.consigneePhone}</span></>}
+                        {t.grParticulars.pincode && <><span style={{color:C.muted}}>Pincode:</span><span>{t.grParticulars.pincode}</span></>}
+                        {t.partyName && <><span style={{color:C.muted}}>Party:</span><span style={{fontWeight:700}}>{t.partyName}</span></>}
+                      </div>
+                    </details>
+                  )}
                   {/* Payment details — shown for any trip with payments recorded */}
                   {(()=>{
                     const pays = (driverPays||[]).filter(p=>p.tripId===t.id).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
@@ -9509,7 +9680,7 @@ function PartyTripCard({t, selected, toggle, isOwner, isPartyMgr, employees, ope
 }
 
 // ─── PARTY PORTAL ─────────────────────────────────────────────────────────────
-function PartyPortal({trips, setTrips, employees, users, user, log}) {
+function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, selectedClient}) {
   const [activeTab,    setActiveTab]   = useState("all");
   const [selected,     setSelected]    = useState(new Set());
   const [assignTo,     setAssignTo]    = useState("");
@@ -9528,7 +9699,14 @@ function PartyPortal({trips, setTrips, employees, users, user, log}) {
 
   // ── 2-day rule: party manager sees trips older than 2 days (not today/yesterday) ──
   const twoDaysAgo = new Date(Date.now() - 2*24*60*60*1000).toISOString().split("T")[0];
-  const allPartyTrips = (trips||[]).filter(t=>t.orderType==="party");
+  // Apply FY + client filters
+  const fyRange = selectedFY ? getFYRange(selectedFY) : null;
+  const allPartyTrips = (trips||[]).filter(t=>{
+    if(t.orderType!=="party") return false;
+    if(fyRange && (t.date<fyRange.start || t.date>fyRange.end)) return false;
+    if(selectedClient && (t.client||getDEFAULT_CLIENT())!==selectedClient) return false;
+    return true;
+  });
   // Party manager only sees trips dated <= 2 days ago AND not paid
   const partyTrips = isOwner ? allPartyTrips : allPartyTrips.filter(t => (t.date||"") <= twoDaysAgo);
 
