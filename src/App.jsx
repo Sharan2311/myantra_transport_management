@@ -2361,6 +2361,7 @@ Rules:
         const updated = prev.map(x => x.id===id
           ? {...x, status:"done", extracted:{...extracted, client},
               orderType: extracted._autoOrderType || "godown",
+              ownerName: ((vehicles||[]).find(v=>v.truckNo===(extracted.truckNo||"").toUpperCase().replace(/\s/g,""))?.ownerName) || extracted.ownerName || "",
               pouchBalance: extracted._autoOrderType === "party" ? 700 : 0,
               partyDriverPhone: "",  // driver phone is manual entry
               partyName: extracted._partyName || "",
@@ -2462,7 +2463,7 @@ Rules:
         shortageRecovery: String(autoShortageG),
         loanRecovery: String(autoLoanG),
         driverPhone: vehG?.driverPhone || "",
-        ownerName: vehG?.ownerName || "",
+        ownerName: vehG?.ownerName || firstItem?.extracted?.ownerName || "",
         assignedEmpId: "",
         _autoAttachedReqId: autoReqG?.id || null,
       };
@@ -2790,6 +2791,16 @@ Rules:
           DB.saveTripSafe(trip),
           new Promise((_,rej)=>setTimeout(()=>rej(new Error("Save timed out — check connection")),15000))
         ]).catch(e=>({success:false, duplicateDI:null, existingLR:null, existingTruck:null, error:e.message}));
+        // Auto-update vehicle ownerName if vehicle has none but trip/scan does
+        if(trip.ownerName && trip.truckNo) {
+          const _vUpd = (vehicles||[]).find(v=>v.truckNo===trip.truckNo);
+          if(_vUpd && !(_vUpd.ownerName||"").trim()) {
+            const updVeh = {..._vUpd, ownerName: trip.ownerName};
+            setVehicles(prev => prev.map(v=>v.id===updVeh.id?updVeh:v));
+            DB.saveVehicle(updVeh).catch(e=>console.warn("Vehicle owner update:", e.message));
+            console.log("[SAVE] Updated vehicle", trip.truckNo, "owner →", trip.ownerName);
+          }
+        }
         // Auto-save party contact + district officer for future auto-fill
         if(trip.orderType==="party" && trip.partyName) {
           DB.savePartyContact({
@@ -6682,7 +6693,11 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                           </div>
                         ) : (
                           <button onClick={()=>{
-                            const normalized = {...t, diLines: (t.diLines||[]).map(d=>({...d, frRate: d.frRate||t.frRate||0}))};
+                            const vehForEdit = (vehicles||[]).find(v=>v.truckNo===t.truckNo);
+                            const normalized = {...t,
+                              ownerName: t.ownerName || vehForEdit?.ownerName || "",
+                              driverPhone: t.driverPhone || vehForEdit?.driverPhone || "",
+                              diLines: (t.diLines||[]).map(d=>({...d, frRate: d.frRate||t.frRate||0}))};
                             // Auto-fill ownerName from vehicle master if blank on trip
                             if(!(normalized.ownerName||"").trim()) {
                               const veh = (vehicles||[]).find(x=>x.truckNo===t.truckNo);
