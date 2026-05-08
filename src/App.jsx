@@ -1160,9 +1160,9 @@ function AppMain() {
     setPayments(prev => {
       const next = typeof updater === "function" ? updater(prev) : updater;
       // Log payment changes
-      const prevIds = new Set((prev||[]).map(p=>p.id));
+      const prevPayIds = new Set((prev||[]).map(p=>p.id));
       next.forEach(p => {
-        if(!prevIds.has(p.id)) log("ADD PAYMENT",`₹${p.amount||0} · ${p.truckNo||""}`);
+        if(!prevPayIds.has(p.id)) log("ADD PAYMENT",`₹${p.amount||0} · ${p.truckNo||""}`);
       });
       const prevIds = new Set((prev||[]).map(p=>p.id));
       next.filter(p => !prevIds.has(p.id)).forEach(p => DB.savePayment(p).catch(e => setSaveErr(e.message)));
