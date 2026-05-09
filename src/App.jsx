@@ -2315,21 +2315,16 @@ Rules:
       // Look up district + state from India Post API (non-blocking)
       let autoState = extracted.state || "";
       let autoDistrict = extracted.district || "";
-      // Fire pincode lookup in background — don't block scan
+      // Pincode lookup — await and store directly on extracted object (no setItems re-render)
       if (pincode && pincode.length === 6) {
-        lookupPincode(pincode).then(pincodeInfo => {
+        try {
+          const pincodeInfo = await lookupPincode(pincode);
           if (pincodeInfo) {
             console.log("[SCAN] Pincode", pincode, "→", pincodeInfo.district, pincodeInfo.state);
-            // Update the item with district/state after lookup completes
-            setItems(prev => prev.map(x => x.extracted?.diNo === extracted.diNo ? {
-              ...x,
-              extracted: {...(x.extracted||{}),
-                _autoDistrict: pincodeInfo.district || x.extracted?._autoDistrict || "",
-                _autoState: pincodeInfo.state || x.extracted?._autoState || "",
-              }
-            } : x));
+            autoDistrict = pincodeInfo.district || autoDistrict;
+            autoState    = pincodeInfo.state    || autoState;
           }
-        }).catch(()=>{});
+        } catch(e) { /* pincode lookup failed — use AI-extracted values */ }
       }
 
       // Store extracted data
@@ -2754,13 +2749,13 @@ Rules:
         const ex     = item.extracted;
         const tripId = uid();
         let grUrl="", invUrl="";
-        if(item.orderType==="party" && item.grFile) {
-          try { grUrl = (await uploadPartyFile(tripId,"gr",item.grFile)).path; }
-          catch(e) { console.warn("GR upload failed:",e.message); }
-        }
-        if(item.orderType==="party" && item.invoiceFile) {
-          try { invUrl = (await uploadPartyFile(tripId,"invoice",item.invoiceFile)).path; }
-          catch(e) { console.warn("Invoice upload failed:",e.message); }
+        if(item.orderType==="party" && (item.grFile || item.invoiceFile)) {
+          const [grRes, invRes] = await Promise.all([
+            item.grFile    ? uploadPartyFile(tripId,"gr",item.grFile).catch(e=>{console.warn("GR upload failed:",e.message);return null;})      : Promise.resolve(null),
+            item.invoiceFile ? uploadPartyFile(tripId,"invoice",item.invoiceFile).catch(e=>{console.warn("Invoice upload failed:",e.message);return null;}) : Promise.resolve(null),
+          ]);
+          if(grRes)  grUrl  = grRes.path;
+          if(invRes) invUrl = invRes.path;
         }
         const trip = {
           id:tripId, type:"outbound",
@@ -2909,13 +2904,13 @@ Rules:
         for(const item of groupItems) {
           const ex = item.extracted;
           let grUrl="", invUrl="";
-          if(item.orderType==="party" && item.grFile) {
-            try { grUrl=(await uploadPartyFile(tripId,`gr_${ex.diNo||item.id}`,item.grFile)).path; }
-            catch(e) { console.warn("GR upload failed:",e.message); }
-          }
-          if(item.orderType==="party" && item.invoiceFile) {
-            try { invUrl=(await uploadPartyFile(tripId,`inv_${ex.diNo||item.id}`,item.invoiceFile)).path; }
-            catch(e) { console.warn("Invoice upload failed:",e.message); }
+          if(item.orderType==="party" && (item.grFile || item.invoiceFile)) {
+            const [grRes, invRes] = await Promise.all([
+              item.grFile    ? uploadPartyFile(tripId,`gr_${ex.diNo||item.id}`,item.grFile).catch(e=>{console.warn("GR upload failed:",e.message);return null;})      : Promise.resolve(null),
+              item.invoiceFile ? uploadPartyFile(tripId,`inv_${ex.diNo||item.id}`,item.invoiceFile).catch(e=>{console.warn("Invoice upload failed:",e.message);return null;}) : Promise.resolve(null),
+            ]);
+            if(grRes)  grUrl  = grRes.path;
+            if(invRes) invUrl = invRes.path;
           }
           diLines.push({
             diNo:  ex.diNo||"",
@@ -7342,8 +7337,12 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                           const invFiles = Array.isArray(invoiceFileRef.current) ? invoiceFileRef.current : (invoiceFileRef.current ? [invoiceFileRef.current] : []);
                           const grReady  = await prepareFile(grFiles,  "gr");
                           const invReady = await prepareFile(invFiles, "invoice");
-                          if(grReady)  { const r=await uploadPartyFile(tripId,"gr",grReady);  grUrl=r.path; }
-                          if(invReady) { const r=await uploadPartyFile(tripId,"invoice",invReady); invUrl=r.path; }
+                          const [grRes, invRes] = await Promise.all([
+                            grReady  ? uploadPartyFile(tripId,"gr",grReady).catch(e=>{console.warn("GR upload failed:",e.message);return null;})      : Promise.resolve(null),
+                            invReady ? uploadPartyFile(tripId,"invoice",invReady).catch(e=>{console.warn("Invoice upload failed:",e.message);return null;}) : Promise.resolve(null),
+                          ]);
+                          if(grRes)  grUrl  = grRes.path;
+                          if(invRes) invUrl = invRes.path;
                           const t = mkTrip({
                             ...f, id:tripId, type:tripType,
                             lrNo: _partyLR,  // auto-assigned from DB sequence
