@@ -18939,7 +18939,7 @@ function DailyOps({trips, vehicles, employees, dieselRequests=[], activity=[], u
             {ydUnattached.length>0&&<div style={{fontSize:12,color:"#92400e"}}>
               🔗 {ydUnattached.length} confirmed indent{ydUnattached.length>1?"s":""} not attached to any trip
               {ydUnattached.map(r=><div key={r.id} style={{fontSize:11,color:"#78350f",marginLeft:12}}>
-                #{r.indentNo} · {r.truckNo} · ₹{(r.confirmedAmount??r.amount||0).toLocaleString("en-IN")}
+                #{r.indentNo} · {r.truckNo} · ₹{((r.confirmedAmount??r.amount)||0).toLocaleString("en-IN")}
               </div>)}
             </div>}
           </div>
