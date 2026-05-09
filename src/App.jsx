@@ -2953,13 +2953,13 @@ Rules:
           emailSentAt:"", partyEmail:"", batchId:"",
           mergedPdfPath:"", receiptFilePath:"", receiptUploadedAt:"",
           sealedInvoicePath:"",
-          partyDriverPhone: g.items[0]?.partyDriverPhone || "",  // manual entry only
-          salesOfficerPhone: g.items[0]?.salesOfficerPhone || "",
-          salesOfficerEmail: g.items[0]?.salesOfficerEmail || "",
-          partyNumber: g.items[0]?.partyNumber || "",
-          partyName: g.items[0]?.partyName || g.items[0]?.extracted?._partyName || "",
-          pouchBalance: g.items[0]?.orderType==="party" ? (g.items[0]?.pouchBalance||700) : 0,
-          grParticulars: g.items[0]?.extracted?._grParticulars || null,
+          partyDriverPhone: primary.partyDriverPhone || "",  // manual entry only
+          salesOfficerPhone: primary.salesOfficerPhone || "",
+          salesOfficerEmail: primary.salesOfficerEmail || "",
+          partyNumber: primary.partyNumber || "",
+          partyName: primary.partyName || primary.extracted?._partyName || "",
+          pouchBalance: primary.orderType==="party" ? (primary.pouchBalance??700) : 0,
+          grParticulars: primary.extracted?._grParticulars || null,
           createdBy:user.username, createdAt:nowTs(),
         };
         // Atomic DB save — checks for duplicate DI before inserting
@@ -3328,7 +3328,7 @@ Rules:
                               <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
                                 💰 POUCH BALANCE ₹ {user.role!=="owner"&&<span style={{fontSize:9,color:C.orange}}>🔒</span>}
                               </div>
-                              <input type="number" value={item.pouchBalance||700}
+                              <input type="number" value={item.pouchBalance??700}
                                 onChange={e=>updateItem(item.id,"pouchBalance",+e.target.value||0)}
                                 readOnly={user.role!=="owner"}
                                 style={{width:"100%",background:user.role==="owner"?C.bg:C.dim,
