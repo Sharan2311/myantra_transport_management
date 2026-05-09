@@ -627,6 +627,7 @@ function BottomNav({tab, setTab, user, trips, driverPays, vehicles, dieselReques
 const canFeature = canFeatureRC;
 
 const MORE_TABS = [
+  {id:"daily_ops",   icon:"📋",label:"Daily Ops",     perm:"reports",      group:"ops"},
   {id:"inbound",      icon:"🏭",label:"Raw Material",   perm:"inbound",      group:"ops",     feat:"inbound_trips"},
   {id:"party_portal", icon:"📋",label:"Party Portal",   perm:"party_portal", group:"ops",     feat:"party_billing"},
   {id:"driverPay", icon:"🏧",label:"Driver Pay",     perm:"driverPay",    group:"money",   feat:"driver_pay"},
@@ -1547,6 +1548,7 @@ function AppMain() {
         {tab==="reports"    && can(user,"reports")    && <Reports    {...sp} />}
         {tab==="reminders"  && can(user,"reminders")  && <Reminders  {...sp} />}
         {tab==="activity"   && can(user,"reports")    && <ActivityLog activity={activity} />}
+        {tab==="daily_ops"  && can(user,"reports")    && <DailyOps {...sp} />}
         {tab==="admin"      && can(user,"admin")      && <UserAdmin  users={users} setUsers={dbSetUsers} user={user} log={log} pumps={pumps||[]} />}
         {tab==="more"       && <MoreMenu user={user} setTab={setTab} trips={roleTrips} driverPays={driverPays} vehicles={vehicles} />}
         </ErrorBoundary>
@@ -13281,6 +13283,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                   const targetTruck = ownerVehs.find(x=>x.id===targetId)?.truckNo||v.truckNo;
                   log("ADD LOAN",`${ownerName||targetTruck} via ${targetTruck} ₹${fmt(+lAmt)} ref:${lRef||"—"}`);
                   setLAmt(""); setLDate(today()); setLRef(""); setLAcct(""); setLAcct2("");
+                  setLSheet(null);
                 }} color={C.red} full>Add Loan</Btn>
               </div>
 
@@ -13339,6 +13342,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                   const usedTruck = targetVeh?.truckNo||v.truckNo;
                   log("LOAN RECOVERY",`${ownerName||usedTruck} via ${usedTruck} ₹${fmt(+rAmt)} LR:${rLR||"—"}`);
                   setRAmt(""); setRDate(today()); setRLR(""); setRRef("");
+                  setLSheet(null);
                 }} color={C.green} full>Record Recovery</Btn>
               </div>
 
@@ -13412,11 +13416,9 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
         const sameOwnerTrucksS = isOwner
           ? null
           : new Set((vehicles||[]).filter(x=>x.ownerName&&x.ownerName===v.ownerName).map(x=>x.truckNo));
-        const vtrips = (trips||[]).filter(t=>{
-          if(t.driverSettled) return false;
-          if(sameOwnerTrucksS===null) return true;  // owner sees all
-          return sameOwnerTrucksS.has(t.truckNo)||sameOwnerTrucksS.has(t.truck);
-        });
+        const vtrips = (trips||[]).filter(t=>
+          !t.driverSettled && (t.truckNo===v.truckNo||t.truck===v.truckNo)
+        );
         return (
           <Sheet title={`⚠ Shortage — ${v.truckNo}`} onClose={()=>{setSSheet(null);resetShForm();}}>
             <div style={{display:"flex",flexDirection:"column",gap:14}}>
@@ -13512,6 +13514,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                   }));
                   log("SHORTAGE",`${v.truckNo} ₹${amount} LR:${lrNo}${shManual?" [manual]":""}`);
                   setShAmt(""); setShTrip(""); setShManualLR(""); setShManualRate("");
+                  setSSheet(null);
                 }} color={C.red} full>Record Shortage</Btn>
               </div>
 
@@ -13565,6 +13568,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                   }
                   log("SHORTAGE RECOVERY",`${v.truckNo} ${srAmt}MT ₹${fmt(amount)} LR:${srLR||"—"}`);
                   setSrAmt(""); setSrLR("");
+                  setSSheet(null);
                 }} color={C.green} full>Record Recovery</Btn>
               </div>
 
@@ -18657,6 +18661,296 @@ function ExpensesLedger({expenses, setExpenses, payments, user, log}) {
 }
 
 // ─── REPORTS ──────────────────────────────────────────────────────────────────
+// ─── DAILY OPS — Auto-verified task dashboard ─────────────────────────────────
+function DailyOps({trips, vehicles, employees, dieselRequests=[], activity=[], user, settings}) {
+  const [dateOffset, setDateOffset] = useState(0); // 0=today, -1=yesterday, etc.
+  const viewDate = (() => { const d=new Date(); d.setDate(d.getDate()+dateOffset); return d.toISOString().split("T")[0]; })();
+  const isToday = dateOffset === 0;
+  const label = isToday ? "Today" : dateOffset===-1 ? "Yesterday" : viewDate;
+  const fmtDate = d => {const p=d.split("-"); return `${p[2]}/${p[1]}/${p[0]}`;};
+
+  // ── Data for the selected date ──────────────────────────────────────────────
+  const dayTrips  = (trips||[]).filter(t => (t.date||"")===viewDate);
+  const dayCreated = (trips||[]).filter(t => (t.createdAt||"").startsWith(viewDate) || (!t.createdAt && (t.date||"")===viewDate));
+  const dayDiesel = (dieselRequests||[]).filter(r => {
+    const rDate = (r.date||r.createdAt||"").slice(0,10);
+    return rDate === viewDate;
+  });
+
+  // ── STAGE 1: Diesel verification by Pintu ──────────────────────────────────
+  const totalIndents  = dayDiesel.length;
+  const confirmedIndents = dayDiesel.filter(r => r.status==="confirmed"||r.status==="attached");
+  const openIndents   = dayDiesel.filter(r => r.status==="open");
+  const changedIndents = confirmedIndents.filter(r => r.confirmedAmount!=null && r.confirmedAmount!==r.amount);
+  const s1Done = totalIndents>0 ? confirmedIndents.length : 0;
+  const s1Total = totalIndents;
+  const s1Pct = s1Total>0 ? Math.round(s1Done/s1Total*100) : null;
+
+  // ── STAGE 2: Manager attached diesel to trips ──────────────────────────────
+  const attachedIndents = dayDiesel.filter(r => r.status==="attached" && r.tripId);
+  const s2Done = attachedIndents.length;
+  const s2Total = confirmedIndents.length;
+  const s2Pct = s2Total>0 ? Math.round(s2Done/s2Total*100) : null;
+
+  // ── STAGE 3: GR upload + trip creation ─────────────────────────────────────
+  const tripsCreated = dayCreated.length;
+  const tripsWithDI  = dayCreated.filter(t => t.diNo);
+  const tripsScanned = dayCreated.filter(t => t.scanSource || t.grNo);
+  // Find how many created by each user
+  const createdByUser = {};
+  dayCreated.forEach(t => {
+    const u = t.createdBy || "unknown";
+    createdByUser[u] = (createdByUser[u]||0) + 1;
+  });
+
+  // ── STAGE 4a: Vehicle shortage + loan report ───────────────────────────────
+  const dayTruckNos = new Set(dayTrips.map(t=>t.truckNo).filter(Boolean));
+  const dayVehicles = (vehicles||[]).filter(v => dayTruckNos.has(v.truckNo));
+  const shortageVehicles = dayVehicles.filter(v => (v.shortageOwed||0)-(v.shortageRecovered||0) > 0);
+  const loanVehicles = dayVehicles.filter(v => (v.loan||0)-(v.loanRecovered||0) > 0);
+
+  // ── STAGE 4b: Party follow-up ──────────────────────────────────────────────
+  const partyTrips = (trips||[]).filter(t => t.orderType==="party" && t.type==="outbound");
+  const partyPending = partyTrips.filter(t => !t.sealedInvoicePath);
+  const partySealed  = partyTrips.filter(t => t.sealedInvoicePath);
+  const partyToday   = dayTrips.filter(t => t.orderType==="party");
+
+  // ── STAGE 5: Bill submission ───────────────────────────────────────────────
+  const pendingBills = (trips||[]).filter(t => t.status==="Pending Bill" && t.type==="outbound");
+  const billedToday  = (trips||[]).filter(t => t.status==="Billed" && (t.billedDate||"")===viewDate);
+  const paidTrips    = (trips||[]).filter(t => t.paymentStatus==="Paid" && t.type==="outbound");
+
+  // ── Build WhatsApp summary ─────────────────────────────────────────────────
+  const buildSummary = () => {
+    const lines = [
+      `📋 *M Yantra Daily Ops — ${fmtDate(viewDate)}*`,
+      ``,
+      `⛽ *Diesel Verification*`,
+      `  Total requests: ${s1Total}`,
+      `  Confirmed: ${s1Done}${changedIndents.length?` (${changedIndents.length} amount changed)`:""}`,
+      `  Pending: ${openIndents.length}`,
+      `  Attached to trips: ${s2Done}/${s2Total}`,
+      ``,
+      `🚛 *Trip Creation*`,
+      `  Trips created: ${tripsCreated}`,
+      `  Total qty: ${dayCreated.reduce((s,t)=>s+(t.qty||0),0)} MT`,
+      ...Object.entries(createdByUser).map(([u,c])=>`  → ${u}: ${c} trips`),
+      ``,
+      `📊 *Vehicle Report (operated today)*`,
+      `  Total vehicles: ${dayTruckNos.size}`,
+      `  Shortage pending: ${shortageVehicles.length}`,
+      ...shortageVehicles.map(v=>`  → ${v.truckNo}: ₹${((v.shortageOwed||0)-(v.shortageRecovered||0)).toLocaleString("en-IN")}`),
+      `  Loan pending: ${loanVehicles.length}`,
+      ...loanVehicles.map(v=>`  → ${v.truckNo}: ₹${((v.loan||0)-(v.loanRecovered||0)).toLocaleString("en-IN")}`),
+      ``,
+      `📦 *Party Status*`,
+      `  Today's party trips: ${partyToday.length}`,
+      `  Overall pending sealed: ${partyPending.length}`,
+      `  Sealed received: ${partySealed.length}`,
+      ``,
+      `📤 *Billing*`,
+      `  Pending bills: ${pendingBills.length}`,
+      `  Billed today: ${billedToday.length}`,
+      `  Total paid trips: ${paidTrips.length}`,
+    ];
+    return lines.join("\n");
+  };
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  const StatusBadge = ({done, total, label:lbl}) => {
+    if(total===0) return <span style={{fontSize:11,color:C.muted,fontWeight:600}}>No {lbl}</span>;
+    const pct = Math.round(done/total*100);
+    const color = pct===100 ? C.green : pct>=50 ? "#d97706" : C.red;
+    return (
+      <div style={{display:"flex",alignItems:"center",gap:8}}>
+        <div style={{flex:1,height:6,background:C.dim,borderRadius:3,overflow:"hidden",minWidth:60}}>
+          <div style={{width:`${pct}%`,height:"100%",background:color,borderRadius:3,transition:"width 0.3s"}} />
+        </div>
+        <span style={{fontSize:12,fontWeight:800,color,minWidth:50,textAlign:"right"}}>{done}/{total}</span>
+      </div>
+    );
+  };
+
+  const Card = ({icon, title, color:clr, children, badge}) => (
+    <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:"14px 16px",marginBottom:10}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <span style={{fontSize:18}}>{icon}</span>
+          <span style={{fontWeight:800,fontSize:14,color:clr||C.text}}>{title}</span>
+        </div>
+        {badge}
+      </div>
+      {children}
+    </div>
+  );
+
+  const Row = ({label:lbl, value, color:clr, sub}) => (
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",padding:"3px 0",fontSize:13}}>
+      <span style={{color:C.muted}}>{lbl}</span>
+      <div style={{textAlign:"right"}}>
+        <span style={{fontWeight:700,color:clr||C.text}}>{value}</span>
+        {sub&&<div style={{fontSize:10,color:C.muted}}>{sub}</div>}
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:10}}>
+
+      {/* Header */}
+      <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,padding:"14px 16px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div>
+            <div style={{color:C.accent,fontWeight:900,fontSize:18,letterSpacing:0.2}}>📋 Daily Ops</div>
+            <div style={{color:C.muted,fontSize:11,marginTop:2}}>Auto-verified from real data — no manual checkboxes</div>
+          </div>
+        </div>
+        {/* Date selector */}
+        <div style={{display:"flex",gap:6,marginTop:12}}>
+          {[0,-1,-2].map(off=>{
+            const d = new Date(); d.setDate(d.getDate()+off);
+            const ds = d.toISOString().split("T")[0];
+            const lb = off===0?"Today":off===-1?"Yesterday":ds.slice(5);
+            return <button key={off} onClick={()=>setDateOffset(off)}
+              style={{flex:1,padding:"8px 0",borderRadius:10,fontWeight:700,fontSize:13,cursor:"pointer",
+                background:dateOffset===off?C.accent:C.bg,color:dateOffset===off?"#fff":C.text,
+                border:`1px solid ${dateOffset===off?C.accent:C.border}`}}>{lb}</button>;
+          })}
+        </div>
+      </div>
+
+      {/* ── STAGE 1: Diesel Verification ──────────────────────── */}
+      <Card icon="⛽" title="Diesel Verification (Pintu)" color="#D85A30"
+        badge={<StatusBadge done={s1Done} total={s1Total} label="indents" />}>
+        <Row label="Total indent requests" value={s1Total} />
+        <Row label="Confirmed at pump" value={confirmedIndents.length} color={confirmedIndents.length===s1Total&&s1Total>0?C.green:C.text} />
+        {changedIndents.length>0&&<Row label="⚠ Amount changed at pump" value={changedIndents.length} color="#d97706" />}
+        <Row label="Still open (unverified)" value={openIndents.length} color={openIndents.length>0?C.red:C.green} />
+        {openIndents.length>0&&(
+          <div style={{marginTop:6,background:C.red+"11",borderRadius:8,padding:"8px 10px"}}>
+            <div style={{fontSize:11,color:C.red,fontWeight:700,marginBottom:4}}>⏳ Pending verification:</div>
+            {openIndents.map(r=>(
+              <div key={r.id} style={{fontSize:11,color:C.muted,padding:"2px 0"}}>
+                #{r.indentNo} · {r.truckNo} · ₹{(r.amount||0).toLocaleString("en-IN")} · PIN: {r.pin||"—"}
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      {/* ── STAGE 2: Manager Diesel Attach ────────────────────── */}
+      <Card icon="🔗" title="Diesel → Trip Attach (Manager)" color={C.teal}
+        badge={<StatusBadge done={s2Done} total={s2Total} label="confirmed" />}>
+        <Row label="Confirmed indents" value={s2Total} />
+        <Row label="Attached to trips" value={s2Done} color={s2Done===s2Total&&s2Total>0?C.green:C.text} />
+        <Row label="Waiting to attach" value={Math.max(0,s2Total-s2Done)} color={s2Total-s2Done>0?"#d97706":C.green} />
+      </Card>
+
+      {/* ── STAGE 3: Trip Creation ────────────────────────────── */}
+      <Card icon="🚛" title="GR Upload & Trip Creation" color={C.blue}
+        badge={<span style={{fontSize:22,fontWeight:900,color:C.blue}}>{tripsCreated}</span>}>
+        <Row label="Trips created" value={tripsCreated} />
+        <Row label="Total quantity" value={`${dayCreated.reduce((s,t)=>s+(t.qty||0),0)} MT`} />
+        {Object.entries(createdByUser).length>0&&(
+          <div style={{marginTop:6,borderTop:`1px solid ${C.border}`,paddingTop:6}}>
+            <div style={{fontSize:11,color:C.muted,fontWeight:700,marginBottom:4}}>Created by:</div>
+            {Object.entries(createdByUser).map(([u,c])=>
+              <Row key={u} label={u} value={`${c} trip${c>1?"s":""}`} />
+            )}
+          </div>
+        )}
+        {tripsCreated===0&&(
+          <div style={{background:C.red+"11",borderRadius:8,padding:"8px 10px",marginTop:6}}>
+            <div style={{fontSize:12,color:C.red,fontWeight:700}}>⚠ No trips created {label.toLowerCase()}</div>
+          </div>
+        )}
+      </Card>
+
+      {/* ── STAGE 4a: Vehicle Shortage/Loan Report ────────────── */}
+      <Card icon="📊" title="Vehicle Shortage & Loan" color="#d97706"
+        badge={<span style={{fontSize:12,fontWeight:800,color:C.muted}}>{dayTruckNos.size} vehicles</span>}>
+        <Row label="Vehicles operated" value={dayTruckNos.size} />
+        <Row label="With shortage pending" value={shortageVehicles.length} color={shortageVehicles.length>0?C.red:C.green} />
+        <Row label="With loan pending" value={loanVehicles.length} color={loanVehicles.length>0?"#d97706":C.green} />
+        {(shortageVehicles.length>0||loanVehicles.length>0)&&(
+          <div style={{marginTop:6,borderTop:`1px solid ${C.border}`,paddingTop:6}}>
+            {shortageVehicles.map(v=>(
+              <div key={v.truckNo+"s"} style={{display:"flex",justifyContent:"space-between",fontSize:12,padding:"3px 0"}}>
+                <span style={{color:C.text,fontWeight:600}}>{v.truckNo}</span>
+                <span style={{color:C.red,fontWeight:700}}>Shortage: ₹{((v.shortageOwed||0)-(v.shortageRecovered||0)).toLocaleString("en-IN")}</span>
+              </div>
+            ))}
+            {loanVehicles.map(v=>(
+              <div key={v.truckNo+"l"} style={{display:"flex",justifyContent:"space-between",fontSize:12,padding:"3px 0"}}>
+                <span style={{color:C.text,fontWeight:600}}>{v.truckNo}</span>
+                <span style={{color:"#d97706",fontWeight:700}}>Loan: ₹{((v.loan||0)-(v.loanRecovered||0)).toLocaleString("en-IN")}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      {/* ── STAGE 4b: Party Follow-up ─────────────────────────── */}
+      <Card icon="📦" title="Party Pending Status" color="#7c3aed"
+        badge={<StatusBadge done={partySealed.length} total={partyTrips.length} label="party trips" />}>
+        <Row label="Today's party trips" value={partyToday.length} />
+        <Row label="Total party trips" value={partyTrips.length} />
+        <Row label="Sealed invoice received" value={partySealed.length} color={C.green} />
+        <Row label="Pending sealed invoice" value={partyPending.length} color={partyPending.length>0?C.red:C.green} />
+      </Card>
+
+      {/* ── STAGE 5: Bill Submission ──────────────────────────── */}
+      <Card icon="📤" title="Billing Status" color={C.purple}
+        badge={<span style={{fontSize:12,fontWeight:800,color:pendingBills.length>0?C.red:C.green}}>{pendingBills.length} pending</span>}>
+        <Row label="Pending bills (all time)" value={pendingBills.length} color={pendingBills.length>0?C.accent:C.green} />
+        <Row label="Billed on this date" value={billedToday.length} />
+        <Row label="Total paid trips" value={paidTrips.length} color={C.green} />
+      </Card>
+
+      {/* ── WhatsApp Share ────────────────────────────────────── */}
+      <button onClick={()=>{
+        const text = buildSummary();
+        window.open(`https://wa.me/?text=${encodeURIComponent(text)}`,"_blank");
+      }}
+        style={{background:C.green,color:"#fff",border:"none",borderRadius:14,padding:"16px",
+          fontWeight:800,fontSize:15,cursor:"pointer",textAlign:"center",letterSpacing:0.5}}>
+        📲 Share Daily Report via WhatsApp
+      </button>
+
+      {/* ── Carryover from yesterday ─────────────────────────── */}
+      {isToday && (()=>{
+        const yd = new Date(); yd.setDate(yd.getDate()-1);
+        const ydStr = yd.toISOString().split("T")[0];
+        const ydOpenDiesel = (dieselRequests||[]).filter(r=>(r.date||"").slice(0,10)===ydStr && r.status==="open");
+        const ydUnattached = (dieselRequests||[]).filter(r=>(r.date||"").slice(0,10)===ydStr && r.status==="confirmed" && !r.tripId);
+        const hasCarry = ydOpenDiesel.length>0 || ydUnattached.length>0;
+        if(!hasCarry) return null;
+        return (
+          <div style={{background:"#fef3c7",border:"1px solid #f59e0b44",borderRadius:14,padding:"14px 16px"}}>
+            <div style={{fontWeight:800,fontSize:14,color:"#92400e",marginBottom:8}}>
+              ⚠ Carryover from yesterday ({fmtDate(ydStr)})
+            </div>
+            {ydOpenDiesel.length>0&&<div style={{fontSize:12,color:"#92400e",marginBottom:4}}>
+              ⛽ {ydOpenDiesel.length} diesel indent{ydOpenDiesel.length>1?"s":""} still unverified
+              {ydOpenDiesel.map(r=><div key={r.id} style={{fontSize:11,color:"#78350f",marginLeft:12}}>
+                #{r.indentNo} · {r.truckNo} · ₹{(r.amount||0).toLocaleString("en-IN")}
+              </div>)}
+            </div>}
+            {ydUnattached.length>0&&<div style={{fontSize:12,color:"#92400e"}}>
+              🔗 {ydUnattached.length} confirmed indent{ydUnattached.length>1?"s":""} not attached to any trip
+              {ydUnattached.map(r=><div key={r.id} style={{fontSize:11,color:"#78350f",marginLeft:12}}>
+                #{r.indentNo} · {r.truckNo} · ₹{(r.confirmedAmount??r.amount||0).toLocaleString("en-IN")}
+              </div>)}
+            </div>}
+          </div>
+        );
+      })()}
+
+    </div>
+  );
+}
+
+// ─── REPORTS ────────────────────────────────────────────────────────────────────
 function Reports({trips, vehicles, employees, payments, settlements, indents, user}) {
   // ── Date range ───────────────────────────────────────────────────────────────
   const [df, setDf] = useState(() => {
