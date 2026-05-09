@@ -2275,13 +2275,20 @@ Rules:
   const scanFile = async (id, file) => {
     setItems(prev => prev.map(x => x.id===id ? {...x, status:"scanning"} : x));
     try {
-      const base64 = await fileToBase64(file);
-      const resp = await fetch("/.netlify/functions/scan-di", {
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ base64, anthropicKey: RC.anthropicKey, mediaType: file.type, prompt: DI_PROMPT }),
-      });
+      let base64;
+      try { base64 = await fileToBase64(file); }
+      catch(e) { throw new Error(`Cannot read file "${file.name}" — ${e.message||"file may be corrupted or too large"}`); }
+
+      let resp;
+      try {
+        resp = await fetch("/.netlify/functions/scan-di", {
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({ base64, anthropicKey: RC.anthropicKey, mediaType: file.type, prompt: DI_PROMPT }),
+        });
+      } catch(e) { throw new Error(`Network error — ${e.message||"check internet connection"}`); }
+
       const data = await resp.json();
-      if(!resp.ok||data.error) throw new Error(data.error||"Scan failed");
+      if(!resp.ok||data.error) throw new Error(data.error||`Server returned ${resp.status}`);
       const extracted = JSON.parse(data.text.replace(/```json|```/g,"").trim());
       const client = detectClient(extracted);
 
@@ -3048,6 +3055,9 @@ Rules:
   };
 
   const scanningCount = items.filter(x=>x.status==="scanning"||x.status==="pending").length;
+  const errorItems    = items.filter(x=>x.status==="error");
+  const dupItems      = doneItems.filter(x=>checkDupDI(x.extracted?.diNo));
+  const cleanDone     = doneItems.filter(x=>!checkDupDI(x.extracted?.diNo));
 
   // ── RENDER ───────────────────────────────────────────────────────────────────
   return (
@@ -3107,17 +3117,60 @@ Rules:
       )}
 
       {/* Error items */}
-      {items.filter(x=>x.status==="error").map(item=>(
-        <div key={item.id} style={{background:C.red+"11",border:`1px solid ${C.red}33`,
-          borderRadius:10,padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <div>
-            <div style={{color:C.red,fontWeight:700,fontSize:12}}>⚠ Scan failed: {item.file?.name}</div>
-            <div style={{color:C.muted,fontSize:11}}>{item.error}</div>
+      {errorItems.length>0&&(
+        <div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:10,padding:"10px 14px"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:errorItems.length>1?8:0}}>
+            <div style={{color:C.red,fontWeight:800,fontSize:13}}>⚠ {errorItems.length} Scan{errorItems.length>1?"s":""} Failed</div>
+            {errorItems.length>1&&<button onClick={()=>setItems(prev=>prev.filter(x=>x.status!=="error"))}
+              style={{background:C.red+"22",border:`1px solid ${C.red}44`,borderRadius:6,padding:"4px 10px",
+                color:C.red,fontSize:11,fontWeight:700,cursor:"pointer"}}>✕ Dismiss All</button>}
           </div>
-          <button onClick={()=>setItems(prev=>prev.filter(x=>x.id!==item.id))}
-            style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:18}}>✕</button>
+          {errorItems.map(item=>(
+            <div key={item.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+              padding:"6px 0",borderTop:`1px solid ${C.red}22`}}>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{color:C.red,fontWeight:700,fontSize:12}}>{item.file?.name||"Unknown file"}</div>
+                <div style={{color:C.muted,fontSize:11,marginTop:2}}>{item.error||"Unknown error"}</div>
+              </div>
+              <button onClick={()=>setItems(prev=>prev.filter(x=>x.id!==item.id))}
+                style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:16,flexShrink:0,padding:"0 4px"}}>✕</button>
+            </div>
+          ))}
         </div>
-      ))}
+      )}
+
+      {/* ── Scan Summary Banner ─────────────────────────────────────────── */}
+      {items.length>0&&!scanningNow&&doneItems.length>0&&(
+        <div style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 14px"}}>
+          <div style={{display:"flex",flexWrap:"wrap",gap:12,alignItems:"center"}}>
+            <div style={{fontSize:13,fontWeight:800,color:C.text}}>
+              📊 Scanned: {items.length} file{items.length>1?"s":""}
+            </div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap",fontSize:11,fontWeight:700}}>
+              <span style={{color:C.green,background:C.green+"15",borderRadius:6,padding:"2px 8px"}}>
+                ✓ {cleanDone.length} ready
+              </span>
+              {dupItems.length>0&&<span style={{color:C.red,background:C.red+"15",borderRadius:6,padding:"2px 8px"}}>
+                🚫 {dupItems.length} duplicate{dupItems.length>1?"s":""}
+              </span>}
+              {errorItems.length>0&&<span style={{color:"#b45309",background:"#fef3c7",borderRadius:6,padding:"2px 8px"}}>
+                ⚠ {errorItems.length} failed
+              </span>}
+            </div>
+            {dupItems.length>0&&(
+              <button onClick={()=>{
+                const dupIds = new Set(dupItems.map(x=>x.id));
+                setItems(prev=>prev.filter(x=>!dupIds.has(x.id)));
+                setGroups(prev=>prev.map(g=>({...g,diIds:g.diIds.filter(id=>!dupIds.has(id))})).filter(g=>g.diIds.length>0));
+              }}
+                style={{marginLeft:"auto",background:C.red+"15",border:`1px solid ${C.red}44`,borderRadius:8,padding:"6px 14px",
+                  color:C.red,fontSize:12,fontWeight:800,cursor:"pointer"}}>
+                🗑 Remove All {dupItems.length} Duplicate{dupItems.length>1?"s":""}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* LR assignment error */}
       {lrError&&(
