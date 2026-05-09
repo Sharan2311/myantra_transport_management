@@ -5674,7 +5674,7 @@ function SealedInvoiceSheet({ trip, onMerge, onClose, embedded=false }) {
 }
 
 // ─── TRIPS ────────────────────────────────────────────────────────────────────
-function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles, indents, settings, tripType, user, log, driverPays, employees, cashTransfers, setCashTransfers, allTripsLoaded, loadingAllTrips, loadAllTrips, dieselRequests=[], setDieselRequests}) {
+function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles, indents, setIndents, settings, tripType, user, log, driverPays, employees, cashTransfers, setCashTransfers, allTripsLoaded, loadingAllTrips, loadAllTrips, dieselRequests=[], setDieselRequests}) {
   const isIn = tripType === "inbound";
   const ac   = isIn ? C.teal : C.accent;
 
@@ -6287,7 +6287,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
   };
 
   const deleteTrip = async (t) => {
-    // Cascade: remove any indents/alerts linked to this trip
+    // ── 1. Cascade: remove any indents/alerts linked to this trip ──────────
     const linkedIndents = indents.filter(i => i.tripId === t.id);
     if (linkedIndents.length > 0) {
       setIndents(prev => prev.filter(i => i.tripId !== t.id));
@@ -6295,13 +6295,65 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         try { await DB.deleteIndent(ind.id); } catch(e) { console.warn("indent cascade delete:", e); }
       }
     }
-    // Optimistic update immediately
+
+    // ── 2. Delete wallet advance entry ("WX-"+tripId) ──────────────────────
+    const walletId = "WX-" + t.id;
+    if ((cashTransfers||[]).some(x => x.id === walletId)) {
+      setCashTransfers(prev => (prev||[]).filter(x => x.id !== walletId));
+      DB.deleteCashTransfer(walletId).catch(e => console.warn("wallet cascade delete:", e));
+      log("WALLET REVERSE", `Deleted advance entry for LR:${t.lrNo||"—"}`);
+    }
+
+    // ── 3. Reverse loan recovery on vehicle ────────────────────────────────
+    if (+t.loanRecovery > 0 && t.truckNo) {
+      setVehicles(prev => prev.map(v => {
+        if (v.truckNo !== t.truckNo) return v;
+        const upd = {
+          ...v,
+          loanRecovered: Math.max(0, (v.loanRecovered||0) - (+t.loanRecovery)),
+          loanTxns: (v.loanTxns||[]).filter(tx => tx.lrNo !== t.lrNo),
+        };
+        DB.saveVehicle(upd).catch(e => console.warn("loan reversal save:", e));
+        return upd;
+      }));
+      log("LOAN REVERSE", `₹${t.loanRecovery} reversed for ${t.truckNo} LR:${t.lrNo||"—"}`);
+    }
+
+    // ── 4. Reverse shortage recovery on vehicle ────────────────────────────
+    if (+t.shortageRecovery > 0 && t.truckNo) {
+      setVehicles(prev => prev.map(v => {
+        if (v.truckNo !== t.truckNo) return v;
+        const upd = {
+          ...v,
+          shortageRecovered: Math.max(0, (v.shortageRecovered||0) - (+t.shortageRecovery)),
+          shortageTxns: (v.shortageTxns||[]).filter(tx => tx.lrNo !== t.lrNo),
+        };
+        DB.saveVehicle(upd).catch(e => console.warn("shortage reversal save:", e));
+        return upd;
+      }));
+      log("SHORTAGE REVERSE", `₹${t.shortageRecovery} reversed for ${t.truckNo} LR:${t.lrNo||"—"}`);
+    }
+
+    // ── 5. Detach diesel request (don't delete — just unlink from trip) ────
+    const linkedDiesel = (dieselRequests||[]).filter(r =>
+      r.tripId === t.id || (t.dieselIndentNo && String(r.indentNo) === String(t.dieselIndentNo).trim())
+    );
+    for (const req of linkedDiesel) {
+      const detached = {...req, tripId:"", lrNo:"", status: req.confirmed ? "confirmed" : "open"};
+      setDieselRequests(prev => (prev||[]).map(r => r.id === req.id ? detached : r));
+      DB.saveDieselRequest(detached).catch(e => console.warn("diesel detach:", e));
+      log("DIESEL DETACH", `Indent #${req.indentNo} detached from LR:${t.lrNo||"—"} (trip deleted)`);
+    }
+
+    // ── 6. Optimistic trip removal ─────────────────────────────────────────
     setTrips(p => p.filter(x => x.id !== t.id));
     setConfirmDel(null);
     log("DELETE TRIP", `LR:${t.lrNo} ${t.truckNo} ${t.qty}MT`);
+
     // Delete party files if applicable
     if(t.orderType==="party") deletePartyFiles(t.id).catch(e=>console.warn("Party file delete:", e));
-    // Persist to Supabase
+
+    // Persist trip deletion to Supabase
     try {
       await DB.deleteTrip(t.id);
     } catch(e) {
