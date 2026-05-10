@@ -2905,6 +2905,22 @@ Rules:
           }));
         }
         log("BATCH TRIP",`LR:${lrNo} DI:${ex.diNo} ${truckNo} ${ex.qty}MT [${item.orderType}]`);
+        // ── Excess diesel tracking — if net goes negative, debit employee wallet ──
+        if(trip.cashEmpId && +trip.dieselEstimate>0 && setCashTransfers) {
+          const _gross = (+trip.qty||0)*(+trip.givenRate||0);
+          const _net = _gross - (+trip.tafal||0) - (+trip.advance||0) - (+trip.dieselEstimate||0)
+                     - (+g.shortageRecovery||0) - (+g.loanRecovery||0);
+          if(_net < 0) {
+            const excess = Math.abs(_net);
+            const wxnXD={id:"XD-"+trip.id, empId:trip.cashEmpId, amount:-excess,
+              date:trip.date||today(), note:`Excess diesel — LR ${lrNo} · ${truckNo}`,
+              type:"excess_diesel", ref:lrNo,
+              lrNo, tripId:trip.id, createdBy:user.username, createdAt:nowTs()};
+            setCashTransfers(prev=>[wxnXD,...(Array.isArray(prev)?prev:[])]);
+            DB.saveCashTransfer(wxnXD).catch(e=>console.error("excess diesel save:",e));
+            log("EXCESS DIESEL",`${employees.find(e=>e.id===trip.cashEmpId)?.name||"—"} −₹${excess} LR:${lrNo} (diesel ₹${trip.dieselEstimate} caused negative net)`);
+          }
+        }
       } else {
         // ── MULTI-DI on new LR ─────────────────────────────────────────────
         // Upload party files per DI
@@ -3041,6 +3057,22 @@ Rules:
           }));
         }
         log("BATCH MULTI-DI",`LR:${lrNo} ${allDiNos} ${truckNo} ${totalQty}MT`);
+        // ── Excess diesel tracking — multi-DI ──
+        if(trip.cashEmpId && +trip.dieselEstimate>0 && setCashTransfers) {
+          const _gross = (+trip.qty||0)*(+trip.givenRate||0);
+          const _net = _gross - (+trip.tafal||0) - (+trip.advance||0) - (+trip.dieselEstimate||0)
+                     - (+g.shortageRecovery||0) - (+g.loanRecovery||0);
+          if(_net < 0) {
+            const excess = Math.abs(_net);
+            const wxnXD={id:"XD-"+trip.id, empId:trip.cashEmpId, amount:-excess,
+              date:trip.date||today(), note:`Excess diesel — LR ${lrNo} · ${truckNo}`,
+              type:"excess_diesel", ref:lrNo,
+              lrNo, tripId:trip.id, createdBy:user.username, createdAt:nowTs()};
+            setCashTransfers(prev=>[wxnXD,...(Array.isArray(prev)?prev:[])]);
+            DB.saveCashTransfer(wxnXD).catch(e=>console.error("excess diesel save:",e));
+            log("EXCESS DIESEL",`${employees.find(e=>e.id===trip.cashEmpId)?.name||"—"} −₹${excess} LR:${lrNo} (multi-DI, diesel ₹${trip.dieselEstimate} caused negative net)`);
+          }
+        }
       }
       savedLRsThisBatch.push({lrNo, truckNo, qty: groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0),0), diCount: groupItems.length});
       count++;
@@ -11621,6 +11653,47 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
                     Total: ₹{((+drDieselAmt||0)+(+drCashAmt||0)).toLocaleString("en-IN")}
                   </div>
                 )}
+                {/* ── Loan/Shortage Warning for this Vehicle ── */}
+                {(()=>{
+                  const tn = drTruckNo.trim().toUpperCase();
+                  if(tn.length < 6) return null;
+                  const veh = (vehicles||[]).find(v=>v.truckNo===tn);
+                  if(!veh) return null;
+                  const loanBal = Math.max(0, (veh.loan||0) - (veh.loanRecovered||0));
+                  const shortageBal = Math.max(0, (veh.shortageOwed||0) - (veh.shortageRecovered||0));
+                  const loanDeduct = loanBal>0 ? (veh.deductPerTrip||0) : 0;
+                  const shortageDeduct = shortageBal>0 ? (veh.shortageDeductPerTrip||0) : 0;
+                  if(loanBal<=0 && shortageBal<=0) return null;
+                  const tafalAmt = veh.tafalExempt ? 0 : (settings?.tafalPerTrip||300);
+                  const perTripDeduct = loanDeduct + shortageDeduct + tafalAmt;
+                  const totalReq = (+drDieselAmt||0) + (+drCashAmt||0);
+                  return (
+                    <div style={{background:"#fef3c7",border:"1px solid #f59e0b55",borderRadius:10,padding:"10px 14px"}}>
+                      <div style={{fontWeight:800,fontSize:12,color:"#92400e",marginBottom:6}}>
+                        ⚠ Vehicle has outstanding deductions
+                      </div>
+                      {loanBal>0 && <div style={{fontSize:12,color:"#78350f",marginBottom:2}}>
+                        🏦 Loan: ₹{loanBal.toLocaleString("en-IN")} outstanding
+                        {loanDeduct>0 && <span> (₹{loanDeduct.toLocaleString("en-IN")} deducted per trip)</span>}
+                      </div>}
+                      {shortageBal>0 && <div style={{fontSize:12,color:"#78350f",marginBottom:2}}>
+                        📉 Shortage: ₹{shortageBal.toLocaleString("en-IN")} outstanding
+                        {shortageDeduct>0 && <span> (₹{shortageDeduct.toLocaleString("en-IN")} per trip)</span>}
+                      </div>}
+                      <div style={{borderTop:"1px solid #f59e0b44",marginTop:6,paddingTop:6,
+                        fontSize:11,color:"#92400e",fontWeight:700}}>
+                        Per-trip deductions: ₹{perTripDeduct.toLocaleString("en-IN")}
+                        <span style={{fontWeight:400}}> (Tafal {tafalAmt>0?`₹${tafalAmt}`:""}{loanDeduct>0?` + Loan ₹${loanDeduct}`:""}{shortageDeduct>0?` + Shortage ₹${shortageDeduct}`:""})</span>
+                      </div>
+                      {totalReq > 0 && totalReq + perTripDeduct > 0 && (
+                        <div style={{fontSize:11,color:"#dc2626",marginTop:4,fontWeight:700}}>
+                          ⚠ Diesel ₹{totalReq.toLocaleString("en-IN")} + Deductions ₹{perTripDeduct.toLocaleString("en-IN")} = ₹{(totalReq+perTripDeduct).toLocaleString("en-IN")} needed from trip earnings.
+                          {totalReq > perTripDeduct*3 && " This diesel amount looks unusually high relative to deductions."}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
                 {/* ── Petrol Pump (mandatory) ── */}
                 <div>
                   <div style={{fontSize:10,fontWeight:700,marginBottom:3,
@@ -14112,7 +14185,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
     <h2 style="color:#7c3aed">TAFAL History (${tafalTxns.length})</h2>
     ${tafalTxns.length===0?"<p style='color:#999;font-style:italic'>No TAFAL payments recorded.</p>":`<table><tr><th>Date</th><th>Amount</th><th>For Month</th><th>Note</th><th>Reference</th></tr>${tafalTxns.map(t=>`<tr style="background:#f5f3ff"><td>${fmtDate(t.date)}</td><td>${fmtAmt(t.amount||0)}</td><td>${t.forMonth?new Date(t.forMonth+"-01").toLocaleDateString("en-IN",{month:"long",year:"numeric"}):"—"}</td><td>${t.note||"—"}</td><td>${t.ref||"—"}</td></tr>`).join("")}</table>`}
     <h2>Wallet History (${walTxns.length})</h2>
-    ${walTxns.length===0?"<p style='color:#999;font-style:italic'>No wallet transactions.</p>":`<table><tr><th>Date</th><th>Amount</th><th>Type</th><th>Note</th></tr>${walTxns.map(t=>`<tr><td>${fmtDate(t.date)}</td><td>${fmtAmt(Math.abs(t.amount||0))}${t.amount<0?" (advance)":""}</td><td>${t.type||"transfer"}</td><td>${t.note||"—"}</td></tr>`).join("")}</table>`}
+    ${walTxns.length===0?"<p style='color:#999;font-style:italic'>No wallet transactions.</p>":`<table><tr><th>Date</th><th>Amount</th><th>Type</th><th>Note</th></tr>${walTxns.map(t=>`<tr style="${t.type==="excess_diesel"?"background:#fef2f2;color:#dc2626;font-weight:700":""}"><td>${fmtDate(t.date)}</td><td>${fmtAmt(Math.abs(t.amount||0))}${t.amount<0?" (debit)":""}</td><td>${t.type==="excess_diesel"?"⛽ EXCESS DIESEL":(t.type||"transfer")}</td><td>${t.note||"—"}</td></tr>`).join("")}</table>`}
     <script>window.onload=function(){window.print();}</script>
     </body></html>`;
 
@@ -14611,8 +14684,12 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                     const amt=Number(tx.amount||0), isCredit=amt>0;
                     return (
                       <div key={tx.id} style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",
-                        padding:"10px 0",borderBottom:"1px solid "+C.border+"55"}}>
+                        padding:"10px 0",borderBottom:"1px solid "+C.border+"55",
+                        ...(tx.type==="excess_diesel"?{background:"#fef2f2",margin:"0 -10px",padding:"10px",borderRadius:6}:{})}}>
                         <div style={{flex:1}}>
+                          {tx.type==="excess_diesel" && <div style={{fontSize:9,fontWeight:800,color:"#dc2626",
+                            background:"#fecaca",borderRadius:4,padding:"2px 6px",display:"inline-block",marginBottom:3,
+                            textTransform:"uppercase",letterSpacing:1}}>⛽ Excess Diesel</div>}
                           <div style={{color:C.text,fontSize:13,fontWeight:600}}>{tx.note||"Transfer"}</div>
                           <div style={{color:C.muted,fontSize:11}}>{tx.date||"—"}{tx.lrNo?" · LR "+tx.lrNo:""} · by {tx.createdBy}</div>
                         </div>
