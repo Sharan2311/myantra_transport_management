@@ -2926,7 +2926,7 @@ Rules:
               date:trip.date||today(), note:`Excess diesel — LR ${lrNo} · ${truckNo}`,
               type:"excess_diesel", ref:lrNo,
               lrNo, tripId:trip.id, createdBy:user.username, createdAt:nowTs()};
-            setCashTransfers(prev=>[wxnXD,...(Array.isArray(prev)?prev:[])]);
+            setCashTransfers(prev=>[wxnXD,...(Array.isArray(prev)?prev:[]).filter(x=>x.id!==wxnXD.id)]);
             DB.saveCashTransfer(wxnXD).catch(e=>console.error("excess diesel save:",e));
             log("EXCESS DIESEL",`${employees.find(e=>e.id===_empId)?.name||"—"} −₹${excess} LR:${lrNo} (diesel ₹${trip.dieselEstimate} caused negative net)`);
           }
@@ -3079,7 +3079,7 @@ Rules:
               date:trip.date||today(), note:`Excess diesel — LR ${lrNo} · ${truckNo}`,
               type:"excess_diesel", ref:lrNo,
               lrNo, tripId:trip.id, createdBy:user.username, createdAt:nowTs()};
-            setCashTransfers(prev=>[wxnXD,...(Array.isArray(prev)?prev:[])]);
+            setCashTransfers(prev=>[wxnXD,...(Array.isArray(prev)?prev:[]).filter(x=>x.id!==wxnXD.id)]);
             DB.saveCashTransfer(wxnXD).catch(e=>console.error("excess diesel save:",e));
             log("EXCESS DIESEL",`${employees.find(e=>e.id===_empId)?.name||"—"} −₹${excess} LR:${lrNo} (multi-DI, diesel ₹${trip.dieselEstimate} caused negative net)`);
           }
@@ -6197,7 +6197,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
           date:t.date||today(), note:`Excess diesel — LR ${t.lrNo||"—"} · ${t.truckNo}`,
           type:"excess_diesel", ref:t.lrNo||"",
           lrNo:t.lrNo||"", tripId:t.id, createdBy:user.username, createdAt:nowTs()};
-        setCashTransfers(prev=>[wxnXD,...(Array.isArray(prev)?prev:[])]);
+        setCashTransfers(prev=>[wxnXD,...(Array.isArray(prev)?prev:[]).filter(x=>x.id!==wxnXD.id)]);
         DB.saveCashTransfer(wxnXD).catch(e=>console.error("excess diesel save:",e));
         log("EXCESS DIESEL",`${employees.find(e=>e.id===_empId)?.name||"—"} −₹${excess} LR:${t.lrNo||"—"} (single DI, diesel ₹${t.dieselEstimate} caused negative net)`);
       }
@@ -6463,6 +6463,25 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       setCashTransfers(prev => (prev||[]).filter(x => x.id !== walletId));
       DB.deleteCashTransfer(walletId).catch(e => console.warn("wallet cascade delete:", e));
       log("WALLET REVERSE", `Deleted advance entry for LR:${t.lrNo||"—"}`);
+    }
+
+    // ── 2b. Delete excess diesel wallet entry ("XD-"+tripId) ────────────
+    const xdId = "XD-" + t.id;
+    if ((cashTransfers||[]).some(x => x.id === xdId)) {
+      setCashTransfers(prev => (prev||[]).filter(x => x.id !== xdId));
+      DB.deleteCashTransfer(xdId).catch(e => console.warn("excess diesel cascade delete:", e));
+      log("EXCESS DIESEL REVERSE", `Deleted excess diesel entry for LR:${t.lrNo||"—"}`);
+    }
+
+    // ── 2c. Delete any other wallet entries linked to this trip ─────────
+    const otherLinked = (cashTransfers||[]).filter(x => x.id !== walletId && x.id !== xdId && (x.tripId === t.id || (t.lrNo && x.lrNo === t.lrNo)));
+    if (otherLinked.length > 0) {
+      const linkedIds = new Set(otherLinked.map(x => x.id));
+      setCashTransfers(prev => (prev||[]).filter(x => !linkedIds.has(x.id)));
+      for (const wx of otherLinked) {
+        DB.deleteCashTransfer(wx.id).catch(e => console.warn("linked wallet delete:", e));
+      }
+      log("WALLET CLEANUP", `Deleted ${otherLinked.length} wallet entries linked to LR:${t.lrNo||"—"}`);
     }
 
     // ── 3. Reverse loan recovery on vehicle ────────────────────────────────
