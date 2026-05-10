@@ -39,46 +39,48 @@ const FY_LABEL  = fy => `FY ${fy-1}–${String(fy).slice(2)}`; // "FY 2025–26"
 // ─── FEATURE PLANS ───────────────────────────────────────────────────────────
 // Each feature flag + which plans include it. Used by canFeature() and Feature Admin UI.
 const FEATURE_CATALOG = [
-  // Core operations (Basic+)
-  {key:"manual_trips",    label:"Add trips (manual entry)",           cat:"Core Operations",     plans:["basic","pro","enterprise"]},
-  {key:"gr_di_scan",      label:"GR/DI scan (batch + single)",       cat:"Core Operations",     plans:["basic","pro","enterprise"]},
-  {key:"lr_auto_assign",  label:"LR auto-assignment",                cat:"Core Operations",     plans:["basic","pro","enterprise"]},
-  {key:"vehicles",        label:"Vehicle management",                cat:"Core Operations",     plans:["basic","pro","enterprise"]},
-  {key:"employees",       label:"Employee management",               cat:"Core Operations",     plans:["basic","pro","enterprise"]},
-  {key:"dashboard",       label:"Dashboard + KPIs",                  cat:"Core Operations",     plans:["basic","pro","enterprise"]},
-  {key:"multi_client",    label:"Multi-client support",              cat:"Core Operations",     plans:["pro","enterprise"]},
-  // AI scanning (Pro+)
-  {key:"gr_particulars",  label:"GR particulars extraction",         cat:"AI Scanning",         plans:["pro","enterprise"]},
-  {key:"auto_order_type", label:"Auto godown/party detection",       cat:"AI Scanning",         plans:["pro","enterprise"]},
-  {key:"pincode_lookup",  label:"Pincode → district/state lookup",   cat:"AI Scanning",         plans:["pro","enterprise"]},
-  {key:"payment_scan",    label:"Payment screenshot scan",           cat:"AI Scanning",         plans:["pro","enterprise"]},
-  {key:"shree_invoice_scan",label:"Shree invoice/payment scan",      cat:"AI Scanning",         plans:["enterprise"]},
-  // Payments & finance (Pro+)
-  {key:"driver_pay",      label:"Driver pay + settlement",           cat:"Payments & Finance",  plans:["pro","enterprise"]},
-  {key:"payment_requests",label:"Payment requests",                  cat:"Payments & Finance",  plans:["pro","enterprise"]},
-  {key:"cash_wallet",     label:"Cash wallet (employee)",            cat:"Payments & Finance",  plans:["pro","enterprise"]},
-  {key:"loan_tracking",   label:"Loan tracking (owner/vehicle)",     cat:"Payments & Finance",  plans:["pro","enterprise"]},
-  {key:"shortage_tracking",label:"Shortage tracking",                cat:"Payments & Finance",  plans:["pro","enterprise"]},
-  {key:"expense_tracking",label:"Expense tracking",                  cat:"Payments & Finance",  plans:["enterprise"]},
-  {key:"excess_diesel_tracking",label:"Excess diesel wallet tracking",cat:"Payments & Finance", plans:["pro","enterprise"]},
-  // Diesel management
-  {key:"diesel_tab",      label:"Diesel indent system",              cat:"Diesel Management",   plans:["pro","enterprise"]},
-  {key:"pump_portal",     label:"Pump portal (PIN-based)",           cat:"Diesel Management",   plans:["enterprise"]},
-  {key:"diesel_mismatch", label:"Diesel mismatch alerts",            cat:"Diesel Management",   plans:["enterprise"]},
-  // Party billing (Enterprise)
-  {key:"party_billing",   label:"Party portal",                      cat:"Party Billing",       plans:["enterprise"]},
-  {key:"pouch_balance",   label:"Pouch balance (₹700)",              cat:"Party Billing",       plans:["enterprise"]},
-  {key:"party_contacts",  label:"Party contact DB",                  cat:"Party Billing",       plans:["enterprise"]},
-  {key:"district_officers",label:"District officer mapping",         cat:"Party Billing",       plans:["enterprise"]},
-  // Reports & compliance
-  {key:"tafal",           label:"TAFAL pool",                        cat:"Reports & Compliance",plans:["pro","enterprise"]},
-  {key:"pdf_reports",     label:"PDF reports",                       cat:"Reports & Compliance",plans:["pro","enterprise"]},
-  {key:"gst_reconciliation",label:"GST reconciliation",              cat:"Reports & Compliance",plans:["enterprise"]},
-  {key:"activity_log",    label:"Activity log (audit trail)",        cat:"Reports & Compliance",plans:["basic","pro","enterprise"]},
-  // User & access
-  {key:"role_based_access",label:"Role-based access",                cat:"User & Access",       plans:["basic","pro","enterprise"]},
-  {key:"daily_ops",       label:"Daily Ops dashboard",               cat:"User & Access",       plans:["pro","enterprise"]},
-  {key:"inbound_trips",   label:"Inbound / raw material trips",     cat:"Core Operations",     plans:["pro","enterprise"]},
+  // Core Operations
+  {key:"trips",             label:"Trips",                          cat:"Core Operations",     plans:["basic","pro","enterprise"]},
+  {key:"di_scan",           label:"GR/DI Scan",                    cat:"Core Operations",     plans:["basic","pro","enterprise"]},
+  {key:"batch_di_scanner",  label:"Batch DI Scanner",              cat:"Core Operations",     plans:["basic","pro","enterprise"]},
+  {key:"vehicles",          label:"Vehicles",                      cat:"Core Operations",     plans:["basic","pro","enterprise"]},
+  {key:"employees",         label:"Employees",                     cat:"Core Operations",     plans:["basic","pro","enterprise"]},
+  {key:"lr_auto_assign",    label:"LR Auto-Assignment",            cat:"Core Operations",     plans:["basic","pro","enterprise"]},
+  {key:"multi_client",      label:"Multi-Client Support",          cat:"Core Operations",     plans:["pro","enterprise"]},
+  {key:"inbound_trips",     label:"Inbound / Raw Material",        cat:"Core Operations",     plans:["pro","enterprise"]},
+  // AI Scanning
+  {key:"payment_scan",      label:"Payment Scan",                  cat:"AI Scanning",         plans:["pro","enterprise"]},
+  {key:"gr_particulars",    label:"GR Particulars",                cat:"AI Scanning",         plans:["pro","enterprise"]},
+  {key:"auto_order_type",   label:"Auto Order Detection",          cat:"AI Scanning",         plans:["pro","enterprise"]},
+  {key:"pincode_lookup",    label:"Pincode Lookup",                cat:"AI Scanning",         plans:["pro","enterprise"]},
+  {key:"shree_invoice_scan",label:"Shree Invoice Scan",            cat:"AI Scanning",         plans:["enterprise"]},
+  // Payments & Finance
+  {key:"driver_pay",        label:"Driver Pay",                    cat:"Payments & Finance",  plans:["basic","pro","enterprise"]},
+  {key:"payment_requests",  label:"Payment Requests",              cat:"Payments & Finance",  plans:["pro","enterprise"]},
+  {key:"cash_wallet",       label:"Cash Wallet",                   cat:"Payments & Finance",  plans:["pro","enterprise"]},
+  {key:"loan_ledger",       label:"Loan Tracking",                 cat:"Payments & Finance",  plans:["pro","enterprise"]},
+  {key:"shortage_recovery", label:"Shortage Tracking",             cat:"Payments & Finance",  plans:["pro","enterprise"]},
+  {key:"expense_tracking",  label:"Expense Tracking",              cat:"Payments & Finance",  plans:["pro","enterprise"]},
+  {key:"excess_diesel",     label:"Excess Diesel Tracking",        cat:"Payments & Finance",  plans:["pro","enterprise"]},
+  // Diesel Management
+  {key:"diesel_tab",        label:"Diesel Indent System",          cat:"Diesel Management",   plans:["pro","enterprise"]},
+  {key:"pump_portal",       label:"Pump Portal",                   cat:"Diesel Management",   plans:["enterprise"]},
+  {key:"diesel_mismatch",   label:"Diesel Mismatch Alerts",        cat:"Diesel Management",   plans:["enterprise"]},
+  // Party Billing
+  {key:"party_billing",     label:"Party Portal",                  cat:"Party Billing",       plans:["enterprise"]},
+  {key:"pouch_balance",     label:"Pouch Balance",                 cat:"Party Billing",       plans:["enterprise"]},
+  {key:"party_contacts",    label:"Party Contact DB",              cat:"Party Billing",       plans:["enterprise"]},
+  {key:"district_officers", label:"District Officer Mapping",      cat:"Party Billing",       plans:["enterprise"]},
+  // Reports & Compliance
+  {key:"tafal",             label:"TAFAL Pool",                    cat:"Reports & Compliance",plans:["pro","enterprise"]},
+  {key:"pdf_reports",       label:"PDF Reports",                   cat:"Reports & Compliance",plans:["pro","enterprise"]},
+  {key:"owner_reports",     label:"Owner Reports",                 cat:"Reports & Compliance",plans:["enterprise"]},
+  {key:"gst_reconciliation",label:"GST Reconciliation",            cat:"Reports & Compliance",plans:["enterprise"]},
+  {key:"daily_ops",         label:"Daily Ops Dashboard",           cat:"Reports & Compliance",plans:["pro","enterprise"]},
+  {key:"activity_log",      label:"Activity Log",                  cat:"Reports & Compliance",plans:["basic","pro","enterprise"]},
+  // Platform
+  {key:"custom_branding",   label:"Custom Branding",               cat:"Platform",            plans:["enterprise"]},
+  {key:"husk_manager",      label:"Husk Manager",                  cat:"Platform",            plans:["enterprise"]},
 ];
 
 // Plan → set of enabled feature keys
@@ -686,13 +688,12 @@ function BottomNav({tab, setTab, user, trips, driverPays, vehicles, dieselReques
   );
 }
 
-// canFeature: checks DB-stored plan + overrides, falls back to RC features
+// canFeature: checks RC.features loaded from admin DB's client_features table
 const canFeature = (feat) => {
-  if(!feat) return true; // no feature gate = always visible
-  // If effectiveFeatures is computed (from settings), use it
-  if(window._effectiveFeatures) return !!window._effectiveFeatures[feat];
-  // Fallback to RC features during boot
-  return canFeatureRC(feat);
+  if(!feat) return true;
+  const f = RC.features;
+  if(Object.keys(f).length === 0) return true; // no features configured = all enabled
+  return f[feat] === true;
 };
 
 const MORE_TABS = [
@@ -1146,14 +1147,6 @@ function AppMain() {
   };
   const [vehicles,    setVehicles,    rV, reloadVehicles]    = useDB(DB.getVehicles,    [],               0);
   const [settings,    setSettings,    rSt,reloadSettings]    = useDB(DB.getSettings,    {tafalPerTrip:300},0);
-
-  // ── Compute effective features from plan + overrides whenever settings change ──
-  useEffect(() => {
-    const plan = settings?.plan || "enterprise";
-    const overrides = settings?.featureOverrides || {};
-    window._effectiveFeatures = computeEffectiveFeatures(plan, overrides, RC.features||{});
-    console.log('[FEATURES]', plan, 'plan →', Object.keys(window._effectiveFeatures).filter(k=>window._effectiveFeatures[k]).length, 'features enabled');
-  }, [settings]);
 
   // ── Phase 2 (300ms) — 5 connections ──────────────────────────────────────────
   const [employees,   setEmployees,   rE, reloadEmployees]   = useDB(DB.getEmployees,   [],             300);
@@ -18910,38 +18903,109 @@ function ExpensesLedger({expenses, setExpenses, payments, user, log}) {
 }
 
 // ─── REPORTS ──────────────────────────────────────────────────────────────────
-// ─── FEATURE ADMIN — toggle features per plan or individually ────────────────
+// ─── FEATURE ADMIN — toggle features per plan, saves to admin DB ─────────────
 function FeatureAdmin({settings, setSettings}) {
-  const plan = settings?.plan || "enterprise";
-  const overrides = settings?.featureOverrides || {};
-  const effective = computeEffectiveFeatures(plan, overrides, RC.features||{});
+  const [saving, setSaving] = useState(false);
+  const [lastSaved, setLastSaved] = useState("");
 
-  const setPlan = (p) => {
-    const updated = {...(settings||{}), plan:p};
-    setSettings(updated);
-    DB.saveSettings(updated).catch(e=>console.error("saveSettings:",e));
-    window._effectiveFeatures = computeEffectiveFeatures(p, overrides, RC.features||{});
+  // Admin DB client for writing back
+  const adminDbRef = useRef(null);
+  if(!adminDbRef.current && RC.adminSupabaseUrl && RC.adminSupabaseAnonKey) {
+    const { createClient } = window.__supabase || {};
+    // Use dynamic import approach — supabase client is already available globally
+    try {
+      adminDbRef.current = supabase ? { from: (t) => {
+        // Use fetch directly to admin DB REST API
+        const base = RC.adminSupabaseUrl + "/rest/v1/" + t;
+        const headers = {
+          "apikey": RC.adminSupabaseAnonKey,
+          "Authorization": "Bearer " + RC.adminSupabaseAnonKey,
+          "Content-Type": "application/json",
+          "Prefer": "return=minimal"
+        };
+        return {
+          upsert: (data) => fetch(base, { method:"POST", headers:{...headers, "Prefer":"resolution=merge-duplicates"}, body:JSON.stringify(data) }),
+          update: (data) => ({ eq: (col,val) => fetch(base+"?"+col+"=eq."+val, { method:"PATCH", headers, body:JSON.stringify(data) }) }),
+          delete: () => ({ eq: (col,val) => fetch(base+"?"+col+"=eq."+val, { method:"DELETE", headers }) }),
+        };
+      }} : null;
+    } catch(e) { console.warn("Admin DB init failed:", e); }
+  }
+
+  // Helper: save feature to admin DB
+  const saveToAdmin = async (feature, enabled) => {
+    try {
+      const url = RC.adminSupabaseUrl + "/rest/v1/client_features";
+      const headers = {
+        "apikey": RC.adminSupabaseAnonKey,
+        "Authorization": "Bearer " + RC.adminSupabaseAnonKey,
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates,return=minimal"
+      };
+      await fetch(url, {
+        method: "POST", headers,
+        body: JSON.stringify({ client_id: RC.clientId, feature, enabled })
+      });
+    } catch(e) { console.warn("Admin save failed:", e); }
   };
 
-  const toggleOverride = (key) => {
-    const newOverrides = {...overrides};
-    const planDefault = (PLAN_FEATURES[plan]||new Set()).has(key);
-    if(key in newOverrides) {
-      // Already overridden — remove override (back to plan default)
-      delete newOverrides[key];
-    } else {
-      // Add override — flip from plan default
-      newOverrides[key] = !planDefault;
+  // Helper: update plan on clients table
+  const savePlanToAdmin = async (plan) => {
+    try {
+      const url = RC.adminSupabaseUrl + "/rest/v1/clients?id=eq." + RC.clientId;
+      await fetch(url, {
+        method: "PATCH",
+        headers: {
+          "apikey": RC.adminSupabaseAnonKey,
+          "Authorization": "Bearer " + RC.adminSupabaseAnonKey,
+          "Content-Type": "application/json",
+          "Prefer": "return=minimal"
+        },
+        body: JSON.stringify({ plan })
+      });
+    } catch(e) { console.warn("Admin plan save failed:", e); }
+  };
+
+  const plan = RC.plan || "enterprise";
+  const effective = {...(RC.features||{})};
+  // Fill in missing features from plan defaults
+  FEATURE_CATALOG.forEach(f => {
+    if(!(f.key in effective)) {
+      effective[f.key] = (PLAN_FEATURES[plan]||new Set()).has(f.key);
     }
-    const updated = {...(settings||{}), featureOverrides:newOverrides};
-    setSettings(updated);
-    DB.saveSettings(updated).catch(e=>console.error("saveSettings:",e));
-    window._effectiveFeatures = computeEffectiveFeatures(plan, newOverrides, RC.features||{});
+  });
+
+  const setPlan = async (p) => {
+    setSaving(true);
+    // Update all features based on new plan
+    const planSet = PLAN_FEATURES[p] || PLAN_FEATURES["enterprise"];
+    const promises = FEATURE_CATALOG.map(f => {
+      const enabled = planSet.has(f.key);
+      RC.features[f.key] = enabled;
+      return saveToAdmin(f.key, enabled);
+    });
+    RC.plan = p;
+    await savePlanToAdmin(p);
+    await Promise.all(promises);
+    // Update effective features
+    window._effectiveFeatures = {...RC.features};
+    setSaving(false);
+    setLastSaved(`Plan set to ${p.charAt(0).toUpperCase()+p.slice(1)} — ${Object.values(RC.features).filter(Boolean).length} features enabled`);
+    setTimeout(()=>setLastSaved(""), 3000);
+  };
+
+  const toggleFeature = async (key) => {
+    const newVal = !effective[key];
+    RC.features[key] = newVal;
+    window._effectiveFeatures = {...RC.features};
+    setSaving(true);
+    await saveToAdmin(key, newVal);
+    setSaving(false);
+    setLastSaved(`${key} → ${newVal?"enabled":"disabled"}`);
+    setTimeout(()=>setLastSaved(""), 2000);
   };
 
   const cats = [...new Set(FEATURE_CATALOG.map(f=>f.cat))];
-  const planCounts = {basic:0,pro:0,enterprise:0};
-  FEATURE_CATALOG.forEach(f => { if(effective[f.key]) planCounts[plan]++; });
   const enabledCount = Object.values(effective).filter(Boolean).length;
 
   return (
@@ -18949,29 +19013,32 @@ function FeatureAdmin({settings, setSettings}) {
       {/* Header */}
       <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,padding:"16px"}}>
         <div style={{color:C.accent,fontWeight:900,fontSize:18}}>⚙️ Feature Flags</div>
-        <div style={{color:C.muted,fontSize:11,marginTop:2}}>Toggle features per plan or individually. Changes apply immediately.</div>
+        <div style={{color:C.muted,fontSize:11,marginTop:2}}>Changes save to admin DB and apply immediately for this transport.</div>
+        {saving && <div style={{color:C.orange,fontSize:11,fontWeight:700,marginTop:4}}>⏳ Saving...</div>}
+        {lastSaved && <div style={{color:C.green,fontSize:11,fontWeight:700,marginTop:4}}>✓ {lastSaved}</div>}
       </div>
 
       {/* Plan selector */}
       <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:"14px 16px"}}>
-        <div style={{fontWeight:700,fontSize:13,color:C.text,marginBottom:10}}>Active Plan</div>
+        <div style={{fontWeight:700,fontSize:13,color:C.text,marginBottom:10}}>Active Plan — {RC.companyName||"Transport"}</div>
         <div style={{display:"flex",gap:6}}>
           {[
             {id:"basic",    label:"Basic",      color:"#0F6E56", count:PLAN_FEATURES.basic.size},
             {id:"pro",      label:"Pro",        color:"#185FA5", count:PLAN_FEATURES.pro.size},
             {id:"enterprise",label:"Enterprise", color:"#534AB7", count:PLAN_FEATURES.enterprise.size},
           ].map(p=>(
-            <button key={p.id} onClick={()=>setPlan(p.id)}
-              style={{flex:1,padding:"10px 0",borderRadius:10,fontWeight:700,fontSize:13,cursor:"pointer",
+            <button key={p.id} onClick={()=>setPlan(p.id)} disabled={saving}
+              style={{flex:1,padding:"10px 0",borderRadius:10,fontWeight:700,fontSize:13,cursor:saving?"wait":"pointer",
                 background:plan===p.id?p.color:C.bg, color:plan===p.id?"#fff":C.text,
-                border:`2px solid ${plan===p.id?p.color:C.border}`, transition:"all 0.2s"}}>
+                border:`2px solid ${plan===p.id?p.color:C.border}`, transition:"all 0.2s",
+                opacity:saving?0.6:1}}>
               {p.label}
               <div style={{fontSize:10,fontWeight:400,marginTop:2,opacity:0.8}}>{p.count} features</div>
             </button>
           ))}
         </div>
         <div style={{fontSize:11,color:C.muted,marginTop:8}}>
-          {enabledCount} features enabled ({Object.keys(overrides).length} individual overrides)
+          {enabledCount} / {FEATURE_CATALOG.length} features enabled
         </div>
       </div>
 
@@ -18984,7 +19051,7 @@ function FeatureAdmin({settings, setSettings}) {
             {features.map(f=>{
               const isEnabled = effective[f.key];
               const planDefault = (PLAN_FEATURES[plan]||new Set()).has(f.key);
-              const isOverridden = f.key in overrides;
+              const isOverridden = isEnabled !== planDefault;
               return (
                 <div key={f.key} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
                   padding:"8px 0",borderBottom:`1px solid ${C.border}33`}}>
@@ -18992,14 +19059,14 @@ function FeatureAdmin({settings, setSettings}) {
                     <div style={{fontSize:13,fontWeight:600,color:isEnabled?C.text:C.muted}}>
                       {f.label}
                       {isOverridden && <span style={{fontSize:9,fontWeight:800,color:C.orange,
-                        background:C.orange+"22",borderRadius:4,padding:"1px 5px",marginLeft:6}}>OVERRIDE</span>}
+                        background:C.orange+"22",borderRadius:4,padding:"1px 5px",marginLeft:6}}>CUSTOM</span>}
                     </div>
                     <div style={{fontSize:10,color:C.muted}}>
-                      {f.plans.map(p=>p.charAt(0).toUpperCase()+p.slice(1)).join(" · ")}
+                      Included in: {f.plans.map(p=>p.charAt(0).toUpperCase()+p.slice(1)).join(", ")}
                     </div>
                   </div>
-                  <button onClick={()=>toggleOverride(f.key)}
-                    style={{width:44,height:24,borderRadius:12,border:"none",cursor:"pointer",position:"relative",
+                  <button onClick={()=>toggleFeature(f.key)} disabled={saving}
+                    style={{width:44,height:24,borderRadius:12,border:"none",cursor:saving?"wait":"pointer",position:"relative",
                       background:isEnabled?C.green:C.dim, transition:"background 0.2s"}}>
                     <div style={{width:18,height:18,borderRadius:9,background:"#fff",position:"absolute",top:3,
                       left:isEnabled?23:3, transition:"left 0.2s", boxShadow:"0 1px 3px #0002"}} />
@@ -19011,19 +19078,12 @@ function FeatureAdmin({settings, setSettings}) {
         );
       })}
 
-      {/* Reset overrides */}
-      {Object.keys(overrides).length>0 && (
-        <button onClick={()=>{
-          const updated = {...(settings||{}), featureOverrides:{}};
-          setSettings(updated);
-          DB.saveSettings(updated).catch(e=>console.error("saveSettings:",e));
-          window._effectiveFeatures = computeEffectiveFeatures(plan, {}, RC.features||{});
-        }}
-          style={{background:C.red+"15",border:`1px solid ${C.red}44`,borderRadius:10,padding:"12px",
-            color:C.red,fontSize:13,fontWeight:700,cursor:"pointer",textAlign:"center"}}>
-          🔄 Reset All Overrides to Plan Defaults
-        </button>
-      )}
+      {/* Reset to plan defaults */}
+      <button onClick={()=>setPlan(plan)} disabled={saving}
+        style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px",
+          color:C.muted,fontSize:13,fontWeight:600,cursor:"pointer",textAlign:"center"}}>
+        🔄 Reset All to {plan.charAt(0).toUpperCase()+plan.slice(1)} Plan Defaults
+      </button>
     </div>
   );
 }
