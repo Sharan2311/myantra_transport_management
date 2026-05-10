@@ -2586,7 +2586,7 @@ Rules:
     if(!manualDiesel && +g.diesel > 0 && !g.dieselIndentNo.trim()) return false;
     // Note: open (unconfirmed) requests are allowed with a warning — not blocked
     // Employee assignment is mandatory
-    if(!g.cashEmpId) return false;
+    if(!g.assignedEmpId) return false;
     return true;
   };
 
@@ -2669,7 +2669,8 @@ Rules:
                  - (+g.shortageRecovery||0) - (+g.loanRecovery||0);
       if(_net < 0) {
         const dieselAmt = +g.diesel||0;
-        const empName = g.cashEmpId ? (employees.find(e=>e.id===g.cashEmpId)?.name||"assigned employee") : null;
+        const empId = g.cashEmpId || g.assignedEmpId;
+        const empName = empId ? (employees.find(e=>e.id===empId)?.name||"assigned employee") : null;
         if(dieselAmt > 0 && empName) {
           const excess = Math.abs(_net);
           if(!window.confirm(
@@ -2914,21 +2915,22 @@ Rules:
         }
         log("BATCH TRIP",`LR:${lrNo} DI:${ex.diNo} ${truckNo} ${ex.qty}MT [${item.orderType}]`);
         // ── Excess diesel tracking — if net goes negative, debit employee wallet ──
-        if(trip.cashEmpId && +trip.dieselEstimate>0 && setCashTransfers) {
+        {const _empId = trip.cashEmpId || trip.assignedEmpId;
+        if(_empId && +trip.dieselEstimate>0 && setCashTransfers) {
           const _gross = (+trip.qty||0)*(+trip.givenRate||0);
           const _net = _gross - (+trip.tafal||0) - (+trip.advance||0) - (+trip.dieselEstimate||0)
                      - (+g.shortageRecovery||0) - (+g.loanRecovery||0);
           if(_net < 0) {
             const excess = Math.abs(_net);
-            const wxnXD={id:"XD-"+trip.id, empId:trip.cashEmpId, amount:-excess,
+            const wxnXD={id:"XD-"+trip.id, empId:_empId, amount:-excess,
               date:trip.date||today(), note:`Excess diesel — LR ${lrNo} · ${truckNo}`,
               type:"excess_diesel", ref:lrNo,
               lrNo, tripId:trip.id, createdBy:user.username, createdAt:nowTs()};
             setCashTransfers(prev=>[wxnXD,...(Array.isArray(prev)?prev:[])]);
             DB.saveCashTransfer(wxnXD).catch(e=>console.error("excess diesel save:",e));
-            log("EXCESS DIESEL",`${employees.find(e=>e.id===trip.cashEmpId)?.name||"—"} −₹${excess} LR:${lrNo} (diesel ₹${trip.dieselEstimate} caused negative net)`);
+            log("EXCESS DIESEL",`${employees.find(e=>e.id===_empId)?.name||"—"} −₹${excess} LR:${lrNo} (diesel ₹${trip.dieselEstimate} caused negative net)`);
           }
-        }
+        }}
       } else {
         // ── MULTI-DI on new LR ─────────────────────────────────────────────
         // Upload party files per DI
@@ -3066,21 +3068,22 @@ Rules:
         }
         log("BATCH MULTI-DI",`LR:${lrNo} ${allDiNos} ${truckNo} ${totalQty}MT`);
         // ── Excess diesel tracking — multi-DI ──
-        if(trip.cashEmpId && +trip.dieselEstimate>0 && setCashTransfers) {
+        {const _empId = trip.cashEmpId || trip.assignedEmpId;
+        if(_empId && +trip.dieselEstimate>0 && setCashTransfers) {
           const _gross = (+trip.qty||0)*(+trip.givenRate||0);
           const _net = _gross - (+trip.tafal||0) - (+trip.advance||0) - (+trip.dieselEstimate||0)
                      - (+g.shortageRecovery||0) - (+g.loanRecovery||0);
           if(_net < 0) {
             const excess = Math.abs(_net);
-            const wxnXD={id:"XD-"+trip.id, empId:trip.cashEmpId, amount:-excess,
+            const wxnXD={id:"XD-"+trip.id, empId:_empId, amount:-excess,
               date:trip.date||today(), note:`Excess diesel — LR ${lrNo} · ${truckNo}`,
               type:"excess_diesel", ref:lrNo,
               lrNo, tripId:trip.id, createdBy:user.username, createdAt:nowTs()};
             setCashTransfers(prev=>[wxnXD,...(Array.isArray(prev)?prev:[])]);
             DB.saveCashTransfer(wxnXD).catch(e=>console.error("excess diesel save:",e));
-            log("EXCESS DIESEL",`${employees.find(e=>e.id===trip.cashEmpId)?.name||"—"} −₹${excess} LR:${lrNo} (multi-DI, diesel ₹${trip.dieselEstimate} caused negative net)`);
+            log("EXCESS DIESEL",`${employees.find(e=>e.id===_empId)?.name||"—"} −₹${excess} LR:${lrNo} (multi-DI, diesel ₹${trip.dieselEstimate} caused negative net)`);
           }
-        }
+        }}
       }
       savedLRsThisBatch.push({lrNo, truckNo, qty: groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0),0), diCount: groupItems.length});
       count++;
@@ -3992,7 +3995,7 @@ Rules:
                     ⚠ Margin below ₹30/MT on {lowMargin.length} DI{lowMargin.length>1?"s":""}
                   </div>
                 );
-                if(!g.cashEmpId) return (
+                if(!g.assignedEmpId) return (
                   <div style={{color:C.orange,fontSize:11,textAlign:"center",fontWeight:600}}>
                     👤 Assign an employee to enable save
                   </div>
@@ -6117,18 +6120,24 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         return;
       }
     }
-    // Validate: Est. Net to Driver cannot be negative
-    // For multi-DI trips, diesel covers all DIs so first DI may show negative — allow with warning
+    // Validate: Est. Net to Driver — allow with excess diesel debit if employee assigned
     {
       const _gross = (+f.qty||0)*(+f.givenRate||0);
       const _net = _gross - (+f.advance||0) - (+f.tafal||0) - (+f.dieselEstimate||0) - (+f.shortageRecovery||0) - (+f.loanRecovery||0);
       if(_net < 0){
-        const isOnlyDiesel = (+f.dieselEstimate||0) > 0 && (+f.advance||0)===0 && (+f.shortageRecovery||0)===0 && (+f.loanRecovery||0)===0;
-        if(isOnlyDiesel) {
-          // Likely a multi-DI trip where diesel spans multiple DIs — allow with warning
-          if(!window.confirm(`Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative) — likely because diesel covers multiple DIs.\n\nSave anyway? You can merge the second DI after saving.`)) return;
+        const dieselAmt = +f.dieselEstimate||0;
+        const _empId = f.cashEmpId || f.assignedEmpId;
+        const empName = _empId ? (employees.find(e=>e.id===_empId)?.name||"assigned employee") : null;
+        if(dieselAmt > 0 && empName) {
+          const excess = Math.abs(_net);
+          if(!window.confirm(
+            `Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\n\n`+
+            `Diesel ₹${dieselAmt.toLocaleString("en-IN")} exceeds trip earnings after deductions.\n\n`+
+            `⛽ ₹${excess.toLocaleString("en-IN")} will be auto-debited as "Excess Diesel" to ${empName}'s wallet.\n\n`+
+            `Save and debit excess?`
+          )) return;
         } else {
-          alert(`Cannot save: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative). Please reduce Advance/Loan/Shortage Recovery.\n\nಡ್ರೈವರ್‌ಗೆ ನಿವ್ವಳ ₹${_net.toLocaleString("en-IN")} (ಋಣಾತ್ಮಕ). Advance/Loan/Shortage ಕಡಿಮೆ ಮಾಡಿ.`);
+          alert(`Cannot save: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative). Please reduce Advance/Diesel/Recoveries.`);
           return;
         }
       }
@@ -6176,6 +6185,23 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       DB.saveCashTransfer(wxn).catch(e=>console.error("saveCashTransfer:",e));
       log("WALLET ADVANCE",`${empName} −₹${fmt(t.advance)} LR:${t.lrNo}`);
     }
+    // ── Excess diesel tracking — single DI trip ──
+    {const _empId = t.cashEmpId || t.assignedEmpId;
+    if(_empId && +t.dieselEstimate>0) {
+      const _gross = (+t.qty||0)*(+t.givenRate||0);
+      const _net = _gross - (+t.tafal||0) - (+t.advance||0) - (+t.dieselEstimate||0)
+                 - (+t.shortageRecovery||0) - (+t.loanRecovery||0);
+      if(_net < 0) {
+        const excess = Math.abs(_net);
+        const wxnXD={id:"XD-"+t.id, empId:_empId, amount:-excess,
+          date:t.date||today(), note:`Excess diesel — LR ${t.lrNo||"—"} · ${t.truckNo}`,
+          type:"excess_diesel", ref:t.lrNo||"",
+          lrNo:t.lrNo||"", tripId:t.id, createdBy:user.username, createdAt:nowTs()};
+        setCashTransfers(prev=>[wxnXD,...(Array.isArray(prev)?prev:[])]);
+        DB.saveCashTransfer(wxnXD).catch(e=>console.error("excess diesel save:",e));
+        log("EXCESS DIESEL",`${employees.find(e=>e.id===_empId)?.name||"—"} −₹${excess} LR:${t.lrNo||"—"} (single DI, diesel ₹${t.dieselEstimate} caused negative net)`);
+      }
+    }}
     const tn2 = (t.truckNo||"").toUpperCase().trim();
     // Auto-create vehicle FIRST if not yet registered — so ledger update below finds it
     if (tn2 && !vehicles.find(v => v.truckNo === tn2)) {
@@ -6268,11 +6294,19 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         : (+editSheet.qty||0)*(+editSheet.givenRate||0);
       const _net = _gross - (+editSheet.advance||0) - (+editSheet.tafal||0) - (+editSheet.dieselEstimate||0) - (+editSheet.shortageRecovery||0) - (+editSheet.loanRecovery||0);
       if(_net < 0){
-        const isOnlyDiesel = (+editSheet.dieselEstimate||0) > 0 && (+editSheet.advance||0)===0 && (+editSheet.shortageRecovery||0)===0 && (+editSheet.loanRecovery||0)===0;
-        if(isOnlyDiesel) {
-          if(!window.confirm(`Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative) — likely because diesel covers multiple DIs.\n\nSave anyway?`)) return;
+        const dieselAmt = +editSheet.dieselEstimate||0;
+        const _empId = editSheet.cashEmpId || editSheet.assignedEmpId;
+        const empName = _empId ? (employees.find(e=>e.id===_empId)?.name||"assigned employee") : null;
+        if(dieselAmt > 0 && empName) {
+          const excess = Math.abs(_net);
+          if(!window.confirm(
+            `Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\n\n`+
+            `Diesel ₹${dieselAmt.toLocaleString("en-IN")} exceeds trip earnings after deductions.\n\n`+
+            `⛽ ₹${excess.toLocaleString("en-IN")} will be auto-debited as "Excess Diesel" to ${empName}'s wallet.\n\n`+
+            `Save and debit excess?`
+          )) return;
         } else {
-          alert(`Cannot save: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative). Please reduce Advance/Loan/Shortage Recovery.\n\nಡ್ರೈವರ್‌ಗೆ ನಿವ್ವಳ ₹${_net.toLocaleString("en-IN")} (ಋಣಾತ್ಮಕ). Advance/Loan/Shortage ಕಡಿಮೆ ಮಾಡಿ.`);
+          alert(`Cannot save: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative). Please reduce Advance/Diesel/Recoveries.`);
           return;
         }
       }
@@ -6382,6 +6416,33 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       setCashTransfers(prev=>(prev||[]).filter(x=>x.id!==stableId));
       DB.deleteCashTransfer(stableId).catch(()=>{});
     }
+    // ── Excess diesel tracking on edit — upsert XD entry ──
+    {const xdId = "XD-"+editSheet.id;
+    const _empId = editSheet.cashEmpId || editSheet.assignedEmpId;
+    const dieselAmt = +editSheet.dieselEstimate||0;
+    if(_empId && dieselAmt > 0) {
+      const _gross = (+editSheet.qty||0)*(+editSheet.givenRate||0);
+      const _net = _gross - (+editSheet.tafal||0) - (+editSheet.advance||0) - dieselAmt
+                 - (+editSheet.shortageRecovery||0) - (+editSheet.loanRecovery||0);
+      if(_net < 0) {
+        const excess = Math.abs(_net);
+        const wxnXD={id:xdId, empId:_empId, amount:-excess,
+          date:editSheet.date||today(), note:`Excess diesel — LR ${editSheet.lrNo||"—"} · ${editSheet.truckNo}`,
+          type:"excess_diesel", ref:editSheet.lrNo||"",
+          lrNo:editSheet.lrNo||"", tripId:editSheet.id, createdBy:user.username, createdAt:nowTs()};
+        setCashTransfers(prev=>[wxnXD,...(Array.isArray(prev)?prev:[]).filter(x=>x.id!==xdId)]);
+        DB.saveCashTransfer(wxnXD).catch(e=>console.error("excess diesel save:",e));
+        log("EXCESS DIESEL",`${employees.find(e=>e.id===_empId)?.name||"—"} −₹${excess} LR:${editSheet.lrNo||"—"} (edit trip)`);
+      } else {
+        // Net is positive now — remove any previous excess diesel entry
+        setCashTransfers(prev=>(prev||[]).filter(x=>x.id!==xdId));
+        DB.deleteCashTransfer(xdId).catch(()=>{});
+      }
+    } else {
+      // No employee or no diesel — clean up any excess entry
+      setCashTransfers(prev=>(prev||[]).filter(x=>x.id!=="XD-"+editSheet.id));
+      DB.deleteCashTransfer("XD-"+editSheet.id).catch(()=>{});
+    }}
     log("EDIT TRIP", `LR:${editSheet.lrNo} ${editSheet.truckNo}`);
     setEditSheet(null);
   };
