@@ -2585,6 +2585,8 @@ Rules:
     if((!readyVeh || !(readyVeh.ownerName||"").trim()) && !(g.ownerName||"").trim()) return false;
     if(!manualDiesel && +g.diesel > 0 && !g.dieselIndentNo.trim()) return false;
     // Note: open (unconfirmed) requests are allowed with a warning — not blocked
+    // Employee assignment is mandatory
+    if(!g.cashEmpId) return false;
     return true;
   };
 
@@ -2666,10 +2668,16 @@ Rules:
       const _net = totalGross - (+g.advance||0) - tafalVal - (+g.diesel||0)
                  - (+g.shortageRecovery||0) - (+g.loanRecovery||0);
       if(_net < 0) {
-        const isOnlyDiesel = (+g.diesel||0)>0 && (+g.advance||0)===0
-          && (+g.shortageRecovery||0)===0 && (+g.loanRecovery||0)===0;
-        if(isOnlyDiesel) {
-          if(!window.confirm(`Truck ${g.truckNo}: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative — likely diesel across DIs).\nSave anyway?`)) return;
+        const dieselAmt = +g.diesel||0;
+        const empName = g.cashEmpId ? (employees.find(e=>e.id===g.cashEmpId)?.name||"assigned employee") : null;
+        if(dieselAmt > 0 && empName) {
+          const excess = Math.abs(_net);
+          if(!window.confirm(
+            `Truck ${g.truckNo}: Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\n\n`+
+            `Diesel ₹${dieselAmt.toLocaleString("en-IN")} exceeds trip earnings after deductions.\n\n`+
+            `⛽ ₹${excess.toLocaleString("en-IN")} will be auto-debited as "Excess Diesel" to ${empName}'s wallet.\n\n`+
+            `Save and debit excess?`
+          )) return;
         } else {
           alert(`Truck ${g.truckNo}: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\nReduce Advance / Diesel / Recoveries.`);
           return;
@@ -3950,7 +3958,7 @@ Rules:
               {(employees||[]).length>0 && (
                 <div>
                   <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3,textTransform:"uppercase"}}>
-                    👤 Assign Employee (optional)
+                    👤 Assign Employee *
                   </div>
                   <select value={g.assignedEmpId||""} onChange={e=>updateGroup(g.id,"assignedEmpId",e.target.value)}
                     style={{width:"100%",background:C.bg,border:`1.5px solid ${g.assignedEmpId?C.teal:C.border}`,
@@ -3982,6 +3990,11 @@ Rules:
                 if(lowMargin.length>0) return (
                   <div style={{color:C.red,fontSize:11,textAlign:"center"}}>
                     ⚠ Margin below ₹30/MT on {lowMargin.length} DI{lowMargin.length>1?"s":""}
+                  </div>
+                );
+                if(!g.cashEmpId) return (
+                  <div style={{color:C.orange,fontSize:11,textAlign:"center",fontWeight:600}}>
+                    👤 Assign an employee to enable save
                   </div>
                 );
                 return <div style={{color:C.green,fontSize:12,fontWeight:700,textAlign:"center"}}>✅ Ready to save · LR will be auto-assigned</div>;
