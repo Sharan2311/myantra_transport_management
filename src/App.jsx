@@ -49,7 +49,7 @@ const FEATURE_CATALOG = [
   {key:"multi_client",      label:"Multi-Client Support",          cat:"Core Operations",     plans:["pro","enterprise"]},
   {key:"inbound_trips",     label:"Inbound / Raw Material",        cat:"Core Operations",     plans:["pro","enterprise"]},
   // AI Scanning
-  {key:"payment_scan",      label:"Payment Scan",                  cat:"AI Scanning",         plans:["pro","enterprise"]},
+  {key:"payment_scan",      label:"Payment Scan",                  cat:"AI Scanning",         plans:["enterprise"]},
   {key:"gr_particulars",    label:"GR Particulars",                cat:"AI Scanning",         plans:["pro","enterprise"]},
   {key:"auto_order_type",   label:"Auto Order Detection",          cat:"AI Scanning",         plans:["pro","enterprise"]},
   {key:"pincode_lookup",    label:"Pincode Lookup",                cat:"AI Scanning",         plans:["pro","enterprise"]},
@@ -688,17 +688,20 @@ function BottomNav({tab, setTab, user, trips, driverPays, vehicles, dieselReques
   );
 }
 
-// canFeature: checks RC.features loaded from admin DB's client_features table
+// canFeature: checks RC.features from admin DB. Falls back to plan defaults if empty.
 const canFeature = (feat) => {
   if(!feat) return true;
   const f = RC.features;
-  if(Object.keys(f).length === 0) return true; // no features configured = all enabled
-  return f[feat] === true;
+  // If features are loaded from admin DB, use them
+  if(Object.keys(f).length > 0) return f[feat] === true;
+  // Fallback: use plan-based defaults when features not yet seeded
+  const plan = RC.plan || "basic";
+  const planSet = PLAN_FEATURES[plan];
+  return planSet ? planSet.has(feat) : false;
 };
 
 const MORE_TABS = [
-  {id:"daily_ops",   icon:"📋",label:"Daily Ops",     perm:"reports",      group:"ops"},
-  {id:"feature_admin",icon:"⚙️",label:"Feature Flags", perm:"admin",        group:"info"},
+  {id:"daily_ops",   icon:"📋",label:"Daily Ops",     perm:"reports",      group:"ops",     feat:"daily_ops"},
   {id:"inbound",      icon:"🏭",label:"Raw Material",   perm:"inbound",      group:"ops",     feat:"inbound_trips"},
   {id:"party_portal", icon:"📋",label:"Party Portal",   perm:"party_portal", group:"ops",     feat:"party_billing"},
   {id:"driverPay", icon:"🏧",label:"Driver Pay",     perm:"driverPay",    group:"money",   feat:"driver_pay"},
