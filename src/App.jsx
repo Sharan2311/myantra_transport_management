@@ -36,6 +36,69 @@ const FY_LABEL  = fy => `FY ${fy-1}–${String(fy).slice(2)}`; // "FY 2025–26"
 
 
 
+// ─── FEATURE PLANS ───────────────────────────────────────────────────────────
+// Each feature flag + which plans include it. Used by canFeature() and Feature Admin UI.
+const FEATURE_CATALOG = [
+  // Core operations (Basic+)
+  {key:"manual_trips",    label:"Add trips (manual entry)",           cat:"Core Operations",     plans:["basic","pro","enterprise"]},
+  {key:"gr_di_scan",      label:"GR/DI scan (batch + single)",       cat:"Core Operations",     plans:["basic","pro","enterprise"]},
+  {key:"lr_auto_assign",  label:"LR auto-assignment",                cat:"Core Operations",     plans:["basic","pro","enterprise"]},
+  {key:"vehicles",        label:"Vehicle management",                cat:"Core Operations",     plans:["basic","pro","enterprise"]},
+  {key:"employees",       label:"Employee management",               cat:"Core Operations",     plans:["basic","pro","enterprise"]},
+  {key:"dashboard",       label:"Dashboard + KPIs",                  cat:"Core Operations",     plans:["basic","pro","enterprise"]},
+  {key:"multi_client",    label:"Multi-client support",              cat:"Core Operations",     plans:["pro","enterprise"]},
+  // AI scanning (Pro+)
+  {key:"gr_particulars",  label:"GR particulars extraction",         cat:"AI Scanning",         plans:["pro","enterprise"]},
+  {key:"auto_order_type", label:"Auto godown/party detection",       cat:"AI Scanning",         plans:["pro","enterprise"]},
+  {key:"pincode_lookup",  label:"Pincode → district/state lookup",   cat:"AI Scanning",         plans:["pro","enterprise"]},
+  {key:"payment_scan",    label:"Payment screenshot scan",           cat:"AI Scanning",         plans:["pro","enterprise"]},
+  {key:"shree_invoice_scan",label:"Shree invoice/payment scan",      cat:"AI Scanning",         plans:["enterprise"]},
+  // Payments & finance (Pro+)
+  {key:"driver_pay",      label:"Driver pay + settlement",           cat:"Payments & Finance",  plans:["pro","enterprise"]},
+  {key:"payment_requests",label:"Payment requests",                  cat:"Payments & Finance",  plans:["pro","enterprise"]},
+  {key:"cash_wallet",     label:"Cash wallet (employee)",            cat:"Payments & Finance",  plans:["pro","enterprise"]},
+  {key:"loan_tracking",   label:"Loan tracking (owner/vehicle)",     cat:"Payments & Finance",  plans:["pro","enterprise"]},
+  {key:"shortage_tracking",label:"Shortage tracking",                cat:"Payments & Finance",  plans:["pro","enterprise"]},
+  {key:"expense_tracking",label:"Expense tracking",                  cat:"Payments & Finance",  plans:["enterprise"]},
+  {key:"excess_diesel_tracking",label:"Excess diesel wallet tracking",cat:"Payments & Finance", plans:["pro","enterprise"]},
+  // Diesel management
+  {key:"diesel_tab",      label:"Diesel indent system",              cat:"Diesel Management",   plans:["pro","enterprise"]},
+  {key:"pump_portal",     label:"Pump portal (PIN-based)",           cat:"Diesel Management",   plans:["enterprise"]},
+  {key:"diesel_mismatch", label:"Diesel mismatch alerts",            cat:"Diesel Management",   plans:["enterprise"]},
+  // Party billing (Enterprise)
+  {key:"party_billing",   label:"Party portal",                      cat:"Party Billing",       plans:["enterprise"]},
+  {key:"pouch_balance",   label:"Pouch balance (₹700)",              cat:"Party Billing",       plans:["enterprise"]},
+  {key:"party_contacts",  label:"Party contact DB",                  cat:"Party Billing",       plans:["enterprise"]},
+  {key:"district_officers",label:"District officer mapping",         cat:"Party Billing",       plans:["enterprise"]},
+  // Reports & compliance
+  {key:"tafal",           label:"TAFAL pool",                        cat:"Reports & Compliance",plans:["pro","enterprise"]},
+  {key:"pdf_reports",     label:"PDF reports",                       cat:"Reports & Compliance",plans:["pro","enterprise"]},
+  {key:"gst_reconciliation",label:"GST reconciliation",              cat:"Reports & Compliance",plans:["enterprise"]},
+  {key:"activity_log",    label:"Activity log (audit trail)",        cat:"Reports & Compliance",plans:["basic","pro","enterprise"]},
+  // User & access
+  {key:"role_based_access",label:"Role-based access",                cat:"User & Access",       plans:["basic","pro","enterprise"]},
+  {key:"daily_ops",       label:"Daily Ops dashboard",               cat:"User & Access",       plans:["pro","enterprise"]},
+  {key:"inbound_trips",   label:"Inbound / raw material trips",     cat:"Core Operations",     plans:["pro","enterprise"]},
+];
+
+// Plan → set of enabled feature keys
+const PLAN_FEATURES = {};
+["basic","pro","enterprise"].forEach(plan => {
+  PLAN_FEATURES[plan] = new Set(FEATURE_CATALOG.filter(f=>f.plans.includes(plan)).map(f=>f.key));
+});
+
+// Compute effective features: plan defaults + DB overrides + RC base
+function computeEffectiveFeatures(plan, overrides={}, rcFeatures={}) {
+  const planSet = PLAN_FEATURES[plan] || PLAN_FEATURES["enterprise"];
+  const result = {};
+  FEATURE_CATALOG.forEach(f => { result[f.key] = planSet.has(f.key); });
+  // Apply individual overrides (true = force enable, false = force disable)
+  Object.entries(overrides).forEach(([k,v]) => { if(k in result) result[k] = !!v; });
+  // Merge with RC base features (RC can also enable features)
+  Object.entries(rcFeatures).forEach(([k,v]) => { if(v && !(k in result)) result[k] = true; });
+  return result;
+}
+
 // ─── ROLES ────────────────────────────────────────────────────────────────────
 const ROLES = {
   owner:         {label:"Owner",               color:C.accent,  perms:["trips","inbound","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","admin","driverPay","party_portal"]},
@@ -623,11 +686,18 @@ function BottomNav({tab, setTab, user, trips, driverPays, vehicles, dieselReques
   );
 }
 
-// canFeature imported from runtime_config.js as canFeatureRC
-const canFeature = canFeatureRC;
+// canFeature: checks DB-stored plan + overrides, falls back to RC features
+const canFeature = (feat) => {
+  if(!feat) return true; // no feature gate = always visible
+  // If effectiveFeatures is computed (from settings), use it
+  if(window._effectiveFeatures) return !!window._effectiveFeatures[feat];
+  // Fallback to RC features during boot
+  return canFeatureRC(feat);
+};
 
 const MORE_TABS = [
   {id:"daily_ops",   icon:"📋",label:"Daily Ops",     perm:"reports",      group:"ops"},
+  {id:"feature_admin",icon:"⚙️",label:"Feature Flags", perm:"admin",        group:"info"},
   {id:"inbound",      icon:"🏭",label:"Raw Material",   perm:"inbound",      group:"ops",     feat:"inbound_trips"},
   {id:"party_portal", icon:"📋",label:"Party Portal",   perm:"party_portal", group:"ops",     feat:"party_billing"},
   {id:"driverPay", icon:"🏧",label:"Driver Pay",     perm:"driverPay",    group:"money",   feat:"driver_pay"},
@@ -1076,6 +1146,14 @@ function AppMain() {
   };
   const [vehicles,    setVehicles,    rV, reloadVehicles]    = useDB(DB.getVehicles,    [],               0);
   const [settings,    setSettings,    rSt,reloadSettings]    = useDB(DB.getSettings,    {tafalPerTrip:300},0);
+
+  // ── Compute effective features from plan + overrides whenever settings change ──
+  useEffect(() => {
+    const plan = settings?.plan || "enterprise";
+    const overrides = settings?.featureOverrides || {};
+    window._effectiveFeatures = computeEffectiveFeatures(plan, overrides, RC.features||{});
+    console.log('[FEATURES]', plan, 'plan →', Object.keys(window._effectiveFeatures).filter(k=>window._effectiveFeatures[k]).length, 'features enabled');
+  }, [settings]);
 
   // ── Phase 2 (300ms) — 5 connections ──────────────────────────────────────────
   const [employees,   setEmployees,   rE, reloadEmployees]   = useDB(DB.getEmployees,   [],             300);
@@ -1549,6 +1627,7 @@ function AppMain() {
         {tab==="reminders"  && can(user,"reminders")  && <Reminders  {...sp} />}
         {tab==="activity"   && can(user,"reports")    && <ActivityLog activity={activity} />}
         {tab==="daily_ops"  && can(user,"reports")    && <DailyOps {...sp} />}
+        {tab==="feature_admin" && can(user,"admin") && <FeatureAdmin settings={settings} setSettings={dbSetSettings} />}
         {tab==="admin"      && can(user,"admin")      && <UserAdmin  users={users} setUsers={dbSetUsers} user={user} log={log} pumps={pumps||[]} />}
         {tab==="more"       && <MoreMenu user={user} setTab={setTab} trips={roleTrips} driverPays={driverPays} vehicles={vehicles} />}
         </ErrorBoundary>
@@ -18831,6 +18910,124 @@ function ExpensesLedger({expenses, setExpenses, payments, user, log}) {
 }
 
 // ─── REPORTS ──────────────────────────────────────────────────────────────────
+// ─── FEATURE ADMIN — toggle features per plan or individually ────────────────
+function FeatureAdmin({settings, setSettings}) {
+  const plan = settings?.plan || "enterprise";
+  const overrides = settings?.featureOverrides || {};
+  const effective = computeEffectiveFeatures(plan, overrides, RC.features||{});
+
+  const setPlan = (p) => {
+    const updated = {...(settings||{}), plan:p};
+    setSettings(updated);
+    DB.saveSettings(updated).catch(e=>console.error("saveSettings:",e));
+    window._effectiveFeatures = computeEffectiveFeatures(p, overrides, RC.features||{});
+  };
+
+  const toggleOverride = (key) => {
+    const newOverrides = {...overrides};
+    const planDefault = (PLAN_FEATURES[plan]||new Set()).has(key);
+    if(key in newOverrides) {
+      // Already overridden — remove override (back to plan default)
+      delete newOverrides[key];
+    } else {
+      // Add override — flip from plan default
+      newOverrides[key] = !planDefault;
+    }
+    const updated = {...(settings||{}), featureOverrides:newOverrides};
+    setSettings(updated);
+    DB.saveSettings(updated).catch(e=>console.error("saveSettings:",e));
+    window._effectiveFeatures = computeEffectiveFeatures(plan, newOverrides, RC.features||{});
+  };
+
+  const cats = [...new Set(FEATURE_CATALOG.map(f=>f.cat))];
+  const planCounts = {basic:0,pro:0,enterprise:0};
+  FEATURE_CATALOG.forEach(f => { if(effective[f.key]) planCounts[plan]++; });
+  const enabledCount = Object.values(effective).filter(Boolean).length;
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      {/* Header */}
+      <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,padding:"16px"}}>
+        <div style={{color:C.accent,fontWeight:900,fontSize:18}}>⚙️ Feature Flags</div>
+        <div style={{color:C.muted,fontSize:11,marginTop:2}}>Toggle features per plan or individually. Changes apply immediately.</div>
+      </div>
+
+      {/* Plan selector */}
+      <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:"14px 16px"}}>
+        <div style={{fontWeight:700,fontSize:13,color:C.text,marginBottom:10}}>Active Plan</div>
+        <div style={{display:"flex",gap:6}}>
+          {[
+            {id:"basic",    label:"Basic",      color:"#0F6E56", count:PLAN_FEATURES.basic.size},
+            {id:"pro",      label:"Pro",        color:"#185FA5", count:PLAN_FEATURES.pro.size},
+            {id:"enterprise",label:"Enterprise", color:"#534AB7", count:PLAN_FEATURES.enterprise.size},
+          ].map(p=>(
+            <button key={p.id} onClick={()=>setPlan(p.id)}
+              style={{flex:1,padding:"10px 0",borderRadius:10,fontWeight:700,fontSize:13,cursor:"pointer",
+                background:plan===p.id?p.color:C.bg, color:plan===p.id?"#fff":C.text,
+                border:`2px solid ${plan===p.id?p.color:C.border}`, transition:"all 0.2s"}}>
+              {p.label}
+              <div style={{fontSize:10,fontWeight:400,marginTop:2,opacity:0.8}}>{p.count} features</div>
+            </button>
+          ))}
+        </div>
+        <div style={{fontSize:11,color:C.muted,marginTop:8}}>
+          {enabledCount} features enabled ({Object.keys(overrides).length} individual overrides)
+        </div>
+      </div>
+
+      {/* Feature list by category */}
+      {cats.map(cat => {
+        const features = FEATURE_CATALOG.filter(f=>f.cat===cat);
+        return (
+          <div key={cat} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:"14px 16px"}}>
+            <div style={{fontWeight:700,fontSize:12,color:C.accent,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>{cat}</div>
+            {features.map(f=>{
+              const isEnabled = effective[f.key];
+              const planDefault = (PLAN_FEATURES[plan]||new Set()).has(f.key);
+              const isOverridden = f.key in overrides;
+              return (
+                <div key={f.key} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                  padding:"8px 0",borderBottom:`1px solid ${C.border}33`}}>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:13,fontWeight:600,color:isEnabled?C.text:C.muted}}>
+                      {f.label}
+                      {isOverridden && <span style={{fontSize:9,fontWeight:800,color:C.orange,
+                        background:C.orange+"22",borderRadius:4,padding:"1px 5px",marginLeft:6}}>OVERRIDE</span>}
+                    </div>
+                    <div style={{fontSize:10,color:C.muted}}>
+                      {f.plans.map(p=>p.charAt(0).toUpperCase()+p.slice(1)).join(" · ")}
+                    </div>
+                  </div>
+                  <button onClick={()=>toggleOverride(f.key)}
+                    style={{width:44,height:24,borderRadius:12,border:"none",cursor:"pointer",position:"relative",
+                      background:isEnabled?C.green:C.dim, transition:"background 0.2s"}}>
+                    <div style={{width:18,height:18,borderRadius:9,background:"#fff",position:"absolute",top:3,
+                      left:isEnabled?23:3, transition:"left 0.2s", boxShadow:"0 1px 3px #0002"}} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
+
+      {/* Reset overrides */}
+      {Object.keys(overrides).length>0 && (
+        <button onClick={()=>{
+          const updated = {...(settings||{}), featureOverrides:{}};
+          setSettings(updated);
+          DB.saveSettings(updated).catch(e=>console.error("saveSettings:",e));
+          window._effectiveFeatures = computeEffectiveFeatures(plan, {}, RC.features||{});
+        }}
+          style={{background:C.red+"15",border:`1px solid ${C.red}44`,borderRadius:10,padding:"12px",
+            color:C.red,fontSize:13,fontWeight:700,cursor:"pointer",textAlign:"center"}}>
+          🔄 Reset All Overrides to Plan Defaults
+        </button>
+      )}
+    </div>
+  );
+}
+
 // ─── DAILY OPS — Auto-verified task dashboard ─────────────────────────────────
 function DailyOps({trips, vehicles, employees, dieselRequests=[], activity=[], user, settings}) {
   const [dateOffset, setDateOffset] = useState(0); // 0=today, -1=yesterday, etc.
