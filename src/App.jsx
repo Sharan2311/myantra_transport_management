@@ -2922,7 +2922,7 @@ Rules:
                      - (+g.shortageRecovery||0) - (+g.loanRecovery||0);
           if(_net < 0) {
             const excess = Math.abs(_net);
-            const wxnXD={id:"XD-"+trip.id, empId:_empId, amount:-excess,
+            const wxnXD={id:"XD-"+trip.id, empId:_empId, amount:excess,
               date:trip.date||today(), note:`Excess diesel — LR ${lrNo} · ${truckNo}`,
               type:"excess_diesel", ref:lrNo,
               lrNo, tripId:trip.id, createdBy:user.username, createdAt:nowTs()};
@@ -3075,7 +3075,7 @@ Rules:
                      - (+g.shortageRecovery||0) - (+g.loanRecovery||0);
           if(_net < 0) {
             const excess = Math.abs(_net);
-            const wxnXD={id:"XD-"+trip.id, empId:_empId, amount:-excess,
+            const wxnXD={id:"XD-"+trip.id, empId:_empId, amount:excess,
               date:trip.date||today(), note:`Excess diesel — LR ${lrNo} · ${truckNo}`,
               type:"excess_diesel", ref:lrNo,
               lrNo, tripId:trip.id, createdBy:user.username, createdAt:nowTs()};
@@ -6193,7 +6193,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                  - (+t.shortageRecovery||0) - (+t.loanRecovery||0);
       if(_net < 0) {
         const excess = Math.abs(_net);
-        const wxnXD={id:"XD-"+t.id, empId:_empId, amount:-excess,
+        const wxnXD={id:"XD-"+t.id, empId:_empId, amount:excess,
           date:t.date||today(), note:`Excess diesel — LR ${t.lrNo||"—"} · ${t.truckNo}`,
           type:"excess_diesel", ref:t.lrNo||"",
           lrNo:t.lrNo||"", tripId:t.id, createdBy:user.username, createdAt:nowTs()};
@@ -6426,7 +6426,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                  - (+editSheet.shortageRecovery||0) - (+editSheet.loanRecovery||0);
       if(_net < 0) {
         const excess = Math.abs(_net);
-        const wxnXD={id:xdId, empId:_empId, amount:-excess,
+        const wxnXD={id:xdId, empId:_empId, amount:excess,
           date:editSheet.date||today(), note:`Excess diesel — LR ${editSheet.lrNo||"—"} · ${editSheet.truckNo}`,
           type:"excess_diesel", ref:editSheet.lrNo||"",
           lrNo:editSheet.lrNo||"", tripId:editSheet.id, createdBy:user.username, createdAt:nowTs()};
@@ -14768,8 +14768,8 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                           <div style={{color:C.muted,fontSize:11}}>{tx.date||"—"}{tx.lrNo?" · LR "+tx.lrNo:""} · by {tx.createdBy}</div>
                         </div>
                         <div style={{display:"flex",alignItems:"center",gap:8}}>
-                          <div style={{color:isCredit?C.green:C.red,fontWeight:800,fontSize:14,minWidth:80,textAlign:"right"}}>
-                            {isCredit?"+":"-"}{fmt(Math.abs(amt))}
+                          <div style={{color:tx.type==="excess_diesel"?C.red:(isCredit?C.green:C.red),fontWeight:800,fontSize:14,minWidth:80,textAlign:"right"}}>
+                            {tx.type==="excess_diesel"?"⛽ +":(isCredit?"+":"-")}{fmt(Math.abs(amt))}
                           </div>
                           {isOwner && (
                             <button onClick={()=>deleteTx(tx.id)}
