@@ -5,8 +5,8 @@
 
 const CLIENT_CONFIG = {
   clientId:            "2dd0f2cf-4f57-4ba8-906e-a64eb5b78f60",
-  adminSupabaseUrl:    "https://efqpvrrmsnyeenbjjrhk.supabase.co",
-  adminSupabaseAnonKey:"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVmcXB2cnJtc255ZWVuYmpqcmhrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg1MTk2ODUsImV4cCI6MjA5NDA5NTY4NX0.VAGiSD2RrGQCtWgwufESiroDmKaIuDP7CZEXOlDQk2U",
+  adminSupabaseUrl:    "https://rthxunzrwwcrarinhqnz.supabase.co",
+  adminSupabaseAnonKey:"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJ0aHh1bnpyd3djcmFyaW5ocW56Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc5MTk4MjgsImV4cCI6MjA5MzQ5NTgyOH0.cM9Ya4Tfki7HAzx-Ny1cWmi82NJq52ofrQy9S7FT-xQ",
 };
 
 export default CLIENT_CONFIG;
