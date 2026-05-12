@@ -1176,9 +1176,24 @@ function PaymentDueScreen() {
             </div>
             <div><div style={{fontSize:10,color:"#94a3b8",fontWeight:700,marginBottom:4}}>UTR / REF NUMBER</div><input value={utr} onChange={e=>setUtr(e.target.value)} style={iS} placeholder="Transaction reference"/></div>
             {error&&<div style={{color:"#ef4444",fontSize:12,fontWeight:600,textAlign:"center"}}>{error}</div>}
-            <button onClick={handleSubmit} disabled={submitting||!screenshot} style={{background:submitting?"#475569":screenshot?"#059669":"#334155",color:"#fff",border:"none",borderRadius:10,padding:14,fontSize:15,fontWeight:700,cursor:submitting||!screenshot?"not-allowed":"pointer",width:"100%"}}>
-              {submitting?"⏳ Submitting...":"✅ Submit Payment for Verification"}
-            </button>
+            {(()=>{
+              const cycleMultiplier = RC.billingCycle==="quarterly"?3:RC.billingCycle==="yearly"?12:1;
+              const minBase = (RC.monthlyFee||0) * cycleMultiplier;
+              const minWithGST = Math.round(minBase * 1.18);
+              const enteredAmt = +amount||0;
+              const isInsufficient = enteredAmt > 0 && enteredAmt < minWithGST;
+              const canSubmit = !submitting && screenshot && enteredAmt >= minWithGST;
+              return (<>
+                {isInsufficient && (
+                  <div style={{background:"#451a03",border:"1px solid #f59e0b55",borderRadius:8,padding:"8px 12px",fontSize:12,color:"#fbbf24"}}>
+                    ⚠ Minimum payment: <b>₹{minWithGST.toLocaleString("en-IN")}</b> (₹{minBase.toLocaleString("en-IN")} + 18% GST) for {RC.billingCycle||"monthly"} {RC.plan} plan. Entered: ₹{enteredAmt.toLocaleString("en-IN")}
+                  </div>
+                )}
+                <button onClick={handleSubmit} disabled={!canSubmit} style={{background:!canSubmit?"#334155":"#059669",color:"#fff",border:"none",borderRadius:10,padding:14,fontSize:15,fontWeight:700,cursor:!canSubmit?"not-allowed":"pointer",width:"100%",opacity:!canSubmit?0.6:1}}>
+                  {submitting?"⏳ Submitting...":"✅ Submit Payment for Verification"}
+                </button>
+              </>);
+            })()}
             <button onClick={()=>setStep("info")} style={{background:"none",border:"1px solid #334155",borderRadius:10,padding:10,color:"#94a3b8",fontSize:12,cursor:"pointer",width:"100%"}}>← Back</button>
           </div>
         )}
