@@ -18831,6 +18831,18 @@ This will auto-recover in the next trip.`);
                     <div style={{fontWeight:800,fontSize:14}}>{pr.lrNo||"—"} · {pr.truckNo}</div>
                     <div style={{color:C.muted,fontSize:11}}>{trip?`${trip.from}→${trip.to} · ${trip.qty}MT`:"—"}</div>
                     <div style={{color:C.muted,fontSize:11}}>Requested by: {pr.createdBy||"—"} · {pr.createdAt||""}</div>
+                    {/* Diesel confirmation warning */}
+                    {(()=>{
+                      if(!trip || !trip.dieselEstimate || +trip.dieselEstimate<=0) return null;
+                      const dreq = (dieselRequests||[]).find(r=>r.tripId===trip.id || r.lrNo===trip.lrNo);
+                      if(!dreq) return <div style={{fontSize:10,color:C.orange,fontWeight:700,marginTop:3}}>⛽ Diesel ₹{(+trip.dieselEstimate).toLocaleString("en-IN")} — no indent linked</div>;
+                      if(dreq.status!=="confirmed"&&dreq.status!=="done") return (
+                        <div style={{fontSize:10,color:"#fff",fontWeight:700,marginTop:3,background:"#dc2626",padding:"3px 8px",borderRadius:4,display:"inline-block"}}>
+                          ⛽ DIESEL NOT CONFIRMED — Indent #{dreq.indentNo}
+                        </div>
+                      );
+                      return null;
+                    })()}
                   </div>
                   <div style={{textAlign:"right"}}>
                     <div style={{color:effectiveStatus==="done"?C.green:amountStale?C.orange:C.purple,fontWeight:800,fontSize:15}}>
