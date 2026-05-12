@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { DB } from "./db.js";
-import { loadRuntimeConfig, RC, canFeature as canFeatureRC, logScan } from "./runtime_config.js";
+import { loadRuntimeConfig, RC, canFeature as canFeatureRC, logScan, isPaymentDue, submitPaymentProof, getPendingPayment } from "./runtime_config.js";
 import { initSupabase } from "./supabase.js";
 import { supabase } from "./supabase.js";
 
@@ -1073,16 +1073,205 @@ class ErrorBoundary extends React.Component {
   }
 }
 
+// ─── PAYMENT DUE SCREEN — blocks app, allows payment submission ──────────────
+function PaymentDueScreen() {
+  const [step, setStep] = useState("info"); // info | form | scanning | submitted
+  const [amount, setAmount] = useState(String(RC.monthlyFee||0));
+  const [utr, setUtr] = useState("");
+  const [payDate, setPayDate] = useState(new Date().toISOString().split("T")[0]);
+  const [screenshot, setScreenshot] = useState("");
+  const [notes, setNotes] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [pendingPay, setPendingPay] = useState(null);
+
+  // Check if there's already a pending payment
+  useEffect(() => { getPendingPayment().then(p => { if(p) { setPendingPay(p); setStep("submitted"); } }); }, []);
+
+  const handleFile = async (file) => {
+    if(!file) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const base64 = reader.result;
+      setScreenshot(base64);
+      // Try to auto-extract UTR and amount from screenshot
+      setStep("scanning");
+      try {
+        const resp = await fetch("/.netlify/functions/scan-di", {
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({
+            base64: base64.split(",")[1] || base64,
+            anthropicKey: RC.anthropicKey,
+            mediaType: file.type,
+            prompt: "Extract payment details from this screenshot. Return JSON: {\"amount\": number, \"utr\": \"string\", \"date\": \"YYYY-MM-DD\", \"payee\": \"string\"}. If any field is unclear, use empty string.",
+          }),
+        });
+        const data = await resp.json();
+        if(data.text) {
+          const clean = data.text.replace(/```json|```/g,"").trim();
+          try {
+            const parsed = JSON.parse(clean);
+            if(parsed.amount) setAmount(String(parsed.amount));
+            if(parsed.utr) setUtr(parsed.utr);
+            if(parsed.date) setPayDate(parsed.date);
+          } catch {}
+        }
+      } catch(e) { console.warn("Scan failed:", e); }
+      setStep("form");
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleSubmit = async () => {
+    if(!amount || +amount <= 0) { setError("Enter payment amount"); return; }
+    setSubmitting(true); setError("");
+    const now = new Date();
+    const period = now.toLocaleString("en-US", {month:"long", year:"numeric"});
+    const result = await submitPaymentProof({
+      amount: +amount, utr, paymentDate: payDate,
+      screenshotBase64: screenshot, billingPeriod: period, notes,
+    });
+    setSubmitting(false);
+    if(result.success) { setStep("submitted"); setPendingPay({id:result.id, amount:+amount, utr, status:"pending"}); }
+    else setError(result.error || "Submission failed. Try again.");
+  };
+
+  const inputStyle = {width:"100%",background:"#1e293b",border:"1px solid #334155",borderRadius:8,
+    padding:"10px 12px",color:"#fff",fontSize:14,outline:"none",boxSizing:"border-box"};
+
+  return (
+    <div style={{minHeight:"100vh",background:"#0d1b2a",display:"flex",flexDirection:"column",
+      alignItems:"center",justifyContent:"center",color:"#fff",padding:20}}>
+      <div style={{maxWidth:420,width:"100%"}}>
+
+        {/* Header */}
+        <div style={{textAlign:"center",marginBottom:24}}>
+          <div style={{fontSize:48,marginBottom:12}}>💳</div>
+          <div style={{fontSize:22,fontWeight:800,color:"#ef4444"}}>Payment Due</div>
+          <div style={{fontSize:13,color:"#94a3b8",marginTop:6}}>
+            <b style={{color:"#fff"}}>{RC.companyName}</b> · {RC.plan} plan
+            {RC.paidUntil && <span> · Expired: <b style={{color:"#fbbf24"}}>{RC.paidUntil}</b></span>}
+          </div>
+          <div style={{fontSize:12,color:"#64748b",marginTop:4}}>
+            ₹{(RC.monthlyFee||0).toLocaleString("en-IN")} / {RC.billingCycle||"month"}
+          </div>
+        </div>
+
+        {step === "submitted" && pendingPay && (
+          <div style={{background:"#064e3b",border:"1px solid #059669",borderRadius:12,padding:20,textAlign:"center"}}>
+            <div style={{fontSize:18,fontWeight:800,color:"#34d399",marginBottom:8}}>✅ Payment Submitted</div>
+            <div style={{fontSize:13,color:"#a7f3d0",lineHeight:1.6}}>
+              Your payment of <b>₹{(+pendingPay.amount||0).toLocaleString("en-IN")}</b>
+              {pendingPay.utr && <span> (UTR: {pendingPay.utr})</span>} is under review.
+              <br/><br/>
+              Admin will verify and activate your account shortly.
+              <br/>You'll receive access once confirmed.
+            </div>
+            <div style={{fontSize:11,color:"#6ee7b7",marginTop:12}}>
+              📞 For urgent activation: 9008420384
+            </div>
+          </div>
+        )}
+
+        {step === "info" && (
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <div style={{background:"#1e293b",borderRadius:12,padding:16,textAlign:"center"}}>
+              <div style={{fontSize:14,color:"#94a3b8",marginBottom:12}}>Make payment to:</div>
+              <div style={{fontSize:16,fontWeight:800,color:"#fff"}}>M Yantra Enterprises</div>
+              <div style={{fontSize:12,color:"#64748b",marginTop:4}}>UPI / NEFT / IMPS</div>
+            </div>
+            <button onClick={()=>setStep("form")}
+              style={{background:"#2563eb",color:"#fff",border:"none",borderRadius:10,padding:14,
+                fontSize:15,fontWeight:700,cursor:"pointer",width:"100%"}}>
+              📤 I've Made Payment — Upload Proof
+            </button>
+            <div style={{textAlign:"center",fontSize:11,color:"#475569"}}>
+              Upload payment screenshot and admin will verify within 24 hours
+            </div>
+          </div>
+        )}
+
+        {(step === "form" || step === "scanning") && (
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            {/* Screenshot upload */}
+            <div style={{background:"#1e293b",borderRadius:12,padding:16}}>
+              <div style={{fontSize:11,color:"#94a3b8",fontWeight:700,marginBottom:8,textTransform:"uppercase"}}>
+                Payment Screenshot {screenshot?"✅":"(required)"}
+              </div>
+              {screenshot ? (
+                <div style={{textAlign:"center"}}>
+                  <img src={screenshot} alt="Payment proof" style={{maxWidth:"100%",maxHeight:200,borderRadius:8,border:"1px solid #334155"}}/>
+                  <div style={{marginTop:6}}>
+                    <button onClick={()=>{setScreenshot("");setUtr("");setAmount(String(RC.monthlyFee||0));}}
+                      style={{background:"none",border:"1px solid #475569",borderRadius:6,padding:"4px 12px",
+                        color:"#94a3b8",fontSize:11,cursor:"pointer"}}>Change</button>
+                  </div>
+                </div>
+              ) : (
+                <label style={{display:"block",background:"#0f172a",border:"2px dashed #334155",borderRadius:10,
+                  padding:20,textAlign:"center",cursor:"pointer"}}>
+                  <input type="file" accept="image/*" onChange={e=>handleFile(e.target.files[0])}
+                    style={{display:"none"}}/>
+                  <div style={{fontSize:24,marginBottom:6}}>📷</div>
+                  <div style={{fontSize:13,color:"#94a3b8"}}>
+                    {step==="scanning" ? "⏳ Scanning..." : "Tap to upload payment screenshot"}
+                  </div>
+                  <div style={{fontSize:10,color:"#475569",marginTop:4}}>AI will auto-extract amount & UTR</div>
+                </label>
+              )}
+            </div>
+
+            {/* Form fields */}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              <div>
+                <div style={{fontSize:10,color:"#94a3b8",fontWeight:700,marginBottom:4}}>AMOUNT ₹ *</div>
+                <input value={amount} onChange={e=>setAmount(e.target.value)} type="number" style={inputStyle} placeholder="0"/>
+              </div>
+              <div>
+                <div style={{fontSize:10,color:"#94a3b8",fontWeight:700,marginBottom:4}}>DATE</div>
+                <input value={payDate} onChange={e=>setPayDate(e.target.value)} type="date" style={inputStyle}/>
+              </div>
+            </div>
+            <div>
+              <div style={{fontSize:10,color:"#94a3b8",fontWeight:700,marginBottom:4}}>UTR / REF NUMBER</div>
+              <input value={utr} onChange={e=>setUtr(e.target.value)} style={inputStyle} placeholder="Transaction reference"/>
+            </div>
+            <div>
+              <div style={{fontSize:10,color:"#94a3b8",fontWeight:700,marginBottom:4}}>NOTES (OPTIONAL)</div>
+              <input value={notes} onChange={e=>setNotes(e.target.value)} style={inputStyle} placeholder="Any additional info"/>
+            </div>
+
+            {error && <div style={{color:"#ef4444",fontSize:12,fontWeight:600,textAlign:"center"}}>{error}</div>}
+
+            <button onClick={handleSubmit} disabled={submitting || !screenshot}
+              style={{background:submitting?"#475569":screenshot?"#059669":"#334155",color:"#fff",border:"none",
+                borderRadius:10,padding:14,fontSize:15,fontWeight:700,
+                cursor:submitting||!screenshot?"not-allowed":"pointer",width:"100%",opacity:submitting?0.7:1}}>
+              {submitting ? "⏳ Submitting..." : "✅ Submit Payment for Verification"}
+            </button>
+            <button onClick={()=>setStep("info")}
+              style={{background:"none",border:"1px solid #334155",borderRadius:10,padding:10,
+                color:"#94a3b8",fontSize:12,cursor:"pointer",width:"100%"}}>← Back</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── BOOT WRAPPER — loads config before mounting the real app ──────────────────
 export default function App() {
   const [booted, setBooted] = useState(false);
   const [bootError, setBootError] = useState("");
+  const [paymentDue, setPaymentDue] = useState(false);
 
   useEffect(() => {
     (async () => {
       try {
         const ok = await loadRuntimeConfig();
         if (!ok) { setBootError("Failed to load config from server."); return; }
+        // Check payment status before proceeding
+        if (isPaymentDue()) { setPaymentDue(true); return; }
         initSupabase(RC.supabaseUrl, RC.supabaseAnonKey);
         document.title = RC.companyName || "Transport Management";
         if (RC.logoSrc) {
@@ -1090,7 +1279,6 @@ export default function App() {
           if (!link) { link = document.createElement("link"); link.rel = "icon"; document.head.appendChild(link); }
           link.href = RC.logoSrc;
         }
-        // Debug: expose RC for console inspection (remove in production)
         window.RC = RC;
         window.DB = DB;
         console.log('[BOOT] RC loaded:', { supabaseUrl: RC.supabaseUrl, companyName: RC.companyName, clients: RC.clients, features: Object.keys(RC.features).filter(k=>RC.features[k]).length + ' features enabled' });
@@ -1098,6 +1286,9 @@ export default function App() {
       } catch (e) { setBootError("Boot failed: " + e.message); }
     })();
   }, []);
+
+  // Payment due screen — blocks app but allows payment submission
+  if (paymentDue) return <PaymentDueScreen />;
 
   if (!booted) return (
     <div style={{minHeight:"100vh",background:"#0d1b2a",display:"flex",flexDirection:"column",
@@ -1824,6 +2015,51 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
         </div>
       </div>
 
+      {/* ── Payment Reminder (due within 7 days) ── */}
+      {(()=>{
+        if(!RC.paidUntil || RC.paymentBypass || RC.monthlyFee===0) return null;
+        const due = new Date(RC.paidUntil);
+        const now = new Date();
+        const daysLeft = Math.ceil((due - now) / (1000*60*60*24));
+        if(daysLeft > 7 || daysLeft < 0) return null;
+        return (
+          <div style={{background:daysLeft<=3?"#fef2f2":"#fffbeb",border:`1px solid ${daysLeft<=3?"#fca5a5":"#fcd34d"}`,
+            borderRadius:10,padding:"12px 14px",display:"flex",alignItems:"center",gap:10}}>
+            <span style={{fontSize:22}}>{daysLeft<=3?"🔴":"🟡"}</span>
+            <div>
+              <div style={{fontWeight:700,fontSize:13,color:daysLeft<=3?"#dc2626":"#d97706"}}>
+                Subscription {daysLeft<=0?"expires today":daysLeft===1?"expires tomorrow":`expires in ${daysLeft} days`}
+              </div>
+              <div style={{fontSize:11,color:"#78350f"}}>
+                Plan: {RC.plan} · ₹{(RC.monthlyFee||0).toLocaleString("en-IN")}/{RC.billingCycle||"month"} · Due: {RC.paidUntil}
+              </div>
+              <div style={{fontSize:11,color:"#78350f",marginTop:2}}>
+                Please contact admin to renew. 📞 9008420384
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── Plan & Scan Usage ── */}
+      <div style={{background:C.bg,borderRadius:10,padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",
+        border:`1px solid ${C.border}`}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <span style={{fontSize:11,fontWeight:700,color:C.accent,textTransform:"uppercase",
+            background:C.accent+"15",padding:"3px 8px",borderRadius:6}}>{RC.plan}</span>
+          <span style={{fontSize:12,color:C.text,fontWeight:600}}>
+            AI Scans: <span style={{color:RC.scansUsed>=RC.scansIncluded?C.red:C.green,fontWeight:800}}>
+              {RC.scansUsed}</span>
+            <span style={{color:C.muted}}>/{RC.scansIncluded} this month</span>
+          </span>
+        </div>
+        {RC.paidUntil && (
+          <span style={{fontSize:10,color:C.muted}}>
+            Paid until: <span style={{fontWeight:700,color:new Date(RC.paidUntil)>new Date()?C.green:C.red}}>{RC.paidUntil}</span>
+          </span>
+        )}
+      </div>
+
       {/* ── FY Summary + Month-wise — Owner only ── */}
       {user.role==="owner" && (()=>{
         const fyTripsAll = displayTrips;
@@ -2467,8 +2703,10 @@ Rules:
           return false; // duplicate — auto-remove
         });
       });
+      logScan("di_scan", true);
     } catch(e) {
       setItems(prev => prev.map(x => x.id===id ? {...x, status:"error", error:e.message} : x));
+      logScan("di_scan", false);
     }
   };
 
@@ -2560,7 +2798,8 @@ Rules:
   }, [scanningNow, items.length, groupsBuilt]);
 
   // Re-build if new items arrive (user uploads more after first batch)
-  // Note: groupsBuilt is reset at line 2488 when new files are uploaded — no itemCount effect needed
+  const itemCount = items.length;
+  useEffect(() => { setGroupsBuilt(false); }, [itemCount]);
 
   // ── Group helpers ─────────────────────────────────────────────────────────────
   const updateGroup = (gid, field, val) =>
@@ -2670,104 +2909,94 @@ Rules:
   // ── Save All ──────────────────────────────────────────────────────────────────
   const saveAll = async () => {
     setLrError("");
-    // ── Pre-validate each group — skip invalid ones, save the rest ──────────
-    const validGroups = [];
-    const skippedGroups = [];
-
+    // ── Pre-validate all groups (preserve all original validations) ──────────
     for(const g of readyGroups) {
       const groupItems = doneItems.filter(x=>g.diIds.includes(x.id));
-      let skipReason = "";
 
       // Duplicate DI check
-      if(!skipReason) {
-        for(const item of groupItems) {
-          const diNo = (item.extracted?.diNo||"").trim();
-          if(diNo) {
-            const dupSaved = checkDupDI(diNo);
-            if(dupSaved) { skipReason = `DI ${diNo} already in LR ${dupSaved.trip.lrNo}`; break; }
-            const dupInBatch = validGroups.flatMap(og=>
-              doneItems.filter(x=>og.diIds.includes(x.id))
-            ).find(x=>(x.extracted?.diNo||"").trim()===diNo);
-            if(dupInBatch) { skipReason = `DI ${diNo} duplicated in another group`; break; }
+      for(const item of groupItems) {
+        const diNo = (item.extracted?.diNo||"").trim();
+        if(diNo) {
+          const dupSaved = checkDupDI(diNo);
+          if(dupSaved) {
+            alert(`DI ${diNo} (truck ${g.truckNo}) is already recorded in LR ${dupSaved.trip.lrNo}.\nCannot save.`);
+            return;
+          }
+          // Dup within other groups in this batch
+          const dupInBatch = readyGroups.flatMap(og=>
+            og.id!==g.id ? doneItems.filter(x=>og.diIds.includes(x.id)) : []
+          ).find(x=>(x.extracted?.diNo||"").trim()===diNo);
+          if(dupInBatch) {
+            alert(`DI ${diNo} appears in another group. Two trips cannot share the same DI.`);
+            return;
           }
         }
       }
 
-      // Margin check
-      if(!skipReason) {
-        for(const item of groupItems) {
-          const margin = (+item.extracted?.frRate||0) - (+item.givenRate||0);
-          if(margin < 30) { skipReason = `DI ${item.extracted?.diNo||"?"}: Margin ₹${margin}/MT below ₹30`; break; }
+      // Margin check per DI
+      for(const item of groupItems) {
+        const margin = (+item.extracted?.frRate||0) - (+item.givenRate||0);
+        if(margin < 30) {
+          alert(`Truck ${g.truckNo} · DI ${item.extracted?.diNo||"?"}: Margin ₹${margin}/MT is below ₹30 minimum.`);
+          return;
         }
       }
 
-      // Owner name
-      if(!skipReason) {
+      // Owner name mandatory for new/unknown vehicles
+      {
         const ownerVeh = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
-        if((!ownerVeh || !(ownerVeh.ownerName||"").trim()) && !(g.ownerName||"").trim())
-          skipReason = "Owner Name required for new vehicle";
+        if((!ownerVeh || !(ownerVeh.ownerName||"").trim()) && !(g.ownerName||"").trim()) {
+          alert(`Truck ${g.truckNo}: Owner Name is required for new vehicles.\n\nPlease enter or select an owner name.`);
+          setSaving(false);
+          return;
+        }
       }
-
-      // Diesel indent
-      if(!skipReason && !manualDiesel && +g.diesel > 0 && !g.dieselIndentNo.trim())
-        skipReason = "Diesel Indent No required";
-      if(!skipReason && g.dieselIndentNo.trim()) {
-        const dupIndent = (trips||[]).some(t => t.dieselIndentNo && t.dieselIndentNo.trim() === g.dieselIndentNo.trim());
-        if(dupIndent) skipReason = `Diesel Indent "${g.dieselIndentNo}" already used`;
+      // Diesel indent — skip check in manual diesel mode
+      if(!manualDiesel && +g.diesel > 0 && !g.dieselIndentNo.trim()) {
+        alert(`Truck ${g.truckNo}: Diesel Indent No is required when Diesel Estimate is entered.`);
+        return;
       }
-
-      // Party files
-      if(!skipReason) {
-        for(const item of groupItems) {
-          if(item.orderType==="party") {
-            if(!item.grFile)      { skipReason = `DI ${item.extracted?.diNo||"?"}: GR Copy required`; break; }
-            if(!item.invoiceFile) { skipReason = `DI ${item.extracted?.diNo||"?"}: Invoice required`; break; }
-          }
+      if(g.dieselIndentNo.trim()) {
+        const dupIndent = (trips||[]).some(t =>
+          t.dieselIndentNo && t.dieselIndentNo.trim() === g.dieselIndentNo.trim()
+        );
+        if(dupIndent) {
+          alert(`Truck ${g.truckNo}: Diesel Indent No "${g.dieselIndentNo}" already exists on another trip.`);
+          return;
         }
       }
 
-      // Net to driver check
-      if(!skipReason) {
-        const totalGross = groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0)*(+x.givenRate||0),0);
-        const tafalVal  = g.tafal!=null&&g.tafal!=="" ? +g.tafal : (settings?.tafalPerTrip||300);
-        const _net = totalGross - (+g.advance||0) - tafalVal - (+g.diesel||0)
-                   - (+g.shortageRecovery||0) - (+g.loanRecovery||0);
-        if(_net < 0) {
-          const dieselAmt = +g.diesel||0;
-          const empId = g.cashEmpId || g.assignedEmpId;
-          const empName = empId ? (employees.find(e=>e.id===empId)?.name||"assigned employee") : null;
-          if(dieselAmt > 0 && empName) {
-            const excess = Math.abs(_net);
-            if(!window.confirm(
-              `Truck ${g.truckNo}: Net ₹${_net.toLocaleString("en-IN")} (negative).\n\n`+
-              `⛽ ₹${excess.toLocaleString("en-IN")} excess diesel will be debited to ${empName}'s wallet.\n\nSave?`
-            )) { skipReason = "Negative net — user cancelled"; }
-          } else {
-            skipReason = `Net ₹${_net.toLocaleString("en-IN")} negative — reduce deductions`;
-          }
+      // Party files per DI
+      for(const item of groupItems) {
+        if(item.orderType==="party") {
+          if(!item.grFile)      { alert(`Truck ${g.truckNo} · DI ${item.extracted?.diNo||"?"}: GR Copy required for Party order.`); return; }
+          if(!item.invoiceFile) { alert(`Truck ${g.truckNo} · DI ${item.extracted?.diNo||"?"}: Invoice required for Party order.`); return; }
         }
       }
 
-      if(skipReason) {
-        skippedGroups.push({ truckNo: g.truckNo, reason: skipReason });
-      } else {
-        validGroups.push(g);
+      // Net to driver check per group
+      const totalQty  = groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0),0);
+      const totalGross = groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0)*(+x.givenRate||0),0);
+      const tafalVal  = +g.tafal || (settings?.tafalPerTrip||300);
+      const _net = totalGross - (+g.advance||0) - tafalVal - (+g.diesel||0)
+                 - (+g.shortageRecovery||0) - (+g.loanRecovery||0);
+      if(_net < 0) {
+        const dieselAmt = +g.diesel||0;
+        const empId = g.cashEmpId || g.assignedEmpId;
+        const empName = empId ? (employees.find(e=>e.id===empId)?.name||"assigned employee") : null;
+        if(dieselAmt > 0 && empName) {
+          const excess = Math.abs(_net);
+          if(!window.confirm(
+            `Truck ${g.truckNo}: Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\n\n`+
+            `Diesel ₹${dieselAmt.toLocaleString("en-IN")} exceeds trip earnings after deductions.\n\n`+
+            `⛽ ₹${excess.toLocaleString("en-IN")} will be auto-debited as "Excess Diesel" to ${empName}'s wallet.\n\n`+
+            `Save and debit excess?`
+          )) return;
+        } else {
+          alert(`Truck ${g.truckNo}: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\nReduce Advance / Diesel / Recoveries.`);
+          return;
+        }
       }
-    }
-
-    if(validGroups.length === 0) {
-      const reasons = skippedGroups.map(s => `${s.truckNo}: ${s.reason}`).join("\n");
-      alert(`No groups ready to save:\n\n${reasons}`);
-      return;
-    }
-
-    // Show summary if some groups were skipped
-    if(skippedGroups.length > 0) {
-      const reasons = skippedGroups.map(s => `⚠ ${s.truckNo}: ${s.reason}`).join("\n");
-      if(!window.confirm(
-        `${validGroups.length} group${validGroups.length>1?"s":""} will be saved.\n\n`+
-        `${skippedGroups.length} group${skippedGroups.length>1?"s":""} skipped:\n${reasons}\n\nProceed with saving the valid groups?`
-      )) return;
     }
 
     setSaving(true);
@@ -2781,7 +3010,7 @@ Rules:
     // If DI date is empty fall back to today
     const safeTripDate = (diDate) => diDate || today();
 
-    for(const g of validGroups) {
+    for(const g of readyGroups) {
       const groupItems = doneItems.filter(x=>g.diIds.includes(x.id));
       const primary    = groupItems[0];
       const ex0        = primary.extracted;
@@ -3178,9 +3407,9 @@ Rules:
     setSavedLRs(prev=>[...savedLRsThisBatch,...prev]);
     setSaving(false);
     // Remove saved groups' items from list
-    const savedItemIds = new Set(validGroups.flatMap(g=>g.diIds));
+    const savedItemIds = new Set(readyGroups.flatMap(g=>g.diIds));
     setItems(prev=>prev.filter(x=>!savedItemIds.has(x.id)));
-    setGroups(prev=>prev.filter(g=>!validGroups.find(r=>r.id===g.id)));
+    setGroups(prev=>prev.filter(g=>!readyGroups.find(r=>r.id===g.id)));
   };
 
   const scanningCount = items.filter(x=>x.status==="scanning"||x.status==="pending").length;
@@ -4736,7 +4965,7 @@ Rules:
       const existingTrip = lrNo ? trips.find(t => t.lrNo === lrNo) : null;
 
       setState("done");
-      // If caller wants the raw file (e.g. to auto-populate GR ref), pass it back
+      logScan("di_scan", true);
       if(onFile) onFile(file);
       onExtracted({
         ...extracted,
@@ -4752,6 +4981,7 @@ Rules:
       console.error("DI scan error:", e);
       setError("Could not read document. Try a clearer photo. (" + e.message + ")");
       setState("error");
+      logScan("di_scan", false);
     }
   };
 
@@ -9617,8 +9847,10 @@ function PumpSlipScanner({ pumps, trips, user, onResults }) {
 
       onResults(results);
       setState("done");
+      logScan("payment_scan", true);
     } catch(e) {
       setError("Could not read slip: " + e.message); setState("error");
+      logScan("payment_scan", false);
     }
   };
 
@@ -15345,9 +15577,9 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         body:JSON.stringify({ base64, anthropicKey: RC.anthropicKey, mediaType:file.type||"application/pdf", scanType}),
       });
       const data = await resp.json();
-      if(data.error) setScanError(data.error);
-      else setScanResult({...data, type:scanType});
-    } catch(e) { setScanError(e.message); }
+      if(data.error) { setScanError(data.error); logScan("shree_scan", false); }
+      else { setScanResult({...data, type:scanType}); logScan("shree_scan", true); }
+    } catch(e) { setScanError(e.message); logScan("shree_scan", false); }
     finally { setScanning(false); }
   };
 
