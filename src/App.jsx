@@ -1074,16 +1074,131 @@ class ErrorBoundary extends React.Component {
   }
 }
 
+// ─── PAYMENT DUE SCREEN — blocks app, allows payment submission ──────────────
+function PaymentDueScreen() {
+  const [step, setStep] = useState("info");
+  const [amount, setAmount] = useState(String(RC.monthlyFee||0));
+  const [utr, setUtr] = useState("");
+  const [payDate, setPayDate] = useState(new Date().toISOString().split("T")[0]);
+  const [screenshot, setScreenshot] = useState("");
+  const [notes, setNotes] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [pendingPay, setPendingPay] = useState(null);
+
+  useEffect(() => { getPendingPayment().then(p => { if(p) { setPendingPay(p); setStep("submitted"); } }); }, []);
+
+  const handleFile = async (file) => {
+    if(!file) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const base64 = reader.result;
+      setScreenshot(base64);
+      setStep("scanning");
+      try {
+        const resp = await fetch("/.netlify/functions/scan-di", {
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({ base64: base64.split(",")[1]||base64, anthropicKey: RC.anthropicKey, mediaType: file.type,
+            prompt: 'Extract payment details from this screenshot. Return JSON: {"amount": number, "utr": "string", "date": "YYYY-MM-DD"}. If unclear, use empty string.' }),
+        });
+        const data = await resp.json();
+        if(data.text) { try { const p=JSON.parse(data.text.replace(/```json|```/g,"").trim()); if(p.amount)setAmount(String(p.amount)); if(p.utr)setUtr(p.utr); if(p.date)setPayDate(p.date); } catch{} }
+      } catch(e) { console.warn("Scan failed:", e); }
+      setStep("form");
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleSubmit = async () => {
+    if(!amount||+amount<=0){setError("Enter payment amount");return;}
+    setSubmitting(true); setError("");
+    const period = new Date().toLocaleString("en-US",{month:"long",year:"numeric"});
+    const result = await submitPaymentProof({ amount:+amount, utr, paymentDate:payDate, screenshotBase64:screenshot, billingPeriod:period, notes });
+    setSubmitting(false);
+    if(result.success){setStep("submitted");setPendingPay({id:result.id,amount:+amount,utr,status:"pending"});}
+    else setError(result.error||"Submission failed");
+  };
+
+  const iS={width:"100%",background:"#1e293b",border:"1px solid #334155",borderRadius:8,padding:"10px 12px",color:"#fff",fontSize:14,outline:"none",boxSizing:"border-box"};
+
+  return (
+    <div style={{minHeight:"100vh",background:"#0d1b2a",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",color:"#fff",padding:20}}>
+      <div style={{maxWidth:420,width:"100%"}}>
+        <div style={{textAlign:"center",marginBottom:24}}>
+          <div style={{fontSize:48,marginBottom:12}}>💳</div>
+          <div style={{fontSize:22,fontWeight:800,color:"#ef4444"}}>Payment Due</div>
+          <div style={{fontSize:13,color:"#94a3b8",marginTop:6}}><b style={{color:"#fff"}}>{RC.companyName}</b> · {RC.plan} plan{RC.paidUntil&&<span> · Expired: <b style={{color:"#fbbf24"}}>{RC.paidUntil}</b></span>}</div>
+          <div style={{fontSize:12,color:"#64748b",marginTop:4}}>₹{(RC.monthlyFee||0).toLocaleString("en-IN")} / {RC.billingCycle||"month"}</div>
+        </div>
+
+        {step==="submitted"&&pendingPay&&(
+          <div style={{background:"#064e3b",border:"1px solid #059669",borderRadius:12,padding:20,textAlign:"center"}}>
+            <div style={{fontSize:18,fontWeight:800,color:"#34d399",marginBottom:8}}>✅ Payment Submitted</div>
+            <div style={{fontSize:13,color:"#a7f3d0",lineHeight:1.6}}>
+              Your payment of <b>₹{(+pendingPay.amount||0).toLocaleString("en-IN")}</b>{pendingPay.utr&&` (UTR: ${pendingPay.utr})`} is under review.
+              <br/><br/>Admin will verify and activate your account shortly.
+            </div>
+            <div style={{fontSize:11,color:"#6ee7b7",marginTop:12}}>📞 For urgent activation: 9008420384</div>
+          </div>
+        )}
+
+        {step==="info"&&(
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <div style={{background:"#1e293b",borderRadius:12,padding:16,textAlign:"center"}}>
+              <div style={{fontSize:14,color:"#94a3b8",marginBottom:8}}>Make payment to:</div>
+              <div style={{fontSize:16,fontWeight:800,color:"#fff"}}>M Yantra Enterprises</div>
+              <div style={{fontSize:12,color:"#64748b",marginTop:4}}>UPI / NEFT / IMPS</div>
+            </div>
+            <button onClick={()=>setStep("form")} style={{background:"#2563eb",color:"#fff",border:"none",borderRadius:10,padding:14,fontSize:15,fontWeight:700,cursor:"pointer",width:"100%"}}>📤 I've Made Payment — Upload Proof</button>
+          </div>
+        )}
+
+        {(step==="form"||step==="scanning")&&(
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <div style={{background:"#1e293b",borderRadius:12,padding:16}}>
+              <div style={{fontSize:11,color:"#94a3b8",fontWeight:700,marginBottom:8,textTransform:"uppercase"}}>Payment Screenshot {screenshot?"✅":"(required)"}</div>
+              {screenshot?(
+                <div style={{textAlign:"center"}}>
+                  <img src={screenshot} alt="Proof" style={{maxWidth:"100%",maxHeight:200,borderRadius:8,border:"1px solid #334155"}}/>
+                  <div style={{marginTop:6}}><button onClick={()=>{setScreenshot("");setUtr("");setAmount(String(RC.monthlyFee||0));}} style={{background:"none",border:"1px solid #475569",borderRadius:6,padding:"4px 12px",color:"#94a3b8",fontSize:11,cursor:"pointer"}}>Change</button></div>
+                </div>
+              ):(
+                <label style={{display:"block",background:"#0f172a",border:"2px dashed #334155",borderRadius:10,padding:20,textAlign:"center",cursor:"pointer"}}>
+                  <input type="file" accept="image/*" onChange={e=>handleFile(e.target.files[0])} style={{display:"none"}}/>
+                  <div style={{fontSize:24,marginBottom:6}}>📷</div>
+                  <div style={{fontSize:13,color:"#94a3b8"}}>{step==="scanning"?"⏳ Scanning...":"Tap to upload payment screenshot"}</div>
+                </label>
+              )}
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              <div><div style={{fontSize:10,color:"#94a3b8",fontWeight:700,marginBottom:4}}>AMOUNT ₹ *</div><input value={amount} onChange={e=>setAmount(e.target.value)} type="number" style={iS}/></div>
+              <div><div style={{fontSize:10,color:"#94a3b8",fontWeight:700,marginBottom:4}}>DATE</div><input value={payDate} onChange={e=>setPayDate(e.target.value)} type="date" style={iS}/></div>
+            </div>
+            <div><div style={{fontSize:10,color:"#94a3b8",fontWeight:700,marginBottom:4}}>UTR / REF NUMBER</div><input value={utr} onChange={e=>setUtr(e.target.value)} style={iS} placeholder="Transaction reference"/></div>
+            {error&&<div style={{color:"#ef4444",fontSize:12,fontWeight:600,textAlign:"center"}}>{error}</div>}
+            <button onClick={handleSubmit} disabled={submitting||!screenshot} style={{background:submitting?"#475569":screenshot?"#059669":"#334155",color:"#fff",border:"none",borderRadius:10,padding:14,fontSize:15,fontWeight:700,cursor:submitting||!screenshot?"not-allowed":"pointer",width:"100%"}}>
+              {submitting?"⏳ Submitting...":"✅ Submit Payment for Verification"}
+            </button>
+            <button onClick={()=>setStep("info")} style={{background:"none",border:"1px solid #334155",borderRadius:10,padding:10,color:"#94a3b8",fontSize:12,cursor:"pointer",width:"100%"}}>← Back</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── BOOT WRAPPER — loads config before mounting the real app ──────────────────
 export default function App() {
   const [booted, setBooted] = useState(false);
   const [bootError, setBootError] = useState("");
+  const [paymentDue, setPaymentDue] = useState(false);
 
   useEffect(() => {
     (async () => {
       try {
         const ok = await loadRuntimeConfig();
         if (!ok) { setBootError("Failed to load config from server."); return; }
+        if (isPaymentDue()) { setPaymentDue(true); return; }
         initSupabase(RC.supabaseUrl, RC.supabaseAnonKey);
         document.title = RC.companyName || "Transport Management";
         if (RC.logoSrc) {
@@ -1091,7 +1206,6 @@ export default function App() {
           if (!link) { link = document.createElement("link"); link.rel = "icon"; document.head.appendChild(link); }
           link.href = RC.logoSrc;
         }
-        // Debug: expose RC for console inspection (remove in production)
         window.RC = RC;
         window.DB = DB;
         console.log('[BOOT] RC loaded:', { supabaseUrl: RC.supabaseUrl, companyName: RC.companyName, clients: RC.clients, features: Object.keys(RC.features).filter(k=>RC.features[k]).length + ' features enabled' });
@@ -1099,6 +1213,8 @@ export default function App() {
       } catch (e) { setBootError("Boot failed: " + e.message); }
     })();
   }, []);
+
+  if (paymentDue) return <PaymentDueScreen />;
 
   if (!booted) return (
     <div style={{minHeight:"100vh",background:"#0d1b2a",display:"flex",flexDirection:"column",
