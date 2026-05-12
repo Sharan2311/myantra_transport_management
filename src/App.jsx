@@ -2560,8 +2560,7 @@ Rules:
   }, [scanningNow, items.length, groupsBuilt]);
 
   // Re-build if new items arrive (user uploads more after first batch)
-  const itemCount = items.length;
-  useEffect(() => { setGroupsBuilt(false); }, [itemCount]);
+  // Note: groupsBuilt is reset at line 2488 when new files are uploaded — no itemCount effect needed
 
   // ── Group helpers ─────────────────────────────────────────────────────────────
   const updateGroup = (gid, field, val) =>
@@ -2671,94 +2670,104 @@ Rules:
   // ── Save All ──────────────────────────────────────────────────────────────────
   const saveAll = async () => {
     setLrError("");
-    // ── Pre-validate all groups (preserve all original validations) ──────────
+    // ── Pre-validate each group — skip invalid ones, save the rest ──────────
+    const validGroups = [];
+    const skippedGroups = [];
+
     for(const g of readyGroups) {
       const groupItems = doneItems.filter(x=>g.diIds.includes(x.id));
+      let skipReason = "";
 
       // Duplicate DI check
-      for(const item of groupItems) {
-        const diNo = (item.extracted?.diNo||"").trim();
-        if(diNo) {
-          const dupSaved = checkDupDI(diNo);
-          if(dupSaved) {
-            alert(`DI ${diNo} (truck ${g.truckNo}) is already recorded in LR ${dupSaved.trip.lrNo}.\nCannot save.`);
-            return;
-          }
-          // Dup within other groups in this batch
-          const dupInBatch = readyGroups.flatMap(og=>
-            og.id!==g.id ? doneItems.filter(x=>og.diIds.includes(x.id)) : []
-          ).find(x=>(x.extracted?.diNo||"").trim()===diNo);
-          if(dupInBatch) {
-            alert(`DI ${diNo} appears in another group. Two trips cannot share the same DI.`);
-            return;
+      if(!skipReason) {
+        for(const item of groupItems) {
+          const diNo = (item.extracted?.diNo||"").trim();
+          if(diNo) {
+            const dupSaved = checkDupDI(diNo);
+            if(dupSaved) { skipReason = `DI ${diNo} already in LR ${dupSaved.trip.lrNo}`; break; }
+            const dupInBatch = validGroups.flatMap(og=>
+              doneItems.filter(x=>og.diIds.includes(x.id))
+            ).find(x=>(x.extracted?.diNo||"").trim()===diNo);
+            if(dupInBatch) { skipReason = `DI ${diNo} duplicated in another group`; break; }
           }
         }
       }
 
-      // Margin check per DI
-      for(const item of groupItems) {
-        const margin = (+item.extracted?.frRate||0) - (+item.givenRate||0);
-        if(margin < 30) {
-          alert(`Truck ${g.truckNo} · DI ${item.extracted?.diNo||"?"}: Margin ₹${margin}/MT is below ₹30 minimum.`);
-          return;
+      // Margin check
+      if(!skipReason) {
+        for(const item of groupItems) {
+          const margin = (+item.extracted?.frRate||0) - (+item.givenRate||0);
+          if(margin < 30) { skipReason = `DI ${item.extracted?.diNo||"?"}: Margin ₹${margin}/MT below ₹30`; break; }
         }
       }
 
-      // Owner name mandatory for new/unknown vehicles
-      {
+      // Owner name
+      if(!skipReason) {
         const ownerVeh = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
-        if((!ownerVeh || !(ownerVeh.ownerName||"").trim()) && !(g.ownerName||"").trim()) {
-          alert(`Truck ${g.truckNo}: Owner Name is required for new vehicles.\n\nPlease enter or select an owner name.`);
-          setSaving(false);
-          return;
-        }
+        if((!ownerVeh || !(ownerVeh.ownerName||"").trim()) && !(g.ownerName||"").trim())
+          skipReason = "Owner Name required for new vehicle";
       }
-      // Diesel indent — skip check in manual diesel mode
-      if(!manualDiesel && +g.diesel > 0 && !g.dieselIndentNo.trim()) {
-        alert(`Truck ${g.truckNo}: Diesel Indent No is required when Diesel Estimate is entered.`);
-        return;
+
+      // Diesel indent
+      if(!skipReason && !manualDiesel && +g.diesel > 0 && !g.dieselIndentNo.trim())
+        skipReason = "Diesel Indent No required";
+      if(!skipReason && g.dieselIndentNo.trim()) {
+        const dupIndent = (trips||[]).some(t => t.dieselIndentNo && t.dieselIndentNo.trim() === g.dieselIndentNo.trim());
+        if(dupIndent) skipReason = `Diesel Indent "${g.dieselIndentNo}" already used`;
       }
-      if(g.dieselIndentNo.trim()) {
-        const dupIndent = (trips||[]).some(t =>
-          t.dieselIndentNo && t.dieselIndentNo.trim() === g.dieselIndentNo.trim()
-        );
-        if(dupIndent) {
-          alert(`Truck ${g.truckNo}: Diesel Indent No "${g.dieselIndentNo}" already exists on another trip.`);
-          return;
+
+      // Party files
+      if(!skipReason) {
+        for(const item of groupItems) {
+          if(item.orderType==="party") {
+            if(!item.grFile)      { skipReason = `DI ${item.extracted?.diNo||"?"}: GR Copy required`; break; }
+            if(!item.invoiceFile) { skipReason = `DI ${item.extracted?.diNo||"?"}: Invoice required`; break; }
+          }
         }
       }
 
-      // Party files per DI
-      for(const item of groupItems) {
-        if(item.orderType==="party") {
-          if(!item.grFile)      { alert(`Truck ${g.truckNo} · DI ${item.extracted?.diNo||"?"}: GR Copy required for Party order.`); return; }
-          if(!item.invoiceFile) { alert(`Truck ${g.truckNo} · DI ${item.extracted?.diNo||"?"}: Invoice required for Party order.`); return; }
+      // Net to driver check
+      if(!skipReason) {
+        const totalGross = groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0)*(+x.givenRate||0),0);
+        const tafalVal  = g.tafal!=null&&g.tafal!=="" ? +g.tafal : (settings?.tafalPerTrip||300);
+        const _net = totalGross - (+g.advance||0) - tafalVal - (+g.diesel||0)
+                   - (+g.shortageRecovery||0) - (+g.loanRecovery||0);
+        if(_net < 0) {
+          const dieselAmt = +g.diesel||0;
+          const empId = g.cashEmpId || g.assignedEmpId;
+          const empName = empId ? (employees.find(e=>e.id===empId)?.name||"assigned employee") : null;
+          if(dieselAmt > 0 && empName) {
+            const excess = Math.abs(_net);
+            if(!window.confirm(
+              `Truck ${g.truckNo}: Net ₹${_net.toLocaleString("en-IN")} (negative).\n\n`+
+              `⛽ ₹${excess.toLocaleString("en-IN")} excess diesel will be debited to ${empName}'s wallet.\n\nSave?`
+            )) { skipReason = "Negative net — user cancelled"; }
+          } else {
+            skipReason = `Net ₹${_net.toLocaleString("en-IN")} negative — reduce deductions`;
+          }
         }
       }
 
-      // Net to driver check per group
-      const totalQty  = groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0),0);
-      const totalGross = groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0)*(+x.givenRate||0),0);
-      const tafalVal  = +g.tafal || (settings?.tafalPerTrip||300);
-      const _net = totalGross - (+g.advance||0) - tafalVal - (+g.diesel||0)
-                 - (+g.shortageRecovery||0) - (+g.loanRecovery||0);
-      if(_net < 0) {
-        const dieselAmt = +g.diesel||0;
-        const empId = g.cashEmpId || g.assignedEmpId;
-        const empName = empId ? (employees.find(e=>e.id===empId)?.name||"assigned employee") : null;
-        if(dieselAmt > 0 && empName) {
-          const excess = Math.abs(_net);
-          if(!window.confirm(
-            `Truck ${g.truckNo}: Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\n\n`+
-            `Diesel ₹${dieselAmt.toLocaleString("en-IN")} exceeds trip earnings after deductions.\n\n`+
-            `⛽ ₹${excess.toLocaleString("en-IN")} will be auto-debited as "Excess Diesel" to ${empName}'s wallet.\n\n`+
-            `Save and debit excess?`
-          )) return;
-        } else {
-          alert(`Truck ${g.truckNo}: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\nReduce Advance / Diesel / Recoveries.`);
-          return;
-        }
+      if(skipReason) {
+        skippedGroups.push({ truckNo: g.truckNo, reason: skipReason });
+      } else {
+        validGroups.push(g);
       }
+    }
+
+    if(validGroups.length === 0) {
+      const reasons = skippedGroups.map(s => `${s.truckNo}: ${s.reason}`).join("\n");
+      alert(`No groups ready to save:\n\n${reasons}`);
+      return;
+    }
+
+    // Show summary if some groups were skipped
+    if(skippedGroups.length > 0) {
+      const reasons = skippedGroups.map(s => `⚠ ${s.truckNo}: ${s.reason}`).join("\n");
+      if(!window.confirm(
+        `${validGroups.length} group${validGroups.length>1?"s":""} will be saved.\n\n`+
+        `${skippedGroups.length} group${skippedGroups.length>1?"s":""} skipped:\n${reasons}\n\nProceed with saving the valid groups?`
+      )) return;
     }
 
     setSaving(true);
@@ -2772,7 +2781,7 @@ Rules:
     // If DI date is empty fall back to today
     const safeTripDate = (diDate) => diDate || today();
 
-    for(const g of readyGroups) {
+    for(const g of validGroups) {
       const groupItems = doneItems.filter(x=>g.diIds.includes(x.id));
       const primary    = groupItems[0];
       const ex0        = primary.extracted;
@@ -3169,9 +3178,9 @@ Rules:
     setSavedLRs(prev=>[...savedLRsThisBatch,...prev]);
     setSaving(false);
     // Remove saved groups' items from list
-    const savedItemIds = new Set(readyGroups.flatMap(g=>g.diIds));
+    const savedItemIds = new Set(validGroups.flatMap(g=>g.diIds));
     setItems(prev=>prev.filter(x=>!savedItemIds.has(x.id)));
-    setGroups(prev=>prev.filter(g=>!readyGroups.find(r=>r.id===g.id)));
+    setGroups(prev=>prev.filter(g=>!validGroups.find(r=>r.id===g.id)));
   };
 
   const scanningCount = items.filter(x=>x.status==="scanning"||x.status==="pending").length;
