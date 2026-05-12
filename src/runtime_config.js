@@ -208,6 +208,17 @@ export async function getPendingPayment() {
   } catch { return null; }
 }
 
+// ── Fetch invoices for this transport (for billing history) ─────────────────
+export async function fetchMyInvoices() {
+  try {
+    const { data } = await adminDb.from('subscription_invoices')
+      .select('*')
+      .eq('client_id', RC.clientId)
+      .order('created_at', { ascending: false });
+    return data || [];
+  } catch { return []; }
+}
+
 // ── Scan logging ────────────────────────────────────────────────────────────
 export async function logScan(scanType, success = true) {
   try {

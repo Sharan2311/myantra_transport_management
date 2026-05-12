@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { DB } from "./db.js";
-import { loadRuntimeConfig, RC, canFeature as canFeatureRC, logScan, isPaymentDue, submitPaymentProof, getPendingPayment } from "./runtime_config.js";
+import { loadRuntimeConfig, RC, canFeature as canFeatureRC, logScan, isPaymentDue, submitPaymentProof, getPendingPayment, fetchMyInvoices } from "./runtime_config.js";
 import { initSupabase } from "./supabase.js";
 import { supabase } from "./supabase.js";
 
@@ -714,6 +714,7 @@ const MORE_TABS = [
   {id:"reports",   icon:"📤",label:"Reports",        perm:"reports",      group:"info",    feat:"pdf_reports"},
   {id:"reminders", icon:"📲",label:"Reminders",      perm:"reminders",    group:"info"},
   {id:"activity",  icon:"📋",label:"Activity Log",   perm:"reports",      group:"info"},
+  {id:"my_billing",icon:"💰",label:"My Billing",     perm:"reports",      group:"info"},
   {id:"admin",     icon:"⚙", label:"User Admin",     perm:"admin",        group:"info"},
 ];
 const MORE_GROUPS = [
@@ -1073,205 +1074,16 @@ class ErrorBoundary extends React.Component {
   }
 }
 
-// ─── PAYMENT DUE SCREEN — blocks app, allows payment submission ──────────────
-function PaymentDueScreen() {
-  const [step, setStep] = useState("info"); // info | form | scanning | submitted
-  const [amount, setAmount] = useState(String(RC.monthlyFee||0));
-  const [utr, setUtr] = useState("");
-  const [payDate, setPayDate] = useState(new Date().toISOString().split("T")[0]);
-  const [screenshot, setScreenshot] = useState("");
-  const [notes, setNotes] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState("");
-  const [pendingPay, setPendingPay] = useState(null);
-
-  // Check if there's already a pending payment
-  useEffect(() => { getPendingPayment().then(p => { if(p) { setPendingPay(p); setStep("submitted"); } }); }, []);
-
-  const handleFile = async (file) => {
-    if(!file) return;
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const base64 = reader.result;
-      setScreenshot(base64);
-      // Try to auto-extract UTR and amount from screenshot
-      setStep("scanning");
-      try {
-        const resp = await fetch("/.netlify/functions/scan-di", {
-          method:"POST", headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({
-            base64: base64.split(",")[1] || base64,
-            anthropicKey: RC.anthropicKey,
-            mediaType: file.type,
-            prompt: "Extract payment details from this screenshot. Return JSON: {\"amount\": number, \"utr\": \"string\", \"date\": \"YYYY-MM-DD\", \"payee\": \"string\"}. If any field is unclear, use empty string.",
-          }),
-        });
-        const data = await resp.json();
-        if(data.text) {
-          const clean = data.text.replace(/```json|```/g,"").trim();
-          try {
-            const parsed = JSON.parse(clean);
-            if(parsed.amount) setAmount(String(parsed.amount));
-            if(parsed.utr) setUtr(parsed.utr);
-            if(parsed.date) setPayDate(parsed.date);
-          } catch {}
-        }
-      } catch(e) { console.warn("Scan failed:", e); }
-      setStep("form");
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const handleSubmit = async () => {
-    if(!amount || +amount <= 0) { setError("Enter payment amount"); return; }
-    setSubmitting(true); setError("");
-    const now = new Date();
-    const period = now.toLocaleString("en-US", {month:"long", year:"numeric"});
-    const result = await submitPaymentProof({
-      amount: +amount, utr, paymentDate: payDate,
-      screenshotBase64: screenshot, billingPeriod: period, notes,
-    });
-    setSubmitting(false);
-    if(result.success) { setStep("submitted"); setPendingPay({id:result.id, amount:+amount, utr, status:"pending"}); }
-    else setError(result.error || "Submission failed. Try again.");
-  };
-
-  const inputStyle = {width:"100%",background:"#1e293b",border:"1px solid #334155",borderRadius:8,
-    padding:"10px 12px",color:"#fff",fontSize:14,outline:"none",boxSizing:"border-box"};
-
-  return (
-    <div style={{minHeight:"100vh",background:"#0d1b2a",display:"flex",flexDirection:"column",
-      alignItems:"center",justifyContent:"center",color:"#fff",padding:20}}>
-      <div style={{maxWidth:420,width:"100%"}}>
-
-        {/* Header */}
-        <div style={{textAlign:"center",marginBottom:24}}>
-          <div style={{fontSize:48,marginBottom:12}}>💳</div>
-          <div style={{fontSize:22,fontWeight:800,color:"#ef4444"}}>Payment Due</div>
-          <div style={{fontSize:13,color:"#94a3b8",marginTop:6}}>
-            <b style={{color:"#fff"}}>{RC.companyName}</b> · {RC.plan} plan
-            {RC.paidUntil && <span> · Expired: <b style={{color:"#fbbf24"}}>{RC.paidUntil}</b></span>}
-          </div>
-          <div style={{fontSize:12,color:"#64748b",marginTop:4}}>
-            ₹{(RC.monthlyFee||0).toLocaleString("en-IN")} / {RC.billingCycle||"month"}
-          </div>
-        </div>
-
-        {step === "submitted" && pendingPay && (
-          <div style={{background:"#064e3b",border:"1px solid #059669",borderRadius:12,padding:20,textAlign:"center"}}>
-            <div style={{fontSize:18,fontWeight:800,color:"#34d399",marginBottom:8}}>✅ Payment Submitted</div>
-            <div style={{fontSize:13,color:"#a7f3d0",lineHeight:1.6}}>
-              Your payment of <b>₹{(+pendingPay.amount||0).toLocaleString("en-IN")}</b>
-              {pendingPay.utr && <span> (UTR: {pendingPay.utr})</span>} is under review.
-              <br/><br/>
-              Admin will verify and activate your account shortly.
-              <br/>You'll receive access once confirmed.
-            </div>
-            <div style={{fontSize:11,color:"#6ee7b7",marginTop:12}}>
-              📞 For urgent activation: 9008420384
-            </div>
-          </div>
-        )}
-
-        {step === "info" && (
-          <div style={{display:"flex",flexDirection:"column",gap:12}}>
-            <div style={{background:"#1e293b",borderRadius:12,padding:16,textAlign:"center"}}>
-              <div style={{fontSize:14,color:"#94a3b8",marginBottom:12}}>Make payment to:</div>
-              <div style={{fontSize:16,fontWeight:800,color:"#fff"}}>M Yantra Enterprises</div>
-              <div style={{fontSize:12,color:"#64748b",marginTop:4}}>UPI / NEFT / IMPS</div>
-            </div>
-            <button onClick={()=>setStep("form")}
-              style={{background:"#2563eb",color:"#fff",border:"none",borderRadius:10,padding:14,
-                fontSize:15,fontWeight:700,cursor:"pointer",width:"100%"}}>
-              📤 I've Made Payment — Upload Proof
-            </button>
-            <div style={{textAlign:"center",fontSize:11,color:"#475569"}}>
-              Upload payment screenshot and admin will verify within 24 hours
-            </div>
-          </div>
-        )}
-
-        {(step === "form" || step === "scanning") && (
-          <div style={{display:"flex",flexDirection:"column",gap:12}}>
-            {/* Screenshot upload */}
-            <div style={{background:"#1e293b",borderRadius:12,padding:16}}>
-              <div style={{fontSize:11,color:"#94a3b8",fontWeight:700,marginBottom:8,textTransform:"uppercase"}}>
-                Payment Screenshot {screenshot?"✅":"(required)"}
-              </div>
-              {screenshot ? (
-                <div style={{textAlign:"center"}}>
-                  <img src={screenshot} alt="Payment proof" style={{maxWidth:"100%",maxHeight:200,borderRadius:8,border:"1px solid #334155"}}/>
-                  <div style={{marginTop:6}}>
-                    <button onClick={()=>{setScreenshot("");setUtr("");setAmount(String(RC.monthlyFee||0));}}
-                      style={{background:"none",border:"1px solid #475569",borderRadius:6,padding:"4px 12px",
-                        color:"#94a3b8",fontSize:11,cursor:"pointer"}}>Change</button>
-                  </div>
-                </div>
-              ) : (
-                <label style={{display:"block",background:"#0f172a",border:"2px dashed #334155",borderRadius:10,
-                  padding:20,textAlign:"center",cursor:"pointer"}}>
-                  <input type="file" accept="image/*" onChange={e=>handleFile(e.target.files[0])}
-                    style={{display:"none"}}/>
-                  <div style={{fontSize:24,marginBottom:6}}>📷</div>
-                  <div style={{fontSize:13,color:"#94a3b8"}}>
-                    {step==="scanning" ? "⏳ Scanning..." : "Tap to upload payment screenshot"}
-                  </div>
-                  <div style={{fontSize:10,color:"#475569",marginTop:4}}>AI will auto-extract amount & UTR</div>
-                </label>
-              )}
-            </div>
-
-            {/* Form fields */}
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-              <div>
-                <div style={{fontSize:10,color:"#94a3b8",fontWeight:700,marginBottom:4}}>AMOUNT ₹ *</div>
-                <input value={amount} onChange={e=>setAmount(e.target.value)} type="number" style={inputStyle} placeholder="0"/>
-              </div>
-              <div>
-                <div style={{fontSize:10,color:"#94a3b8",fontWeight:700,marginBottom:4}}>DATE</div>
-                <input value={payDate} onChange={e=>setPayDate(e.target.value)} type="date" style={inputStyle}/>
-              </div>
-            </div>
-            <div>
-              <div style={{fontSize:10,color:"#94a3b8",fontWeight:700,marginBottom:4}}>UTR / REF NUMBER</div>
-              <input value={utr} onChange={e=>setUtr(e.target.value)} style={inputStyle} placeholder="Transaction reference"/>
-            </div>
-            <div>
-              <div style={{fontSize:10,color:"#94a3b8",fontWeight:700,marginBottom:4}}>NOTES (OPTIONAL)</div>
-              <input value={notes} onChange={e=>setNotes(e.target.value)} style={inputStyle} placeholder="Any additional info"/>
-            </div>
-
-            {error && <div style={{color:"#ef4444",fontSize:12,fontWeight:600,textAlign:"center"}}>{error}</div>}
-
-            <button onClick={handleSubmit} disabled={submitting || !screenshot}
-              style={{background:submitting?"#475569":screenshot?"#059669":"#334155",color:"#fff",border:"none",
-                borderRadius:10,padding:14,fontSize:15,fontWeight:700,
-                cursor:submitting||!screenshot?"not-allowed":"pointer",width:"100%",opacity:submitting?0.7:1}}>
-              {submitting ? "⏳ Submitting..." : "✅ Submit Payment for Verification"}
-            </button>
-            <button onClick={()=>setStep("info")}
-              style={{background:"none",border:"1px solid #334155",borderRadius:10,padding:10,
-                color:"#94a3b8",fontSize:12,cursor:"pointer",width:"100%"}}>← Back</button>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
 // ── BOOT WRAPPER — loads config before mounting the real app ──────────────────
 export default function App() {
   const [booted, setBooted] = useState(false);
   const [bootError, setBootError] = useState("");
-  const [paymentDue, setPaymentDue] = useState(false);
 
   useEffect(() => {
     (async () => {
       try {
         const ok = await loadRuntimeConfig();
         if (!ok) { setBootError("Failed to load config from server."); return; }
-        // Check payment status before proceeding
-        if (isPaymentDue()) { setPaymentDue(true); return; }
         initSupabase(RC.supabaseUrl, RC.supabaseAnonKey);
         document.title = RC.companyName || "Transport Management";
         if (RC.logoSrc) {
@@ -1279,6 +1091,7 @@ export default function App() {
           if (!link) { link = document.createElement("link"); link.rel = "icon"; document.head.appendChild(link); }
           link.href = RC.logoSrc;
         }
+        // Debug: expose RC for console inspection (remove in production)
         window.RC = RC;
         window.DB = DB;
         console.log('[BOOT] RC loaded:', { supabaseUrl: RC.supabaseUrl, companyName: RC.companyName, clients: RC.clients, features: Object.keys(RC.features).filter(k=>RC.features[k]).length + ' features enabled' });
@@ -1286,9 +1099,6 @@ export default function App() {
       } catch (e) { setBootError("Boot failed: " + e.message); }
     })();
   }, []);
-
-  // Payment due screen — blocks app but allows payment submission
-  if (paymentDue) return <PaymentDueScreen />;
 
   if (!booted) return (
     <div style={{minHeight:"100vh",background:"#0d1b2a",display:"flex",flexDirection:"column",
@@ -1813,6 +1623,7 @@ function AppMain() {
         {tab==="reports"    && can(user,"reports")    && <Reports    {...sp} />}
         {tab==="reminders"  && can(user,"reminders")  && <Reminders  {...sp} />}
         {tab==="activity"   && can(user,"reports")    && <ActivityLog activity={activity} />}
+        {tab==="my_billing" && can(user,"reports")    && <MyBilling />}
         {tab==="daily_ops"  && can(user,"reports")    && <DailyOps {...sp} />}
         {tab==="feature_admin" && can(user,"admin") && <FeatureAdmin settings={settings} setSettings={dbSetSettings} />}
         {tab==="admin"      && can(user,"admin")      && <UserAdmin  users={users} setUsers={dbSetUsers} user={user} log={log} pumps={pumps||[]} />}
@@ -2013,51 +1824,6 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
             </div>
           ))}
         </div>
-      </div>
-
-      {/* ── Payment Reminder (due within 7 days) ── */}
-      {(()=>{
-        if(!RC.paidUntil || RC.paymentBypass || RC.monthlyFee===0) return null;
-        const due = new Date(RC.paidUntil);
-        const now = new Date();
-        const daysLeft = Math.ceil((due - now) / (1000*60*60*24));
-        if(daysLeft > 7 || daysLeft < 0) return null;
-        return (
-          <div style={{background:daysLeft<=3?"#fef2f2":"#fffbeb",border:`1px solid ${daysLeft<=3?"#fca5a5":"#fcd34d"}`,
-            borderRadius:10,padding:"12px 14px",display:"flex",alignItems:"center",gap:10}}>
-            <span style={{fontSize:22}}>{daysLeft<=3?"🔴":"🟡"}</span>
-            <div>
-              <div style={{fontWeight:700,fontSize:13,color:daysLeft<=3?"#dc2626":"#d97706"}}>
-                Subscription {daysLeft<=0?"expires today":daysLeft===1?"expires tomorrow":`expires in ${daysLeft} days`}
-              </div>
-              <div style={{fontSize:11,color:"#78350f"}}>
-                Plan: {RC.plan} · ₹{(RC.monthlyFee||0).toLocaleString("en-IN")}/{RC.billingCycle||"month"} · Due: {RC.paidUntil}
-              </div>
-              <div style={{fontSize:11,color:"#78350f",marginTop:2}}>
-                Please contact admin to renew. 📞 9008420384
-              </div>
-            </div>
-          </div>
-        );
-      })()}
-
-      {/* ── Plan & Scan Usage ── */}
-      <div style={{background:C.bg,borderRadius:10,padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",
-        border:`1px solid ${C.border}`}}>
-        <div style={{display:"flex",alignItems:"center",gap:10}}>
-          <span style={{fontSize:11,fontWeight:700,color:C.accent,textTransform:"uppercase",
-            background:C.accent+"15",padding:"3px 8px",borderRadius:6}}>{RC.plan}</span>
-          <span style={{fontSize:12,color:C.text,fontWeight:600}}>
-            AI Scans: <span style={{color:RC.scansUsed>=RC.scansIncluded?C.red:C.green,fontWeight:800}}>
-              {RC.scansUsed}</span>
-            <span style={{color:C.muted}}>/{RC.scansIncluded} this month</span>
-          </span>
-        </div>
-        {RC.paidUntil && (
-          <span style={{fontSize:10,color:C.muted}}>
-            Paid until: <span style={{fontWeight:700,color:new Date(RC.paidUntil)>new Date()?C.green:C.red}}>{RC.paidUntil}</span>
-          </span>
-        )}
       </div>
 
       {/* ── FY Summary + Month-wise — Owner only ── */}
@@ -2703,10 +2469,8 @@ Rules:
           return false; // duplicate — auto-remove
         });
       });
-      logScan("di_scan", true);
     } catch(e) {
       setItems(prev => prev.map(x => x.id===id ? {...x, status:"error", error:e.message} : x));
-      logScan("di_scan", false);
     }
   };
 
@@ -4965,7 +4729,7 @@ Rules:
       const existingTrip = lrNo ? trips.find(t => t.lrNo === lrNo) : null;
 
       setState("done");
-      logScan("di_scan", true);
+      // If caller wants the raw file (e.g. to auto-populate GR ref), pass it back
       if(onFile) onFile(file);
       onExtracted({
         ...extracted,
@@ -4981,7 +4745,6 @@ Rules:
       console.error("DI scan error:", e);
       setError("Could not read document. Try a clearer photo. (" + e.message + ")");
       setState("error");
-      logScan("di_scan", false);
     }
   };
 
@@ -9847,10 +9610,8 @@ function PumpSlipScanner({ pumps, trips, user, onResults }) {
 
       onResults(results);
       setState("done");
-      logScan("payment_scan", true);
     } catch(e) {
       setError("Could not read slip: " + e.message); setState("error");
-      logScan("payment_scan", false);
     }
   };
 
@@ -15577,9 +15338,9 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         body:JSON.stringify({ base64, anthropicKey: RC.anthropicKey, mediaType:file.type||"application/pdf", scanType}),
       });
       const data = await resp.json();
-      if(data.error) { setScanError(data.error); logScan("shree_scan", false); }
-      else { setScanResult({...data, type:scanType}); logScan("shree_scan", true); }
-    } catch(e) { setScanError(e.message); logScan("shree_scan", false); }
+      if(data.error) setScanError(data.error);
+      else setScanResult({...data, type:scanType});
+    } catch(e) { setScanError(e.message); }
     finally { setScanning(false); }
   };
 
@@ -20459,6 +20220,117 @@ function Reminders({trips, vehicles, employees}) {
 }
 
 // ─── ACTIVITY LOG ─────────────────────────────────────────────────────────────
+// ─── MY BILLING — Transport app billing history ────────────────────────────────
+function MyBilling() {
+  const [invoices, setInvoices] = useState([]);
+  const [loading, setLoading] = useState(true);
+  useEffect(()=>{ fetchMyInvoices().then(d=>{setInvoices(d);setLoading(false);}); },[]);
+
+  const totalBilled = invoices.reduce((s,i)=>s+(+i.total_amount||0),0);
+  const totalPaid = invoices.filter(i=>i.status==="paid").reduce((s,i)=>s+(+i.total_amount||0),0);
+  const outstanding = invoices.filter(i=>i.status==="unpaid").reduce((s,i)=>s+(+i.total_amount||0),0);
+  const fmt = n => "₹"+Number(n||0).toLocaleString("en-IN");
+
+  const openInvoice = (inv) => {
+    const cgst=Math.round((+inv.gst_amount||0)/2);const sgst=cgst;
+    const html=`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Invoice ${inv.invoice_no}</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Segoe UI',Arial,sans-serif;padding:20px;max-width:800px;margin:0 auto;color:#1e293b}
+.hdr{display:flex;justify-content:space-between;border-bottom:3px solid #1565c0;padding-bottom:12px;margin-bottom:16px}.hdr h1{font-size:22px;color:#1565c0}.hdr .sub{font-size:11px;color:#64748b}
+.inv-title{text-align:center;font-size:18px;font-weight:800;color:#1565c0;margin:16px 0;text-transform:uppercase;letter-spacing:2px}
+table{width:100%;border-collapse:collapse;margin:12px 0}th,td{border:1px solid #cbd5e1;padding:8px 10px;font-size:12px;text-align:left}th{background:#f1f5f9;font-weight:700;font-size:11px;text-transform:uppercase;color:#475569}
+.right{text-align:right}.bold{font-weight:700}.total-row{background:#eff6ff;font-weight:800;font-size:14px}
+.meta{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}.meta-box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px}
+.meta-box h3{font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}.meta-box p{font-size:12px;line-height:1.6;color:#1e293b}
+.status{display:inline-block;padding:3px 10px;border-radius:4px;font-size:11px;font-weight:700;text-transform:uppercase}.status-paid{background:#dcfce7;color:#166534}.status-unpaid{background:#fee2e2;color:#991b1b}
+.bank{background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:12px;margin-top:12px}.bank h3{font-size:10px;color:#0369a1;text-transform:uppercase;margin-bottom:6px}.bank p{font-size:11px;color:#1e293b;line-height:1.6}
+.footer{margin-top:24px;border-top:2px solid #e2e8f0;padding-top:12px;font-size:10px;color:#94a3b8;text-align:center}
+@media print{button{display:none!important}}</style></head><body>
+<div class="hdr"><div><h1>M YANTRA ENTERPRISES</h1><div class="sub">Transport Management Solutions<br/>Kodla, Sedam, Gulbarga, Karnataka</div></div><div style="text-align:right"><div class="sub">Phone: 9008420384<br/>Email: myantraenterprises@gmail.com</div></div></div>
+<div class="inv-title">Tax Invoice</div>
+<div class="meta">
+<div class="meta-box"><h3>Bill To</h3><p><b>${RC.companyName}</b><br/>${RC.ownerName}<br/>Phone: ${RC.phone||"—"}<br/>GSTN: ${RC.gstn||"—"}</p></div>
+<div class="meta-box"><h3>Invoice Details</h3><p><b>Invoice No:</b> ${inv.invoice_no}<br/><b>Date:</b> ${inv.invoice_date}<br/><b>Period:</b> ${inv.billing_period}<br/><b>Status:</b> <span class="status ${inv.status==="paid"?"status-paid":"status-unpaid"}">${inv.status}</span>${inv.paid_ref?`<br/><b>Ref:</b> ${inv.paid_ref}`:""}</p></div>
+</div>
+<table><tr><th>#</th><th>Description</th><th class="right">HSN/SAC</th><th class="right">Amount</th></tr>
+<tr><td>1</td><td>${inv.description||inv.billing_period}</td><td class="right">998599</td><td class="right">${fmt(inv.base_amount)}</td></tr>
+<tr><td colspan="3" class="right">CGST @ ${(+inv.gst_rate||18)/2}%</td><td class="right">${fmt(cgst)}</td></tr>
+<tr><td colspan="3" class="right">SGST @ ${(+inv.gst_rate||18)/2}%</td><td class="right">${fmt(sgst)}</td></tr>
+<tr class="total-row"><td colspan="3" class="right">Total</td><td class="right">${fmt(inv.total_amount)}</td></tr></table>
+<div class="bank"><h3>Bank Details</h3><p><b>Account:</b> M Yantra Enterprises · HDFC Bank<br/><b>UPI:</b> myantra@hdfcbank</p></div>
+<div class="footer">Computer-generated invoice · M Yantra Enterprises</div>
+<br/><button onclick="window.print()" style="background:#1565c0;color:#fff;border:none;border-radius:8px;padding:12px 24px;font-size:14px;font-weight:700;cursor:pointer;display:block;margin:0 auto">🖨 Print / Save PDF</button>
+</body></html>`;
+    const w=window.open("","_blank");w.document.write(html);w.document.close();
+  };
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,padding:"16px"}}>
+        <div style={{color:C.accent,fontWeight:900,fontSize:18}}>💰 My Billing</div>
+        <div style={{color:C.muted,fontSize:11,marginTop:2}}>Subscription invoices and payment history</div>
+      </div>
+
+      {/* Summary */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+        <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:12,textAlign:"center"}}>
+          <div style={{fontSize:16,fontWeight:800,color:C.accent}}>{fmt(totalBilled)}</div>
+          <div style={{fontSize:9,color:C.muted}}>TOTAL BILLED</div>
+        </div>
+        <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:12,textAlign:"center"}}>
+          <div style={{fontSize:16,fontWeight:800,color:C.green}}>{fmt(totalPaid)}</div>
+          <div style={{fontSize:9,color:C.muted}}>PAID</div>
+        </div>
+        <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:12,textAlign:"center"}}>
+          <div style={{fontSize:16,fontWeight:800,color:outstanding>0?C.red:C.green}}>{fmt(outstanding)}</div>
+          <div style={{fontSize:9,color:C.muted}}>OUTSTANDING</div>
+        </div>
+      </div>
+
+      {/* Plan info */}
+      <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 14px",
+        display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:12}}>
+        <span>Plan: <b style={{color:C.accent}}>{RC.plan}</b> · {fmt(RC.monthlyFee)}/{RC.billingCycle||"month"}</span>
+        {RC.paidUntil && <span style={{color:C.muted}}>Paid until: <b style={{color:new Date(RC.paidUntil)>new Date()?C.green:C.red}}>{RC.paidUntil}</b></span>}
+      </div>
+
+      {/* Invoice list */}
+      {loading ? <div style={{textAlign:"center",color:C.muted,padding:20}}>Loading invoices...</div> :
+       invoices.length===0 ? <div style={{textAlign:"center",color:C.muted,padding:20}}>No invoices yet</div> :
+       invoices.map(inv=>{
+        const sc = inv.status==="paid"?C.green:inv.status==="cancelled"?C.muted:C.red;
+        return (
+          <div key={inv.id} style={{background:C.card,border:`1px solid ${inv.status==="unpaid"?C.red+"44":C.border}`,
+            borderRadius:12,padding:"12px 14px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div>
+                <div style={{display:"flex",alignItems:"center",gap:6}}>
+                  <span style={{fontWeight:700,fontSize:13}}>{inv.invoice_no}</span>
+                  <span style={{fontSize:9,fontWeight:800,color:sc,background:sc+"22",padding:"2px 6px",
+                    borderRadius:4,textTransform:"uppercase"}}>{inv.status}</span>
+                  <span style={{fontSize:9,color:C.muted,background:C.dim,padding:"2px 6px",borderRadius:4}}>{inv.type}</span>
+                </div>
+                <div style={{fontSize:11,color:C.muted,marginTop:2}}>{inv.invoice_date} · {inv.billing_period}</div>
+              </div>
+              <div style={{textAlign:"right"}}>
+                <div style={{fontSize:16,fontWeight:800,color:inv.status==="paid"?C.green:C.text}}>{fmt(inv.total_amount)}</div>
+                <div style={{fontSize:9,color:C.muted}}>Base {fmt(inv.base_amount)} + GST {fmt(inv.gst_amount)}</div>
+              </div>
+            </div>
+            {inv.status==="paid" && inv.paid_ref && (
+              <div style={{fontSize:10,color:C.green,marginTop:4}}>✅ Paid: {inv.paid_date} · Ref: {inv.paid_ref}</div>
+            )}
+            <button onClick={()=>openInvoice(inv)}
+              style={{marginTop:8,background:C.accent+"15",border:`1px solid ${C.accent}44`,borderRadius:8,
+                padding:"6px 14px",color:C.accent,fontSize:12,fontWeight:700,cursor:"pointer"}}>
+              📄 View / Print Invoice
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function ActivityLog({activity}) {
   const [days, setDays] = useState(7);
   const [searchQ, setSearchQ] = useState("");
