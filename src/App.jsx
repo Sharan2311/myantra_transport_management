@@ -1942,6 +1942,48 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
         </div>
       </div>
 
+      {/* ── Payment Reminder (due within 7 days) ── */}
+      {(()=>{
+        if(!RC.paidUntil || RC.paymentBypass || RC.monthlyFee===0) return null;
+        const due = new Date(RC.paidUntil);
+        const now = new Date();
+        const daysLeft = Math.ceil((due - now) / (1000*60*60*24));
+        if(daysLeft > 7 || daysLeft < 0) return null;
+        return (
+          <div style={{background:daysLeft<=3?"#fef2f2":"#fffbeb",border:`1px solid ${daysLeft<=3?"#fca5a5":"#fcd34d"}`,
+            borderRadius:10,padding:"12px 14px",display:"flex",alignItems:"center",gap:10}}>
+            <span style={{fontSize:22}}>{daysLeft<=3?"🔴":"🟡"}</span>
+            <div>
+              <div style={{fontWeight:700,fontSize:13,color:daysLeft<=3?"#dc2626":"#d97706"}}>
+                Subscription {daysLeft<=0?"expires today":daysLeft===1?"expires tomorrow":`expires in ${daysLeft} days`}
+              </div>
+              <div style={{fontSize:11,color:"#78350f"}}>
+                Plan: {RC.plan} · ₹{(RC.monthlyFee||0).toLocaleString("en-IN")}/{RC.billingCycle||"month"} · Due: {RC.paidUntil}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── Plan & Scan Usage ── */}
+      <div style={{background:C.bg,borderRadius:10,padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",
+        border:`1px solid ${C.border}`}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <span style={{fontSize:11,fontWeight:700,color:C.accent,textTransform:"uppercase",
+            background:C.accent+"15",padding:"3px 8px",borderRadius:6}}>{RC.plan}</span>
+          <span style={{fontSize:12,color:C.text,fontWeight:600}}>
+            AI Scans: <span style={{color:RC.scansUsed>=RC.scansIncluded?"#dc2626":"#16a34a",fontWeight:800}}>
+              {RC.scansUsed||0}</span>
+            <span style={{color:C.muted}}>/{RC.scansIncluded||50} this month</span>
+          </span>
+        </div>
+        {RC.paidUntil && (
+          <span style={{fontSize:10,color:C.muted}}>
+            Paid until: <span style={{fontWeight:700,color:new Date(RC.paidUntil)>new Date()?"#16a34a":"#dc2626"}}>{RC.paidUntil}</span>
+          </span>
+        )}
+      </div>
+
       {/* ── FY Summary + Month-wise — Owner only ── */}
       {user.role==="owner" && (()=>{
         const fyTripsAll = displayTrips;
@@ -2585,8 +2627,10 @@ Rules:
           return false; // duplicate — auto-remove
         });
       });
+      logScan("di_scan", true);
     } catch(e) {
       setItems(prev => prev.map(x => x.id===id ? {...x, status:"error", error:e.message} : x));
+      logScan("di_scan", false);
     }
   };
 
@@ -4845,6 +4889,7 @@ Rules:
       const existingTrip = lrNo ? trips.find(t => t.lrNo === lrNo) : null;
 
       setState("done");
+      logScan("di_scan", true);
       // If caller wants the raw file (e.g. to auto-populate GR ref), pass it back
       if(onFile) onFile(file);
       onExtracted({
@@ -4861,6 +4906,7 @@ Rules:
       console.error("DI scan error:", e);
       setError("Could not read document. Try a clearer photo. (" + e.message + ")");
       setState("error");
+      logScan("di_scan", false);
     }
   };
 
@@ -9726,8 +9772,10 @@ function PumpSlipScanner({ pumps, trips, user, onResults }) {
 
       onResults(results);
       setState("done");
+      logScan("payment_scan", true);
     } catch(e) {
       setError("Could not read slip: " + e.message); setState("error");
+      logScan("payment_scan", false);
     }
   };
 
@@ -15454,9 +15502,9 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         body:JSON.stringify({ base64, anthropicKey: RC.anthropicKey, mediaType:file.type||"application/pdf", scanType}),
       });
       const data = await resp.json();
-      if(data.error) setScanError(data.error);
-      else setScanResult({...data, type:scanType});
-    } catch(e) { setScanError(e.message); }
+      if(data.error) { setScanError(data.error); logScan("shree_scan", false); }
+      else { setScanResult({...data, type:scanType}); logScan("shree_scan", true); }
+    } catch(e) { setScanError(e.message); logScan("shree_scan", false); }
     finally { setScanning(false); }
   };
 
