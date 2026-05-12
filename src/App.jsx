@@ -18680,6 +18680,19 @@ This will auto-recover in the next trip.`);
               <div style={{fontWeight:800,fontSize:14}}>{t.truckNo}</div>
               <div style={{color:C.blue,fontSize:12}}>LR: {t.lrNo||"—"}</div>
               <div style={{color:C.muted,fontSize:11}}>{t.from}→{t.to} · {t.qty}MT · {t.date}</div>
+              <div style={{color:C.muted,fontSize:11}}>{t.from}→{t.to} · {t.qty}MT · {t.date}</div>
+              {/* Diesel confirmation status */}
+              {(()=>{
+                if(!t.dieselEstimate || +t.dieselEstimate<=0) return null;
+                const req = (dieselRequests||[]).find(r=>r.tripId===t.id || r.lrNo===t.lrNo);
+                if(!req) return <div style={{fontSize:10,color:C.orange,fontWeight:700,marginTop:3}}>⛽ Diesel ₹{(+t.dieselEstimate).toLocaleString("en-IN")} — no indent linked</div>;
+                if(req.status!=="confirmed" && req.status!=="done") return (
+                  <div style={{fontSize:10,color:C.red,fontWeight:700,marginTop:3,background:C.red+"11",padding:"3px 8px",borderRadius:4,display:"inline-block"}}>
+                    ⛽ Diesel NOT CONFIRMED — Indent #{req.indentNo} · ₹{(+t.dieselEstimate).toLocaleString("en-IN")}
+                  </div>
+                );
+                return null;
+              })()}
             </div>
             <div style={{textAlign:"right"}}>
               {t.balance>0
