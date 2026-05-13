@@ -11675,13 +11675,47 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
         );
       })()}
 
-      {/* Summary KPIs */}
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-        <KPI icon="⏳" label="Pending to Credit" value={fmt(totalPending)} color={C.red}
-          sub={`across ${pumps.length} pump${pumps.length!==1?"s":""}`} />
-        <KPI icon="✅" label="Total Paid" value={fmt(totalPaid)} color={C.green}
-          sub={`${(pumpPayments||[]).length} payment${(pumpPayments||[]).length!==1?"s":""}`} />
-      </div>
+      {/* Diesel Summary + Quick Payment */}
+      {(()=>{
+        const allReqs = dieselRequests||[];
+        const totalRequested = allReqs.reduce((s,r)=>s+(+r.amount||0),0);
+        const openReqs = allReqs.filter(r=>r.status==="open");
+        const confirmedReqs = allReqs.filter(r=>r.status==="confirmed");
+        const attachedReqs = allReqs.filter(r=>r.status==="attached");
+        const totalOpen = openReqs.reduce((s,r)=>s+(+r.amount||0),0);
+        const totalConfirmed = confirmedReqs.reduce((s,r)=>s+(+r.amount||0),0);
+        const totalAttached = attachedReqs.reduce((s,r)=>s+(+r.amount||0),0);
+        return (
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+            <KPI icon="⛽" label="Total Diesel" value={fmt(totalRequested)} color={C.accent}
+              sub={`${allReqs.length} requests`} />
+            <KPI icon="⏳" label="Pending to Pump" value={fmt(totalPending)} color={totalPending>0?C.red:C.green}
+              sub={`across ${pumps.length} pump${pumps.length!==1?"s":""}`} />
+            <KPI icon="✅" label="Paid to Pump" value={fmt(totalPaid)} color={C.green}
+              sub={`${(pumpPayments||[]).length} payments`} />
+          </div>
+        );
+      })()}
+
+      {/* Quick Record Payment */}
+      {user.role==="owner" && !payPumpId && (
+        <div style={{display:"flex",gap:8}}>
+          {pumps.map(p=>{
+            const bal = pumpBalances.find(b=>b.id===p.id);
+            const pending = bal?.pending||0;
+            if(pending<=0) return null;
+            return (
+              <button key={p.id} onClick={()=>{setPayPumpId(p.id);setPayAmt(String(pending));}}
+                style={{flex:1,background:C.card,border:`1px solid ${C.red}44`,borderRadius:10,padding:"10px 12px",
+                  cursor:"pointer",textAlign:"left"}}>
+                <div style={{fontSize:11,color:C.muted}}>{p.name}</div>
+                <div style={{fontSize:14,fontWeight:800,color:C.red}}>{fmt(pending)} due</div>
+                <div style={{fontSize:10,color:C.accent,marginTop:2}}>Tap to pay →</div>
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       <PillBar items={[
         {id:"requests", label:`Requests (${(dieselRequests||[]).filter(r=>r.status!=="attached").length})`, color:C.teal},
