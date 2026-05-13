@@ -1207,11 +1207,22 @@ export default function App() {
   const [booted, setBooted] = useState(false);
   const [bootError, setBootError] = useState("");
   const [paymentDue, setPaymentDue] = useState(false);
+  const [bootSlow, setBootSlow] = useState(false);
+  const [bootAttempt, setBootAttempt] = useState(0);
 
   useEffect(() => {
+    let cancelled = false;
+    const slowTimer = setTimeout(() => { if(!cancelled) setBootSlow(true); }, 6000);
+
     (async () => {
       try {
-        const ok = await loadRuntimeConfig();
+        // Add a 15-second timeout to the entire boot
+        const configPromise = loadRuntimeConfig();
+        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("Connection timed out")), 15000));
+        const ok = await Promise.race([configPromise, timeoutPromise]);
+
+        if (cancelled) return;
+        clearTimeout(slowTimer);
         if (!ok) { setBootError("Failed to load config from server."); return; }
         if (isPaymentDue()) { setPaymentDue(true); return; }
         initSupabase(RC.supabaseUrl, RC.supabaseAnonKey);
@@ -1225,22 +1236,39 @@ export default function App() {
         window.DB = DB;
         console.log('[BOOT] RC loaded:', { supabaseUrl: RC.supabaseUrl, companyName: RC.companyName, clients: RC.clients, features: Object.keys(RC.features).filter(k=>RC.features[k]).length + ' features enabled' });
         setBooted(true);
-      } catch (e) { setBootError("Boot failed: " + e.message); }
+      } catch (e) {
+        if(!cancelled) setBootError(e.message || "Boot failed");
+      }
     })();
-  }, []);
+
+    return () => { cancelled = true; clearTimeout(slowTimer); };
+  }, [bootAttempt]);
 
   if (paymentDue) return <PaymentDueScreen />;
 
   if (!booted) return (
     <div style={{minHeight:"100vh",background:"#0d1b2a",display:"flex",flexDirection:"column",
-      alignItems:"center",justifyContent:"center",color:"#fff"}}>
+      alignItems:"center",justifyContent:"center",color:"#fff",padding:20}}>
       {bootError ? (
-        <div style={{textAlign:"center"}}>
+        <div style={{textAlign:"center",maxWidth:360}}>
           <div style={{fontSize:18,fontWeight:700,color:"#ef4444",marginBottom:8}}>⚠ {bootError}</div>
-          <div style={{fontSize:12,color:"#94a3b8"}}>Check client.config.js has correct clientId and adminSupabaseUrl</div>
+          <div style={{fontSize:12,color:"#94a3b8",marginBottom:16}}>Check your internet connection and try again.</div>
+          <button onClick={()=>{setBootError("");setBootSlow(false);setBootAttempt(a=>a+1);}}
+            style={{background:"#2563eb",color:"#fff",border:"none",borderRadius:10,padding:"12px 24px",
+              fontSize:14,fontWeight:700,cursor:"pointer"}}>🔄 Retry</button>
         </div>
       ) : (
-        <div style={{fontSize:14,color:"#94a3b8"}}>Loading configuration...</div>
+        <div style={{textAlign:"center"}}>
+          <div style={{fontSize:14,color:"#94a3b8",marginBottom:8}}>Loading configuration...</div>
+          {bootSlow && (
+            <div style={{marginTop:12}}>
+              <div style={{fontSize:12,color:"#f59e0b",marginBottom:12}}>Taking longer than usual. Slow connection?</div>
+              <button onClick={()=>{setBootError("");setBootSlow(false);setBootAttempt(a=>a+1);}}
+                style={{background:"#334155",color:"#fff",border:"1px solid #475569",borderRadius:8,
+                  padding:"8px 20px",fontSize:13,cursor:"pointer"}}>🔄 Retry</button>
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
