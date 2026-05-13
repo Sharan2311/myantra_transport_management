@@ -11729,42 +11729,83 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
       {/* ── PAYMENTS VIEW ── */}
       {view==="payments" && (
         <div style={{display:"flex",flexDirection:"column",gap:10}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-            <div style={{color:C.muted,fontSize:12}}>{(pumpPayments||[]).length} payments recorded</div>
-            <div style={{color:C.green,fontWeight:800}}>{fmt((pumpPayments||[]).reduce((s,p)=>s+(+p.amount||0),0))}</div>
+          {/* Action buttons */}
+          <div style={{display:"flex",gap:8}}>
+            {pumps.length>0 && user.role==="owner" && (<>
+              <button onClick={()=>{setScanSheet(true);setScanResults(null);setScanSummary(null);}}
+                style={{flex:1,background:C.accent,color:"#fff",border:"none",borderRadius:10,padding:"10px 14px",
+                  fontWeight:700,fontSize:13,cursor:"pointer"}}>📷 Scan Payment</button>
+              <button onClick={()=>{if(!payPumpId)setPayPumpId(pumps[0]?.id||"");}}
+                style={{flex:1,background:C.card,color:C.text,border:`1px solid ${C.border}`,borderRadius:10,
+                  padding:"10px 14px",fontWeight:700,fontSize:13,cursor:"pointer"}}>✏️ Record Manually</button>
+            </>)}
           </div>
-          {(pumpPayments||[]).length === 0 && (
-            <div style={{textAlign:"center",color:C.muted,padding:40}}>No payments recorded yet</div>
-          )}
-          {[...(pumpPayments||[])].sort((a,b)=>b.date.localeCompare(a.date)).map(pp => {
-            const pump = pumps.find(p=>p.id===pp.pumpId);
-            return (
-              <div key={pp.id} style={{background:C.card,borderRadius:12,padding:"12px 14px",
-                borderLeft:"3px solid "+C.green}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
-                  <div style={{flex:1,minWidth:0}}>
-                    <div style={{fontWeight:700,fontSize:14}}>{fmt(pp.amount)}</div>
-                    <div style={{color:C.muted,fontSize:12,marginTop:2}}>
-                      {pump?.name||"—"} · {pp.date}
-                    </div>
-                    <div style={{color:C.muted,fontSize:11,marginTop:1}}>
-                      UTR: {pp.utr||"—"}
-                      {pp.note && <span> · {pp.note}</span>}
+
+          {/* Date filter */}
+          <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+            <div><div style={{fontSize:9,color:C.muted,fontWeight:700}}>FROM</div>
+              <input type="date" value={filterFrom} onChange={e=>setFilterFrom(e.target.value)}
+                style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 8px",color:C.text,fontSize:11}}/></div>
+            <div><div style={{fontSize:9,color:C.muted,fontWeight:700}}>TO</div>
+              <input type="date" value={filterTo} onChange={e=>setFilterTo(e.target.value)}
+                style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 8px",color:C.text,fontSize:11}}/></div>
+            <button onClick={()=>{setFilterFrom("");setFilterTo("");}}
+              style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 10px",color:C.muted,fontSize:11,cursor:"pointer",marginTop:14}}>All</button>
+            <button onClick={()=>{const d=new Date();setFilterFrom(new Date(d.getFullYear(),d.getMonth(),1).toISOString().split("T")[0]);setFilterTo(d.toISOString().split("T")[0]);}}
+              style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 10px",color:C.muted,fontSize:11,cursor:"pointer",marginTop:14}}>This Month</button>
+          </div>
+
+          {/* Filtered summary */}
+          {(()=>{
+            const filtered = [...(pumpPayments||[])].filter(pp=>{
+              if(filterFrom && pp.date < filterFrom) return false;
+              if(filterTo && pp.date > filterTo) return false;
+              return true;
+            }).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+            const filteredTotal = filtered.reduce((s,p)=>s+(+p.amount||0),0);
+            return (<>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                background:C.card,borderRadius:8,padding:"8px 12px",border:`1px solid ${C.border}`}}>
+                <div style={{color:C.muted,fontSize:12}}>
+                  {filtered.length} payment{filtered.length!==1?"s":""}{filterFrom||filterTo?" (filtered)":""}
+                </div>
+                <div style={{color:C.green,fontWeight:800,fontSize:15}}>{fmt(filteredTotal)}</div>
+              </div>
+
+              {filtered.length === 0 && (
+                <div style={{textAlign:"center",color:C.muted,padding:40}}>No payments{filterFrom||filterTo?" in this period":""}</div>
+              )}
+              {filtered.map(pp => {
+                const pump = pumps.find(p=>p.id===pp.pumpId);
+                return (
+                  <div key={pp.id} style={{background:C.card,borderRadius:12,padding:"12px 14px",
+                    borderLeft:"3px solid "+C.green}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontWeight:700,fontSize:14}}>{fmt(pp.amount)}</div>
+                        <div style={{color:C.muted,fontSize:12,marginTop:2}}>
+                          {pump?.name||"—"} · {pp.date}
+                        </div>
+                        <div style={{color:C.muted,fontSize:11,marginTop:1}}>
+                          UTR: {pp.utr||"—"}
+                          {pp.note && <span> · {pp.note}</span>}
+                        </div>
+                      </div>
+                      {user.role==="owner" && (
+                        <button onClick={async()=>{
+                          if(!window.confirm("Delete payment of "+fmt(pp.amount)+" to "+(pump?.name||"—")+"?")) return;
+                          deletePumpPayment(pp.id);
+                        }} style={{background:"none",border:"1px solid "+C.red+"55",borderRadius:6,
+                          color:C.red,fontSize:11,padding:"4px 8px",cursor:"pointer",flexShrink:0,marginLeft:8}}>
+                          🗑
+                        </button>
+                      )}
                     </div>
                   </div>
-                  {user.role==="owner" && (
-                    <button onClick={async()=>{
-                      if(!window.confirm("Delete payment of "+fmt(pp.amount)+" to "+pump?.name+"?\\nThis will affect pending balance.")) return;
-                      deletePumpPayment(pp.id);
-                    }} style={{background:"none",border:"1px solid "+C.red+"55",borderRadius:6,
-                      color:C.red,fontSize:11,padding:"4px 8px",cursor:"pointer",flexShrink:0,marginLeft:8}}>
-                      🗑 Delete
-                    </button>
-                  )}
-                </div>
-              </div>
-            );
-          })}
+                );
+              })}
+            </>);
+          })()}
         </div>
       )}
 
