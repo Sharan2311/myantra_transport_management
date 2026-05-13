@@ -75,14 +75,11 @@ export const RC = {
 // ── Load everything from admin DB ───────────────────────────────────────────
 export async function loadRuntimeConfig() {
   try {
-    // Fetch client, features, and scan count in PARALLEL for faster boot
-    const som = new Date();
-    som.setDate(1); som.setHours(0,0,0,0);
-
-    const [clientRes, featsRes, scanRes] = await Promise.all([
+    // Fetch client + features in parallel (required for boot)
+    // Scan count is optional — fetched separately so it doesn't block boot
+    const [clientRes, featsRes] = await Promise.all([
       adminDb.from('clients').select('*').eq('id', CLIENT_CONFIG.clientId).single(),
       adminDb.from('client_features').select('feature, enabled').eq('client_id', CLIENT_CONFIG.clientId),
-      adminDb.from('client_scans').select('*', { count: 'exact', head: true }).eq('client_id', CLIENT_CONFIG.clientId).gte('scanned_at', som.toISOString()),
     ]);
 
     const client = clientRes.data;
@@ -94,7 +91,17 @@ export async function loadRuntimeConfig() {
     const featureMap = {};
     (featsRes.data || []).forEach(f => { featureMap[f.feature] = f.enabled; });
 
-    const scanCount = scanRes.count || 0;
+    // Scan count — non-blocking, fetched after boot if slow
+    let scanCount = 0;
+    try {
+      const som = new Date();
+      som.setDate(1); som.setHours(0,0,0,0);
+      const scanRes = await Promise.race([
+        adminDb.from('client_scans').select('*', { count: 'exact', head: true }).eq('client_id', CLIENT_CONFIG.clientId).gte('scanned_at', som.toISOString()),
+        new Promise(resolve => setTimeout(() => resolve({ count: 0 }), 3000)) // 3s timeout
+      ]);
+      scanCount = scanRes.count || 0;
+    } catch { scanCount = 0; }
 
     // Parse business config
     const biz = client.business_config || {};
