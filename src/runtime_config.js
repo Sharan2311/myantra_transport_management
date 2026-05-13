@@ -75,44 +75,31 @@ export const RC = {
 // ── Load everything from admin DB ───────────────────────────────────────────
 export async function loadRuntimeConfig() {
   try {
-    // 1. Fetch client row
-    const { data: client, error: e1 } = await adminDb
-      .from('clients')
-      .select('*')
-      .eq('id', CLIENT_CONFIG.clientId)
-      .single();
+    // Fetch client, features, and scan count in PARALLEL for faster boot
+    const som = new Date();
+    som.setDate(1); som.setHours(0,0,0,0);
 
-    if (e1 || !client) {
-      console.error('Failed to load client config:', e1);
+    const [clientRes, featsRes, scanRes] = await Promise.all([
+      adminDb.from('clients').select('*').eq('id', CLIENT_CONFIG.clientId).single(),
+      adminDb.from('client_features').select('feature, enabled').eq('client_id', CLIENT_CONFIG.clientId),
+      adminDb.from('client_scans').select('*', { count: 'exact', head: true }).eq('client_id', CLIENT_CONFIG.clientId).gte('scanned_at', som.toISOString()),
+    ]);
+
+    const client = clientRes.data;
+    if (clientRes.error || !client) {
+      console.error('Failed to load client config:', clientRes.error);
       return false;
     }
 
-    // 2. Fetch features
-    const { data: feats } = await adminDb
-      .from('client_features')
-      .select('feature, enabled')
-      .eq('client_id', CLIENT_CONFIG.clientId);
-
     const featureMap = {};
-    (feats || []).forEach(f => { featureMap[f.feature] = f.enabled; });
+    (featsRes.data || []).forEach(f => { featureMap[f.feature] = f.enabled; });
 
-// 3. Fetch scan count for current month
-    const som = new Date();
-    som.setDate(1); som.setHours(0,0,0,0);
-    let scanCount = 0;
-    try {
-      const { count } = await adminDb
-        .from('client_scans')
-        .select('*', { count: 'exact', head: true })
-        .eq('client_id', CLIENT_CONFIG.clientId)
-        .gte('scanned_at', som.toISOString());
-      scanCount = count || 0;
-    } catch { scanCount = 0; }
+    const scanCount = scanRes.count || 0;
 
-    // 4. Parse business config
+    // Parse business config
     const biz = client.business_config || {};
 
-    // 5. Populate RC
+    // Populate RC
     RC.companyName      = client.name || RC.companyName;
     RC.companyShort     = client.company_short || client.name?.slice(0,2).toUpperCase() || "TM";
     RC.ownerName        = client.owner_name || "";

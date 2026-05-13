@@ -2610,18 +2610,18 @@ Rules:
         pincode: pincode || extracted.pincode || "",
       };
 
-      // Check if scanned client is in user's allowed clients
+      // Check if scanned client is in user's allowed clients — auto-correct if not
       if(userClients.length < getCLIENTS().length && !userClients.includes(client)) {
-        setItems(prev => prev.map(x => x.id===id
-          ? {...x, status:"error",
-              error:`You are not assigned to "${client}". Contact owner to get access.`}
-          : x));
-        return;
+        // Auto-correct to user's first assigned client instead of blocking
+        const correctedClient = userClients[0] || client;
+        extracted.client = correctedClient;
+        extracted._clientCorrected = true;
+        extracted._originalClient = client;
       }
       setItems(prev => {
         // First mark this item done
         const updated = prev.map(x => x.id===id
-          ? {...x, status:"done", extracted:{...extracted, client},
+          ? {...x, status:"done", extracted:{...extracted, client: extracted.client || client},
               orderType: extracted._autoOrderType || "godown",
               ownerName: ((vehicles||[]).find(v=>v.truckNo===(extracted.truckNo||"").toUpperCase().replace(/\s/g,""))?.ownerName) || extracted.ownerName || "",
               pouchBalance: extracted._autoOrderType === "party" ? 700 : 0,
@@ -18686,7 +18686,7 @@ This will auto-recover in the next trip.`);
                 if(!t.dieselEstimate || +t.dieselEstimate<=0) return null;
                 const req = (dieselRequests||[]).find(r=>r.tripId===t.id || r.lrNo===t.lrNo);
                 if(!req) return <div style={{fontSize:10,color:C.orange,fontWeight:700,marginTop:3}}>⛽ Diesel ₹{(+t.dieselEstimate).toLocaleString("en-IN")} — no indent linked</div>;
-                if(req.status!=="confirmed" && req.status!=="done") return (
+                if(req.status==="open") return (
                   <div style={{fontSize:10,color:C.red,fontWeight:700,marginTop:3,background:C.red+"11",padding:"3px 8px",borderRadius:4,display:"inline-block"}}>
                     ⛽ Diesel NOT CONFIRMED — Indent #{req.indentNo} · ₹{(+t.dieselEstimate).toLocaleString("en-IN")}
                   </div>
@@ -18836,7 +18836,7 @@ This will auto-recover in the next trip.`);
                       if(!trip || !trip.dieselEstimate || +trip.dieselEstimate<=0) return null;
                       const dreq = (dieselRequests||[]).find(r=>r.tripId===trip.id || r.lrNo===trip.lrNo);
                       if(!dreq) return <div style={{fontSize:10,color:C.orange,fontWeight:700,marginTop:3}}>⛽ Diesel ₹{(+trip.dieselEstimate).toLocaleString("en-IN")} — no indent linked</div>;
-                      if(dreq.status!=="confirmed"&&dreq.status!=="done") return (
+                      if(dreq.status==="open") return (
                         <div style={{fontSize:10,color:"#fff",fontWeight:700,marginTop:3,background:"#dc2626",padding:"3px 8px",borderRadius:4,display:"inline-block"}}>
                           ⛽ DIESEL NOT CONFIRMED — Indent #{dreq.indentNo}
                         </div>
