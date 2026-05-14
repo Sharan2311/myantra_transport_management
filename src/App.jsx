@@ -10634,19 +10634,48 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
     if(!file||!selected.size)return;
     setPdfUploading(true);
     try{
-      const path=`party_confirm/${Date.now()}_${file.name.replace(/\s/g,"_")}`;
-      const {error}=await supabase.storage.from("trip-files").upload(path,file,{upsert:true});
-      if(error)throw error;
-      const {data:{publicUrl}}=supabase.storage.from("trip-files").getPublicUrl(path);
       const ts=new Date().toISOString();
       const pdfUpdated=[];
+      const confBuf = await file.arrayBuffer();
+
+      for(const tid of selected) {
+        const trip = (trips||[]).find(t=>t.id===tid);
+        if(!trip) continue;
+
+        // Upload confirmation to party-trip-files bucket
+        const path=`${tid}/confirmation.${file.name.split(".").pop()||"pdf"}`;
+        const{error}=await supabase.storage.from("party-trip-files").upload(path,file,{upsert:true});
+        if(error) { console.error("Upload confirm:",error.message); continue; }
+
+        // Generate signed URL for viewing
+        const{data:signedData}=await supabase.storage.from("party-trip-files").createSignedUrl(path,86400*365);
+        const confirmUrl = signedData?.signedUrl || path;
+
+        // Auto-merge: confirmation + GR + invoice
+        let mergedPath="";
+        const grP=trip.grFilePath||(trip.diLines||[]).find(d=>d.grFilePath)?.grFilePath;
+        const invP=trip.invoiceFilePath||(trip.diLines||[]).find(d=>d.invoiceFilePath)?.invoiceFilePath;
+        if(grP&&invP){
+          try{
+            const[gb,ib]=await Promise.all([fetchStorageFile(grP),fetchStorageFile(invP)]);
+            const mb=await mergePDFs([confBuf,gb,ib]);
+            const mr=await uploadPartyFile(tid,"merged_confirmation",new File([mb],"merged.pdf",{type:"application/pdf"}));
+            mergedPath=mr.path;
+          }catch(me){console.warn("Merge:",me.message);}
+        }
+
+        const u={...trip,emailSentAt:trip.emailSentAt||ts,confirmPdfPath:confirmUrl,status:"Confirmation Email Received",
+          ...(mergedPath?{mergedPdfPath:mergedPath,receiptFilePath:path,receiptUploadedAt:ts}:{})};
+        pdfUpdated.push(u);
+      }
+
       setTrips(prev=>prev.map(t=>{
-        if(!selected.has(t.id))return t;
-        const u={...t,emailSentAt:t.emailSentAt||ts,confirmPdfPath:publicUrl,status:"Confirmation Email Received"};
-        pdfUpdated.push(u); return u;
+        const u=pdfUpdated.find(p=>p.id===t.id);
+        return u||t;
       }));
-      setTimeout(()=>pdfUpdated.forEach(u=>DB.saveTrip(u).catch(e=>console.error("saveTrip confirm pdf:",e))),0);
-      log&&log("CONFIRM PDF",`${selected.size} trips`);setSelected(new Set());
+      setTimeout(()=>pdfUpdated.forEach(u=>DB.saveTrip(u).catch(e=>console.error("saveTrip confirm:",e))),0);
+      log&&log("CONFIRM PDF",`${pdfUpdated.length} trips${pdfUpdated.some(u=>u.mergedPdfPath)?" + merged":""}`);
+      setSelected(new Set());
     }catch(e){alert("Upload failed: "+e.message);}
     finally{setPdfUploading(false);}
   };
