@@ -106,6 +106,7 @@ const ROLES = {
   owner:         {label:"Owner",               color:C.accent,  perms:["trips","inbound","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","admin","driverPay","party_portal"]},
   manager:       {label:"Manager",             color:C.blue,    perms:["trips","inbound","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","driverPay","party_portal"]},
   fleet_manager: {label:"Cement Fleet Manager",color:C.teal,    perms:["cement_trips","billing","diesel","driverPay_view"]},
+  fleet_mgr_nd:  {label:"Fleet Mgr (No Diesel Req)",color:"#0891b2", perms:["cement_trips","billing","diesel_view","driverPay_view"]},
   operator:      {label:"Trip Operator",       color:C.teal,    perms:["trips","billing","diesel"]},
   accounts:      {label:"Accounts",            color:C.purple,  perms:["billing","payments","reports","diesel","tafal"]},
   pump_operator: {label:"Pump Operator",       color:C.orange,  perms:["pump_portal"]},
@@ -3268,12 +3269,13 @@ Rules:
           emailSentAt:"", partyEmail:"", batchId:"",
           mergedPdfPath:"", receiptFilePath:"", receiptUploadedAt:"",
           sealedInvoicePath:"",
-          partyDriverPhone: primary.partyDriverPhone || "",  // manual entry only
-          salesOfficerPhone: primary.salesOfficerPhone || "",
-          salesOfficerEmail: primary.salesOfficerEmail || "",
-          partyNumber: primary.partyNumber || "",
-          partyName: primary.partyName || primary.extracted?._partyName || "",
-          pouchBalance: primary.orderType==="party" ? (primary.pouchBalance??700) : 0,
+          // For mixed trips: use the PARTY DI's fields (not necessarily the primary)
+          partyDriverPhone: (groupItems.find(x=>x.orderType==="party")?.partyDriverPhone) || primary.partyDriverPhone || "",
+          salesOfficerPhone: (groupItems.find(x=>x.orderType==="party")?.salesOfficerPhone) || primary.salesOfficerPhone || "",
+          salesOfficerEmail: (groupItems.find(x=>x.orderType==="party")?.salesOfficerEmail) || primary.salesOfficerEmail || "",
+          partyNumber: (groupItems.find(x=>x.orderType==="party")?.partyNumber) || primary.partyNumber || "",
+          partyName: (groupItems.find(x=>x.orderType==="party")?.partyName) || primary.partyName || primary.extracted?._partyName || "",
+          pouchBalance: diLines.some(d=>d.orderType==="party") ? ((groupItems.find(x=>x.orderType==="party")?.pouchBalance)??700) : 0,
           grParticulars: primary.extracted?._grParticulars || null,
           createdBy:user.username, createdAt:nowTs(),
         };
@@ -4254,30 +4256,37 @@ Rules:
                 </div>
               )}
 
-              {/* Ready indicator */}
+              {/* Ready indicator with detailed validation messages */}
               {(()=>{
                 const dupItems = groupItems.filter(x=>checkDupDI(x.extracted?.diNo));
                 const noRate   = groupItems.filter(x=>!x.givenRate||+x.givenRate<=0);
                 const lowMargin= groupItems.filter(x=>x.givenRate&&+x.givenRate>0&&(+x.extracted?.frRate||0)-(+x.givenRate)<30);
-                if(dupItems.length>0) return (
-                  <div style={{color:C.red,fontSize:12,fontWeight:800,textAlign:"center",
-                    background:C.red+"11",borderRadius:8,padding:"8px"}}>
-                    🚫 {dupItems.length} duplicate DI{dupItems.length>1?"s":""} — remove from group or uncheck to proceed
-                  </div>
-                );
-                if(noRate.length>0) return (
-                  <div style={{color:C.muted,fontSize:11,textAlign:"center"}}>
-                    Enter driver rate for {noRate.length} DI{noRate.length>1?"s":""} to enable save
-                  </div>
-                );
-                if(lowMargin.length>0) return (
-                  <div style={{color:C.red,fontSize:11,textAlign:"center"}}>
-                    ⚠ Margin below ₹30/MT on {lowMargin.length} DI{lowMargin.length>1?"s":""}
-                  </div>
-                );
-                if(!g.assignedEmpId) return (
-                  <div style={{color:C.orange,fontSize:11,textAlign:"center",fontWeight:600}}>
-                    👤 Assign an employee to enable save
+                const ownerVeh = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
+                const noOwner  = (!ownerVeh || !(ownerVeh.ownerName||"").trim()) && !(g.ownerName||"").trim();
+                const noEmployee = !g.assignedEmpId;
+                const noPhone  = !ownerVeh && !(g.driverPhone||"").trim();
+
+                // Collect all issues
+                const issues = [];
+                if(dupItems.length>0)  issues.push({icon:"🚫", en:`${dupItems.length} duplicate DI — remove to proceed`, kn:`${dupItems.length} ನಕಲಿ DI — ತೆಗೆದುಹಾಕಿ`});
+                if(noRate.length>0)    issues.push({icon:"₹",  en:`Enter driver rate for ${noRate.length} DI`, kn:`${noRate.length} DI ಗೆ ಡ್ರೈವರ್ ದರ ನಮೂದಿಸಿ`});
+                if(lowMargin.length>0) issues.push({icon:"⚠",  en:`Margin below ₹30/MT on ${lowMargin.length} DI`, kn:`${lowMargin.length} DI ಯಲ್ಲಿ ₹30/MT ಕಡಿಮೆ ಮಾರ್ಜಿನ್`});
+                if(noOwner)            issues.push({icon:"👤", en:"Owner name required (new vehicle)", kn:"ಮಾಲೀಕರ ಹೆಸರು ಅಗತ್ಯ (ಹೊಸ ವಾಹನ)"});
+                if(noPhone)            issues.push({icon:"📞", en:"Driver phone required (new vehicle)", kn:"ಡ್ರೈವರ್ ಫೋನ್ ಅಗತ್ಯ (ಹೊಸ ವಾಹನ)"});
+                if(noEmployee)         issues.push({icon:"👤", en:"Assign an employee", kn:"ಉದ್ಯೋಗಿಯನ್ನು ನಿಯೋಜಿಸಿ"});
+
+                if(issues.length > 0) return (
+                  <div style={{background:"#fef3c7",border:"1px solid #f59e0b44",borderRadius:8,padding:"8px 10px"}}>
+                    <div style={{fontSize:11,fontWeight:700,color:"#92400e",marginBottom:4}}>
+                      ⚠ {issues.length} field{issues.length>1?"s":""} required to save — ಸೇವ್ ಮಾಡಲು {issues.length} ಕ್ಷೇತ್ರ ಅಗತ್ಯ
+                    </div>
+                    {issues.map((iss,i)=>(
+                      <div key={i} style={{fontSize:11,color:"#78350f",padding:"2px 0",display:"flex",alignItems:"center",gap:6}}>
+                        <span>{iss.icon}</span>
+                        <span>{iss.en}</span>
+                        <span style={{color:"#92400e",fontSize:10}}>({iss.kn})</span>
+                      </div>
+                    ))}
                   </div>
                 );
                 return <div style={{color:C.green,fontSize:12,fontWeight:700,textAlign:"center"}}>✅ Ready to save · LR will be auto-assigned</div>;
@@ -11720,7 +11729,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
       <PillBar items={[
         {id:"requests", label:`Requests (${(dieselRequests||[]).filter(r=>r.status!=="attached").length})`, color:C.teal},
         {id:"pumps",    label:"By Pump",   color:C.orange},
-        {id:"payments", label:`Payments (${(pumpPayments||[]).length})`, color:C.green},
+        ...(user.role==="owner"?[{id:"payments", label:`Payments (${(pumpPayments||[]).length})`, color:C.green}]:[]),
         {id:"indents",  label:`Indents (${confirmedIndents.length})`, color:C.blue},
         {id:"lrmap",    label:"LR ↔ Indent", color:C.teal||C.purple},
         {id:"history",  label:"Alerts", color:C.muted},
