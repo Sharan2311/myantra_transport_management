@@ -5539,15 +5539,27 @@ function PartyBatchEmailSheet({ trips, setTrips, onClose, log }) {
                   onChange={async(e)=>{
                     const file=e.target.files[0]; if(!file)return;
                     try{
-                      const path=`party_confirm/${t.id}_${file.name.replace(/\s/g,"_")}`;
-                      const{error}=await supabase.storage.from("trip-files").upload(path,file,{upsert:true});
+                      const path=`${t.id}/confirmation.${file.name.split(".").pop()||"pdf"}`;
+                      const{error}=await supabase.storage.from("party-trip-files").upload(path,file,{upsert:true});
                       if(error)throw error;
-                      const{data:{publicUrl}}=supabase.storage.from("trip-files").getPublicUrl(path);
+                      // Auto-merge
+                      let mergedPath="";
+                      const grP=t.grFilePath||(t.diLines||[]).find(d=>d.grFilePath)?.grFilePath;
+                      const invP=t.invoiceFilePath||(t.diLines||[]).find(d=>d.invoiceFilePath)?.invoiceFilePath;
+                      if(grP&&invP){try{
+                        const cb=await file.arrayBuffer();
+                        const[gb,ib]=await Promise.all([fetchStorageFile(grP),fetchStorageFile(invP)]);
+                        const mb=await mergePDFs([cb,gb,ib]);
+                        const mr=await uploadPartyFile(t.id,"merged_confirmation",new File([mb],"merged.pdf",{type:"application/pdf"}));
+                        mergedPath=mr.path;
+                      }catch(me){console.warn("Merge:",me.message);}}
+                      const{data}=await supabase.storage.from("party-trip-files").createSignedUrl(path,86400*365);
                       const ts=new Date().toISOString();
-                      const u={...t,emailSentAt:t.emailSentAt||ts,confirmPdfPath:publicUrl,status:"Confirmation Email Received"};
+                      const u={...t,emailSentAt:t.emailSentAt||ts,confirmPdfPath:data?.signedUrl||path,status:"Confirmation Email Received",
+                        ...(mergedPath?{mergedPdfPath:mergedPath,receiptFilePath:path,receiptUploadedAt:ts}:{})};
                       setTrips(p=>p.map(x=>x.id===t.id?u:x));
                       setTimeout(()=>DB.saveTrip(u).catch(er=>console.error(er)),0);
-                      log&&log("CONFIRM PDF UPLOADED","Single: "+t.lrNo);
+                      log&&log("CONFIRM PDF","Single: "+t.lrNo+(mergedPath?" + merged":""));
                     }catch(err){alert("Upload failed: "+err.message);}
                   }}/>
               </label>
@@ -7463,14 +7475,30 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                             onChange={async(e)=>{
                               const file=e.target.files[0]; if(!file)return;
                               try{
-                                const path=`party_confirm/${t.id}_${file.name.replace(/\s/g,"_")}`;
-                                const{error}=await supabase.storage.from("trip-files").upload(path,file,{upsert:true});
+                                const path=`${t.id}/confirmation.${file.name.split(".").pop()||"pdf"}`;
+                                const{error}=await supabase.storage.from("party-trip-files").upload(path,file,{upsert:true});
                                 if(error)throw error;
-                                const{data:{publicUrl}}=supabase.storage.from("trip-files").getPublicUrl(path);
+                                // Auto-merge: GR + Invoice + Confirmation
+                                let mergedPath="";
+                                const grPath=t.grFilePath||(t.diLines||[]).find(d=>d.grFilePath)?.grFilePath;
+                                const invPath=t.invoiceFilePath||(t.diLines||[]).find(d=>d.invoiceFilePath)?.invoiceFilePath;
+                                if(grPath&&invPath){
+                                  try{
+                                    const confBuf=await file.arrayBuffer();
+                                    const[grBuf,invBuf]=await Promise.all([fetchStorageFile(grPath),fetchStorageFile(invPath)]);
+                                    const merged=await mergePDFs([confBuf,grBuf,invBuf]);
+                                    const mf=new File([merged],"merged_confirmation.pdf",{type:"application/pdf"});
+                                    const mr=await uploadPartyFile(t.id,"merged_confirmation",mf);
+                                    mergedPath=mr.path;
+                                  }catch(me){console.warn("Auto-merge failed:",me.message);}
+                                }
+                                const{data:{signedUrl}}=await supabase.storage.from("party-trip-files").createSignedUrl(path,86400*365);
                                 const ts=new Date().toISOString();
-                                const u={...t,emailSentAt:t.emailSentAt||ts,confirmPdfPath:publicUrl,status:"Confirmation Email Received"};
+                                const u={...t,emailSentAt:t.emailSentAt||ts,confirmPdfPath:signedUrl||path,
+                                  status:"Confirmation Email Received",
+                                  ...(mergedPath?{mergedPdfPath:mergedPath,receiptFilePath:path,receiptUploadedAt:ts}:{})};
                                 setTrips(p=>p.map(x=>x.id===t.id?u:x));
-                                log("CONFIRM PDF","LR:"+t.lrNo);
+                                log("CONFIRM PDF","LR:"+t.lrNo+(mergedPath?" + auto-merged":""));
                               }catch(err){alert("Upload failed: "+err.message);}
                             }}/>
                         </label>
@@ -16076,7 +16104,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         const short=shorts.find(s=>(s.lrNo||"").trim()===lrKey);
         if(t.orderType==="party" && t.id) paidTrips.push(t.id);
         const updated = {...t, paidAmount:Number(t.billedToShree||0), paymentDate:pDate, utr,
-          shreeStatus:"paid",
+          shreeStatus:"paid", status:"Paid",
           shortage: short ? (t.shortage||0)+Number(short.tonnes||0) : t.shortage,
           shreeShortage:short?{tonnes:Number(short.tonnes||0),deduction:Number(short.deduction||0)}:t.shreeShortage};
         paidTripObjects.push(updated);
