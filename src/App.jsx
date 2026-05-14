@@ -5385,9 +5385,21 @@ function PartyBatchEmailSheet({ trips, setTrips, onClose, log }) {
   const [toEmail,  setToEmail]  = useState("");
   const [step,     setStep]     = useState("select"); // "select" | "compose" | "sealed"
   const [opened,   setOpened]   = useState(false);
-  const [sealedTrip, setSealedTrip] = useState(null); // trip object for inline SealedInvoiceSheet
+  const [sealedTrip, setSealedTrip] = useState(null);
+  const [searchQ,  setSearchQ]  = useState("");
+  const [showAll,  setShowAll]  = useState(false);
 
-  const pending = trips.filter(t => t.orderType==="party" && !t.emailSentAt);
+  const allParty = trips.filter(t => t.orderType==="party");
+  const pending = allParty.filter(t => !t.emailSentAt);
+  const displayList = showAll ? allParty : pending;
+  const filtered = displayList.filter(t => {
+    if(!searchQ.trim()) return true;
+    const q = searchQ.trim().toUpperCase();
+    return (t.truckNo||"").toUpperCase().includes(q) ||
+           (t.lrNo||"").toUpperCase().includes(q) ||
+           (t.diNo||"").toUpperCase().includes(q) ||
+           (t.consignee||"").toUpperCase().includes(q);
+  });
   const fmtD = d => { if(!d) return "—"; const [y,m,dy]=d.split("-"); return dy+"-"+m+"-"+y; };
 
   const toggle = id => setSelected(prev => {
@@ -5451,13 +5463,24 @@ function PartyBatchEmailSheet({ trips, setTrips, onClose, log }) {
           </div>
         )}
 
-        {/* Select All / Deselect All */}
-        {pending.length>0 && (
+        {/* Select All / Deselect All + Search */}
+        {displayList.length>0 && (<>
+          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            <input value={searchQ} onChange={e=>setSearchQ(e.target.value)} placeholder="🔍 Search LR, vehicle, consignee..."
+              style={{flex:1,background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,color:C.text,
+                padding:"8px 12px",fontSize:12,outline:"none"}}/>
+            <button onClick={()=>setShowAll(!showAll)}
+              style={{background:showAll?C.blue+"22":C.dim,border:`1px solid ${showAll?C.blue:C.border}`,
+                borderRadius:8,padding:"6px 10px",fontSize:10,fontWeight:700,
+                color:showAll?C.blue:C.muted,cursor:"pointer",whiteSpace:"nowrap"}}>
+              {showAll?`All (${allParty.length})`:`Pending (${pending.length})`}
+            </button>
+          </div>
           <div style={{display:"flex",gap:8}}>
-            <button onClick={()=>setSelected(new Set(pending.map(t=>t.id)))}
+            <button onClick={()=>setSelected(new Set(filtered.map(t=>t.id)))}
               style={{background:C.accent+"22",border:"1px solid "+C.accent+"44",color:C.accent,
                 borderRadius:8,padding:"5px 12px",fontSize:11,fontWeight:700,cursor:"pointer"}}>
-              Select All ({pending.length})
+              Select All ({filtered.length})
             </button>
             <button onClick={()=>setSelected(new Set())}
               style={{background:C.dim,border:"1px solid "+C.border,color:C.muted,
@@ -5465,28 +5488,70 @@ function PartyBatchEmailSheet({ trips, setTrips, onClose, log }) {
               Clear
             </button>
           </div>
-        )}
+        </>)}
 
-        {pending.map(t => (
-          <div key={t.id} onClick={()=>toggle(t.id)}
+        {filtered.map(t => (
+          <div key={t.id}
             style={{background:selected.has(t.id)?C.accent+"11":C.bg,
               border:"2px solid "+(selected.has(t.id)?C.accent:C.border),
-              borderRadius:12,padding:"12px 14px",cursor:"pointer",
-              display:"flex",gap:12,alignItems:"flex-start"}}>
-            <div style={{width:20,height:20,borderRadius:4,flexShrink:0,marginTop:2,
-              background:selected.has(t.id)?C.accent:C.dim,
-              border:"2px solid "+(selected.has(t.id)?C.accent:C.border),
-              display:"flex",alignItems:"center",justifyContent:"center",color:"#000",fontSize:13,fontWeight:900}}>
-              {selected.has(t.id)?"✓":""}
-            </div>
-            <div style={{flex:1,minWidth:0}}>
-              <div style={{display:"flex",justifyContent:"space-between"}}>
-                <span style={{fontWeight:800,fontSize:13}}>{t.truckNo}</span>
-                <span style={{color:C.orange,fontWeight:700}}>{t.qty} MT</span>
+              borderRadius:12,padding:"12px 14px",
+              display:"flex",flexDirection:"column",gap:6}}>
+            <div onClick={()=>toggle(t.id)} style={{display:"flex",gap:12,alignItems:"flex-start",cursor:"pointer"}}>
+              <div style={{width:20,height:20,borderRadius:4,flexShrink:0,marginTop:2,
+                background:selected.has(t.id)?C.accent:C.dim,
+                border:"2px solid "+(selected.has(t.id)?C.accent:C.border),
+                display:"flex",alignItems:"center",justifyContent:"center",color:"#000",fontSize:13,fontWeight:900}}>
+                {selected.has(t.id)?"✓":""}
               </div>
-              <div style={{color:C.blue,fontSize:12}}>LR: {t.lrNo||"—"} · DI: {t.diNo||"—"}</div>
-              <div style={{color:C.muted,fontSize:11}}>{t.consignee||"—"} · {t.to||"—"}</div>
-              <div style={{color:C.muted,fontSize:11}}>{t.district||"—"}, {t.state||"—"} · {t.date}</div>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{display:"flex",justifyContent:"space-between"}}>
+                  <span style={{fontWeight:800,fontSize:13}}>{t.truckNo}</span>
+                  <span style={{color:C.orange,fontWeight:700}}>{t.qty} MT</span>
+                </div>
+                <div style={{color:C.blue,fontSize:12}}>LR: {t.lrNo||"—"} · DI: {t.diNo||"—"}</div>
+                <div style={{color:C.muted,fontSize:11}}>{t.consignee||"—"} · {t.to||"—"}</div>
+                <div style={{color:C.muted,fontSize:11}}>{t.district||"—"}, {t.state||"—"} · {t.date}</div>
+                {t.salesOfficerEmail&&<div style={{fontSize:10,color:C.purple}}>📧 SO: {t.salesOfficerEmail}</div>}
+              </div>
+            </div>
+            {/* Per-trip quick actions */}
+            <div style={{display:"flex",gap:6,flexWrap:"wrap",paddingLeft:32}}>
+              {!t.emailSentAt ? (
+                <button onClick={(e)=>{e.stopPropagation();
+                  if(!window.confirm(`Mark email sent for ${t.lrNo||t.truckNo}?`)) return;
+                  const ts=new Date().toISOString();
+                  setTrips(p=>p.map(x=>x.id===t.id?{...x,emailSentAt:ts,status:"Yet to Bill"}:x));
+                  setTimeout(()=>DB.saveTrip({...t,emailSentAt:ts,status:"Yet to Bill"}).catch(er=>console.error(er)),0);
+                  log&&log("PARTY EMAIL SENT","Single: "+t.lrNo);
+                }} style={{fontSize:10,color:C.blue,background:C.blue+"11",border:`1px solid ${C.blue}33`,
+                  borderRadius:4,padding:"3px 8px",cursor:"pointer",fontWeight:600}}>
+                  📧 Mark Sent
+                </button>
+              ) : (
+                <span style={{fontSize:10,color:C.green,background:C.green+"11",borderRadius:4,padding:"3px 8px"}}>
+                  ✅ Email sent {t.emailSentAt.slice(0,10)}
+                </span>
+              )}
+              <label style={{fontSize:10,color:C.teal,background:C.teal+"11",border:`1px solid ${C.teal}33`,
+                borderRadius:4,padding:"3px 8px",cursor:"pointer",fontWeight:600}}>
+                📄 Upload Confirmation
+                <input type="file" accept=".pdf,image/*" style={{display:"none"}}
+                  onChange={async(e)=>{
+                    const file=e.target.files[0]; if(!file)return;
+                    try{
+                      const path=`party_confirm/${t.id}_${file.name.replace(/\s/g,"_")}`;
+                      const{error}=await supabase.storage.from("trip-files").upload(path,file,{upsert:true});
+                      if(error)throw error;
+                      const{data:{publicUrl}}=supabase.storage.from("trip-files").getPublicUrl(path);
+                      const ts=new Date().toISOString();
+                      const u={...t,emailSentAt:t.emailSentAt||ts,confirmPdfPath:publicUrl,status:"Confirmation Email Received"};
+                      setTrips(p=>p.map(x=>x.id===t.id?u:x));
+                      setTimeout(()=>DB.saveTrip(u).catch(er=>console.error(er)),0);
+                      log&&log("CONFIRM PDF UPLOADED","Single: "+t.lrNo);
+                    }catch(err){alert("Upload failed: "+err.message);}
+                  }}/>
+              </label>
+              {t.confirmPdfPath&&<span style={{fontSize:10,color:C.teal,background:C.teal+"11",borderRadius:4,padding:"3px 8px"}}>✅ Confirmed</span>}
             </div>
           </div>
         ))}
@@ -10265,7 +10330,7 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance: tripWithBalancePr
 }
 
 // ─── DIESEL MODULE ────────────────────────────────────────────────────────────
-function PartyTripCard({t, selected, toggle, isOwner, isPartyMgr, employees, openFile, undoEmailSent, undoAssign}) {
+function PartyTripCard({t, selected, toggle, isOwner, isPartyMgr, employees, openFile, undoEmailSent, undoAssign, onUploadConfirm, onMarkEmailSent}) {
     const isSel=selected.has(t.id);
     const amt=(t.qty||0)*(t.frRate||0);
     const empName = (()=>{
@@ -10287,7 +10352,29 @@ function PartyTripCard({t, selected, toggle, isOwner, isPartyMgr, employees, ope
               <span style={{color:C.muted,fontWeight:400,fontSize:11}}>· {t.lrNo}</span>
               {empName&&<span style={{fontSize:10,color:"#7c3aed",background:"#7c3aed11",borderRadius:4,padding:"1px 6px"}}>👤 {empName}</span>}
             </div>
-            <div style={{color:C.muted,fontSize:11,marginTop:2}}>{t.to||"—"} · {t.date} · {t.qty}MT</div>
+            <div style={{color:C.muted,fontSize:11,marginTop:2}}>{t.from}→{t.to||"—"} · {t.date} · {t.qty}MT</div>
+            {/* DI numbers */}
+            {(t.diLines?.length>0 || t.diNo) && (
+              <div style={{fontSize:10,color:C.text,marginTop:2}}>
+                DI: {t.diLines?.length>0 ? t.diLines.map(d=>d.diNo).filter(Boolean).join(", ") : t.diNo}
+              </div>
+            )}
+            {/* Party details — sales officer, party number */}
+            {(t.salesOfficerPhone || t.salesOfficerEmail || t.partyNumber || t.partyName) && (
+              <div style={{fontSize:10,color:C.purple,marginTop:3,display:"flex",flexWrap:"wrap",gap:6}}>
+                {t.partyName && <span>🤝 {t.partyName}</span>}
+                {t.partyNumber && <span>📞 Party: {t.partyNumber}</span>}
+                {t.salesOfficerPhone && <span>👔 SO: {t.salesOfficerPhone}</span>}
+                {t.salesOfficerEmail && <span>📧 {t.salesOfficerEmail}</span>}
+              </div>
+            )}
+            {/* Assigned trip employee */}
+            {t.assignedEmpId && (()=>{
+              const tripEmp = (employees||[]).find(e=>e.id===t.assignedEmpId);
+              return tripEmp ? (
+                <div style={{fontSize:10,color:C.teal,marginTop:2}}>🚛 Trip by: {tripEmp.name}</div>
+              ) : null;
+            })()}
             <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:4}}>
               {t.emailSentAt&&<span style={{fontSize:10,color:C.blue,background:C.blue+"11",borderRadius:4,padding:"1px 6px"}}>📧 {t.emailSentAt.slice(0,10)}</span>}
               {t.sealedInvoicePath&&<span onClick={e=>openFile(t.sealedInvoicePath,e)} style={{fontSize:10,color:C.orange,background:C.orange+"11",borderRadius:4,padding:"1px 6px",cursor:"pointer"}}>🏷️ Sealed ↗</span>}
@@ -10304,6 +10391,40 @@ function PartyTripCard({t, selected, toggle, isOwner, isPartyMgr, employees, ope
             )}
           </div>
         </div>
+        {/* Per-card quick actions */}
+        {isPartyMgr && (
+          <div style={{display:"flex",gap:6,marginTop:6,flexWrap:"wrap"}} onClick={e=>e.stopPropagation()}>
+            {!t.emailSentAt && (
+              <button onClick={()=>onMarkEmailSent&&onMarkEmailSent(t)}
+                style={{fontSize:10,color:C.blue,background:C.blue+"11",border:`1px solid ${C.blue}33`,
+                  borderRadius:4,padding:"3px 8px",cursor:"pointer",fontWeight:600}}>📧 Mark Email Sent</button>
+            )}
+            {!t.confirmPdfPath && (
+              <label style={{fontSize:10,color:C.teal,background:C.teal+"11",border:`1px solid ${C.teal}33`,
+                borderRadius:4,padding:"3px 8px",cursor:"pointer",fontWeight:600,display:"inline-flex",alignItems:"center",gap:3}}>
+                📄 Upload Confirmation
+                <input type="file" accept=".pdf,image/*" style={{display:"none"}}
+                  onChange={e=>{if(e.target.files[0]) onUploadConfirm&&onUploadConfirm(t, e.target.files[0]);}}/>
+              </label>
+            )}
+            {!t.sealedInvoicePath && (
+              <label style={{fontSize:10,color:C.orange,background:C.orange+"11",border:`1px solid ${C.orange}33`,
+                borderRadius:4,padding:"3px 8px",cursor:"pointer",fontWeight:600,display:"inline-flex",alignItems:"center",gap:3}}>
+                🏷️ Upload Sealed
+                <input type="file" accept=".pdf,image/*" style={{display:"none"}}
+                  onChange={e=>{if(e.target.files[0]) {
+                    const uploadSeal = async()=>{
+                      const path=`${t.id}/sealed_invoice.${e.target.files[0].name.split(".").pop()||"pdf"}`;
+                      await supabase.storage.from("party-trip-files").upload(path,e.target.files[0],{upsert:true});
+                      // Status update happens via parent
+                    };
+                    // Trigger parent's sealed upload
+                    toggle(t.id); // select this trip first
+                  }}}/>
+              </label>
+            )}
+          </div>
+        )}
       </div>
     );
 }
@@ -10422,14 +10543,34 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
       const path=`${tripId}/sealed_invoice.${file.name.split(".").pop()||"pdf"}`;
       const {error}=await supabase.storage.from("party-trip-files").upload(path,file,{upsert:true});
       if(error) throw error;
+
+      // Auto-merge: if GR + Invoice exist, create merged PDF
+      const trip = (trips||[]).find(t=>t.id===tripId);
+      let mergedPath = "";
+      if(trip) {
+        const grPath = trip.grFilePath || (trip.diLines||[]).find(d=>d.grFilePath)?.grFilePath;
+        const invPath = trip.invoiceFilePath || (trip.diLines||[]).find(d=>d.invoiceFilePath)?.invoiceFilePath;
+        if(grPath && invPath) {
+          try {
+            const sealedBuf = await file.arrayBuffer();
+            const [grBuf, invBuf] = await Promise.all([fetchStorageFile(grPath), fetchStorageFile(invPath)]);
+            const finalBytes = await mergePDFs([sealedBuf, grBuf, invBuf]);
+            const mergedFile = new File([finalBytes], "merged_confirmation.pdf", {type:"application/pdf"});
+            const mergedResult = await uploadPartyFile(tripId, "merged_confirmation", mergedFile);
+            mergedPath = mergedResult.path;
+          } catch(me) { console.warn("Auto-merge failed:", me.message); }
+        }
+      }
+
       setTrips(prev=>prev.map(t=>{
         if(t.id!==tripId) return t;
-        const u={...t, sealedInvoicePath:path, status:"Sealed Invoice Received"};
+        const u={...t, sealedInvoicePath:path, status:"Sealed Invoice Received",
+          ...(mergedPath ? {mergedPdfPath:mergedPath, receiptFilePath:path, receiptUploadedAt:new Date().toISOString()} : {})};
         setTimeout(()=>DB.saveTrip(u).catch(e=>console.error("saveTrip sealed:",e)),0);
         return u;
       }));
       setSelected(new Set());
-      log&&log("SEALED INVOICE UPLOADED",tripId);
+      log&&log("SEALED INVOICE UPLOADED",`${trip?.lrNo||tripId}${mergedPath?" + auto-merged":""}`);
     } catch(e){alert("Upload failed: "+e.message);}
     finally{setPdfUploading(false);}
   };
