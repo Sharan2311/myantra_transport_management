@@ -7454,6 +7454,34 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                           🏷️ Upload Sealed Invoice
                         </button>
                       )}
+                      {/* Upload Confirmation Email PDF — always available for party trips */}
+                      {t.orderType==="party" && !t.confirmPdfPath && (
+                        <label style={{background:C.teal+"22",color:C.teal,border:"1px solid "+C.teal+"44",borderRadius:20,
+                          padding:"4px 12px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap",display:"inline-flex",alignItems:"center"}}>
+                          📄 Upload Confirmation
+                          <input type="file" accept=".pdf,image/*" style={{display:"none"}}
+                            onChange={async(e)=>{
+                              const file=e.target.files[0]; if(!file)return;
+                              try{
+                                const path=`party_confirm/${t.id}_${file.name.replace(/\s/g,"_")}`;
+                                const{error}=await supabase.storage.from("trip-files").upload(path,file,{upsert:true});
+                                if(error)throw error;
+                                const{data:{publicUrl}}=supabase.storage.from("trip-files").getPublicUrl(path);
+                                const ts=new Date().toISOString();
+                                const u={...t,emailSentAt:t.emailSentAt||ts,confirmPdfPath:publicUrl,status:"Confirmation Email Received"};
+                                setTrips(p=>p.map(x=>x.id===t.id?u:x));
+                                log("CONFIRM PDF","LR:"+t.lrNo);
+                              }catch(err){alert("Upload failed: "+err.message);}
+                            }}/>
+                        </label>
+                      )}
+                      {t.confirmPdfPath && (
+                        <a href={t.confirmPdfPath} target="_blank" rel="noreferrer"
+                          style={{background:C.teal+"22",color:C.teal,border:"1px solid "+C.teal+"44",borderRadius:20,
+                            padding:"4px 12px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap",textDecoration:"none"}}>
+                          ✅ Confirmation ↗
+                        </a>
+                      )}
                       {/* Single-trip GR/Invoice download */}
                       {t.grFilePath && (
                         <button onClick={async()=>{try{const url=await getSignedUrl(t.grFilePath,3600);const a=document.createElement("a");a.href=url;a.download="GR_"+(t.lrNo||t.id);a.target="_blank";document.body.appendChild(a);a.click();document.body.removeChild(a);}catch(e){alert("GR download failed: "+e.message);}}}
