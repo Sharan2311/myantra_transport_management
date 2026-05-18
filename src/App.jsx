@@ -17851,14 +17851,20 @@ function ShortageRecoverBtn({v, setVehicles, log}) {
 function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentRequests, setPaymentRequests, driverPays=[], user, log, onClose}) {
   const t = trip;
   const veh = (vehicles||[]).find(v=>v.truckNo===t.truckNo);
-  // Compute actual balance (trip may not have .balance if coming from raw trips array)
+  // Compute actual balance — pouch is handled separately, NOT auto-deducted
   const _diGross = (t.diLines&&t.diLines.length>1)
     ? t.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
     : (t.qty||0)*(t.givenRate||0);
-  const _deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)+(t.shortageRecovery||0)+(t.loanRecovery||0)+(t.pouchBalance||0);
+  const _deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)+(t.shortageRecovery||0)+(t.loanRecovery||0);
   const _netDue  = Math.max(0, _diGross - _deducts);
   const _paidSoFar = (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
   const _balance = Math.max(0, _netDue - _paidSoFar);
+
+  // Party trip pouch: ₹700 can only be requested if sealed invoice or confirmation is uploaded
+  const isParty = t.orderType === "party";
+  const pouchAmt = isParty ? (+t.pouchBalance || 700) : 0;
+  const hasSealedOrConfirm = !!(t.sealedInvoicePath || t.confirmPdfPath || t.mergedPdfPath);
+  const pouchBlocked = isParty && pouchAmt > 0 && !hasSealedOrConfirm;
 
   // Build account lists — collect accounts from ALL vehicles of the same owner
   const ownerNameForAcct = (veh?.ownerName||"").trim();
@@ -17895,7 +17901,8 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
   const [accSearch,  setAccSearch]  = useState(""); // search within account list
   const [accOpen,    setAccOpen]    = useState(false); // dropdown open
   const [showOther,  setShowOther]  = useState(!!editingReq?.accountId && editingReq.accountId!==primaryOwnerAcc); // show alternate accounts
-  const [amount,     setAmount]     = useState(String(editingReq?.amount||_balance||0));
+  const _maxRequestable = pouchBlocked ? Math.max(0, _balance - pouchAmt) : _balance;
+  const [amount,     setAmount]     = useState(String(editingReq?.amount||_maxRequestable||0));
   const [notes,      setNotes]      = useState(editingReq?.notes||"");
   const [newAcc,     setNewAcc]     = useState({name:"",accountNo:"",ifsc:""});
   const [newAccEmpId,setNewAccEmpId]= useState(""); // which employee to save new account to
@@ -17911,6 +17918,11 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
     const effectiveAccId = (!showOther && recipType==="vehicle_owner") ? (accId||primaryOwnerAcc) : accId;
     if(!effectiveAccId)              { alert("Select an account."); return; }
     if(!amount||+amount<=0) { alert("Enter amount."); return; }
+    // Block if requesting pouch amount without sealed/confirmation
+    if(pouchBlocked && +amount > Math.max(0, _balance - pouchAmt)) {
+      alert(`Pouch ₹${pouchAmt.toLocaleString("en-IN")} is held back.\n\nUpload Sealed Invoice or Confirmation Email to release it.\n\nMax requestable now: ₹${Math.max(0, _balance - pouchAmt).toLocaleString("en-IN")}`);
+      return;
+    }
 
     // Resolve the account — when primary is shown (not showOther), use the displayed primary
     const resolvedAccId = (!showOther && recipType==="vehicle_owner" && !accId) ? primaryOwnerAcc : accId;
@@ -18025,6 +18037,27 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
           <div style={{color:C.accent,fontWeight:800,fontSize:15,marginTop:4}}>
             Balance: ₹{_balance.toLocaleString("en-IN")}
           </div>
+          {/* Calculation breakdown */}
+          <div style={{fontSize:10,color:C.muted,marginTop:4,lineHeight:1.7}}>
+            Gross: ₹{_diGross.toLocaleString("en-IN")}
+            {(t.advance||0)>0 && <span> − Advance ₹{(t.advance||0).toLocaleString("en-IN")}</span>}
+            {(t.tafal||0)>0 && <span> − Tafal ₹{(t.tafal||0).toLocaleString("en-IN")}</span>}
+            {(t.dieselEstimate||0)>0 && <span> − Diesel ₹{(t.dieselEstimate||0).toLocaleString("en-IN")}</span>}
+            {(t.shortageRecovery||0)>0 && <span> − Shortage ₹{(t.shortageRecovery||0).toLocaleString("en-IN")}</span>}
+            {(t.loanRecovery||0)>0 && <span> − Loan ₹{(t.loanRecovery||0).toLocaleString("en-IN")}</span>}
+            {_paidSoFar>0 && <span> − Paid ₹{_paidSoFar.toLocaleString("en-IN")}</span>}
+            {isParty && pouchAmt>0 && <span style={{color:hasSealedOrConfirm?"#16a34a":"#dc2626",fontWeight:600}}> − Pouch ₹{pouchAmt.toLocaleString("en-IN")} {hasSealedOrConfirm?"(released)":"(held)"}</span>}
+          </div>
+          {isParty && pouchAmt > 0 && (
+            <div style={{marginTop:6,fontSize:11,padding:"6px 10px",borderRadius:6,
+              background:hasSealedOrConfirm?"#dcfce7":"#fef2f2",
+              border:`1px solid ${hasSealedOrConfirm?"#86efac":"#fca5a5"}`,
+              color:hasSealedOrConfirm?"#166534":"#991b1b"}}>
+              {hasSealedOrConfirm
+                ? `✅ Sealed/Confirmation received — Pouch ₹${pouchAmt} released, can request full balance`
+                : `🔒 Pouch ₹${pouchAmt} held back — requestable: ₹${Math.max(0,_balance - pouchAmt).toLocaleString("en-IN")}. Upload Sealed Invoice or Confirmation Email to release.`}
+            </div>
+          )}
         </div>
 
         {hasPending && (()=>{
