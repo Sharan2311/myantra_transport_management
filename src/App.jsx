@@ -78,6 +78,8 @@ const FEATURE_CATALOG = [
   {key:"gst_reconciliation",label:"GST Reconciliation",            cat:"Reports & Compliance",plans:["enterprise"]},
   {key:"daily_ops",         label:"Daily Ops Dashboard",           cat:"Reports & Compliance",plans:["pro","enterprise"]},
   {key:"activity_log",      label:"Activity Log",                  cat:"Reports & Compliance",plans:["basic","pro","enterprise"]},
+  // Data Quality
+  {key:"mandatory_trip_fields", label:"Mandatory Trip Fields",      cat:"Data Quality",        plans:["pro","enterprise"]},
   // Platform
   {key:"custom_branding",   label:"Custom Branding",               cat:"Platform",            plans:["enterprise"]},
   {key:"husk_manager",      label:"Husk Manager",                  cat:"Platform",            plans:["enterprise"]},
@@ -2932,6 +2934,29 @@ Rules:
         );
         if(dupIndent) {
           alert(`Truck ${g.truckNo}: Diesel Indent No "${g.dieselIndentNo}" already exists on another trip.`);
+          return;
+        }
+      }
+
+      // ── Mandatory trip fields (feature flag) ──────────────────────────────
+      if(canFeature("mandatory_trip_fields")) {
+        const groupItems = doneItems.filter(x=>g.diIds.includes(x.id));
+        const veh = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
+        const missing = [];
+        // All trips: owner name + driver phone
+        if(!(g.ownerName||veh?.ownerName||"").trim()) missing.push("Owner Name (ಮಾಲೀಕರ ಹೆಸರು)");
+        if(!(g.driverPhone||veh?.driverPhone||"").trim()) missing.push("Driver Phone (ಚಾಲಕರ ಫೋನ್)");
+        // Party trips: party fields
+        const hasParty = groupItems.some(it=>it.orderType==="party");
+        if(hasParty) {
+          const partyItem = groupItems.find(it=>it.orderType==="party");
+          if(!(partyItem?.partyNumber||"").trim()) missing.push("Party Number (ಪಾರ್ಟಿ ನಂಬರ್)");
+          if(!(partyItem?.salesOfficerPhone||"").trim()) missing.push("Sales Officer Phone (ಸೇಲ್ಸ್ ಅಧಿಕಾರಿ ಫೋನ್)");
+          if(!(partyItem?.salesOfficerEmail||"").trim()) missing.push("Sales Officer Email (ಸೇಲ್ಸ್ ಅಧಿಕಾರಿ ಇಮೇಲ್)");
+          if(!(partyItem?.partyDriverPhone||"").trim()) missing.push("Party Driver Phone (ಪಾರ್ಟಿ ಡ್ರೈವರ್ ಫೋನ್)");
+        }
+        if(missing.length > 0) {
+          alert(`Truck ${g.truckNo}: Mandatory fields missing:\n\n${missing.map(m=>"  ⚠ "+m).join("\n")}\n\nPlease fill all required fields before saving.`);
           return;
         }
       }
@@ -6709,6 +6734,24 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
           alert(`Cannot save: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative). Please reduce Advance/Diesel/Recoveries.`);
           return;
         }
+      }
+    }
+    // ── Mandatory trip fields (feature flag) ──────────────────────────────
+    if(canFeature("mandatory_trip_fields")) {
+      const t = editSheet;
+      const veh = (vehicles||[]).find(v=>v.truckNo===t.truckNo);
+      const missing = [];
+      if(!(t.ownerName||veh?.ownerName||"").trim()) missing.push("Owner Name (ಮಾಲೀಕರ ಹೆಸರು)");
+      if(!(t.driverPhone||veh?.driverPhone||"").trim()) missing.push("Driver Phone (ಚಾಲಕರ ಫೋನ್)");
+      if(t.orderType==="party") {
+        if(!(t.partyNumber||"").trim()) missing.push("Party Number (ಪಾರ್ಟಿ ನಂಬರ್)");
+        if(!(t.salesOfficerPhone||"").trim()) missing.push("Sales Officer Phone (ಸೇಲ್ಸ್ ಅಧಿಕಾರಿ ಫೋನ್)");
+        if(!(t.salesOfficerEmail||"").trim()) missing.push("Sales Officer Email (ಸೇಲ್ಸ್ ಅಧಿಕಾರಿ ಇಮೇಲ್)");
+        if(!(t.partyDriverPhone||"").trim()) missing.push("Party Driver Phone (ಪಾರ್ಟಿ ಡ್ರೈವರ್ ಫೋನ್)");
+      }
+      if(missing.length > 0) {
+        alert(`Mandatory fields missing:\n\n${missing.map(m=>"  ⚠ "+m).join("\n")}\n\nPlease fill all required fields.\nಎಲ್ಲಾ ಕಡ್ಡಾಯ ಕ್ಷೇತ್ರಗಳನ್ನು ಭರ್ತಿ ಮಾಡಿ.`);
+        return;
       }
     }
     setTrips(p => p.map(t => t.id===editSheet.id ? {
@@ -13056,7 +13099,7 @@ Return ONLY a JSON array, no other text:
                 const emp = (employees||[]).find(e=>e.id===empId);
                 if(emp){
                   const walletTxn = {id:"W"+Date.now(), type:"debit", amount:totalDiff,
-                    note:`Diesel mismatch: Pump ₹${(entry.pump?.hsd||0)+(entry.pump?.advance||0)} vs App ₹${(entry.app?.confirmedAmount??entry.app?.amount||0)}. Indent #${entry.app?.indentNo||"?"}`,
+                    note:`Diesel mismatch: Pump ₹${(entry.pump?.hsd||0)+(entry.pump?.advance||0)} vs App ₹${((entry.app?.confirmedAmount??entry.app?.amount)||0)}. Indent #${entry.app?.indentNo||"?"}`,
                     date:new Date().toISOString(), category:"Diesel"};
                   const updEmp = {...emp, wallet:[...(emp.wallet||[]), walletTxn]};
                   setVehicles(p=>p); // trigger re-render
@@ -13084,7 +13127,7 @@ Return ONLY a JSON array, no other text:
               const veh = (vehicles||[]).find(v=>v.truckNo===entry.pump?.vehicle || v.truckNo===entry.app?.truckNo);
               if(veh && totalDiff > 0){
                 const loanTxn = {id:"DM"+Date.now(), type:"diesel_mismatch", amount:totalDiff,
-                  note:`Diesel mismatch: Pump ₹${(entry.pump?.hsd||0)+(entry.pump?.advance||0)} vs App ₹${(entry.app?.confirmedAmount??entry.app?.amount||0)}. LR ${entry.trip?.lrNo||"?"}, Indent #${entry.app?.indentNo||"?"}`,
+                  note:`Diesel mismatch: Pump ₹${(entry.pump?.hsd||0)+(entry.pump?.advance||0)} vs App ₹${((entry.app?.confirmedAmount??entry.app?.amount)||0)}. LR ${entry.trip?.lrNo||"?"}, Indent #${entry.app?.indentNo||"?"}`,
                   date:new Date().toISOString()};
                 const updVeh = {...veh, loan:(veh.loan||0)+totalDiff,
                   loanTxns:[...(veh.loanTxns||[]), loanTxn]};
