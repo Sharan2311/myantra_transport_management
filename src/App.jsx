@@ -2846,11 +2846,13 @@ Rules:
       if(frRate - (+item.givenRate) < 30) return false;
       // Only require GR/Invoice for DIs explicitly set as party order
       if(item.orderType==="party" && (!item.grFile||!item.invoiceFile)) return false;
-      // Party mandatory fields: driver phone, sales officer phone, sales officer email (@shreecement.com), party number
-      if(item.orderType==="party" && (!(item.partyDriverPhone||"").match(/^\d{10}$/))) return false;
-      if(item.orderType==="party" && (!(item.salesOfficerPhone||"").match(/^\d{10}$/))) return false;
-      if(item.orderType==="party" && (!(item.salesOfficerEmail||"").endsWith("shreecement.com"))) return false;
-      if(item.orderType==="party" && !(item.partyNumber||"").trim()) return false;
+      // Party mandatory fields — only enforced when mandatory_trip_fields feature is ON
+      if(canFeature("mandatory_trip_fields") && item.orderType==="party") {
+        if(!(item.partyDriverPhone||"").match(/^\d{10}$/)) return false;
+        if(!(item.salesOfficerPhone||"").match(/^\d{10}$/)) return false;
+        if(!(item.salesOfficerEmail||"").endsWith("shreecement.com")) return false;
+        if(!(item.partyNumber||"").trim()) return false;
+      }
       // Block save if party file DI verification failed (mismatch)
       if(item.orderType==="party" && item.grFileDiCheck?.status==="error") return false;
       if(item.orderType==="party" && item.invoiceFileDiCheck?.status==="error") return false;
@@ -13027,9 +13029,15 @@ Return ONLY a JSON array, no other text:
               const clean = text.replace(/```json|```/g,"").trim();
               const rows = JSON.parse(clean);
               if(Array.isArray(rows)) allRows.push(...rows);
-            }catch(err){ console.error("Scan image "+(i+1)+":",err.message); }
+            }catch(err){ console.error("Scan image "+(i+1)+":",err.message); alert("⚠ Scan failed for image "+(i+1)+": "+err.message); }
           }
           setReconData(allRows);
+          if(allRows.length===0) {
+            alert("⚠ Scan completed but extracted 0 entries from the images.\n\nPlease check that the uploaded images are clear pump statement pages with diesel entries.");
+            setReconScanning(false);
+            setReconProgress("");
+            return;
+          }
           setReconProgress(`Extracted ${allRows.length} entries. Matching...`);
 
           // ── Auto-match with app diesel requests ──
@@ -13185,21 +13193,25 @@ Return ONLY a JSON array, no other text:
           {reconMatches && (<>
             {/* Summary KPIs */}
             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-              <div style={{background:C.green+"11",border:`1px solid ${C.green}33`,borderRadius:8,padding:"8px 14px",flex:1,minWidth:80,textAlign:"center"}}>
+              <div style={{background:C.green+"11",border:`1px solid ${C.green}33`,borderRadius:8,padding:"8px 14px",flex:1,minWidth:60,textAlign:"center"}}>
                 <div style={{fontSize:18,fontWeight:800,color:C.green}}>{matchedCount}</div>
                 <div style={{fontSize:9,color:C.green}}>Matched ✅</div>
               </div>
-              <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,borderRadius:8,padding:"8px 14px",flex:1,minWidth:80,textAlign:"center"}}>
+              <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,borderRadius:8,padding:"8px 14px",flex:1,minWidth:60,textAlign:"center"}}>
                 <div style={{fontSize:18,fontWeight:800,color:C.orange}}>{mismatchCount}</div>
                 <div style={{fontSize:9,color:C.orange}}>Mismatch ⚠</div>
               </div>
-              <div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,padding:"8px 14px",flex:1,minWidth:80,textAlign:"center"}}>
+              <div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,padding:"8px 14px",flex:1,minWidth:60,textAlign:"center"}}>
                 <div style={{fontSize:18,fontWeight:800,color:C.red}}>{notInApp}</div>
                 <div style={{fontSize:9,color:C.red}}>Not in App</div>
               </div>
-              <div style={{background:C.purple+"11",border:`1px solid ${C.purple}33`,borderRadius:8,padding:"8px 14px",flex:1,minWidth:80,textAlign:"center"}}>
-                <div style={{fontSize:18,fontWeight:800,color:C.purple}}>{resolved}</div>
-                <div style={{fontSize:9,color:C.purple}}>Resolved</div>
+              <div style={{background:C.purple+"11",border:`1px solid ${C.purple}33`,borderRadius:8,padding:"8px 14px",flex:1,minWidth:60,textAlign:"center"}}>
+                <div style={{fontSize:18,fontWeight:800,color:C.purple}}>{notInPump}</div>
+                <div style={{fontSize:9,color:C.purple}}>Not in Pump ❓</div>
+              </div>
+              <div style={{background:C.teal+"11",border:`1px solid ${C.teal}33`,borderRadius:8,padding:"8px 14px",flex:1,minWidth:60,textAlign:"center"}}>
+                <div style={{fontSize:18,fontWeight:800,color:C.teal}}>{resolved}</div>
+                <div style={{fontSize:9,color:C.teal}}>Resolved</div>
               </div>
             </div>
 
