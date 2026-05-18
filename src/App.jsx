@@ -2733,9 +2733,10 @@ Rules:
         _stxnsG.filter(x=>x.type==="recovery").reduce((s,x)=>s+(x.amount||0),0));
       const shortDeductG = vehG?.shortageDeductPerTrip||0;
       const autoShortageG = shortBalG<=0 ? 0 : (shortDeductG>0 ? Math.min(shortDeductG, shortBalG) : shortBalG);
-      // Auto-attach ONLY confirmed requests — open (unconfirmed) ones show a warning card instead
+      // Auto-attach ONLY confirmed requests within 4 days — older ones need manual attach
+      const _4daysAgo = new Date(Date.now() - 4*86400000).toISOString().slice(0,10);
       const confirmedReqsG = (dieselRequests||[])
-        .filter(r => r.truckNo===truckNo && r.status==="confirmed");
+        .filter(r => r.truckNo===truckNo && r.status==="confirmed" && (r.date||"")>=_4daysAgo);
       const autoReqG = confirmedReqsG.length >= 1 ? confirmedReqsG[0] : null;
       const autoIndentNo = autoReqG ? String(autoReqG.indentNo) : "";
       const autoDiesel   = autoReqG ? String(autoReqG.confirmedAmount??autoReqG.amount) : "0";
@@ -2793,8 +2794,9 @@ Rules:
         const shortBal2 = Math.max(0,(()=>{const t=vehT2?.shortageTxns||[];return t.filter(x=>x.type==="shortage").reduce((s,x)=>s+(x.amount||0),0)-t.filter(x=>x.type==="recovery").reduce((s,x)=>s+(x.amount||0),0);})());
         const shortDed2 = vehT2?.shortageDeductPerTrip||0;
         const autoSR2 = shortBal2<=0?0:(shortDed2>0?Math.min(shortDed2,shortBal2):shortBal2);
+        const _4dSplit = new Date(Date.now() - 4*86400000).toISOString().slice(0,10);
         const autoReqS = (dieselRequests||[])
-          .filter(r => r.truckNo===g.truckNo && r.status==="confirmed")[0] || null;
+          .filter(r => r.truckNo===g.truckNo && r.status==="confirmed" && (r.date||"")>=_4dSplit)[0] || null;
         const solo = {
           id:uid(), truckNo:g.truckNo, diIds:[itemId],
           client:g.client, tafal:g.tafal,
@@ -3132,27 +3134,46 @@ Rules:
         if (g.dieselIndentNo.trim() && typeof setDieselRequests === "function") {
           const preReq = (dieselRequests||[]).find(r => String(r.indentNo)===g.dieselIndentNo.trim() && r.status!=="attached");
           if (preReq) {
-            const updPreReq = {...preReq, status:"attached", tripId:trip.id, lrNo};
-            setDieselRequests(p=>p.map(r=>r.id===preReq.id?updPreReq:r));
-            await DB.saveDieselRequest(updPreReq);
-            log("DIESEL ATTACH", `Indent #${preReq.indentNo} → LR ${lrNo} · ₹${preReq.confirmedAmount??preReq.amount} (auto)`);
+            // Warn if attaching unconfirmed (open) indent
+            let doAttach = true;
+            if (preReq.status === "open") {
+              doAttach = window.confirm(`⚠ Indent #${preReq.indentNo} is UNCONFIRMED by pump.\n\nAttach anyway to LR ${lrNo}?`);
+            }
+            if (doAttach) {
+              const updPreReq = {...preReq, status:"attached", tripId:trip.id, lrNo};
+              setDieselRequests(p=>p.map(r=>r.id===preReq.id?updPreReq:r));
+              await DB.saveDieselRequest(updPreReq);
+              log("DIESEL ATTACH", `Indent #${preReq.indentNo} → LR ${lrNo} · ₹${preReq.confirmedAmount??preReq.amount} (manual${preReq.status==="open"?" ⚠UNCONFIRMED":""})`);
+            }
           }
         }
-        // ── Auto-attach open diesel request for this truck ────────────────
+        // ── Auto-attach confirmed diesel request for this truck (within 4 days) ──
         if (typeof setDieselRequests === "function" && !g.dieselIndentNo.trim()) {
-          const openReqs = (dieselRequests||[]).filter(r => r.status==="open" || r.status==="confirmed");
-          const truckMatch = openReqs.find(r => r.truckNo===truckNo);
+          const _4dAgo = new Date(Date.now() - 4*86400000).toISOString().slice(0,10);
+          const confirmedReqs = (dieselRequests||[]).filter(r => r.status==="confirmed" && (r.date||"")>=_4dAgo);
+          const truckMatch = confirmedReqs.find(r => r.truckNo===truckNo);
           let chosenReq = truckMatch;
-          if (!truckMatch && openReqs.length > 0) {
-            // Truck mismatch — let user pick from open requests
-            const listStr = openReqs.map(r=>`  #${r.indentNo} · ${r.truckNo} · ₹${(r.confirmedAmount??r.amount).toLocaleString("en-IN")}`).join("\n");
-            const sel = window.prompt(
-              `⛽ No open Diesel Request found for ${truckNo}.\n\nAvailable open requests:\n${listStr}\n\nEnter Indent # to attach (or Cancel to skip):`, ""
-            );
-            if (sel && sel.trim()) {
-              const selNo = parseInt(sel.trim(), 10);
-              chosenReq = openReqs.find(r => r.indentNo===selNo);
-              if (!chosenReq) alert(`No open request found with Indent #${selNo}.`);
+          if (!truckMatch) {
+            // Also check older/open requests for manual owner override
+            const allUnattached = (dieselRequests||[]).filter(r => r.status==="open" || r.status==="confirmed");
+            if (allUnattached.length > 0) {
+              const listStr = allUnattached.map(r=>{
+                const age = Math.floor((Date.now()-new Date(r.date||0).getTime())/86400000);
+                const warn = r.status==="open"?" ⚠UNCONFIRMED":"";
+                const old = age>4?" ⚠OLD("+age+"d)":"";
+                return `  #${r.indentNo} · ${r.truckNo} · ₹${(r.confirmedAmount??r.amount).toLocaleString("en-IN")}${warn}${old}`;
+              }).join("\n");
+              const sel = window.prompt(
+                `⛽ No confirmed Diesel Request (within 4 days) for ${truckNo}.\n\nAll available requests:\n${listStr}\n\n⚠ UNCONFIRMED/OLD requests need owner verification.\nEnter Indent # to attach (or Cancel to skip):`, ""
+              );
+              if (sel && sel.trim()) {
+                const selNo = parseInt(sel.trim(), 10);
+                chosenReq = allUnattached.find(r => r.indentNo===selNo);
+                if (!chosenReq) alert(`No request found with Indent #${selNo}.`);
+                else if (chosenReq.status==="open") {
+                  if (!window.confirm(`⚠ Indent #${selNo} is UNCONFIRMED (pump has not verified).\n\nAre you sure you want to attach it?`)) chosenReq = null;
+                }
+              }
             }
           }
           if (chosenReq) {
@@ -3292,21 +3313,32 @@ Rules:
           return;
         }
         setTrips(p=>[trip,...(p||[])]);
-        // ── Auto-attach open diesel request for this truck ────────────────
+        // ── Auto-attach confirmed diesel request for this truck (within 4 days) ──
         if (typeof setDieselRequests === "function") {
-          const openReqs = (dieselRequests||[]).filter(r => r.status==="open" || r.status==="confirmed");
-          const truckMatch = openReqs.find(r => r.truckNo===truckNo);
+          const _4dAgo = new Date(Date.now() - 4*86400000).toISOString().slice(0,10);
+          const confirmedReqs = (dieselRequests||[]).filter(r => r.status==="confirmed" && (r.date||"")>=_4dAgo);
+          const truckMatch = confirmedReqs.find(r => r.truckNo===truckNo);
           let chosenReq = truckMatch;
-          if (!truckMatch && openReqs.length > 0) {
-            // Truck mismatch — let user pick from open requests
-            const listStr = openReqs.map(r=>`  #${r.indentNo} · ${r.truckNo} · ₹${(r.confirmedAmount??r.amount).toLocaleString("en-IN")}`).join("\n");
-            const sel = window.prompt(
-              `⛽ No open Diesel Request found for ${truckNo}.\n\nAvailable open requests:\n${listStr}\n\nEnter Indent # to attach (or Cancel to skip):`, ""
-            );
-            if (sel && sel.trim()) {
-              const selNo = parseInt(sel.trim(), 10);
-              chosenReq = openReqs.find(r => r.indentNo===selNo);
-              if (!chosenReq) alert(`No open request found with Indent #${selNo}.`);
+          if (!truckMatch) {
+            const allUnattached = (dieselRequests||[]).filter(r => r.status==="open" || r.status==="confirmed");
+            if (allUnattached.length > 0) {
+              const listStr = allUnattached.map(r=>{
+                const age = Math.floor((Date.now()-new Date(r.date||0).getTime())/86400000);
+                const warn = r.status==="open"?" ⚠UNCONFIRMED":"";
+                const old = age>4?" ⚠OLD("+age+"d)":"";
+                return `  #${r.indentNo} · ${r.truckNo} · ₹${(r.confirmedAmount??r.amount).toLocaleString("en-IN")}${warn}${old}`;
+              }).join("\n");
+              const sel = window.prompt(
+                `⛽ No confirmed Diesel Request (within 4 days) for ${truckNo}.\n\nAll available requests:\n${listStr}\n\n⚠ UNCONFIRMED/OLD requests need owner verification.\nEnter Indent # to attach (or Cancel to skip):`, ""
+              );
+              if (sel && sel.trim()) {
+                const selNo = parseInt(sel.trim(), 10);
+                chosenReq = allUnattached.find(r => r.indentNo===selNo);
+                if (!chosenReq) alert(`No request found with Indent #${selNo}.`);
+                else if (chosenReq.status==="open") {
+                  if (!window.confirm(`⚠ Indent #${selNo} is UNCONFIRMED (pump has not verified).\n\nAre you sure you want to attach it?`)) chosenReq = null;
+                }
+              }
             }
           }
           if (chosenReq) {
@@ -11301,7 +11333,7 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
   );
 }
 
-function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, driverPays, setDriverPays, user, log, viewOnly=false, dieselRequests=[], setDieselRequests, settings}) {
+function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, driverPays, setDriverPays, user, log, viewOnly=false, dieselRequests=[], setDieselRequests, settings}) {
   const [view,        setView]        = useState("requests");
   const [pumpSheet,   setPumpSheet]   = useState(false);
   const [scanSheet,   setScanSheet]   = useState(false);
@@ -11336,6 +11368,13 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
   const [editDieselAmt,  setEditDieselAmt]  = useState("");
   const [editCashAmt,    setEditCashAmt]    = useState("");
   const [editPumpId,     setEditPumpId]     = useState("");
+
+  // ── Diesel Reconciliation state ──────────────────────────────────────────
+  const [reconImages,   setReconImages]   = useState([]);
+  const [reconScanning, setReconScanning] = useState(false);
+  const [reconData,     setReconData]     = useState(null); // [{pumpIndent, date, vehicle, hsd, advance}]
+  const [reconMatches,  setReconMatches]  = useState(null); // matched results
+  const [reconProgress, setReconProgress] = useState("");
 
   const blankP = {name:"", contact:"", address:"", accountNo:"", ifsc:""};
   const [pf, setPf] = useState(blankP);
@@ -11929,6 +11968,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, indents, setIndents,
         ...(user.role==="owner"?[{id:"payments", label:`Payments (${(pumpPayments||[]).length})`, color:C.green}]:[]),
         {id:"indents",  label:`Indents (${confirmedIndents.length})`, color:C.blue},
         {id:"lrmap",    label:"LR ↔ Indent", color:C.teal||C.purple},
+        ...(user.role==="owner"?[{id:"reconcile", label:"🔍 Reconcile", color:C.red}]:[]),
         {id:"history",  label:"Alerts", color:C.muted},
       ]} active={view} onSelect={setView} />
 
@@ -12904,6 +12944,343 @@ This was already dispensed — only delete if it was recorded in error.`;
           )}
         </div>
       )}
+
+      {/* ── RECONCILIATION VIEW ── */}
+      {view==="reconcile" && (()=>{
+        // ── Scan pump images via AI ──
+        const scanPumpImages = async () => {
+          if(!reconImages.length) return alert("Upload pump statement images first.");
+          setReconScanning(true); setReconProgress("Starting scan...");
+          const allRows = [];
+          for(let i=0;i<reconImages.length;i++){
+            setReconProgress(`Scanning image ${i+1} of ${reconImages.length}...`);
+            try{
+              const file = reconImages[i];
+              const b64 = await new Promise((res,rej)=>{
+                const r=new FileReader(); r.onload=()=>res(r.result.split(",")[1]); r.onerror=rej; r.readAsDataURL(file);
+              });
+              const mediaType = file.type||"image/jpeg";
+              const resp = await fetch("https://api.anthropic.com/v1/messages",{method:"POST",
+                headers:{"Content-Type":"application/json"},
+                body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:4000,
+                  messages:[{role:"user",content:[
+                    {type:"image",source:{type:"base64",media_type:mediaType,data:b64}},
+                    {type:"text",text:`Extract ALL diesel entries from this pump statement image. For each row extract:
+- indent_no: the pump indent number (5-digit number like 28712) or "MY" if no indent
+- date: in YYYY-MM-DD format
+- vehicle: full vehicle number
+- hsd: HSD/diesel amount in rupees (number only, no commas)
+- advance: advance/cash amount in rupees (number only)
+
+SKIP summary/total rows (yellow highlighted rows with totals).
+SKIP rows where indent_no is "MY" and vehicle is just a short number (these are payment entries, not diesel).
+
+Return ONLY a JSON array, no other text:
+[{"indent_no":"28712","date":"2026-05-01","vehicle":"KA34C7132","hsd":20000,"advance":1000}, ...]`}
+                  ]}]})
+              });
+              const data = await resp.json();
+              const text = (data.content||[]).map(c=>c.text||"").join("");
+              const clean = text.replace(/```json|```/g,"").trim();
+              const rows = JSON.parse(clean);
+              if(Array.isArray(rows)) allRows.push(...rows);
+            }catch(err){ console.error("Scan image "+(i+1)+":",err.message); }
+          }
+          setReconData(allRows);
+          setReconProgress(`Extracted ${allRows.length} entries. Matching...`);
+
+          // ── Auto-match with app diesel requests ──
+          const normalize = v => (v||"").toUpperCase().replace(/[\s\-]/g,"");
+          const vMatch = (a,b) => {
+            const an=normalize(a), bn=normalize(b);
+            if(an===bn) return true;
+            if(an.length>=4 && bn.length>=4 && an.slice(-4)===bn.slice(-4)) return true;
+            if(an.length<=5 && bn.includes(an)) return true;
+            if(bn.length<=5 && an.includes(bn)) return true;
+            return false;
+          };
+          const appReqs = (dieselRequests||[]).filter(r=>r.status==="attached"||r.status==="confirmed"||r.status==="open");
+          const usedApp = new Set();
+          const matches = allRows.map((p,pi) => {
+            // Find best app match by vehicle
+            let best = null;
+            for(const [ai,a] of appReqs.entries()){
+              if(usedApp.has(ai)) continue;
+              if(vMatch(p.vehicle, a.truckNo)){
+                best = {ai, a}; break;
+              }
+            }
+            if(best){
+              usedApp.add(best.ai);
+              const a = best.a;
+              const hsdDiff = (p.hsd||0) - (a.confirmedAmount??a.amount??0);
+              // App stores diesel+cash separately; pump HSD = diesel portion
+              const appDiesel = a.dieselAmount??a.amount??0;
+              const appCash = a.cashAmount??0;
+              const hsdMatch = Math.abs((p.hsd||0) - appDiesel) <= 1;
+              const advMatch = Math.abs((p.advance||0) - appCash) <= 1;
+              const tripLinked = (trips||[]).find(t=>t.dieselIndentNo===String(a.indentNo));
+              return {
+                pump: p, app: a, trip: tripLinked||null,
+                status: hsdMatch&&advMatch ? "matched" : "mismatch",
+                hsdDiff: (p.hsd||0) - appDiesel,
+                advDiff: (p.advance||0) - appCash,
+                resolution: hsdMatch&&advMatch ? "ok" : "pending",
+              };
+            }
+            return { pump:p, app:null, trip:null, status:"not_in_app", hsdDiff:0, advDiff:0, resolution:"pending" };
+          });
+          // App requests not matched
+          appReqs.forEach((a,ai) => {
+            if(!usedApp.has(ai)){
+              matches.push({ pump:null, app:a, trip:(trips||[]).find(t=>t.dieselIndentNo===String(a.indentNo)), status:"not_in_pump", hsdDiff:0, advDiff:0, resolution:"pending" });
+            }
+          });
+          setReconMatches(matches);
+          setReconScanning(false);
+          setReconProgress("");
+        };
+
+        // ── Resolution handlers ──
+        const resolveEntry = (idx, action) => {
+          setReconMatches(prev => {
+            const m = [...prev]; const entry = m[idx];
+            if(!entry) return prev;
+            const empWho = entry.app ? ((employees||[]).find(e=>e.id===entry.app.createdById)||{}).name || entry.app.createdBy || "Unknown" : "Unknown";
+            const totalDiff = (entry.hsdDiff||0) + (entry.advDiff||0);
+
+            if(action==="debit_employee"){
+              const empId = entry.app?.createdById;
+              if(empId && totalDiff > 0){
+                // Add to employee wallet as debit
+                const emp = (employees||[]).find(e=>e.id===empId);
+                if(emp){
+                  const walletTxn = {id:"W"+Date.now(), type:"debit", amount:totalDiff,
+                    note:`Diesel mismatch: Pump ₹${(entry.pump?.hsd||0)+(entry.pump?.advance||0)} vs App ₹${(entry.app?.confirmedAmount??entry.app?.amount||0)}. Indent #${entry.app?.indentNo||"?"}`,
+                    date:new Date().toISOString(), category:"Diesel"};
+                  const updEmp = {...emp, wallet:[...(emp.wallet||[]), walletTxn]};
+                  setVehicles(p=>p); // trigger re-render
+                  DB.saveEmployee&&DB.saveEmployee(updEmp).catch(()=>{});
+                  log("DIESEL RECON","Debited ₹"+totalDiff+" from "+emp.name+" — Indent #"+(entry.app?.indentNo||"?"));
+                }
+              }
+              m[idx] = {...entry, resolution:"debit_employee", resolvedNote:`Debited ₹${totalDiff} from ${empWho}`};
+            }
+            else if(action==="adjust_trip"){
+              const trip = entry.trip;
+              if(trip && !trip.driverSettled){
+                const newDiesel = (entry.pump?.hsd||0) + (entry.pump?.advance||0);
+                const updTrip = {...trip, dieselEstimate:newDiesel};
+                setTrips(p=>p.map(t=>t.id===trip.id?updTrip:t));
+                DB.saveTrip(updTrip).catch(()=>{});
+                log("DIESEL RECON","Adjusted LR "+trip.lrNo+" diesel to ₹"+newDiesel+" (was ₹"+trip.dieselEstimate+")");
+                m[idx] = {...entry, resolution:"adjusted_trip", resolvedNote:`LR ${trip.lrNo} diesel updated to ₹${newDiesel}`};
+              } else {
+                alert(trip?"Trip already settled — use 'Recover from Next Trip' instead.":"No linked trip found.");
+                return prev;
+              }
+            }
+            else if(action==="recover_next"){
+              const veh = (vehicles||[]).find(v=>v.truckNo===entry.pump?.vehicle || v.truckNo===entry.app?.truckNo);
+              if(veh && totalDiff > 0){
+                const loanTxn = {id:"DM"+Date.now(), type:"diesel_mismatch", amount:totalDiff,
+                  note:`Diesel mismatch: Pump ₹${(entry.pump?.hsd||0)+(entry.pump?.advance||0)} vs App ₹${(entry.app?.confirmedAmount??entry.app?.amount||0)}. LR ${entry.trip?.lrNo||"?"}, Indent #${entry.app?.indentNo||"?"}`,
+                  date:new Date().toISOString()};
+                const updVeh = {...veh, loan:(veh.loan||0)+totalDiff,
+                  loanTxns:[...(veh.loanTxns||[]), loanTxn]};
+                setVehicles(p=>p.map(v=>v.id===veh.id?updVeh:v));
+                DB.saveVehicle(updVeh).catch(()=>{});
+                log("DIESEL RECON","Added ₹"+totalDiff+" to "+veh.truckNo+" loan — Indent #"+(entry.app?.indentNo||"?"));
+                m[idx] = {...entry, resolution:"recover_next", resolvedNote:`₹${totalDiff} added to ${veh.truckNo} vehicle loan`};
+              }
+            }
+            else if(action==="write_off"){
+              log("DIESEL RECON","Write-off ₹"+(Math.abs(totalDiff))+" — Indent #"+(entry.app?.indentNo||entry.pump?.indent_no||"?"));
+              m[idx] = {...entry, resolution:"write_off", resolvedNote:`₹${Math.abs(totalDiff)} written off`};
+            }
+            else if(action==="flag"){
+              m[idx] = {...entry, resolution:"flagged", resolvedNote:"Flagged for investigation"};
+            }
+            return m;
+          });
+        };
+
+        const fmt = n => "₹"+(n||0).toLocaleString("en-IN");
+        const matchedCount = (reconMatches||[]).filter(m=>m.status==="matched").length;
+        const mismatchCount = (reconMatches||[]).filter(m=>m.status==="mismatch").length;
+        const notInApp = (reconMatches||[]).filter(m=>m.status==="not_in_app").length;
+        const notInPump = (reconMatches||[]).filter(m=>m.status==="not_in_pump").length;
+        const resolved = (reconMatches||[]).filter(m=>m.resolution!=="pending"&&m.resolution!=="ok").length;
+
+        return (<div style={{display:"flex",flexDirection:"column",gap:12}}>
+          <div style={{fontSize:14,fontWeight:700,color:C.text}}>🔍 Diesel Reconciliation</div>
+          <div style={{fontSize:11,color:C.muted}}>Upload pump statement images → AI extracts data → auto-match with app requests → resolve mismatches</div>
+
+          {/* Upload area */}
+          {!reconMatches && (<>
+            <div style={{background:C.bg,border:`2px dashed ${C.border}`,borderRadius:12,padding:20,textAlign:"center"}}>
+              <label style={{cursor:"pointer",color:C.accent,fontWeight:700,fontSize:13}}>
+                📷 Upload Pump Statement Images
+                <input type="file" accept="image/*" multiple style={{display:"none"}}
+                  onChange={e=>{setReconImages(Array.from(e.target.files||[]));}}/>
+              </label>
+              {reconImages.length>0 && (
+                <div style={{marginTop:8,fontSize:12,color:C.green,fontWeight:600}}>
+                  {reconImages.length} image{reconImages.length>1?"s":""} selected
+                </div>
+              )}
+            </div>
+            <button onClick={scanPumpImages}
+              disabled={reconScanning||!reconImages.length}
+              style={{background:reconScanning?C.muted:C.accent,color:"#fff",border:"none",borderRadius:10,
+                padding:"12px 20px",fontSize:13,fontWeight:700,cursor:reconScanning?"wait":"pointer"}}>
+              {reconScanning ? reconProgress : "🔍 Scan & Match"}
+            </button>
+          </>)}
+
+          {/* Results */}
+          {reconMatches && (<>
+            {/* Summary KPIs */}
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              <div style={{background:C.green+"11",border:`1px solid ${C.green}33`,borderRadius:8,padding:"8px 14px",flex:1,minWidth:80,textAlign:"center"}}>
+                <div style={{fontSize:18,fontWeight:800,color:C.green}}>{matchedCount}</div>
+                <div style={{fontSize:9,color:C.green}}>Matched ✅</div>
+              </div>
+              <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,borderRadius:8,padding:"8px 14px",flex:1,minWidth:80,textAlign:"center"}}>
+                <div style={{fontSize:18,fontWeight:800,color:C.orange}}>{mismatchCount}</div>
+                <div style={{fontSize:9,color:C.orange}}>Mismatch ⚠</div>
+              </div>
+              <div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,padding:"8px 14px",flex:1,minWidth:80,textAlign:"center"}}>
+                <div style={{fontSize:18,fontWeight:800,color:C.red}}>{notInApp}</div>
+                <div style={{fontSize:9,color:C.red}}>Not in App</div>
+              </div>
+              <div style={{background:C.purple+"11",border:`1px solid ${C.purple}33`,borderRadius:8,padding:"8px 14px",flex:1,minWidth:80,textAlign:"center"}}>
+                <div style={{fontSize:18,fontWeight:800,color:C.purple}}>{resolved}</div>
+                <div style={{fontSize:9,color:C.purple}}>Resolved</div>
+              </div>
+            </div>
+
+            {/* Reset button */}
+            <button onClick={()=>{setReconMatches(null);setReconData(null);setReconImages([]);}}
+              style={{background:C.dim,color:C.text,border:"none",borderRadius:8,padding:"6px 14px",
+                fontSize:11,fontWeight:600,cursor:"pointer",alignSelf:"flex-start"}}>
+              ↩ New Reconciliation
+            </button>
+
+            {/* Mismatch entries (show mismatches & unmatched first, then matched) */}
+            {reconMatches.filter(m=>m.status!=="matched").map((m,idx)=>{
+              const realIdx = reconMatches.indexOf(m);
+              const bg = m.status==="mismatch"?C.orange+"0a":m.status==="not_in_app"?C.red+"0a":C.purple+"0a";
+              const borderCol = m.status==="mismatch"?C.orange:m.status==="not_in_app"?C.red:C.purple;
+              const totalDiff = (m.hsdDiff||0)+(m.advDiff||0);
+              const isResolved = m.resolution!=="pending";
+              return (
+                <div key={idx} style={{background:bg,border:`1.5px solid ${borderCol}33`,borderRadius:10,padding:"12px 14px",
+                  opacity:isResolved?0.6:1}}>
+                  {/* Status badge */}
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                    <span style={{fontSize:10,fontWeight:700,color:borderCol,background:borderCol+"22",
+                      padding:"2px 8px",borderRadius:10}}>
+                      {m.status==="mismatch"?"⚠ AMOUNT MISMATCH":m.status==="not_in_app"?"❌ NOT IN APP":"❓ NOT IN PUMP"}
+                    </span>
+                    {isResolved && (
+                      <span style={{fontSize:10,color:C.green,fontWeight:600}}>✅ {m.resolvedNote}</span>
+                    )}
+                  </div>
+
+                  {/* Data comparison */}
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4,fontSize:11,marginBottom:8}}>
+                    <div style={{fontWeight:700,color:C.text}}>🏪 Pump</div>
+                    <div style={{fontWeight:700,color:C.text}}>📱 App</div>
+                    <div>{m.pump?.vehicle||"—"}</div>
+                    <div>{m.app?.truckNo||"—"}</div>
+                    <div>HSD: <b style={{color:m.hsdDiff?C.red:C.green}}>{fmt(m.pump?.hsd||0)}</b></div>
+                    <div>Diesel: <b style={{color:m.hsdDiff?C.red:C.green}}>{fmt(m.app?.dieselAmount??m.app?.amount??0)}</b></div>
+                    <div>Advance: <b style={{color:m.advDiff?C.red:C.green}}>{fmt(m.pump?.advance||0)}</b></div>
+                    <div>Cash: <b style={{color:m.advDiff?C.red:C.green}}>{fmt(m.app?.cashAmount??0)}</b></div>
+                    {totalDiff!==0 && (
+                      <div style={{gridColumn:"1/3",color:C.red,fontWeight:700,fontSize:12}}>
+                        Difference: {fmt(Math.abs(totalDiff))} {totalDiff>0?"(pump higher)":"(app higher)"}
+                        {m.trip && <span style={{color:C.muted,fontWeight:400}}> · LR: {m.trip.lrNo} · {m.trip.driverSettled?"⚠ Settled":"Unsettled"}</span>}
+                      </div>
+                    )}
+                    {m.app?.createdBy && (
+                      <div style={{gridColumn:"1/3",color:C.muted,fontSize:10}}>
+                        Created by: <b>{m.app.createdBy}</b> · Indent #{m.app.indentNo} · {m.app.date?.slice(0,10)}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Action buttons (only if not resolved) */}
+                  {!isResolved && m.status==="mismatch" && totalDiff>0 && (
+                    <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                      <button onClick={()=>resolveEntry(realIdx,"debit_employee")}
+                        style={{fontSize:10,fontWeight:600,background:C.orange+"22",color:C.orange,border:`1px solid ${C.orange}44`,
+                          borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                        👤 Debit Employee
+                      </button>
+                      {m.trip && !m.trip.driverSettled && (
+                        <button onClick={()=>resolveEntry(realIdx,"adjust_trip")}
+                          style={{fontSize:10,fontWeight:600,background:C.blue+"22",color:C.blue,border:`1px solid ${C.blue}44`,
+                            borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                          📝 Adjust Trip
+                        </button>
+                      )}
+                      <button onClick={()=>resolveEntry(realIdx,"recover_next")}
+                        style={{fontSize:10,fontWeight:600,background:C.purple+"22",color:C.purple,border:`1px solid ${C.purple}44`,
+                          borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                        🚛 Recover from Next Trip
+                      </button>
+                      <button onClick={()=>resolveEntry(realIdx,"write_off")}
+                        style={{fontSize:10,fontWeight:600,background:C.muted+"22",color:C.muted,border:`1px solid ${C.muted}44`,
+                          borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                        ✖ Write Off
+                      </button>
+                      <button onClick={()=>resolveEntry(realIdx,"flag")}
+                        style={{fontSize:10,fontWeight:600,background:C.red+"22",color:C.red,border:`1px solid ${C.red}44`,
+                          borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                        🚩 Flag
+                      </button>
+                    </div>
+                  )}
+                  {!isResolved && m.status==="not_in_app" && (
+                    <div style={{display:"flex",gap:6}}>
+                      <button onClick={()=>resolveEntry(realIdx,"recover_next")}
+                        style={{fontSize:10,fontWeight:600,background:C.purple+"22",color:C.purple,border:`1px solid ${C.purple}44`,
+                          borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                        🚛 Add to Vehicle Loan
+                      </button>
+                      <button onClick={()=>resolveEntry(realIdx,"flag")}
+                        style={{fontSize:10,fontWeight:600,background:C.red+"22",color:C.red,border:`1px solid ${C.red}44`,
+                          borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                        🚩 Flag for Investigation
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
+            {/* Matched entries (collapsed) */}
+            {matchedCount > 0 && (
+              <details style={{background:C.green+"08",border:`1px solid ${C.green}22`,borderRadius:10,padding:"10px 14px"}}>
+                <summary style={{fontSize:12,fontWeight:700,color:C.green,cursor:"pointer"}}>
+                  ✅ {matchedCount} Matched Entries (tap to expand)
+                </summary>
+                <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:4}}>
+                  {reconMatches.filter(m=>m.status==="matched").map((m,i)=>(
+                    <div key={i} style={{fontSize:10,color:C.muted,display:"flex",justifyContent:"space-between",
+                      padding:"4px 0",borderBottom:`1px solid ${C.border}`}}>
+                      <span>{m.pump?.vehicle} · #{m.app?.indentNo}</span>
+                      <span>HSD {fmt(m.pump?.hsd||0)} · Adv {fmt(m.pump?.advance||0)}</span>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
+          </>)}
+        </div>);
+      })()}
 
       {/* ── ALERT HISTORY VIEW ── */}
       {view==="history" && (()=>{
@@ -17851,20 +18228,14 @@ function ShortageRecoverBtn({v, setVehicles, log}) {
 function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentRequests, setPaymentRequests, driverPays=[], user, log, onClose}) {
   const t = trip;
   const veh = (vehicles||[]).find(v=>v.truckNo===t.truckNo);
-  // Compute actual balance — pouch is handled separately, NOT auto-deducted
+  // Compute actual balance (trip may not have .balance if coming from raw trips array)
   const _diGross = (t.diLines&&t.diLines.length>1)
     ? t.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
     : (t.qty||0)*(t.givenRate||0);
-  const _deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)+(t.shortageRecovery||0)+(t.loanRecovery||0);
+  const _deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)+(t.shortageRecovery||0)+(t.loanRecovery||0)+(t.pouchBalance||0);
   const _netDue  = Math.max(0, _diGross - _deducts);
   const _paidSoFar = (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
   const _balance = Math.max(0, _netDue - _paidSoFar);
-
-  // Party trip pouch: ₹700 can only be requested if sealed invoice or confirmation is uploaded
-  const isParty = t.orderType === "party";
-  const pouchAmt = isParty ? (+t.pouchBalance || 700) : 0;
-  const hasSealedOrConfirm = !!(t.sealedInvoicePath || t.confirmPdfPath || t.mergedPdfPath);
-  const pouchBlocked = isParty && pouchAmt > 0 && !hasSealedOrConfirm;
 
   // Build account lists — collect accounts from ALL vehicles of the same owner
   const ownerNameForAcct = (veh?.ownerName||"").trim();
@@ -17901,8 +18272,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
   const [accSearch,  setAccSearch]  = useState(""); // search within account list
   const [accOpen,    setAccOpen]    = useState(false); // dropdown open
   const [showOther,  setShowOther]  = useState(!!editingReq?.accountId && editingReq.accountId!==primaryOwnerAcc); // show alternate accounts
-  const _maxRequestable = pouchBlocked ? Math.max(0, _balance - pouchAmt) : _balance;
-  const [amount,     setAmount]     = useState(String(editingReq?.amount||_maxRequestable||0));
+  const [amount,     setAmount]     = useState(String(editingReq?.amount||_balance||0));
   const [notes,      setNotes]      = useState(editingReq?.notes||"");
   const [newAcc,     setNewAcc]     = useState({name:"",accountNo:"",ifsc:""});
   const [newAccEmpId,setNewAccEmpId]= useState(""); // which employee to save new account to
@@ -17918,11 +18288,6 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
     const effectiveAccId = (!showOther && recipType==="vehicle_owner") ? (accId||primaryOwnerAcc) : accId;
     if(!effectiveAccId)              { alert("Select an account."); return; }
     if(!amount||+amount<=0) { alert("Enter amount."); return; }
-    // Block if requesting pouch amount without sealed/confirmation
-    if(pouchBlocked && +amount > Math.max(0, _balance - pouchAmt)) {
-      alert(`Pouch ₹${pouchAmt.toLocaleString("en-IN")} is held back.\n\nUpload Sealed Invoice or Confirmation Email to release it.\n\nMax requestable now: ₹${Math.max(0, _balance - pouchAmt).toLocaleString("en-IN")}`);
-      return;
-    }
 
     // Resolve the account — when primary is shown (not showOther), use the displayed primary
     const resolvedAccId = (!showOther && recipType==="vehicle_owner" && !accId) ? primaryOwnerAcc : accId;
@@ -18037,27 +18402,6 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
           <div style={{color:C.accent,fontWeight:800,fontSize:15,marginTop:4}}>
             Balance: ₹{_balance.toLocaleString("en-IN")}
           </div>
-          {/* Calculation breakdown */}
-          <div style={{fontSize:10,color:C.muted,marginTop:4,lineHeight:1.7}}>
-            Gross: ₹{_diGross.toLocaleString("en-IN")}
-            {(t.advance||0)>0 && <span> − Advance ₹{(t.advance||0).toLocaleString("en-IN")}</span>}
-            {(t.tafal||0)>0 && <span> − Tafal ₹{(t.tafal||0).toLocaleString("en-IN")}</span>}
-            {(t.dieselEstimate||0)>0 && <span> − Diesel ₹{(t.dieselEstimate||0).toLocaleString("en-IN")}</span>}
-            {(t.shortageRecovery||0)>0 && <span> − Shortage ₹{(t.shortageRecovery||0).toLocaleString("en-IN")}</span>}
-            {(t.loanRecovery||0)>0 && <span> − Loan ₹{(t.loanRecovery||0).toLocaleString("en-IN")}</span>}
-            {_paidSoFar>0 && <span> − Paid ₹{_paidSoFar.toLocaleString("en-IN")}</span>}
-            {isParty && pouchAmt>0 && <span style={{color:hasSealedOrConfirm?"#16a34a":"#dc2626",fontWeight:600}}> − Pouch ₹{pouchAmt.toLocaleString("en-IN")} {hasSealedOrConfirm?"(released)":"(held)"}</span>}
-          </div>
-          {isParty && pouchAmt > 0 && (
-            <div style={{marginTop:6,fontSize:11,padding:"6px 10px",borderRadius:6,
-              background:hasSealedOrConfirm?"#dcfce7":"#fef2f2",
-              border:`1px solid ${hasSealedOrConfirm?"#86efac":"#fca5a5"}`,
-              color:hasSealedOrConfirm?"#166534":"#991b1b"}}>
-              {hasSealedOrConfirm
-                ? `✅ Sealed/Confirmation received — Pouch ₹${pouchAmt} released, can request full balance`
-                : `🔒 Pouch ₹${pouchAmt} held back — requestable: ₹${Math.max(0,_balance - pouchAmt).toLocaleString("en-IN")}. Upload Sealed Invoice or Confirmation Email to release.`}
-            </div>
-          )}
         </div>
 
         {hasPending && (()=>{
