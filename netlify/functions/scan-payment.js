@@ -72,6 +72,16 @@ exports.handler = async (event) => {
 
     const data = await response.json();
 
+    // Calculate actual cost from token usage and include in response
+    let _costInr = 0;
+    if (data.usage) {
+      const { input_tokens, output_tokens } = data.usage;
+      const costUSD = (input_tokens * 0.80 + output_tokens * 4.00) / 1_000_000;
+      _costInr = +(costUSD * 84).toFixed(4);
+      console.log(`[scan-payment] tokens: ${input_tokens} in / ${output_tokens} out | cost: $${costUSD.toFixed(6)} (~₹${_costInr})`);
+    }
+
+
     // ── Token usage log — check Netlify function logs for per-scan cost ──
     if (data.usage) {
       const { input_tokens, output_tokens } = data.usage;
@@ -128,6 +138,8 @@ exports.handler = async (event) => {
       ? parsed.lrNumbers.map(lr => String(lr).trim().toUpperCase()).filter(lr => lr.length > 0)
       : [];
 
+    parsed._costInr = _costInr;
+    parsed._scanType = "payment_scan";
     return {
       statusCode: 200,
       headers: { "Content-Type": "application/json" },

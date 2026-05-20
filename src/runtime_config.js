@@ -218,12 +218,13 @@ export async function fetchMyInvoices() {
 }
 
 // ── Scan logging ────────────────────────────────────────────────────────────
-export async function logScan(scanType, success = true) {
+export async function logScan(scanType, success = true, costInr = 0) {
   try {
     await adminDb.from('client_scans').insert({
       client_id: RC.clientId,
       scan_type: scanType,
       success,
+      cost_inr: costInr > 0 ? costInr : null,
       scanned_at: new Date().toISOString(),
     });
     RC.scansUsed++;
