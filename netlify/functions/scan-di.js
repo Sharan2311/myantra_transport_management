@@ -113,6 +113,16 @@ exports.handler = async (event) => {
     });
 
     const data = await response.json();
+
+    // Calculate actual cost from token usage
+    let _costInr = 0;
+    if (data.usage) {
+      const { input_tokens, output_tokens } = data.usage;
+      const costUSD = (input_tokens * 0.80 + output_tokens * 4.00) / 1_000_000;
+      _costInr = +(costUSD * 84).toFixed(4);
+      console.log(`[scan-di:${promptType||"di"}] tokens: ${input_tokens} in / ${output_tokens} out | cost: $${costUSD.toFixed(6)} (~₹${_costInr})`);
+    }
+
     if (!response.ok) {
       return {
         statusCode: response.status,
@@ -162,6 +172,8 @@ exports.handler = async (event) => {
         };
       }
 
+      parsed._costInr = _costInr;
+      parsed._scanType = promptType||"di_scan";
       return { statusCode: 200, headers: { "Content-Type": "application/json" }, body: JSON.stringify(parsed) };
     }
 
@@ -169,7 +181,7 @@ exports.handler = async (event) => {
     return {
       statusCode: 200,
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: clean }),
+      body: JSON.stringify({ text: clean, _costInr, _scanType: promptType||"pump_scan" }),
     };
 
   } catch (e) {
