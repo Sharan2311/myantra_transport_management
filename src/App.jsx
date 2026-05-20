@@ -8480,7 +8480,7 @@ function SearchableIndentSelect({options, value, truck, onSelect, onClear}) {
           </div>
         )}
         {filtered.map(r=>{
-          const amt=(r.confirmedAmount??r.amount||0).toLocaleString("en-IN");
+          const amt=(r.confirmedAmount??(r.amount||0)).toLocaleString("en-IN");
           const conf=r.status==="confirmed";
           const isSame=r.truckNo===truck;
           const isSel=String(r.indentNo)===value;
