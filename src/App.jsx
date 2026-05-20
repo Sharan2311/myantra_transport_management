@@ -8467,7 +8467,7 @@ function SearchableIndentSelect({options, value, truck, onSelect, onClear}) {
         {value && (
           <div onClick={onClear} style={{padding:"7px 12px",borderRadius:8,cursor:"pointer",
             background:C.red+"11",border:`1px solid ${C.red}44`,color:C.red,fontSize:12,fontWeight:700}}>
-            \u2715 Clear attached indent #{value}
+            ✕ Clear attached indent #{value}
           </div>
         )}
         {filtered.length===0 && (
@@ -8492,14 +8492,14 @@ function SearchableIndentSelect({options, value, truck, onSelect, onClear}) {
                 </span>
                 <span style={{marginLeft:8,fontSize:10,fontWeight:700,
                   background:conf?C.teal:C.orange,color:"#fff",borderRadius:4,padding:"1px 5px"}}>
-                  {conf?"\u2713 OK":"\u26a0 PENDING"}
+                  {conf?"✓ OK":"⚠ PENDING"}
                 </span>
                 {!isSame&&<span style={{marginLeft:6,fontSize:10,color:C.red,
                   background:C.red+"11",borderRadius:4,padding:"1px 5px",fontWeight:700}}>
                   OTHER TRUCK
                 </span>}
                 <div style={{fontSize:11,color:C.muted,marginTop:2}}>
-                  {r.truckNo}{isSame?" \u2014 this trip":""} \u00b7 \u20b9{amt}{r.date?" \u00b7 "+r.date:""}
+                  {r.truckNo}{isSame?" — this trip":""} · ₹{amt}{r.date?" · "+r.date:""}
                 </div>
               </div>
               <div style={{fontSize:12,fontWeight:700,flexShrink:0,marginLeft:8,
@@ -9156,47 +9156,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
               </div>
             )}
 
-            {/* \u2500\u2500 Owner override: searchable indent picker for wrong-attachment fix \u2500\u2500 */}
-            {isOwner && (
-              <div style={{marginTop:4,borderTop:`1px dashed ${C.border}`,paddingTop:8}}>
-                <div style={{fontSize:11,color:C.red,fontWeight:700,marginBottom:6,
-                  display:"flex",alignItems:"center",gap:5}}>
-                  \ud83d\udd04 Override \u2014 all available indents
-                  <span style={{fontSize:10,fontWeight:400,color:C.muted}}>(owner only \u2014 use to fix wrong attachment)</span>
-                </div>
-                {[...truckReqs.filter(r=>r.status!=="attached"),...otherReqs]
-                  .sort((a,b)=>{
-                    const sA=a.truckNo===truck?1:0,sB=b.truckNo===truck?1:0;
-                    if(sA!==sB)return sB-sA;
-                    return (b.status==="confirmed"?1:0)-(a.status==="confirmed"?1:0);
-                  }).length===0
-                  ? <div style={{fontSize:12,color:C.muted,fontStyle:"italic"}}>No indents available.</div>
-                  : <SearchableIndentSelect
-                      options={[...truckReqs.filter(r=>r.status!=="attached"),...otherReqs]
-                        .sort((a,b)=>{
-                          const sA=a.truckNo===truck?1:0,sB=b.truckNo===truck?1:0;
-                          if(sA!==sB)return sB-sA;
-                          return (b.status==="confirmed"?1:0)-(a.status==="confirmed"?1:0);
-                        })}
-                      value={val}
-                      truck={truck}
-                      onSelect={r=>{
-                        if(r.truckNo!==truck){
-                          const ok=window.confirm(
-                            `\u26a0 Indent #${r.indentNo} belongs to ${r.truckNo}, not ${truck}.\n\n`+
-                            `Amount: \u20b9${(r.confirmedAmount??(r.amount||0)).toLocaleString("en-IN")}\n`+
-                            `Status: ${r.status==="confirmed"?"Confirmed by pump":"Not yet confirmed"}\n\n`+
-                            `Attach to this trip anyway?`);
-                          if(!ok)return;
-                        }
-                        ff("dieselIndentNo")(String(r.indentNo));
-                        ff("dieselEstimate")(String(r.confirmedAmount??(r.amount||0)));
-                      }}
-                      onClear={clearReq}
-                    />
-                }
-              </div>
-            )}
+
 
             {/* Matched / error messages */}
             {matchedReq&&matchedReq.truckNo!==truck&&truck&&(
@@ -10284,8 +10244,10 @@ function ScanPaymentBtn({ onResult }) {
       });
       const parsed = await resp.json();
       if (parsed.error) throw new Error(parsed.error);
+      logScan("payment_scan", true, parsed._costInr||0);
       onResult(parsed);
     } catch(e) {
+      logScan("payment_scan", false, 0);
       alert("Could not read payment image.\n\n" + (e.message||"Unknown error") + "\n\nPlease fill manually.");
     } finally {
       setScanning(false);
@@ -19316,8 +19278,10 @@ This will auto-recover in the next trip.`);
         }
       }
       // Always open split sheet — handles both single and multi-LR
+      logScan("payment_scan", true, data._costInr||0);
       setSplitSheet(data);
     } catch(e) {
+      logScan("payment_scan", false, 0);
       alert("Could not read payment image.\n\n" + (e.message||"Unknown error") + "\n\nPlease fill manually.");
     } finally {
       setScanningGlobal(false);
