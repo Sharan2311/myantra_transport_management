@@ -141,6 +141,16 @@ exports.handler = async (event) => {
     });
 
     const data = await response.json();
+
+    // Calculate actual cost from token usage (Sonnet 4.6 pricing)
+    let _costInr = 0;
+    if (data.usage) {
+      const { input_tokens, output_tokens } = data.usage;
+      const costUSD = (input_tokens * 3.00 + output_tokens * 15.00) / 1_000_000;
+      _costInr = +(costUSD * 84).toFixed(4);
+      console.log(`[scan-shree:${scanType||"invoice"}] tokens: ${input_tokens} in / ${output_tokens} out | cost: $${costUSD.toFixed(6)} (~₹${_costInr})`);
+    }
+
     if (!response.ok) {
       return {
         statusCode: response.status,
@@ -213,6 +223,8 @@ exports.handler = async (event) => {
       }
     }
 
+    parsed._costInr = _costInr;
+    parsed._scanType = scanType==="invoice" ? "shree_scan" : "shree_payment_scan";
     return {
       statusCode: 200,
       headers: { "Content-Type": "application/json" },

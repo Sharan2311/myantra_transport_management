@@ -2673,10 +2673,10 @@ Rules:
           return false; // duplicate — auto-remove
         });
       });
-      logScan("di_scan", true);
+      logScan("di_scan", true, data._costInr||0);
     } catch(e) {
       setItems(prev => prev.map(x => x.id===id ? {...x, status:"error", error:e.message} : x));
-      logScan("di_scan", false);
+      logScan("di_scan", false, 0);
     }
   };
 
@@ -5018,7 +5018,7 @@ Rules:
       const existingTrip = lrNo ? trips.find(t => t.lrNo === lrNo) : null;
 
       setState("done");
-      logScan("di_scan", true);
+      logScan("di_scan", true, data._costInr||0);
       // If caller wants the raw file (e.g. to auto-populate GR ref), pass it back
       if(onFile) onFile(file);
       onExtracted({
@@ -8519,6 +8519,73 @@ function SearchableIndentSelect({options, value, truck, onSelect, onClear}) {
 }
 
 
+// SearchableIndentSelect - owner-only searchable indent picker
+function SearchableIndentSelect({options, value, truck, onSelect, onClear}) {
+  const [q, setQ] = React.useState("");
+  const filtered = options.filter(r => {
+    if(!q.trim()) return true;
+    const lq = q.toLowerCase();
+    return String(r.indentNo).includes(lq) || (r.truckNo||"").toLowerCase().includes(lq);
+  });
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:6}}>
+      <input type="text" placeholder="Search by truck no or indent no..."
+        value={q} onChange={e=>setQ(e.target.value)}
+        style={{width:"100%",boxSizing:"border-box",background:"#fff",
+          border:`1.5px solid ${C.border}`,borderRadius:9,color:C.text,
+          padding:"9px 12px",fontSize:13,outline:"none"}}/>
+      <div style={{maxHeight:220,overflowY:"auto",display:"flex",flexDirection:"column",gap:3}}>
+        {value && (
+          <div onClick={onClear} style={{padding:"7px 12px",borderRadius:8,cursor:"pointer",
+            background:C.red+"11",border:`1px solid ${C.red}44`,color:C.red,fontSize:12,fontWeight:700}}>
+            \u2715 Clear attached indent #{value}
+          </div>
+        )}
+        {filtered.length===0 && (
+          <div style={{padding:"8px 12px",fontSize:12,color:C.muted,fontStyle:"italic"}}>
+            No indents match &quot;{q}&quot;
+          </div>
+        )}
+        {filtered.map(r=>{
+          const amt=(r.confirmedAmount??(r.amount||0)).toLocaleString("en-IN");
+          const conf=r.status==="confirmed";
+          const isSame=r.truckNo===truck;
+          const isSel=String(r.indentNo)===value;
+          return(
+            <div key={r.id} onClick={()=>onSelect(r)}
+              style={{padding:"8px 12px",borderRadius:8,cursor:"pointer",
+                background:isSel?C.teal+"22":isSame?C.teal+"0a":"#fff8f0",
+                border:`1.5px solid ${isSel?C.teal:isSame?C.teal+"44":C.orange+"44"}`,
+                display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div style={{flex:1,minWidth:0}}>
+                <span style={{fontWeight:700,fontSize:13,color:isSel?C.teal:isSame?C.teal:C.orange}}>
+                  #{r.indentNo}
+                </span>
+                <span style={{marginLeft:8,fontSize:10,fontWeight:700,
+                  background:conf?C.teal:C.orange,color:"#fff",borderRadius:4,padding:"1px 5px"}}>
+                  {conf?"\u2713 OK":"\u26a0 PENDING"}
+                </span>
+                {!isSame&&<span style={{marginLeft:6,fontSize:10,color:C.red,
+                  background:C.red+"11",borderRadius:4,padding:"1px 5px",fontWeight:700}}>
+                  OTHER TRUCK
+                </span>}
+                <div style={{fontSize:11,color:C.muted,marginTop:2}}>
+                  {r.truckNo}{isSame?" \u2014 this trip":""} \u00b7 \u20b9{amt}{r.date?" \u00b7 "+r.date:""}
+                </div>
+              </div>
+              <div style={{fontSize:12,fontWeight:700,flexShrink:0,marginLeft:8,
+                color:isSel?C.red:isSame?C.teal:C.orange}}>
+                {isSel?"Remove":"Select"}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+
 function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit, submitLabel, user, showStatus=false, wasScanned=false, isParty=false, partyDriverPhone="", salesOfficerPhone="", salesOfficerEmail="", partyNumber="", onPartyFieldChange, employees=[], cashTransfers=[], recentDestinations=[], recentGrades=[], trips=[], indents=[], dieselRequests=[], setDieselRequests, manualLrMode=false, manualDiesel=false}) {
   // Ensure each diLine has frRate — migrate from trip-level frRate if missing
   const normalizedDiLines = (f.diLines||[]).map(d => ({...d, frRate: d.frRate || +f.frRate || 0}));
@@ -9160,11 +9227,73 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
               </div>
             )}
 
+            {/* \u2500\u2500 Owner override: searchable indent picker for wrong-attachment fix \u2500\u2500 */}
+            {isOwner && (
+              <div style={{marginTop:4,borderTop:`1px dashed ${C.border}`,paddingTop:8}}>
+                <div style={{fontSize:11,color:C.red,fontWeight:700,marginBottom:6,
+                  display:"flex",alignItems:"center",gap:5}}>
+                  \ud83d\udd04 Override \u2014 all available indents
+                  <span style={{fontSize:10,fontWeight:400,color:C.muted}}>(owner only \u2014 use to fix wrong attachment)</span>
+                </div>
+                {[...truckReqs.filter(r=>r.status!=="attached"),...otherReqs]
+                  .sort((a,b)=>{
+                    const sA=a.truckNo===truck?1:0,sB=b.truckNo===truck?1:0;
+                    if(sA!==sB)return sB-sA;
+                    return (b.status==="confirmed"?1:0)-(a.status==="confirmed"?1:0);
+                  }).length===0
+                  ? <div style={{fontSize:12,color:C.muted,fontStyle:"italic"}}>No indents available.</div>
+                  : <SearchableIndentSelect
+                      options={[...truckReqs.filter(r=>r.status!=="attached"),...otherReqs]
+                        .sort((a,b)=>{
+                          const sA=a.truckNo===truck?1:0,sB=b.truckNo===truck?1:0;
+                          if(sA!==sB)return sB-sA;
+                          return (b.status==="confirmed"?1:0)-(a.status==="confirmed"?1:0);
+                        })}
+                      value={val}
+                      truck={truck}
+                      onSelect={r=>{
+                        if(r.truckNo!==truck){
+                          const ok=window.confirm(
+                            `\u26a0 Indent #${r.indentNo} belongs to ${r.truckNo}, not ${truck}.\n\n`+
+                            `Amount: \u20b9${(r.confirmedAmount??(r.amount||0)).toLocaleString("en-IN")}\n`+
+                            `Status: ${r.status==="confirmed"?"Confirmed by pump":"Not yet confirmed"}\n\n`+
+                            `Attach to this trip anyway?`);
+                          if(!ok)return;
+                        }
+                        ff("dieselIndentNo")(String(r.indentNo));
+                        ff("dieselEstimate")(String(r.confirmedAmount??(r.amount||0)));
+                      }}
+                      onClear={clearReq}
+                    />
+                }
+              </div>
+            )}
+
             {/* Matched / error messages */}
             {matchedReq&&matchedReq.truckNo!==truck&&truck&&(
-              <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,borderRadius:8,
-                padding:"7px 12px",fontSize:12,color:C.orange,fontWeight:600}}>
-                This indent was for {matchedReq.truckNo} — trip truck is {truck}
+              <div style={{background:C.orange+"11",border:`1.5px solid ${C.orange}`,borderRadius:8,
+                padding:"9px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:12,color:C.orange,fontWeight:700}}>
+                    ⚠ This indent was for {matchedReq.truckNo} — trip truck is {truck}
+                  </div>
+                  <div style={{fontSize:11,color:C.muted,marginTop:2,display:"flex",alignItems:"center",gap:6}}>
+                    #{matchedReq.indentNo}
+                    <span style={{fontSize:10,fontWeight:700,background:matchedReq.confirmedAmount!=null?C.teal:C.orange,
+                      color:"#fff",borderRadius:4,padding:"1px 5px"}}>
+                      {matchedReq.confirmedAmount!=null?"✓ CONFIRMED":"⚠ PENDING"}
+                    </span>
+                    · ₹{(matchedReq.confirmedAmount??(matchedReq.amount||0)).toLocaleString("en-IN")}
+                  </div>
+                </div>
+                {isOwner
+                  ? <button onClick={clearReq}
+                      style={{background:"none",border:`1px solid ${C.red}44`,borderRadius:6,
+                        color:C.red,cursor:"pointer",fontSize:12,padding:"4px 10px",fontWeight:700,flexShrink:0}}>
+                      ✕ Remove
+                    </button>
+                  : <span style={{fontSize:10,color:C.muted}}>🔒 Owner only</span>
+                }
               </div>
             )}
             {dupTrip&&<div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,padding:"7px 12px",fontSize:12,color:C.red,fontWeight:600}}>⚠ Indent already used on LR {dupTrip.lrNo||"—"} ({dupTrip.truckNo} · {dupTrip.date})</div>}
@@ -10170,10 +10299,10 @@ function PumpSlipScanner({ pumps, trips, user, onResults }) {
 
       onResults(results);
       setState("done");
-      logScan("payment_scan", true);
+      logScan("payment_scan", true, data._costInr||0);
     } catch(e) {
       setError("Could not read slip: " + e.message); setState("error");
-      logScan("payment_scan", false);
+      logScan("payment_scan", false, 0);
     }
   };
 
@@ -16427,8 +16556,8 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         body:JSON.stringify({ base64, anthropicKey: RC.anthropicKey, mediaType:file.type||"application/pdf", scanType}),
       });
       const data = await resp.json();
-      if(data.error) { setScanError(data.error); logScan("shree_scan", false); }
-      else { setScanResult({...data, type:scanType}); logScan("shree_scan", true); }
+      if(data.error) { setScanError(data.error); logScan("shree_scan", false, 0); }
+      else { setScanResult({...data, type:scanType}); logScan("shree_scan", true, data._costInr||0); }
     } catch(e) { setScanError(e.message); logScan("shree_scan", false); }
     finally { setScanning(false); }
   };
