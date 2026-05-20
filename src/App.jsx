@@ -3182,16 +3182,25 @@ Rules:
           let chosenReq = truckMatch;
           if (!truckMatch) {
             // Also check older/open requests for manual owner override
-            const allUnattached = (dieselRequests||[]).filter(r => r.status==="open" || r.status==="confirmed");
+            // Show truck-specific indents first; only fall back to other trucks if none found
+            const sametruckUnattached = (dieselRequests||[]).filter(r => (r.status==="open"||r.status==="confirmed") && r.truckNo===truckNo);
+            const allUnattached = sametruckUnattached.length > 0
+              ? sametruckUnattached
+              : (dieselRequests||[]).filter(r => r.status==="open" || r.status==="confirmed");
+            const isOtherTruckFallback = sametruckUnattached.length === 0;
             if (allUnattached.length > 0) {
               const listStr = allUnattached.map(r=>{
                 const age = Math.floor((Date.now()-new Date(r.date||0).getTime())/86400000);
                 const warn = r.status==="open"?" ⚠UNCONFIRMED":"";
                 const old = age>4?" ⚠OLD("+age+"d)":"";
-                return `  #${r.indentNo} · ${r.truckNo} · ₹${(r.confirmedAmount??r.amount).toLocaleString("en-IN")}${warn}${old}`;
+                const truckLabel = r.truckNo!==truckNo ? ` [OTHER TRUCK: ${r.truckNo}]` : "";
+                return `  #${r.indentNo} · ${r.truckNo} · ₹${(r.confirmedAmount??r.amount).toLocaleString("en-IN")}${warn}${old}${truckLabel}`;
               }).join("\n");
+              const fallbackNote = isOtherTruckFallback
+                ? `\n⚠ NO INDENT FOUND FOR ${truckNo} — showing OTHER TRUCKS. Verify before attaching!`
+                : "";
               const sel = window.prompt(
-                `⛽ No confirmed Diesel Request (within 4 days) for ${truckNo}.\n\nAll available requests:\n${listStr}\n\n⚠ UNCONFIRMED/OLD requests need owner verification.\nEnter Indent # to attach (or Cancel to skip):`, ""
+                `⛽ No confirmed Diesel Request (within 4 days) for ${truckNo}.\n\nAvailable requests:${fallbackNote}\n${listStr}\n\n⚠ UNCONFIRMED/OLD requests need owner verification.\nEnter Indent # to attach (or Cancel to skip):`, ""
               );
               if (sel && sel.trim()) {
                 const selNo = parseInt(sel.trim(), 10);
@@ -3347,16 +3356,25 @@ Rules:
           const truckMatch = confirmedReqs.find(r => r.truckNo===truckNo);
           let chosenReq = truckMatch;
           if (!truckMatch) {
-            const allUnattached = (dieselRequests||[]).filter(r => r.status==="open" || r.status==="confirmed");
+            // Show truck-specific indents first; only fall back to other trucks if none found
+            const sametruckUnattached = (dieselRequests||[]).filter(r => (r.status==="open"||r.status==="confirmed") && r.truckNo===truckNo);
+            const allUnattached = sametruckUnattached.length > 0
+              ? sametruckUnattached
+              : (dieselRequests||[]).filter(r => r.status==="open" || r.status==="confirmed");
+            const isOtherTruckFallback = sametruckUnattached.length === 0;
             if (allUnattached.length > 0) {
               const listStr = allUnattached.map(r=>{
                 const age = Math.floor((Date.now()-new Date(r.date||0).getTime())/86400000);
                 const warn = r.status==="open"?" ⚠UNCONFIRMED":"";
                 const old = age>4?" ⚠OLD("+age+"d)":"";
-                return `  #${r.indentNo} · ${r.truckNo} · ₹${(r.confirmedAmount??r.amount).toLocaleString("en-IN")}${warn}${old}`;
+                const truckLabel = r.truckNo!==truckNo ? ` [OTHER TRUCK: ${r.truckNo}]` : "";
+                return `  #${r.indentNo} · ${r.truckNo} · ₹${(r.confirmedAmount??r.amount).toLocaleString("en-IN")}${warn}${old}${truckLabel}`;
               }).join("\n");
+              const fallbackNote = isOtherTruckFallback
+                ? `\n⚠ NO INDENT FOUND FOR ${truckNo} — showing OTHER TRUCKS. Verify before attaching!`
+                : "";
               const sel = window.prompt(
-                `⛽ No confirmed Diesel Request (within 4 days) for ${truckNo}.\n\nAll available requests:\n${listStr}\n\n⚠ UNCONFIRMED/OLD requests need owner verification.\nEnter Indent # to attach (or Cancel to skip):`, ""
+                `⛽ No confirmed Diesel Request (within 4 days) for ${truckNo}.\n\nAvailable requests:${fallbackNote}\n${listStr}\n\n⚠ UNCONFIRMED/OLD requests need owner verification.\nEnter Indent # to attach (or Cancel to skip):`, ""
               );
               if (sel && sel.trim()) {
                 const selNo = parseInt(sel.trim(), 10);
@@ -5219,11 +5237,23 @@ async function mergePDFs(pdfBuffers) {
   const merged = await PDFDocument.create();
   for (const buf of pdfBuffers) {
     try {
-      const doc = await PDFDocument.load(buf, { ignoreEncryption: true });
-      const pages = await merged.copyPages(doc, doc.getPageIndices());
-      pages.forEach(p => merged.addPage(p));
+      // Detect PDF by %PDF magic bytes — images (JPEG/PNG) are embedded as a page
+      const u8 = new Uint8Array(buf instanceof ArrayBuffer ? buf : buf.buffer, 0, 4);
+      const isPDF = u8[0]===0x25&&u8[1]===0x50&&u8[2]===0x44&&u8[3]===0x46; // %PDF
+      if(isPDF) {
+        const doc = await PDFDocument.load(buf, { ignoreEncryption: true });
+        const pages = await merged.copyPages(doc, doc.getPageIndices());
+        pages.forEach(p => merged.addPage(p));
+      } else {
+        // Try JPEG first, fallback to PNG
+        let img;
+        try { img = await merged.embedJpg(buf); }
+        catch { img = await merged.embedPng(buf); }
+        const page = merged.addPage([img.width, img.height]);
+        page.drawImage(img, {x:0, y:0, width:img.width, height:img.height});
+      }
     } catch(e) {
-      console.warn("Could not merge one PDF:", e.message);
+      console.warn("Could not merge one file:", e.message);
     }
   }
   return await merged.save();
@@ -5614,11 +5644,12 @@ function PartyBatchEmailSheet({ trips, setTrips, onClose, log }) {
                       }catch(me){console.warn("Merge:",me.message);}}
                       const{data}=await supabase.storage.from("party-trip-files").createSignedUrl(path,86400*365);
                       const ts=new Date().toISOString();
-                      const u={...t,emailSentAt:t.emailSentAt||ts,confirmPdfPath:data?.signedUrl||path,status:"Confirmation Email Received",
-                        ...(mergedPath?{mergedPdfPath:mergedPath,receiptFilePath:path,receiptUploadedAt:ts}:{})};
+                      if(!mergedPath)alert("\u26a0 Confirmation uploaded but merge failed. Status not updated until merge succeeds.");
+                      const u={...t,emailSentAt:t.emailSentAt||ts,confirmPdfPath:data?.signedUrl||path,
+                        ...(mergedPath?{status:"Confirmation Email Received",mergedPdfPath:mergedPath,receiptFilePath:path,receiptUploadedAt:ts}:{})};
                       setTrips(p=>p.map(x=>x.id===t.id?u:x));
                       setTimeout(()=>DB.saveTrip(u).catch(er=>console.error(er)),0);
-                      log&&log("CONFIRM PDF","Single: "+t.lrNo+(mergedPath?" + merged":""));
+                      log&&log("CONFIRM PDF","Single: "+t.lrNo+(mergedPath?" + merged":" \u2014 merge failed"));
                     }catch(err){alert("Upload failed: "+err.message);}
                   }}/>
               </label>
@@ -7571,11 +7602,12 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                                 }
                                 const{data:{signedUrl}}=await supabase.storage.from("party-trip-files").createSignedUrl(path,86400*365);
                                 const ts=new Date().toISOString();
+                                if(!mergedPath)alert("\u26a0 Confirmation uploaded but PDF merge failed.\nStatus not updated until merge succeeds.");
                                 const u={...t,emailSentAt:t.emailSentAt||ts,confirmPdfPath:signedUrl||path,
-                                  status:"Confirmation Email Received",
-                                  ...(mergedPath?{mergedPdfPath:mergedPath,receiptFilePath:path,receiptUploadedAt:ts}:{})};
+                                  ...(mergedPath?{status:"Confirmation Email Received",mergedPdfPath:mergedPath,receiptFilePath:path,receiptUploadedAt:ts}:{})};
                                 setTrips(p=>p.map(x=>x.id===t.id?u:x));
-                                log("CONFIRM PDF","LR:"+t.lrNo+(mergedPath?" + auto-merged":""));
+                                setTimeout(()=>DB.saveTrip(u).catch(er=>console.error("saveTrip confirm:",er)),0);
+                                log("CONFIRM PDF","LR:"+t.lrNo+(mergedPath?" + auto-merged":" — merge failed"));
                               }catch(err){alert("Upload failed: "+err.message);}
                             }}/>
                         </label>
@@ -8416,6 +8448,77 @@ function FileUploadRow({ label, path, onFile, disabled }) {
 }
 
 // Shared form for add + edit
+// ── SearchableIndentSelect ─────────────────────────────────────────────────────
+function SearchableIndentSelect({options, value, truck, onSelect, onClear}) {
+  const [q, setQ] = React.useState("");
+  const filtered = options.filter(r => {
+    if(!q.trim()) return true;
+    const lq = q.toLowerCase();
+    return String(r.indentNo).includes(lq) || (r.truckNo||"").toLowerCase().includes(lq);
+  });
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:6}}>
+      <input
+        type="text"
+        placeholder="Search by truck no or indent no..."
+        value={q}
+        onChange={e=>setQ(e.target.value)}
+        style={{width:"100%",boxSizing:"border-box",background:"#fff",
+          border:`1.5px solid ${C.border}`,borderRadius:9,color:C.text,
+          padding:"9px 12px",fontSize:13,outline:"none"}}
+      />
+      <div style={{maxHeight:220,overflowY:"auto",display:"flex",flexDirection:"column",gap:3}}>
+        {value && (
+          <div onClick={onClear} style={{padding:"7px 12px",borderRadius:8,cursor:"pointer",
+            background:C.red+"11",border:`1px solid ${C.red}44`,color:C.red,fontSize:12,fontWeight:700}}>
+            \u2715 Clear attached indent #{value}
+          </div>
+        )}
+        {filtered.length===0 && (
+          <div style={{padding:"8px 12px",fontSize:12,color:C.muted,fontStyle:"italic"}}>
+            No indents match &quot;{q}&quot;
+          </div>
+        )}
+        {filtered.map(r=>{
+          const amt=(r.confirmedAmount??r.amount||0).toLocaleString("en-IN");
+          const conf=r.status==="confirmed";
+          const isSame=r.truckNo===truck;
+          const isSel=String(r.indentNo)===value;
+          return (
+            <div key={r.id} onClick={()=>onSelect(r)}
+              style={{padding:"8px 12px",borderRadius:8,cursor:"pointer",
+                background:isSel?C.teal+"22":isSame?C.teal+"0a":"#fff8f0",
+                border:`1.5px solid ${isSel?C.teal:isSame?C.teal+"44":C.orange+"44"}`,
+                display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div style={{flex:1,minWidth:0}}>
+                <span style={{fontWeight:700,fontSize:13,color:isSel?C.teal:isSame?C.teal:C.orange}}>
+                  #{r.indentNo}
+                </span>
+                <span style={{marginLeft:8,fontSize:10,fontWeight:700,
+                  background:conf?C.teal:C.orange,color:"#fff",borderRadius:4,padding:"1px 5px"}}>
+                  {conf?"OK":"PENDING"}
+                </span>
+                {!isSame&&<span style={{marginLeft:6,fontSize:10,color:C.red,
+                  background:C.red+"11",borderRadius:4,padding:"1px 5px",fontWeight:700}}>
+                  OTHER TRUCK
+                </span>}
+                <div style={{fontSize:11,color:C.muted,marginTop:2}}>
+                  {r.truckNo}{isSame?" (this trip)":""} &middot; &#8377;{amt}{r.date?" \u00b7 "+r.date:""}
+                </div>
+              </div>
+              <div style={{fontSize:12,fontWeight:700,flexShrink:0,marginLeft:8,
+                color:isSel?C.red:isSame?C.teal:C.orange}}>
+                {isSel?"Remove":"Select"}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+
 function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit, submitLabel, user, showStatus=false, wasScanned=false, isParty=false, partyDriverPhone="", salesOfficerPhone="", salesOfficerEmail="", partyNumber="", onPartyFieldChange, employees=[], cashTransfers=[], recentDestinations=[], recentGrades=[], trips=[], indents=[], dieselRequests=[], setDieselRequests, manualLrMode=false, manualDiesel=false}) {
   // Ensure each diLine has frRate — migrate from trip-level frRate if missing
   const normalizedDiLines = (f.diLines||[]).map(d => ({...d, frRate: d.frRate || +f.frRate || 0}));
@@ -9009,6 +9112,51 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
               <div style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,
                 padding:"8px 12px",fontSize:11,color:C.muted,fontStyle:"italic"}}>
                 No unattached diesel requests for {truck}. Create a diesel request first from the Diesel tab.
+              </div>
+            )}
+
+            {/* ── Owner override: select indent from any truck (fix wrong attachment) ── */}
+            {isOwner && (
+              <div style={{marginTop:4,borderTop:`1px dashed ${C.border}`,paddingTop:8}}>
+                <div style={{fontSize:11,color:C.red,fontWeight:700,marginBottom:6,
+                  display:"flex",alignItems:"center",gap:5}}>
+                  🔄 Override — all available indents
+                  <span style={{fontSize:10,fontWeight:400,color:C.muted}}>(owner only — use to fix wrong attachment)</span>
+                </div>
+                {[...truckReqs.filter(r=>r.status!=="attached"),...otherReqs]
+                  .sort((a,b)=>{
+                    const sameA=a.truckNo===truck?1:0, sameB=b.truckNo===truck?1:0;
+                    if(sameA!==sameB)return sameB-sameA;
+                    return (b.status==="confirmed"?1:0)-(a.status==="confirmed"?1:0);
+                  })
+                  .length===0 ? (
+                    <div style={{fontSize:12,color:C.muted,fontStyle:"italic"}}>
+                      No open or confirmed indents available across any truck.
+                    </div>
+                  ) : (
+                    <SearchableIndentSelect
+                      options={[...truckReqs.filter(r=>r.status!=="attached"),...otherReqs]
+                        .sort((a,b)=>{
+                          const sA=a.truckNo===truck?1:0,sB=b.truckNo===truck?1:0;
+                          if(sA!==sB)return sB-sA;
+                          return (b.status==="confirmed"?1:0)-(a.status==="confirmed"?1:0);
+                        })}
+                      value={val}
+                      truck={truck}
+                      onSelect={r=>{
+                        if(r.truckNo!==truck){
+                          const ok=window.confirm(
+                            `⚠ Indent #${r.indentNo} belongs to ${r.truckNo}, not ${truck}.\n\n`+
+                            `Amount: ₹${(r.confirmedAmount??r.amount).toLocaleString("en-IN")}\n`+
+                            `Status: ${r.status==="confirmed"?"Confirmed by pump":"Not yet confirmed"}\n\n`+
+                            `Attach to this trip anyway?`);
+                          if(!ok)return;
+                        }
+                        attachReq(r);
+                      }}
+                      onClear={clearReq}
+                    />
+                  )}
               </div>
             )}
 
@@ -10717,13 +10865,34 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
       const {data:{publicUrl}}=supabase.storage.from("trip-files").getPublicUrl(path);
       const ts=new Date().toISOString();
       const pdfUpdated=[];
+      // Auto-merge for single selected trip
+      let batchMergedPath="";
+      if(selected.size===1){
+        const t=(trips||[]).find(x=>selected.has(x.id));
+        if(t){
+          const grPath=t.grFilePath||(t.diLines||[]).find(d=>d.grFilePath)?.grFilePath;
+          const invPath=t.invoiceFilePath||(t.diLines||[]).find(d=>d.invoiceFilePath)?.invoiceFilePath;
+          if(grPath&&invPath){try{
+            const confBuf=await file.arrayBuffer();
+            const[grBuf,invBuf]=await Promise.all([fetchStorageFile(grPath),fetchStorageFile(invPath)]);
+            const merged=await mergePDFs([confBuf,grBuf,invBuf]);
+            const mf=new File([merged],"merged_confirmation.pdf",{type:"application/pdf"});
+            const mr=await uploadPartyFile(t.id,"merged_confirmation",mf);
+            batchMergedPath=mr.path;
+          }catch(me){console.warn("Merge failed:",me.message);}}
+        }
+      }
+      if(!batchMergedPath&&selected.size===1)alert("\u26a0 Confirmation uploaded but PDF merge failed.\nStatus not updated until merge succeeds.");
       setTrips(prev=>prev.map(t=>{
         if(!selected.has(t.id))return t;
-        const u={...t,emailSentAt:t.emailSentAt||ts,confirmPdfPath:publicUrl,status:"Confirmation Email Received"};
+        const mergedPath=selected.size===1?batchMergedPath:"";
+        const u={...t,emailSentAt:t.emailSentAt||ts,confirmPdfPath:publicUrl,
+          ...(mergedPath?{status:"Confirmation Email Received",mergedPdfPath:mergedPath,receiptFilePath:path,receiptUploadedAt:ts}
+            :(selected.size>1?{status:"Confirmation Email Received"}:{}))};
         pdfUpdated.push(u); return u;
       }));
       setTimeout(()=>pdfUpdated.forEach(u=>DB.saveTrip(u).catch(e=>console.error("saveTrip confirm pdf:",e))),0);
-      log&&log("CONFIRM PDF",`${selected.size} trips`);setSelected(new Set());
+      log&&log("CONFIRM PDF",`${selected.size} trips`+(batchMergedPath?" + merged":""));setSelected(new Set());
     }catch(e){alert("Upload failed: "+e.message);}
     finally{setPdfUploading(false);}
   };
@@ -18287,7 +18456,10 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
   const _diGross = (t.diLines&&t.diLines.length>1)
     ? t.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
     : (t.qty||0)*(t.givenRate||0);
-  const _deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)+(t.shortageRecovery||0)+(t.loanRecovery||0)+(t.pouchBalance||0);
+  // Release pouch hold once confirmation/sealed invoice is uploaded (mergedPdfPath = both upload + merge done)
+  const _hasMerged = !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received");
+  const _pouchHold = (t.orderType==="party"&&!_hasMerged) ? (t.pouchBalance||0) : 0;
+  const _deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)+(t.shortageRecovery||0)+(t.loanRecovery||0)+_pouchHold;
   const _netDue  = Math.max(0, _diGross - _deducts);
   const _paidSoFar = (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
   const _balance = Math.max(0, _netDue - _paidSoFar);
@@ -18389,10 +18561,9 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
     }
     if(!finalAcc) { alert("Could not find selected account."); return; }
 
-    // ── Pouch balance validation: block if only pouch remains and no sealed/confirmation ──
+    // ── Pouch balance validation: block if only pouch remains and no confirmation ──
     if(t.orderType==="party" && (t.pouchBalance||0)>0) {
-      const hasSealedOrConfirm = t.sealedInvoicePath || t.status==="Sealed Invoice Received" || t.status==="Confirmation Email Received";
-      if(!hasSealedOrConfirm && _balance <= (t.pouchBalance||0)) {
+      if(!_hasMerged && _balance <= 0) {
         alert("⚠ Cannot request payment.\n\nThe remaining balance (₹"+_balance.toLocaleString("en-IN")+") is only the pouch balance.\nPlease upload sealed invoice or confirmation email first.");
         return;
       }
