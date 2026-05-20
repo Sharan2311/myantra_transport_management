@@ -72,6 +72,14 @@ exports.handler = async (event) => {
 
     const data = await response.json();
 
+    // ── Token usage log — check Netlify function logs for per-scan cost ──
+    if (data.usage) {
+      const { input_tokens, output_tokens } = data.usage;
+      const costUSD = (input_tokens * 0.80 + output_tokens * 4.00) / 1_000_000;
+      const costINR = costUSD * 84;
+      console.log(`[scan-payment] tokens: ${input_tokens} in / ${output_tokens} out | cost: $${costUSD.toFixed(6)} (~₹${costINR.toFixed(4)})`);
+    }
+
     if (!response.ok || data.error) {
       const errMsg = data.error?.message || JSON.stringify(data.error) || `API ${response.status}`;
       console.error("scan-payment API error:", errMsg);
