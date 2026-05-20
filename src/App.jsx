@@ -10284,8 +10284,10 @@ function ScanPaymentBtn({ onResult }) {
       });
       const parsed = await resp.json();
       if (parsed.error) throw new Error(parsed.error);
+      logScan("payment_scan", true, parsed._costInr||0);
       onResult(parsed);
     } catch(e) {
+      logScan("payment_scan", false, 0);
       alert("Could not read payment image.\n\n" + (e.message||"Unknown error") + "\n\nPlease fill manually.");
     } finally {
       setScanning(false);
@@ -19316,8 +19318,10 @@ This will auto-recover in the next trip.`);
         }
       }
       // Always open split sheet — handles both single and multi-LR
+      logScan("payment_scan", true, data._costInr||0);
       setSplitSheet(data);
     } catch(e) {
+      logScan("payment_scan", false, 0);
       alert("Could not read payment image.\n\n" + (e.message||"Unknown error") + "\n\nPlease fill manually.");
     } finally {
       setScanningGlobal(false);
