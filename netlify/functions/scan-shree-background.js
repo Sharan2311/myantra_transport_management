@@ -144,8 +144,13 @@ exports.handler = async (event) => {
 
     const text = (data.content || []).find(b => b.type === "text")?.text || "";
     const clean = text.replace(/```json|```/g, "").trim();
+    // Fix unescaped control chars inside JSON string values from PDF
+    const fixJsonStrings = s => s.replace(/"(?:[^"\\]|\\.)*"/gs, m =>
+      m.replace(/\n/g, " ").replace(/\r/g, " ").replace(/\t/g, " ")
+        .replace(/[\x00-\x1f]/g, " ")
+    );
     let parsed;
-    try { parsed = JSON.parse(clean); }
+    try { parsed = JSON.parse(fixJsonStrings(clean)); }
     catch(e) {
       await saveResult(adminUrl, adminKey, jobId, clientId, "error",
         { error: "Could not parse AI response: " + text.slice(0, 200) });
