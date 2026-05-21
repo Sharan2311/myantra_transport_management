@@ -16615,21 +16615,13 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
       return;
     }
 
-    // Save prevFY placeholder records (if any), then fall through to process matched trips
+    // Save prevFY placeholder records (if any) then continue to process matched trips
     if(prevFYUnmatched.length > 0) {
       const parsedInvDate = parseDD(scanResult.invoiceDate || "");
-      const sampleFY = getFY(parseDD(prevFYUnmatched[0].date||"")||parsedInvDate||"");
-      const fyLabel = FY_LABEL(sampleFY);
-      const diList = prevFYUnmatched.map(st =>
-        "DI "+(st.diNo||"---")+" | "+(st.truckNo||"---")+" | Rs."+Number(st.frtAmt||0).toLocaleString("en-IN")
-      ).join("\n");
-      const matchedCount = scTrips.length - prevFYUnmatched.length;
-      const mixedNote = matchedCount>0 ? "\n("+matchedCount+" current-year trip(s) will also be marked Billed)":"";
-      const proceed = window.confirm(
-        prevFYUnmatched.length+" trip(s) from "+fyLabel+" (Prev FY):\n"+diList+mixedNote+
-        "\n\nSave these as Previous FY records and continue?"
-      );
-      if(!proceed) return;
+      // Safe FY label from trip date (avoid NaN if invoice date is missing)
+      const firstTripDate = parseDD(prevFYUnmatched[0].date||"");
+      const sampleFY = firstTripDate ? getFY(firstTripDate) : null;
+      const fyLabel = sampleFY ? FY_LABEL(sampleFY) : "Previous FY";
       const ts = nowTs();
       const prevFYTrips = prevFYUnmatched.map(st => ({
         id: (typeof crypto!=="undefined"&&crypto.randomUUID)?crypto.randomUUID():"prevfy_"+(st.diNo||Date.now())+"_"+Math.random().toString(36).slice(2,8),
