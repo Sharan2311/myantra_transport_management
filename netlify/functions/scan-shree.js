@@ -160,9 +160,11 @@ exports.handler = async (event) => {
     }
 
     const text = (data.content || []).find(b => b.type === "text")?.text || "";
-    const clean = text.replace(/```json|```/g, "").trim();
+    // Extract JSON object directly - handles trailing notes after closing }
+    const jsonMatch = text.match(/{[\s\S]*}/);
+    const clean = jsonMatch ? jsonMatch[0].trim() : text.replace(/```json|```/g, "").trim();
 
-    // Fix unescaped control chars (newlines) inside JSON string values from PDF extraction
+    // Fix unescaped control chars (newlines) inside JSON string values from PDF
     const fixJsonStrings = s => s.replace(/"(?:[^"\\]|\\.)*"/gs, m =>
       m.replace(/\n/g, " ").replace(/\r/g, " ").replace(/\t/g, " ")
         .replace(/[\x00-\x1f]/g, " ")
