@@ -16442,22 +16442,42 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         r.onerror = ()=>rej(new Error("File read failed"));
         r.readAsDataURL(file);
       });
-      const resp = await fetch("/.netlify/functions/scan-shree",{
+            // \u2500\u2500 Background function approach: no timeout for any invoice size \u2500\u2500
+      // 1. Kick off background scan (returns immediately with 202)
+      const jobId = (typeof crypto!=="undefined"&&crypto.randomUUID)?crypto.randomUUID():Date.now().toString(36)+Math.random().toString(36).slice(2);
+      const bgResp = await fetch("/.netlify/functions/scan-shree-background",{
         method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({ base64, anthropicKey: RC.anthropicKey, mediaType:file.type||"application/pdf", scanType}),
+        body:JSON.stringify({
+          jobId, base64, anthropicKey:RC.anthropicKey,
+          mediaType:file.type||"application/pdf", scanType,
+          clientId: RC.clientId,
+          adminSupabaseUrl: RC.adminSupabaseUrl,
+          adminSupabaseAnonKey: RC.adminSupabaseAnonKey,
+        }),
       });
-      // Safe parse: Safari throws "string did not match expected pattern" on resp.json() with HTML
-      const rawText = await resp.text();
-      let data;
-      try { data = JSON.parse(rawText); }
-      catch(_) {
-        const isTimeout = resp.status===504 || rawText.includes("TimeoutError") || rawText.includes("Gateway");
-        throw new Error(isTimeout
-          ? "Scan timed out (10s limit). Invoice has many rows. Try Netlify Pro for larger invoices."
-          : "Server error "+resp.status+". Please try again.");
+      if(!bgResp.ok && bgResp.status!==202) throw new Error("Could not start background scan (status "+bgResp.status+")");
+
+      // 2. Poll admin DB for result (every 3s, up to 3 minutes)
+      const adminDb2 = createClient(RC.adminSupabaseUrl, RC.adminSupabaseAnonKey);
+      let elapsed = 0;
+      const maxWait = 180000; // 3 minutes
+      const pollMs = 3000;
+      let scanDone = false;
+      while(elapsed < maxWait) {
+        await new Promise(r=>setTimeout(r,pollMs));
+        elapsed += pollMs;
+        try {
+          const {data:job} = await adminDb2.from("scan_results").select("status,result_json").eq("id",jobId).maybeSingle();
+          if(job?.status==="done"||job?.status==="error") {
+            const result = JSON.parse(job.result_json||"{}");
+            adminDb2.from("scan_results").delete().eq("id",jobId).then(()=>{});
+            if(job.status==="error"||result.error) { setScanError(result.error||"Scan failed"); logScan("shree_scan",false,0); }
+            else { setScanResult({...result,type:scanType}); logScan("shree_scan",true,result._costInr||0); }
+            scanDone=true; break;
+          }
+        } catch(_) {}
       }
-      if(data.error) { setScanError(data.error); logScan("shree_scan", false, 0); }
-      else { setScanResult({...data, type:scanType}); logScan("shree_scan", true, data._costInr||0); }
+      if(!scanDone) throw new Error("Scan timed out after 3 minutes. Invoice may be too complex.");
     } catch(e) { setScanError(e.message); logScan("shree_scan", false); }
     finally { setScanning(false); }
   };
