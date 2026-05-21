@@ -16446,7 +16446,16 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({ base64, anthropicKey: RC.anthropicKey, mediaType:file.type||"application/pdf", scanType}),
       });
-      const data = await resp.json();
+      // Safe parse: Safari throws "string did not match expected pattern" on resp.json() with HTML
+      const rawText = await resp.text();
+      let data;
+      try { data = JSON.parse(rawText); }
+      catch(_) {
+        const isTimeout = resp.status===504 || rawText.includes("TimeoutError") || rawText.includes("Gateway");
+        throw new Error(isTimeout
+          ? "Scan timed out (10s limit). Invoice has many rows. Try Netlify Pro for larger invoices."
+          : "Server error "+resp.status+". Please try again.");
+      }
       if(data.error) { setScanError(data.error); logScan("shree_scan", false, 0); }
       else { setScanResult({...data, type:scanType}); logScan("shree_scan", true, data._costInr||0); }
     } catch(e) { setScanError(e.message); logScan("shree_scan", false); }
@@ -16578,7 +16587,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         if(!proceed) return;
         const ts = nowTs();
         const prevFYTrips = unmatched.map(st => ({
-          id: "prevfy_"+(st.diNo||Date.now())+"_"+Math.random().toString(36).slice(2,6),
+          id: (typeof crypto!=="undefined"&&crypto.randomUUID)?crypto.randomUUID():"prevfy_"+(st.diNo||Date.now())+"_"+Math.random().toString(36).slice(2,8),
           prevFY: true,
           prevFYLabel: FY_LABEL(invFY),
           invoiceNo: invNo, invoiceDate: parsedInvDate,

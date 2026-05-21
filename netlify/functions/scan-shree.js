@@ -1,4 +1,5 @@
 // netlify/functions/scan-shree.js
+// v3 - max_tokens 8192, cost tracking, Safari safe parse
 
 const INVOICE_PROMPT = `You are reading a freight tax invoice PDF from M Yantra Enterprises to Shree Cement or Ultratech Cement.
 
