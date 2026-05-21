@@ -16595,62 +16595,59 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     const scTrips = scanResult.trips||[];
     const allTrips = trips||[];
 
-    // Check for unmatched trips
+    // Separate unmatched into prevFY vs current FY (check TRIP dates only, not invoice date)
     const unmatched = scTrips.filter(st => !matchInvoiceLine(st, allTrips));
-    if(unmatched.length > 0) {
-      // Detect prevFY from trip dates (invoice may be filed in current FY for old trips)
-      const rawInvDate = scanResult.invoiceDate || "";
-      const parsedInvDate = parseDD(rawInvDate);
-      // Check if ALL unmatched trips have dates from a previous FY
-      const prevFYUnmatched = unmatched.filter(st => {
-        const d = parseDD(st.date || "");
-        return d && getFY(d) < currentFY();
-      });
-      const isPrevFY = prevFYUnmatched.length > 0 && prevFYUnmatched.length === unmatched.length;
+    const prevFYUnmatched = unmatched.filter(st => {
+      const d = parseDD(st.date || "");
+      return d && getFY(d) < currentFY();
+    });
+    const currentFYUnmatched = unmatched.filter(st => !prevFYUnmatched.includes(st));
 
-      if(isPrevFY) {
-        const diList = unmatched.map(st =>
-          "DI "+(st.diNo||"---")+" | "+(st.truckNo||"---")+" | Rs."+Number(st.frtAmt||0).toLocaleString("en-IN")
-        ).join("\n");
-        const proceed = window.confirm(
-          "This invoice is from "+FY_LABEL(invFY)+" (Previous Financial Year).\n\n"+
-          unmatched.length+" trip(s) not in current records:\n"+diList+
-          "\n\nSave as Previous FY invoice? DI numbers will be stored."
-        );
-        if(!proceed) return;
-        const ts = nowTs();
-        const prevFYTrips = unmatched.map(st => ({
-          id: (typeof crypto!=="undefined"&&crypto.randomUUID)?crypto.randomUUID():"prevfy_"+(st.diNo||Date.now())+"_"+Math.random().toString(36).slice(2,8),
-          prevFY: true,
-          prevFYLabel: FY_LABEL(invFY),
-          invoiceNo: invNo, invoiceDate: parsedInvDate,
-          diNo: st.diNo||"", grNo: st.grNo||"",
-          truckNo: String(st.truckNo||"").replace(/\s+/g,"").toUpperCase(),
-          consignee: st.consigneeName||"", to: st.to||"",
-          qty: st.qty||0, frRate: st.frRate||0,
-          billedToShree: Number(st.frtAmt||0),
-          status: "Billed", billedBy: "scan", billedAt: ts,
-          shreeStatus: "billed",
-          date: parseDD(st.date||"")||parsedInvDate||"",
-          lrNo: "", orderType: "outbound",
-          client: chosenClient||"", type: "outbound",
-        }));
-        setTrips(prev => [...prev, ...prevFYTrips]);
-        Promise.all(prevFYTrips.map(t => DB.saveTrip(t).catch(e => console.error("saveTrip prevFY:",e))));
-        log && log("PrevFY Invoice "+invNo+" saved - "+prevFYTrips.length+" DIs - "+FY_LABEL(invFY));
-        setScanResult(null); setScanClient(""); setScanMaterial("Cement");
-        return;
-      } else {
-        // Current FY - must add trips first
-        const details = unmatched.map(st =>
-          "DI: "+(st.diNo||"---")+" / GR: "+(st.grNo||"---")+" / Rs."+Number(st.frtAmt||0).toLocaleString("en-IN")
-        ).join("\n");
-        setScanError(
-          unmatched.length+" trip"+(unmatched.length>1?"s":"")+" in this invoice not found in your Trips:\n\n"+
-          details+"\n\nGo to Trips tab, add all missing trips first, then scan invoice again."
-        );
-        return;
-      }
+    // Block if any current FY trips are missing in DB
+    if(currentFYUnmatched.length > 0) {
+      const details = currentFYUnmatched.map(st =>
+        "DI: "+(st.diNo||"---")+" / GR: "+(st.grNo||"---")+" / Rs."+Number(st.frtAmt||0).toLocaleString("en-IN")
+      ).join("\n");
+      setScanError(
+        currentFYUnmatched.length+" trip"+(currentFYUnmatched.length>1?"s":"")+" not found in your Trips:\n\n"+
+        details+"\n\nAdd these trips first, then scan invoice again."
+      );
+      return;
+    }
+
+    // Save prevFY placeholder records (if any), then fall through to process matched trips
+    if(prevFYUnmatched.length > 0) {
+      const parsedInvDate = parseDD(scanResult.invoiceDate || "");
+      const sampleFY = getFY(parseDD(prevFYUnmatched[0].date||"")||parsedInvDate||"");
+      const fyLabel = FY_LABEL(sampleFY);
+      const diList = prevFYUnmatched.map(st =>
+        "DI "+(st.diNo||"---")+" | "+(st.truckNo||"---")+" | Rs."+Number(st.frtAmt||0).toLocaleString("en-IN")
+      ).join("\n");
+      const matchedCount = scTrips.length - prevFYUnmatched.length;
+      const mixedNote = matchedCount>0 ? "\n("+matchedCount+" current-year trip(s) will also be marked Billed)":"";
+      const proceed = window.confirm(
+        prevFYUnmatched.length+" trip(s) from "+fyLabel+" (Prev FY):\n"+diList+mixedNote+
+        "\n\nSave these as Previous FY records and continue?"
+      );
+      if(!proceed) return;
+      const ts = nowTs();
+      const prevFYTrips = prevFYUnmatched.map(st => ({
+        id: (typeof crypto!=="undefined"&&crypto.randomUUID)?crypto.randomUUID():"prevfy_"+(st.diNo||Date.now())+"_"+Math.random().toString(36).slice(2,8),
+        prevFY: true, prevFYLabel: fyLabel,
+        invoiceNo: invNo, invoiceDate: parsedInvDate,
+        diNo: st.diNo||"", grNo: st.grNo||"",
+        truckNo: String(st.truckNo||"").replace(/\s+/g,"").toUpperCase(),
+        consignee: st.consigneeName||"", to: st.to||"",
+        qty: st.qty||0, frRate: st.frRate||0,
+        billedToShree: Number(st.frtAmt||0),
+        status: "Billed", billedBy: "scan", billedAt: ts, shreeStatus: "billed",
+        date: parseDD(st.date||"")||parsedInvDate||"",
+        lrNo: "", orderType: "outbound", client: chosenClient||"", type: "outbound",
+      }));
+      setTrips(prev => [...prev, ...prevFYTrips]);
+      Promise.all(prevFYTrips.map(t => DB.saveTrip(t).catch(e => console.error("saveTrip prevFY:",e))));
+      log && log("PrevFY "+prevFYTrips.length+" DIs saved under "+invNo+" ("+fyLabel+")");
+      // Do NOT return here - fall through to process any matched current-year trips
     }
 
     // Check amount mismatches — distinguish hard mismatches from unverifiable multi-DI lines
@@ -17265,6 +17262,10 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                         const noTrip      = lines.length - identityOk;
                         const amtMismatch = identityOk - amtOk;
                         const allOk       = noTrip===0 && amtMismatch===0 && identityOk===lines.length;
+                        const allUnmatched = noTrip===lines.length && lines.length>0;
+                        // Mixed: some matched + some unmatched all from prevFY
+                        const prevFYCount = lines.filter(st=>{ const d=parseDD(st.date||""); return d&&getFY(d)<currentFY()&&!matchInvoiceLine(st,trips||[]); }).length;
+                        const mixedPrevFY = noTrip>0 && noTrip<lines.length && prevFYCount===noTrip;
                         const alreadySaved = (trips||[]).some(t=>t.invoiceNo===scanResult.invoiceNo);
                         return (<>
                           <div style={{marginTop:8,padding:"8px 0",display:"flex",gap:12,flexWrap:"wrap",
@@ -17310,12 +17311,20 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                             </div>
                           )}
                           <div style={{display:"flex",gap:8,marginTop:8}}>
-                            <button onClick={applyInvoiceScan} disabled={!allOk||alreadySaved||!scanClient||!scanMaterial}
-                              style={{flex:1,background:allOk&&!alreadySaved&&scanClient&&scanMaterial?C.green:C.dim,
-                                color:allOk&&!alreadySaved&&scanClient&&scanMaterial?"#000":"#666",border:"none",borderRadius:6,
-                                padding:"10px",fontWeight:700,
-                                cursor:allOk&&!alreadySaved&&scanClient&&scanMaterial?"pointer":"not-allowed",fontSize:13}}>
-                              {alreadySaved ? "Already Saved" : !scanClient||!scanMaterial ? "Select client & material first" : allOk ? "✓ Apply — Mark Billed" : "Fix issues above first"}
+                            <button onClick={applyInvoiceScan}
+                              disabled={(!allOk&&!allUnmatched&&!mixedPrevFY)||alreadySaved||!scanClient||!scanMaterial}
+                              style={{flex:1,
+                                background:(allOk||allUnmatched||mixedPrevFY)&&!alreadySaved&&scanClient&&scanMaterial
+                                  ?(allUnmatched||mixedPrevFY)?C.orange:C.green:C.dim,
+                                color:(allOk||allUnmatched||mixedPrevFY)&&!alreadySaved&&scanClient&&scanMaterial?"#000":"#666",
+                                border:"none",borderRadius:6,padding:"10px",fontWeight:700,
+                                cursor:(allOk||allUnmatched||mixedPrevFY)&&!alreadySaved&&scanClient&&scanMaterial?"pointer":"not-allowed",fontSize:13}}>
+                              {alreadySaved ? "Already Saved"
+                                : !scanClient||!scanMaterial ? "Select client & material first"
+                                : allOk ? "✓ Apply — Mark Billed"
+                                : allUnmatched ? "📅 Save as Previous FY Invoice"
+                                : mixedPrevFY ? "📅 Apply (includes Prev FY trips)"
+                                : "Fix issues above first"}
                             </button>
                             <button onClick={()=>setScanResult(null)}
                               style={{background:"#e8f0fa",color:C.muted,border:"1px solid #ccddf0",borderRadius:6,
