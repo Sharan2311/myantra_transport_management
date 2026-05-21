@@ -16585,6 +16585,12 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
   const applyInvoiceScan = () => {
     if(!scanResult || scanResult.type!=="invoice") return;
     const invNo = scanResult.invoiceNo;
+    const invDate = parseDD(scanResult.invoiceDate);
+    const chosenClient   = scanClient   || "";
+    const chosenMaterial = scanMaterial || "";
+    const typeOverride = chosenMaterial==="Cement" ? "outbound"
+                       : chosenMaterial==="Raw Material" ? "inbound"
+                       : null;
 
     // Block if invoice already saved
     if((trips||[]).some(t=>t.invoiceNo===invNo)) {
@@ -16676,12 +16682,6 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     }
 
     // All matched and amounts OK — apply
-    const invDate = parseDD(scanResult.invoiceDate);
-    const chosenClient   = scanClient   || "";
-    const chosenMaterial = scanMaterial || "";
-    const typeOverride = chosenMaterial==="Cement" ? "outbound"
-                       : chosenMaterial==="Raw Material" ? "inbound"
-                       : null;
     let matched = 0;
     const updatedTrips = [];
     setTrips(prev=>prev.map(t=>{
