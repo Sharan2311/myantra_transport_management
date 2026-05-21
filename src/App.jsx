@@ -16457,8 +16457,10 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
       });
       if(!bgResp.ok && bgResp.status!==202) throw new Error("Could not start background scan (status "+bgResp.status+")");
 
-      // 2. Poll admin DB for result (every 3s, up to 3 minutes)
-      const adminDb2 = createClient(RC.adminSupabaseUrl, RC.adminSupabaseAnonKey);
+      // 2. Poll admin DB via REST (no createClient needed)
+      const _aUrl = RC.adminSupabaseUrl;
+      const _aKey = RC.adminSupabaseAnonKey;
+      const _hdrs = { "apikey": _aKey, "Authorization": "Bearer "+_aKey };
       let elapsed = 0;
       const maxWait = 180000; // 3 minutes
       const pollMs = 3000;
@@ -16467,10 +16469,13 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         await new Promise(r=>setTimeout(r,pollMs));
         elapsed += pollMs;
         try {
-          const {data:job} = await adminDb2.from("scan_results").select("status,result_json").eq("id",jobId).maybeSingle();
+          const pr = await fetch(`${_aUrl}/rest/v1/scan_results?id=eq.${jobId}&select=status,result_json`,{headers:_hdrs});
+          const rows = await pr.json();
+          const job = rows?.[0];
           if(job?.status==="done"||job?.status==="error") {
             const result = JSON.parse(job.result_json||"{}");
-            adminDb2.from("scan_results").delete().eq("id",jobId).then(()=>{});
+            // Cleanup
+            fetch(`${_aUrl}/rest/v1/scan_results?id=eq.${jobId}`,{method:"DELETE",headers:_hdrs}).catch(()=>{});
             if(job.status==="error"||result.error) { setScanError(result.error||"Scan failed"); logScan("shree_scan",false,0); }
             else { setScanResult({...result,type:scanType}); logScan("shree_scan",true,result._costInr||0); }
             scanDone=true; break;
