@@ -16639,7 +16639,8 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         qty: st.qty||0, frRate: st.frRate||0,
         billedToShree: Number(st.frtAmt||0),
         status: "Billed", billedBy: "scan", billedAt: ts, shreeStatus: "billed",
-        date: parseDD(st.date||"")||parsedInvDate||"",
+        date: invDate||parsedInvDate||ts.slice(0,10), // invoice date (current FY) so it shows in billing tab
+        tripDate: parseDD(st.date||""), // original DI trip date preserved for reference
         lrNo: "", orderType: "outbound", client: chosenClient||"", type: "outbound",
       }));
       setTrips(prev => [...prev, ...prevFYTrips]);
