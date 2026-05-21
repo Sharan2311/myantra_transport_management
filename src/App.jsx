@@ -16598,11 +16598,15 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     // Check for unmatched trips
     const unmatched = scTrips.filter(st => !matchInvoiceLine(st, allTrips));
     if(unmatched.length > 0) {
-      // Detect if this is a previous FY invoice
+      // Detect prevFY from trip dates (invoice may be filed in current FY for old trips)
       const rawInvDate = scanResult.invoiceDate || "";
       const parsedInvDate = parseDD(rawInvDate);
-      const invFY = parsedInvDate ? getFY(parsedInvDate) : null;
-      const isPrevFY = invFY && invFY < currentFY();
+      // Check if ALL unmatched trips have dates from a previous FY
+      const prevFYUnmatched = unmatched.filter(st => {
+        const d = parseDD(st.date || "");
+        return d && getFY(d) < currentFY();
+      });
+      const isPrevFY = prevFYUnmatched.length > 0 && prevFYUnmatched.length === unmatched.length;
 
       if(isPrevFY) {
         const diList = unmatched.map(st =>
