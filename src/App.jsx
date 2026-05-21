@@ -16557,18 +16557,58 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     const scTrips = scanResult.trips||[];
     const allTrips = trips||[];
 
-    // ALL lines must match a trip — block if any are unmatched
+    // Check for unmatched trips
     const unmatched = scTrips.filter(st => !matchInvoiceLine(st, allTrips));
     if(unmatched.length > 0) {
-      const details = unmatched.map(st =>
-        "DI: "+(st.diNo||"—")+" · GR: "+(st.grNo||"—")+" · ₹"+Number(st.frtAmt||0).toLocaleString("en-IN")
-      ).join("\n");
-      setScanError(
-        unmatched.length+" trip"+(unmatched.length>1?"s":"")+" in this invoice not found in your Trips:\n\n"+
-        details+
-        "\n\nGo to Trips tab, add all missing trips first, then scan invoice again."
-      );
-      return;
+      // Detect if this is a previous FY invoice
+      const rawInvDate = scanResult.invoiceDate || "";
+      const parsedInvDate = parseDD(rawInvDate);
+      const invFY = parsedInvDate ? getFY(parsedInvDate) : null;
+      const isPrevFY = invFY && invFY < currentFY();
+
+      if(isPrevFY) {
+        const diList = unmatched.map(st =>
+          "DI "+(st.diNo||"---")+" | "+(st.truckNo||"---")+" | Rs."+Number(st.frtAmt||0).toLocaleString("en-IN")
+        ).join("\n");
+        const proceed = window.confirm(
+          "This invoice is from "+FY_LABEL(invFY)+" (Previous Financial Year).\n\n"+
+          unmatched.length+" trip(s) not in current records:\n"+diList+
+          "\n\nSave as Previous FY invoice? DI numbers will be stored."
+        );
+        if(!proceed) return;
+        const ts = nowTs();
+        const prevFYTrips = unmatched.map(st => ({
+          id: "prevfy_"+(st.diNo||Date.now())+"_"+Math.random().toString(36).slice(2,6),
+          prevFY: true,
+          prevFYLabel: FY_LABEL(invFY),
+          invoiceNo: invNo, invoiceDate: parsedInvDate,
+          diNo: st.diNo||"", grNo: st.grNo||"",
+          truckNo: String(st.truckNo||"").replace(/\s+/g,"").toUpperCase(),
+          consignee: st.consigneeName||"", to: st.to||"",
+          qty: st.qty||0, frRate: st.frRate||0,
+          billedToShree: Number(st.frtAmt||0),
+          status: "Billed", billedBy: "scan", billedAt: ts,
+          shreeStatus: "billed",
+          date: parseDD(st.date||"")||parsedInvDate||"",
+          lrNo: "", orderType: "outbound",
+          client: chosenClient||"", type: "outbound",
+        }));
+        setTrips(prev => [...prev, ...prevFYTrips]);
+        Promise.all(prevFYTrips.map(t => DB.saveTrip(t).catch(e => console.error("saveTrip prevFY:",e))));
+        log && log("PrevFY Invoice "+invNo+" saved - "+prevFYTrips.length+" DIs - "+FY_LABEL(invFY));
+        setScanResult(null); setScanClient(""); setScanMaterial("Cement");
+        return;
+      } else {
+        // Current FY - must add trips first
+        const details = unmatched.map(st =>
+          "DI: "+(st.diNo||"---")+" / GR: "+(st.grNo||"---")+" / Rs."+Number(st.frtAmt||0).toLocaleString("en-IN")
+        ).join("\n");
+        setScanError(
+          unmatched.length+" trip"+(unmatched.length>1?"s":"")+" in this invoice not found in your Trips:\n\n"+
+          details+"\n\nGo to Trips tab, add all missing trips first, then scan invoice again."
+        );
+        return;
+      }
     }
 
     // Check amount mismatches — distinguish hard mismatches from unverifiable multi-DI lines
@@ -17642,7 +17682,14 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                           <div key={t.id} style={{padding:"9px 14px",borderBottom:`1px solid ${C.border}`,
                             background:t.shreeShortage?"#fef2f2":C.card2}}>
                             <div style={{display:"flex",justifyContent:"space-between",fontSize:12}}>
-                              <span style={{fontFamily:"monospace",color:C.muted}}>{t.lr||t.lrNo}</span>
+                              {t.prevFY
+                                ? <span style={{fontFamily:"monospace",color:C.muted,display:"flex",alignItems:"center",gap:5}}>
+                                    {t.diNo||"---"}
+                                    <span style={{fontSize:9,fontWeight:700,background:"#7c3aed",color:"#fff",
+                                      borderRadius:3,padding:"1px 4px"}}>{t.prevFYLabel||"Prev FY"}</span>
+                                  </span>
+                                : <span style={{fontFamily:"monospace",color:C.muted}}>{t.lr||t.lrNo}</span>
+                              }
                               <span style={{fontFamily:"monospace",color:"#ccc",fontWeight:700}}>
                                 ₹{fmtINR(t.billedToShree)}
                               </span>
