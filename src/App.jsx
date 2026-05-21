@@ -16471,7 +16471,11 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         try {
           const pr = await fetch(`${_aUrl}/rest/v1/scan_results?id=eq.${jobId}&select=status,result_json`,{headers:_hdrs});
           const rows = await pr.json();
-          const job = rows?.[0];
+          // Detect missing table (Supabase returns {code:"42P01"} or similar error)
+          if(rows?.code==="42P01"||rows?.message?.includes("does not exist")) {
+            throw new Error("Run MIGRATION_scan_results.sql in Admin Supabase first (scan_results table missing).");
+          }
+          const job = Array.isArray(rows)?rows[0]:null;
           if(job?.status==="done"||job?.status==="error") {
             const result = JSON.parse(job.result_json||"{}");
             // Cleanup
