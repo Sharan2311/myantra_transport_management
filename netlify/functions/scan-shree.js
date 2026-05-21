@@ -169,6 +169,8 @@ exports.handler = async (event) => {
       m.replace(/\n/g, " ").replace(/\r/g, " ").replace(/\t/g, " ")
         .replace(/[\x00-\x1f]/g, " ")
     );
+    console.log("[scan-shree] RAW text length:", text.length);
+    console.log("[scan-shree] CLEAN to parse:\n", fixJsonStrings(clean));
     let parsed;
     try {
       parsed = JSON.parse(fixJsonStrings(clean));
