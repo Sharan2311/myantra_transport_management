@@ -154,7 +154,11 @@ exports.handler = async (event) => {
     console.log("[scan-shree-bg] RAW text length:", text.length);
     console.log("[scan-shree-bg] CLEAN to parse:\n", fixJsonStrings(clean));
     let parsed;
-    try { parsed = JSON.parse(fixJsonStrings(clean)); }
+    try {
+      // Fix invalid leading zeros in JSON numbers: 05.050 -> 5.050
+      const fixedClean = fixJsonStrings(clean).replace(/([:\[,]\s*)0(\d)/g, '$1$2');
+      parsed = JSON.parse(fixedClean);
+    }
     catch(e) {
       await saveResult(adminUrl, adminKey, jobId, clientId, "error",
         { error: "Could not parse AI response: " + text.slice(0, 200) });

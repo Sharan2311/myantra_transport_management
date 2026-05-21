@@ -173,7 +173,9 @@ exports.handler = async (event) => {
     console.log("[scan-shree] CLEAN to parse:\n", fixJsonStrings(clean));
     let parsed;
     try {
-      parsed = JSON.parse(fixJsonStrings(clean));
+      // Fix invalid leading zeros in numbers: 05.050 -> 5.050
+      const fixedClean = fixJsonStrings(clean).replace(/([:\[,]\s*)0(\d)/g, '$1$2');
+      parsed = JSON.parse(fixedClean);
     } catch(e) {
       return {
         statusCode: 500,
