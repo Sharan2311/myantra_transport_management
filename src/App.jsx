@@ -4,6 +4,30 @@ import { loadRuntimeConfig, RC, canFeature as canFeatureRC, logScan, isPaymentDu
 import { initSupabase } from "./supabase.js";
 import { supabase } from "./supabase.js";
 
+// Network retry wrapper for Safari iOS "Load failed" / transient network errors
+// Retries up to 3x with 1s, 2s backoff
+const _dbRetry = async (fn, maxAttempts = 3) => {
+  for (let i = 1; i <= maxAttempts; i++) {
+    try { return await fn(); }
+    catch (e) {
+      const isNet = /(Load failed|Failed to fetch|NetworkError|fetch)/i.test(e.message || "") || e.name === "TypeError";
+      if (i === maxAttempts || !isNet) throw e;
+      console.warn(`[DB retry] attempt ${i} failed: ${e.message}. Retrying in ${i}s...`);
+      await new Promise(r => setTimeout(r, i * 1000));
+    }
+  }
+};
+// Patch all DB methods transparently so every DB call gets retry for free
+(function patchDB() {
+  const proto = Object.getPrototypeOf(DB);
+  const src = (proto && proto !== Object.prototype) ? proto : DB;
+  [...new Set([...Object.getOwnPropertyNames(src), ...Object.keys(DB)])].forEach(k => {
+    if (k === "constructor" || typeof DB[k] !== "function") return;
+    const orig = DB[k].bind(DB);
+    DB[k] = (...args) => _dbRetry(() => orig(...args));
+  });
+})();
+
 
 // ─── LOGO ────────────────────────────────────────────────────────────────────
 // LOGO_SRC now comes from RC.logoSrc (loaded at runtime)
