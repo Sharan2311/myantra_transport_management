@@ -13259,7 +13259,9 @@ This was already dispensed — only delete if it was recorded in error.`;
           const matches = allRows.map(p=>{
             let best=null;
             if(p.indentNo){ const ai=appReqs.findIndex((a,i)=>!usedApp.has(i)&&String(a.indentNo).trim()===p.indentNo); if(ai>=0) best={ai,a:appReqs[ai]}; }
-            if(!best){ for(const [ai,a] of appReqs.entries()){ if(usedApp.has(ai)) continue; if(vMatch(p.truckNo,a.truckNo)&&(!p.date||!a.date||p.date===a.date)){best={ai,a};break;} } }
+            // Date tolerance: +-1 day
+            const dClose = (d1,d2) => { if(!d1||!d2) return true; const diff=Math.abs(new Date(d1)-new Date(d2)); return diff<=86400000; };
+            if(!best){ for(const [ai,a] of appReqs.entries()){ if(usedApp.has(ai)) continue; if(vMatch(p.truckNo,a.truckNo)&&dClose(p.date,a.date)){best={ai,a};break;} } }
             if(best){
               usedApp.add(best.ai); const a=best.a;
               const cat=getReqCat(a);
@@ -13272,12 +13274,7 @@ This was already dispensed — only delete if it was recorded in error.`;
             }
             return {pump:p,app:null,trip:null,cat:0,complete:false,hsdDiff:p.hsd,advDiff:p.advance,status:"not_in_app",resolution:"pending"};
           });
-          appReqs.forEach((a,ai)=>{
-            if(!usedApp.has(ai)){
-              const cat=getReqCat(a); const trip=(trips||[]).find(t=>t.dieselIndentNo===String(a.indentNo)||t.id===a.tripId);
-              matches.push({pump:null,app:a,trip:trip||null,cat,complete:false,hsdDiff:0,advDiff:0,status:"not_in_pump",resolution:"pending"});
-            }
-          });
+          // not_in_pump records are intentionally excluded from display
           setReconMatches(matches); setReconScanning(false); setReconProgress("");
         };
 
@@ -13315,6 +13312,17 @@ This was already dispensed — only delete if it was recorded in error.`;
               setTrips(p=>p.map(t=>t.id===trip.id?upd:t)); DB.saveTrip(upd).catch(()=>{});
               log("RECON ADJUST",`LR ${trip.lrNo} diesel Rs.${newD}`);
               m[idx]={...e,trip:upd,resolution:"adjusted",resolvedNote:`Trip diesel Rs.${newD}`};
+            } else if(action==="attach_to_request"){
+              // Attach a pump-only row to an existing app request
+              const appReq=(dieselRequests||[]).find(r=>r.id===extra.reqId); if(!appReq) return prev;
+              const upd={...appReq, amount:e.pump?.hsd||appReq.amount,
+                cashAmount:e.pump?.advance||appReq.cashAmount||0,
+                indentNo:e.pump?.indentNo||appReq.indentNo};
+              setDieselRequests(p=>p.map(r=>r.id===appReq.id?upd:r));
+              DB.saveDieselRequest(upd).catch(()=>{});
+              log("RECON ATTACH_REQ",`Pump #${e.pump?.indentNo} -> Req #${appReq.indentNo} ${appReq.truckNo}`);
+              m[idx]={...e,app:upd,resolution:"attached_req",
+                resolvedNote:`Attached to request #${appReq.indentNo} ${appReq.truckNo}`};
             } else if(action==="write_off"){
               log("RECON WRITEOFF",`Rs.${Math.abs(totalDiff)} written off`);
               m[idx]={...e,resolution:"write_off",resolvedNote:`Rs.${Math.abs(totalDiff)} written off`};
@@ -13333,7 +13341,6 @@ This was already dispensed — only delete if it was recorded in error.`;
           {l:"Cat 3 Value Mismatch",    v:actionable.filter(m=>m.cat===3).length, c:C.blue},
           {l:"Cat 4: No Confirm/LR",    v:actionable.filter(m=>m.cat===4).length, c:C.purple},
           {l:"Not in App",              v:actionable.filter(m=>m.status==="not_in_app").length, c:C.red},
-          {l:"Not in Pump",             v:actionable.filter(m=>m.status==="not_in_pump").length, c:C.muted},
         ];
 
         return (
@@ -13447,6 +13454,12 @@ This was already dispensed — only delete if it was recorded in error.`;
                             Write Off
                           </button>
                         )}
+                        {m.status==="not_in_app"&&!cs.showAttachReq&&(
+                          <button onClick={()=>setCS(idx,{showAttachReq:true,reqSearch:m.pump?.truckNo||""})}
+                            style={{fontSize:10,fontWeight:700,background:C.purple+"22",color:C.purple,border:`1px solid ${C.purple}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                            Attach to Existing Request
+                          </button>
+                        )}
                       </div>
                     )}
                     {cs.showPin&&!isResolved&&(
@@ -13523,6 +13536,39 @@ This was already dispensed — only delete if it was recorded in error.`;
                       </div>
                     )}
                   </div>
+                    {cs.showAttachReq&&!isResolved&&(()=>{
+                      const reqMatches=(dieselRequests||[]).filter(r=>
+                        (r.status==="open"||r.status==="confirmed")&&
+                        ((r.truckNo||"").toUpperCase().includes((cs.reqSearch||"").toUpperCase())||
+                         String(r.indentNo||"").includes(cs.reqSearch||""))
+                      ).slice(0,15);
+                      return (
+                        <div style={{background:C.bg,borderRadius:8,padding:"10px 12px",marginTop:4}}>
+                          <div style={{fontSize:11,fontWeight:700,marginBottom:4}}>Attach to existing app request</div>
+                          <div style={{fontSize:10,color:C.muted,marginBottom:6}}>Pump: {m.pump?.truckNo} / #{m.pump?.indentNo} / Rs.{m.pump?.hsd}</div>
+                          <input value={cs.reqSearch||""} onChange={e=>setCS(idx,{reqSearch:e.target.value})}
+                            placeholder="Search truck no or indent..." autoFocus
+                            style={{width:"100%",background:C.card,border:`1px solid ${C.border}`,borderRadius:6,
+                              padding:"6px 8px",color:C.text,fontSize:12,marginBottom:6,boxSizing:"border-box"}}/>
+                          <div style={{maxHeight:180,overflowY:"auto",display:"flex",flexDirection:"column",gap:4}}>
+                            {reqMatches.map(r=>(
+                              <button key={r.id}
+                                onClick={()=>{resolveEntry(idx,"attach_to_request",{reqId:r.id});setCS(idx,{showAttachReq:false});}}
+                                style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:6,
+                                  padding:"7px 10px",textAlign:"left",cursor:"pointer",fontSize:11}}>
+                                <b>{r.truckNo}</b> / #{r.indentNo} / {r.date||"--"}
+                                <span style={{marginLeft:8,fontSize:9,color:r.status==="confirmed"?C.green:C.muted}}>
+                                  {r.status} / Rs.{r.amount} / By: {r.createdBy||"--"}
+                                </span>
+                              </button>
+                            ))}
+                            {reqMatches.length===0&&<div style={{color:C.muted,fontSize:11,padding:4}}>No matching requests found</div>}
+                          </div>
+                          <button onClick={()=>setCS(idx,{showAttachReq:false})}
+                            style={{fontSize:10,color:C.muted,background:"none",border:"none",cursor:"pointer",marginTop:6}}>Cancel</button>
+                        </div>
+                      );
+                    })()}
                 );
               });
               })()}
