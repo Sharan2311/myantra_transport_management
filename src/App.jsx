@@ -13204,8 +13204,20 @@ This was already dispensed — only delete if it was recorded in error.`;
       )}
 
       {/* ── RECONCILIATION VIEW ── */}
-      {view==="reconcile" && (()=>{
-        // ── Scan pump images via AI ──
+      {view==="reconcile" && user.role==="owner" && (()=>{
+
+        const getReqCat = (req) => {
+          const confirmed = req.confirmed || req.status==="confirmed" || req.status==="attached";
+          const hasLR = Boolean((req.lrNo||"").trim()) || Boolean(req.tripId);
+          if (!confirmed && !hasLR) return 1;
+          if ( confirmed && !hasLR) return 2;
+          if ( confirmed &&  hasLR) return 3;
+          return 4;
+        };
+        const CAT_LABEL = {1:"No Confirmation / No LR",2:"Confirmed / No LR",3:"Confirmed + LR",4:"No Confirmation / Has LR"};
+        const CAT_COLOR = (cat) => ({1:C.red,2:C.orange,3:C.green,4:C.purple}[cat]||C.muted);
+
+        // FIX: Route through Netlify function (was calling Anthropic directly — CORS blocked)
         const scanPumpImages = async () => {
           if(!reconImages.length) return alert("Upload pump statement images first.");
           setReconScanning(true); setReconProgress("Starting scan...");
@@ -13217,337 +13229,322 @@ This was already dispensed — only delete if it was recorded in error.`;
               const b64 = await new Promise((res,rej)=>{
                 const r=new FileReader(); r.onload=()=>res(r.result.split(",")[1]); r.onerror=rej; r.readAsDataURL(file);
               });
-              const mediaType = file.type||"image/jpeg";
-              const resp = await fetch("https://api.anthropic.com/v1/messages",{method:"POST",
+              const resp = await fetch("/.netlify/functions/scan-di",{method:"POST",
                 headers:{"Content-Type":"application/json"},
-                body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:4000,
-                  messages:[{role:"user",content:[
-                    {type:"image",source:{type:"base64",media_type:mediaType,data:b64}},
-                    {type:"text",text:`Extract ALL diesel entries from this pump statement image. For each row extract:
-- indent_no: the pump indent number (5-digit number like 28712) or "MY" if no indent
-- date: in YYYY-MM-DD format
-- vehicle: full vehicle number
-- hsd: HSD/diesel amount in rupees (number only, no commas)
-- advance: advance/cash amount in rupees (number only)
-
-SKIP summary/total rows (yellow highlighted rows with totals).
-SKIP rows where indent_no is "MY" and vehicle is just a short number (these are payment entries, not diesel).
-
-Return ONLY a JSON array, no other text:
-[{"indent_no":"28712","date":"2026-05-01","vehicle":"KA34C7132","hsd":20000,"advance":1000}, ...]`}
-                  ]}]})
+                body:JSON.stringify({base64:b64,mediaType:file.type||"image/jpeg",
+                  promptType:"pump",anthropicKey:RC.anthropicKey})
               });
-              const data = await resp.json();
-              const text = (data.content||[]).map(c=>c.text||"").join("");
-              const clean = text.replace(/```json|```/g,"").trim();
+              const result = await resp.json();
+              if(result.error) throw new Error(result.error);
+              const clean = (result.text||"").replace(/```json|```/g,"").trim();
               const rows = JSON.parse(clean);
-              if(Array.isArray(rows)) allRows.push(...rows);
-            }catch(err){ console.error("Scan image "+(i+1)+":",err.message); alert("⚠ Scan failed for image "+(i+1)+": "+err.message); }
+              if(Array.isArray(rows)) allRows.push(...rows.map(r=>({
+                truckNo: String(r.truckNo||r.vehicle||"").replace(/\s+/g,"").toUpperCase(),
+                indentNo: String(r.indentNo||r.indent_no||"").trim(),
+                date: r.date||null, hsd: Number(r.hsd||0), advance: Number(r.advance||0),
+              })));
+            }catch(err){
+              console.error("Scan image "+(i+1)+":",err.message);
+              alert("Scan failed for image "+(i+1)+": "+err.message);
+            }
           }
-          setReconData(allRows);
-          if(allRows.length===0) {
-            alert("⚠ Scan completed but extracted 0 entries from the images.\n\nPlease check that the uploaded images are clear pump statement pages with diesel entries.");
-            setReconScanning(false);
-            setReconProgress("");
-            return;
-          }
+          if(!allRows.length){ alert("Extracted 0 entries. Check image quality."); setReconScanning(false); setReconProgress(""); return; }
           setReconProgress(`Extracted ${allRows.length} entries. Matching...`);
 
-          // ── Auto-match with app diesel requests ──
-          const normalize = v => (v||"").toUpperCase().replace(/[\s\-]/g,"");
-          const vMatch = (a,b) => {
-            const an=normalize(a), bn=normalize(b);
-            if(an===bn) return true;
-            if(an.length>=4 && bn.length>=4 && an.slice(-4)===bn.slice(-4)) return true;
-            if(an.length<=5 && bn.includes(an)) return true;
-            if(bn.length<=5 && an.includes(bn)) return true;
-            return false;
-          };
-          const appReqs = (dieselRequests||[]).filter(r=>r.status==="attached"||r.status==="confirmed"||r.status==="open");
+          const norm = v => (v||"").toUpperCase().replace(/[\s\-]/g,"");
+          const vMatch = (a,b) => { const an=norm(a),bn=norm(b); return an===bn||(an.length>=4&&bn.length>=4&&an.slice(-4)===bn.slice(-4)); };
+          const appReqs = (dieselRequests||[]).filter(r=>r.status==="open"||r.status==="confirmed"||r.status==="attached");
           const usedApp = new Set();
-          const matches = allRows.map((p,pi) => {
-            // Find best app match by vehicle
-            let best = null;
-            for(const [ai,a] of appReqs.entries()){
-              if(usedApp.has(ai)) continue;
-              if(vMatch(p.vehicle, a.truckNo)){
-                best = {ai, a}; break;
-              }
-            }
+          const matches = allRows.map(p=>{
+            let best=null;
+            if(p.indentNo){ const ai=appReqs.findIndex((a,i)=>!usedApp.has(i)&&String(a.indentNo).trim()===p.indentNo); if(ai>=0) best={ai,a:appReqs[ai]}; }
+            if(!best){ for(const [ai,a] of appReqs.entries()){ if(usedApp.has(ai)) continue; if(vMatch(p.truckNo,a.truckNo)&&(!p.date||!a.date||p.date===a.date)){best={ai,a};break;} } }
             if(best){
-              usedApp.add(best.ai);
-              const a = best.a;
-              const hsdDiff = (p.hsd||0) - (a.confirmedAmount??a.amount??0);
-              // App stores diesel+cash separately; pump HSD = diesel portion
-              const appDiesel = a.dieselAmount??a.amount??0;
-              const appCash = a.cashAmount??0;
-              const hsdMatch = Math.abs((p.hsd||0) - appDiesel) <= 1;
-              const advMatch = Math.abs((p.advance||0) - appCash) <= 1;
-              const tripLinked = (trips||[]).find(t=>t.dieselIndentNo===String(a.indentNo));
-              return {
-                pump: p, app: a, trip: tripLinked||null,
-                status: hsdMatch&&advMatch ? "matched" : "mismatch",
-                hsdDiff: (p.hsd||0) - appDiesel,
-                advDiff: (p.advance||0) - appCash,
-                resolution: hsdMatch&&advMatch ? "ok" : "pending",
-              };
+              usedApp.add(best.ai); const a=best.a;
+              const cat=getReqCat(a);
+              const appHsd=Number(a.confirmedAmount??a.dieselAmount??a.amount??0);
+              const appAdv=Number(a.cashAmount??0);
+              const hsdOk=Math.abs(p.hsd-appHsd)<=5; const advOk=Math.abs(p.advance-appAdv)<=5;
+              const complete=cat===3&&hsdOk&&advOk&&vMatch(p.truckNo,a.truckNo);
+              const trip=(trips||[]).find(t=>t.dieselIndentNo===String(a.indentNo)||t.id===a.tripId);
+              return {pump:p,app:a,trip:trip||null,cat,complete,hsdDiff:p.hsd-appHsd,advDiff:p.advance-appAdv,status:complete?"ok":"mismatch",resolution:"pending"};
             }
-            return { pump:p, app:null, trip:null, status:"not_in_app", hsdDiff:0, advDiff:0, resolution:"pending" };
+            return {pump:p,app:null,trip:null,cat:0,complete:false,hsdDiff:p.hsd,advDiff:p.advance,status:"not_in_app",resolution:"pending"};
           });
-          // App requests not matched
-          appReqs.forEach((a,ai) => {
+          appReqs.forEach((a,ai)=>{
             if(!usedApp.has(ai)){
-              matches.push({ pump:null, app:a, trip:(trips||[]).find(t=>t.dieselIndentNo===String(a.indentNo)), status:"not_in_pump", hsdDiff:0, advDiff:0, resolution:"pending" });
+              const cat=getReqCat(a); const trip=(trips||[]).find(t=>t.dieselIndentNo===String(a.indentNo)||t.id===a.tripId);
+              matches.push({pump:null,app:a,trip:trip||null,cat,complete:false,hsdDiff:0,advDiff:0,status:"not_in_pump",resolution:"pending"});
             }
           });
-          setReconMatches(matches);
-          setReconScanning(false);
-          setReconProgress("");
+          setReconMatches(matches); setReconScanning(false); setReconProgress("");
         };
 
-        // ── Resolution handlers ──
-        const resolveEntry = (idx, action) => {
-          setReconMatches(prev => {
-            const m = [...prev]; const entry = m[idx];
-            if(!entry) return prev;
-            const empWho = entry.app ? ((employees||[]).find(e=>e.id===entry.app.createdById)||{}).name || entry.app.createdBy || "Unknown" : "Unknown";
-            const totalDiff = (entry.hsdDiff||0) + (entry.advDiff||0);
-
-            if(action==="debit_employee"){
-              const empId = entry.app?.createdById;
-              if(empId && totalDiff > 0){
-                // Add to employee wallet as debit
-                const emp = (employees||[]).find(e=>e.id===empId);
-                if(emp){
-                  const walletTxn = {id:"W"+Date.now(), type:"debit", amount:totalDiff,
-                    note:`Diesel mismatch: Pump ₹${(entry.pump?.hsd||0)+(entry.pump?.advance||0)} vs App ₹${((entry.app?.confirmedAmount??entry.app?.amount)||0)}. Indent #${entry.app?.indentNo||"?"}`,
-                    date:new Date().toISOString(), category:"Diesel"};
-                  const updEmp = {...emp, wallet:[...(emp.wallet||[]), walletTxn]};
-                  setVehicles(p=>p); // trigger re-render
-                  DB.saveEmployee&&DB.saveEmployee(updEmp).catch(()=>{});
-                  log("DIESEL RECON","Debited ₹"+totalDiff+" from "+emp.name+" — Indent #"+(entry.app?.indentNo||"?"));
-                }
-              }
-              m[idx] = {...entry, resolution:"debit_employee", resolvedNote:`Debited ₹${totalDiff} from ${empWho}`};
-            }
-            else if(action==="adjust_trip"){
-              const trip = entry.trip;
-              if(trip && !trip.driverSettled){
-                const newDiesel = (entry.pump?.hsd||0) + (entry.pump?.advance||0);
-                const updTrip = {...trip, dieselEstimate:newDiesel};
-                setTrips(p=>p.map(t=>t.id===trip.id?updTrip:t));
-                DB.saveTrip(updTrip).catch(()=>{});
-                log("DIESEL RECON","Adjusted LR "+trip.lrNo+" diesel to ₹"+newDiesel+" (was ₹"+trip.dieselEstimate+")");
-                m[idx] = {...entry, resolution:"adjusted_trip", resolvedNote:`LR ${trip.lrNo} diesel updated to ₹${newDiesel}`};
-              } else {
-                alert(trip?"Trip already settled — use 'Recover from Next Trip' instead.":"No linked trip found.");
-                return prev;
-              }
-            }
-            else if(action==="recover_next"){
-              const veh = (vehicles||[]).find(v=>v.truckNo===entry.pump?.vehicle || v.truckNo===entry.app?.truckNo);
-              if(veh && totalDiff > 0){
-                const loanTxn = {id:"DM"+Date.now(), type:"diesel_mismatch", amount:totalDiff,
-                  note:`Diesel mismatch: Pump ₹${(entry.pump?.hsd||0)+(entry.pump?.advance||0)} vs App ₹${((entry.app?.confirmedAmount??entry.app?.amount)||0)}. LR ${entry.trip?.lrNo||"?"}, Indent #${entry.app?.indentNo||"?"}`,
-                  date:new Date().toISOString()};
-                const updVeh = {...veh, loan:(veh.loan||0)+totalDiff,
-                  loanTxns:[...(veh.loanTxns||[]), loanTxn]};
-                setVehicles(p=>p.map(v=>v.id===veh.id?updVeh:v));
-                DB.saveVehicle(updVeh).catch(()=>{});
-                log("DIESEL RECON","Added ₹"+totalDiff+" to "+veh.truckNo+" loan — Indent #"+(entry.app?.indentNo||"?"));
-                m[idx] = {...entry, resolution:"recover_next", resolvedNote:`₹${totalDiff} added to ${veh.truckNo} vehicle loan`};
-              }
-            }
-            else if(action==="write_off"){
-              log("DIESEL RECON","Write-off ₹"+(Math.abs(totalDiff))+" — Indent #"+(entry.app?.indentNo||entry.pump?.indent_no||"?"));
-              m[idx] = {...entry, resolution:"write_off", resolvedNote:`₹${Math.abs(totalDiff)} written off`};
-            }
-            else if(action==="flag"){
-              m[idx] = {...entry, resolution:"flagged", resolvedNote:"Flagged for investigation"};
+        const resolveEntry = (idx, action, extra={}) => {
+          setReconMatches(prev=>{
+            const m=[...prev]; const e=m[idx]; if(!e) return prev;
+            const totalDiff=(e.hsdDiff||0)+(e.advDiff||0);
+            if(action==="confirm_pin"){
+              const amt=extra.amount||Number(e.app?.confirmedAmount??e.app?.amount??0);
+              const upd={...e.app,status:"confirmed",confirmed:true,confirmedAmount:amt,confirmedAt:nowTs(),pin:"****"};
+              setDieselRequests(p=>p.map(r=>r.id===e.app.id?upd:r));
+              DB.saveDieselRequest(upd).catch(()=>{});
+              log("PUMP CONFIRM",`Recon: #${e.app.indentNo} confirmed Rs.${amt}`);
+              m[idx]={...e,app:upd,cat:getReqCat(upd),resolution:"confirmed",resolvedNote:`Confirmed Rs.${amt}`};
+            } else if(action==="attach_lr"){
+              const trip=(trips||[]).find(t=>t.lrNo===extra.lrNo); if(!trip) return prev;
+              const upd={...e.app,lrNo:extra.lrNo,tripId:trip.id,status:"attached"};
+              setDieselRequests(p=>p.map(r=>r.id===e.app.id?upd:r));
+              DB.saveDieselRequest(upd).catch(()=>{});
+              const updTrip={...trip,dieselIndentNo:String(e.app.indentNo)};
+              setTrips(p=>p.map(t=>t.id===trip.id?updTrip:t));
+              DB.saveTrip(updTrip).catch(()=>{});
+              log("RECON ATTACH",`#${e.app.indentNo} -> LR ${extra.lrNo}`);
+              m[idx]={...e,app:upd,trip,cat:getReqCat(upd),resolution:"attached",resolvedNote:`LR ${extra.lrNo}`};
+            } else if(action==="update_amounts"){
+              const upd={...e.app,amount:extra.hsd||e.app.amount,cashAmount:extra.advance||0};
+              setDieselRequests(p=>p.map(r=>r.id===e.app.id?upd:r));
+              DB.saveDieselRequest(upd).catch(()=>{});
+              log("RECON UPDATE",`#${e.app.indentNo} amounts updated`);
+              m[idx]={...e,app:upd,hsdDiff:0,advDiff:0,resolution:"updated",resolvedNote:`HSD Rs.${extra.hsd||e.app.amount}`};
+            } else if(action==="adjust_trip"){
+              const trip=e.trip; if(!trip||trip.driverSettled) return prev;
+              const newD=(e.pump?.hsd||0)+(e.pump?.advance||0);
+              const upd={...trip,dieselEstimate:newD};
+              setTrips(p=>p.map(t=>t.id===trip.id?upd:t)); DB.saveTrip(upd).catch(()=>{});
+              log("RECON ADJUST",`LR ${trip.lrNo} diesel Rs.${newD}`);
+              m[idx]={...e,trip:upd,resolution:"adjusted",resolvedNote:`Trip diesel Rs.${newD}`};
+            } else if(action==="write_off"){
+              log("RECON WRITEOFF",`Rs.${Math.abs(totalDiff)} written off`);
+              m[idx]={...e,resolution:"write_off",resolvedNote:`Rs.${Math.abs(totalDiff)} written off`};
             }
             return m;
           });
         };
 
-        const fmt = n => "₹"+(n||0).toLocaleString("en-IN");
-        const matchedCount = (reconMatches||[]).filter(m=>m.status==="matched").length;
-        const mismatchCount = (reconMatches||[]).filter(m=>m.status==="mismatch").length;
-        const notInApp = (reconMatches||[]).filter(m=>m.status==="not_in_app").length;
-        const notInPump = (reconMatches||[]).filter(m=>m.status==="not_in_pump").length;
-        const resolved = (reconMatches||[]).filter(m=>m.resolution!=="pending"&&m.resolution!=="ok").length;
+        const fmt = n => "Rs."+(n||0).toLocaleString("en-IN");
+        const complete   = (reconMatches||[]).filter(m=>m.complete||m.status==="ok");
+        const actionable = (reconMatches||[]).filter(m=>!m.complete&&m.status!=="ok");
+        const SUMMARY = [
+          {l:"Complete", v:complete.length, c:C.green},
+          {l:"Cat 1: No Confirm/No LR", v:actionable.filter(m=>m.cat===1).length, c:C.red},
+          {l:"Cat 2: Confirmed/No LR",  v:actionable.filter(m=>m.cat===2).length, c:C.orange},
+          {l:"Cat 3 Value Mismatch",    v:actionable.filter(m=>m.cat===3).length, c:C.blue},
+          {l:"Cat 4: No Confirm/LR",    v:actionable.filter(m=>m.cat===4).length, c:C.purple},
+          {l:"Not in App",              v:actionable.filter(m=>m.status==="not_in_app").length, c:C.red},
+          {l:"Not in Pump",             v:actionable.filter(m=>m.status==="not_in_pump").length, c:C.muted},
+        ];
 
-        return (<div style={{display:"flex",flexDirection:"column",gap:12}}>
-          <div style={{fontSize:14,fontWeight:700,color:C.text}}>🔍 Diesel Reconciliation</div>
-          <div style={{fontSize:11,color:C.muted}}>Upload pump statement images → AI extracts data → auto-match with app requests → resolve mismatches</div>
+        return (
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <div style={{fontSize:14,fontWeight:700,color:C.text}}>Diesel Reconciliation</div>
+            <div style={{fontSize:11,color:C.muted}}>Pump data is master. Scan statement, match with app requests, resolve mismatches.</div>
 
-          {/* Upload area */}
-          {!reconMatches && (<>
-            <div style={{background:C.bg,border:`2px dashed ${C.border}`,borderRadius:12,padding:20,textAlign:"center"}}>
-              <label style={{cursor:"pointer",color:C.accent,fontWeight:700,fontSize:13}}>
-                📷 Upload Pump Statement Images
-                <input type="file" accept="image/*" multiple style={{display:"none"}}
-                  onChange={e=>{setReconImages(Array.from(e.target.files||[]));}}/>
-              </label>
-              {reconImages.length>0 && (
-                <div style={{marginTop:8,fontSize:12,color:C.green,fontWeight:600}}>
-                  {reconImages.length} image{reconImages.length>1?"s":""} selected
-                </div>
+            {!reconMatches && (<>
+              <div style={{background:C.bg,border:`2px dashed ${C.border}`,borderRadius:12,padding:20,textAlign:"center"}}>
+                <label style={{cursor:"pointer",color:C.accent,fontWeight:700,fontSize:13}}>
+                  Upload Pump Statement Images
+                  <input type="file" accept="image/*" multiple style={{display:"none"}} onChange={e=>setReconImages(Array.from(e.target.files||[]))}/>
+                </label>
+                {reconImages.length>0 && <div style={{marginTop:8,fontSize:12,color:C.green,fontWeight:600}}>{reconImages.length} image{reconImages.length!==1?"s":""} selected</div>}
+              </div>
+              <button onClick={scanPumpImages} disabled={reconScanning||!reconImages.length}
+                style={{background:reconScanning?C.muted:C.accent,color:"#fff",border:"none",borderRadius:10,padding:"12px 20px",fontSize:13,fontWeight:700,cursor:reconScanning?"wait":"pointer"}}>
+                {reconScanning?reconProgress:"Scan & Match"}
+              </button>
+            </>)}
+
+            {reconMatches && (<>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                {SUMMARY.filter(s=>s.v>0).map((s,i)=>(
+                  <div key={i} style={{background:s.c+"11",border:`1px solid ${s.c}33`,borderRadius:8,padding:"6px 10px",textAlign:"center",minWidth:70}}>
+                    <div style={{fontSize:16,fontWeight:800,color:s.c}}>{s.v}</div>
+                    <div style={{fontSize:8,color:s.c,lineHeight:1.3}}>{s.l}</div>
+                  </div>
+                ))}
+              </div>
+              <button onClick={()=>{setReconMatches(null);setReconData(null);setReconImages([]);}}
+                style={{background:C.dim,color:C.text,border:"none",borderRadius:8,padding:"6px 14px",fontSize:11,fontWeight:600,cursor:"pointer",alignSelf:"flex-start"}}>
+                New Reconciliation
+              </button>
+              {actionable.length===0 && complete.length>0 && (
+                <div style={{textAlign:"center",padding:24,color:C.green,fontWeight:700,fontSize:14}}>All entries matched and complete!</div>
               )}
-            </div>
-            <button onClick={scanPumpImages}
-              disabled={reconScanning||!reconImages.length}
-              style={{background:reconScanning?C.muted:C.accent,color:"#fff",border:"none",borderRadius:10,
-                padding:"12px 20px",fontSize:13,fontWeight:700,cursor:reconScanning?"wait":"pointer"}}>
-              {reconScanning ? reconProgress : "🔍 Scan & Match"}
-            </button>
-          </>)}
-
-          {/* Results */}
-          {reconMatches && (<>
-            {/* Summary KPIs */}
-            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-              <div style={{background:C.green+"11",border:`1px solid ${C.green}33`,borderRadius:8,padding:"8px 14px",flex:1,minWidth:60,textAlign:"center"}}>
-                <div style={{fontSize:18,fontWeight:800,color:C.green}}>{matchedCount}</div>
-                <div style={{fontSize:9,color:C.green}}>Matched ✅</div>
-              </div>
-              <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,borderRadius:8,padding:"8px 14px",flex:1,minWidth:60,textAlign:"center"}}>
-                <div style={{fontSize:18,fontWeight:800,color:C.orange}}>{mismatchCount}</div>
-                <div style={{fontSize:9,color:C.orange}}>Mismatch ⚠</div>
-              </div>
-              <div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,padding:"8px 14px",flex:1,minWidth:60,textAlign:"center"}}>
-                <div style={{fontSize:18,fontWeight:800,color:C.red}}>{notInApp}</div>
-                <div style={{fontSize:9,color:C.red}}>Not in App</div>
-              </div>
-              <div style={{background:C.purple+"11",border:`1px solid ${C.purple}33`,borderRadius:8,padding:"8px 14px",flex:1,minWidth:60,textAlign:"center"}}>
-                <div style={{fontSize:18,fontWeight:800,color:C.purple}}>{notInPump}</div>
-                <div style={{fontSize:9,color:C.purple}}>Not in Pump ❓</div>
-              </div>
-              <div style={{background:C.teal+"11",border:`1px solid ${C.teal}33`,borderRadius:8,padding:"8px 14px",flex:1,minWidth:60,textAlign:"center"}}>
-                <div style={{fontSize:18,fontWeight:800,color:C.teal}}>{resolved}</div>
-                <div style={{fontSize:9,color:C.teal}}>Resolved</div>
-              </div>
-            </div>
-
-            {/* Reset button */}
-            <button onClick={()=>{setReconMatches(null);setReconData(null);setReconImages([]);}}
-              style={{background:C.dim,color:C.text,border:"none",borderRadius:8,padding:"6px 14px",
-                fontSize:11,fontWeight:600,cursor:"pointer",alignSelf:"flex-start"}}>
-              ↩ New Reconciliation
-            </button>
-
-            {/* Mismatch entries (show mismatches & unmatched first, then matched) */}
-            {reconMatches.filter(m=>m.status!=="matched").map((m,idx)=>{
-              const realIdx = reconMatches.indexOf(m);
-              const bg = m.status==="mismatch"?C.orange+"0a":m.status==="not_in_app"?C.red+"0a":C.purple+"0a";
-              const borderCol = m.status==="mismatch"?C.orange:m.status==="not_in_app"?C.red:C.purple;
-              const totalDiff = (m.hsdDiff||0)+(m.advDiff||0);
-              const isResolved = m.resolution!=="pending";
-              return (
-                <div key={idx} style={{background:bg,border:`1.5px solid ${borderCol}33`,borderRadius:10,padding:"12px 14px",
-                  opacity:isResolved?0.6:1}}>
-                  {/* Status badge */}
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-                    <span style={{fontSize:10,fontWeight:700,color:borderCol,background:borderCol+"22",
-                      padding:"2px 8px",borderRadius:10}}>
-                      {m.status==="mismatch"?"⚠ AMOUNT MISMATCH":m.status==="not_in_app"?"❌ NOT IN APP":"❓ NOT IN PUMP"}
-                    </span>
-                    {isResolved && (
-                      <span style={{fontSize:10,color:C.green,fontWeight:600}}>✅ {m.resolvedNote}</span>
-                    )}
-                  </div>
-
-                  {/* Data comparison */}
-                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4,fontSize:11,marginBottom:8}}>
-                    <div style={{fontWeight:700,color:C.text}}>🏪 Pump</div>
-                    <div style={{fontWeight:700,color:C.text}}>📱 App</div>
-                    <div>{m.pump?.vehicle||"—"}</div>
-                    <div>{m.app?.truckNo||"—"}</div>
-                    <div>HSD: <b style={{color:m.hsdDiff?C.red:C.green}}>{fmt(m.pump?.hsd||0)}</b></div>
-                    <div>Diesel: <b style={{color:m.hsdDiff?C.red:C.green}}>{fmt(m.app?.dieselAmount??m.app?.amount??0)}</b></div>
-                    <div>Advance: <b style={{color:m.advDiff?C.red:C.green}}>{fmt(m.pump?.advance||0)}</b></div>
-                    <div>Cash: <b style={{color:m.advDiff?C.red:C.green}}>{fmt(m.app?.cashAmount??0)}</b></div>
-                    {totalDiff!==0 && (
-                      <div style={{gridColumn:"1/3",color:C.red,fontWeight:700,fontSize:12}}>
-                        Difference: {fmt(Math.abs(totalDiff))} {totalDiff>0?"(pump higher)":"(app higher)"}
-                        {m.trip && <span style={{color:C.muted,fontWeight:400}}> · LR: {m.trip.lrNo} · {m.trip.driverSettled?"⚠ Settled":"Unsettled"}</span>}
+              {actionable.map((m,xi)=>{
+                const idx=(reconMatches||[]).indexOf(m);
+                const catCol=m.status==="not_in_app"?C.red:m.status==="not_in_pump"?C.muted:CAT_COLOR(m.cat);
+                const catLabel=m.status==="not_in_app"?"NOT IN APP"
+                  :m.status==="not_in_pump"?"NOT IN PUMP"
+                  :`CAT ${m.cat}: ${CAT_LABEL[m.cat]||""}`;
+                const isResolved=m.resolution!=="pending";
+                const [showAttach,setShowAttach]=React.useState(false);
+                const [lrSearch,setLrSearch]=React.useState("");
+                const [editAmts,setEditAmts]=React.useState(false);
+                const [editHsd,setEditHsd]=React.useState(String(m.app?.amount||""));
+                const [editAdv,setEditAdv]=React.useState(String(m.app?.cashAmount||"0"));
+                const [showPin,setShowPin]=React.useState(false);
+                const [pinEntry,setPinEntry]=React.useState("");
+                const [pinErr,setPinErr]=React.useState(false);
+                const lrMatches=(trips||[]).filter(t=>(t.lrNo||"").includes(lrSearch.toUpperCase()));
+                return (
+                  <div key={idx} style={{background:C.card,border:`1.5px solid ${catCol}44`,borderRadius:12,padding:"12px 14px",opacity:isResolved?0.65:1}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                      <span style={{fontSize:10,fontWeight:800,color:catCol,background:catCol+"18",padding:"2px 8px",borderRadius:10}}>{catLabel}</span>
+                      {isResolved && <span style={{fontSize:10,color:C.green,fontWeight:600}}>{m.resolvedNote}</span>}
+                    </div>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:8}}>
+                      <div style={{background:C.bg,borderRadius:8,padding:"8px 10px"}}>
+                        <div style={{fontSize:9,fontWeight:800,color:C.muted,marginBottom:3}}>PUMP (MASTER)</div>
+                        <div style={{fontSize:12,fontWeight:700}}>{m.pump?.truckNo||"--"}</div>
+                        <div style={{fontSize:10,color:C.muted}}>{m.pump?.date||"--"} / #{m.pump?.indentNo||"--"}</div>
+                        <div style={{fontSize:12,marginTop:3}}>HSD: <b style={{color:m.hsdDiff?C.red:C.green}}>{fmt(m.pump?.hsd||0)}</b></div>
+                        <div style={{fontSize:12}}>Adv: <b>{fmt(m.pump?.advance||0)}</b></div>
+                      </div>
+                      <div style={{background:C.bg,borderRadius:8,padding:"8px 10px"}}>
+                        <div style={{fontSize:9,fontWeight:800,color:C.muted,marginBottom:3}}>APP REQUEST</div>
+                        {m.app?(<>
+                          <div style={{fontSize:12,fontWeight:700}}>{m.app.truckNo||"--"}</div>
+                          <div style={{fontSize:10,color:C.muted}}>{m.app.date||"--"} / #{m.app.indentNo||"--"}</div>
+                          <div style={{fontSize:12,marginTop:3}}>HSD: <b style={{color:m.hsdDiff?C.red:C.green}}>{fmt(m.app.confirmedAmount??m.app.dieselAmount??m.app.amount??0)}</b></div>
+                          <div style={{fontSize:12}}>Adv: <b>{fmt(m.app.cashAmount??0)}</b></div>
+                          {m.trip&&<div style={{fontSize:10,color:C.accent,marginTop:2}}>LR: {m.trip.lrNo}</div>}
+                          <div style={{fontSize:9,color:C.muted,marginTop:2}}>By: {m.app.createdBy||"--"}</div>
+                        </>):<div style={{fontSize:11,color:C.muted,paddingTop:8}}>No app record found</div>}
+                      </div>
+                    </div>
+                    {(m.hsdDiff!==0||m.advDiff!==0)&&m.app&&(
+                      <div style={{fontSize:11,fontWeight:700,color:C.red,padding:"4px 8px",background:C.red+"11",borderRadius:6,marginBottom:8}}>
+                        Diff: HSD {m.hsdDiff>0?"+":""}{fmt(m.hsdDiff)}{m.advDiff!==0&&` / Adv ${m.advDiff>0?"+":""}${fmt(m.advDiff)}`} {(m.hsdDiff+m.advDiff)>0?"(pump higher)":"(app higher)"}
                       </div>
                     )}
-                    {m.app?.createdBy && (
-                      <div style={{gridColumn:"1/3",color:C.muted,fontSize:10}}>
-                        Created by: <b>{m.app.createdBy}</b> · Indent #{m.app.indentNo} · {m.app.date?.slice(0,10)}
+                    {!isResolved&&(
+                      <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:showPin||showAttach||editAmts?8:0}}>
+                        {m.app&&(m.cat===1||m.cat===4)&&!showPin&&(
+                          <button onClick={()=>{setShowPin(true);setPinEntry("");setPinErr(false);}}
+                            style={{fontSize:10,fontWeight:700,background:C.green+"22",color:C.green,border:`1px solid ${C.green}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                            Confirm with PIN
+                          </button>
+                        )}
+                        {m.app&&(m.cat===1||m.cat===2)&&!showAttach&&(
+                          <button onClick={()=>setShowAttach(true)}
+                            style={{fontSize:10,fontWeight:700,background:C.blue+"22",color:C.blue,border:`1px solid ${C.blue}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                            Attach to LR
+                          </button>
+                        )}
+                        {m.app&&(m.hsdDiff!==0||m.advDiff!==0)&&!editAmts&&(
+                          <button onClick={()=>setEditAmts(true)}
+                            style={{fontSize:10,fontWeight:700,background:C.orange+"22",color:C.orange,border:`1px solid ${C.orange}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                            Update Amounts
+                          </button>
+                        )}
+                        {m.trip&&!m.trip.driverSettled&&(m.hsdDiff!==0||m.advDiff!==0)&&(
+                          <button onClick={()=>resolveEntry(idx,"adjust_trip")}
+                            style={{fontSize:10,fontWeight:700,background:C.blue+"22",color:C.blue,border:`1px solid ${C.blue}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                            Adjust Trip Diesel
+                          </button>
+                        )}
+                        {(m.hsdDiff!==0||m.advDiff!==0||m.status==="not_in_app")&&(
+                          <button onClick={()=>resolveEntry(idx,"write_off")}
+                            style={{fontSize:10,fontWeight:700,background:C.muted+"22",color:C.muted,border:`1px solid ${C.muted}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                            Write Off
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    {showPin&&!isResolved&&(
+                      <div style={{background:C.bg,borderRadius:8,padding:"10px 12px",marginTop:4}}>
+                        <div style={{fontSize:11,fontWeight:700,marginBottom:6}}>Enter pump PIN to confirm Indent #{m.app?.indentNo}</div>
+                        <div style={{display:"flex",gap:6,marginBottom:6}}>
+                          {[0,1,2,3].map(j=>(
+                            <div key={j} style={{width:32,height:40,background:C.card,borderRadius:6,border:`1px solid ${pinErr?C.red:C.border}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,fontWeight:700}}>
+                              {pinEntry[j]?"*":""}
+                            </div>
+                          ))}
+                        </div>
+                        {pinErr&&<div style={{color:C.red,fontSize:10,marginBottom:4}}>Wrong PIN — try again</div>}
+                        <div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:6}}>
+                          {[1,2,3,4,5,6,7,8,9,"DEL",0,"OK"].map(k=>(
+                            <button key={k} onClick={()=>{
+                              if(k==="DEL"){setPinEntry(p=>p.slice(0,-1));setPinErr(false);}
+                              else if(k==="OK"){
+                                if(pinEntry===m.app?.pin){resolveEntry(idx,"confirm_pin",{amount:Number(m.pump?.hsd||m.app?.amount)});setShowPin(false);}
+                                else{setPinErr(true);setPinEntry("");}
+                              } else if(pinEntry.length<4){
+                                const np=pinEntry+String(k); setPinEntry(np); setPinErr(false);
+                                if(np.length===4){
+                                  if(np===m.app?.pin){resolveEntry(idx,"confirm_pin",{amount:Number(m.pump?.hsd||m.app?.amount)});setShowPin(false);}
+                                  else{setPinErr(true);setPinEntry("");}
+                                }
+                              }
+                            }}
+                            style={{width:36,height:36,borderRadius:6,border:`1px solid ${C.border}`,background:k==="OK"?C.green:k==="DEL"?C.red+"22":C.card,color:k==="OK"?"#fff":k==="DEL"?C.red:C.text,fontWeight:700,fontSize:k==="DEL"||k==="OK"?10:14,cursor:"pointer"}}>
+                              {k}
+                            </button>
+                          ))}
+                        </div>
+                        <button onClick={()=>setShowPin(false)} style={{fontSize:10,color:C.muted,background:"none",border:"none",cursor:"pointer"}}>Cancel</button>
+                      </div>
+                    )}
+                    {showAttach&&!isResolved&&(
+                      <div style={{background:C.bg,borderRadius:8,padding:"10px 12px",marginTop:4}}>
+                        <div style={{fontSize:11,fontWeight:700,marginBottom:6}}>Select LR to attach</div>
+                        <input value={lrSearch} onChange={e=>setLrSearch(e.target.value)} placeholder="Search LR / truck..."
+                          style={{width:"100%",background:C.card,border:`1px solid ${C.border}`,borderRadius:6,padding:"6px 8px",color:C.text,fontSize:12,marginBottom:6,boxSizing:"border-box"}}/>
+                        <div style={{maxHeight:150,overflowY:"auto",display:"flex",flexDirection:"column",gap:4}}>
+                          {lrMatches.slice(0,20).map(t=>(
+                            <button key={t.id} onClick={()=>{resolveEntry(idx,"attach_lr",{lrNo:t.lrNo});setShowAttach(false);}}
+                              style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:6,padding:"6px 10px",textAlign:"left",cursor:"pointer",fontSize:11}}>
+                              <b>{t.lrNo}</b> / {t.truckNo} / {t.date}
+                            </button>
+                          ))}
+                          {lrMatches.length===0&&<div style={{color:C.muted,fontSize:11}}>No matching trips found</div>}
+                        </div>
+                        <button onClick={()=>setShowAttach(false)} style={{fontSize:10,color:C.muted,background:"none",border:"none",cursor:"pointer",marginTop:4}}>Cancel</button>
+                      </div>
+                    )}
+                    {editAmts&&!isResolved&&(
+                      <div style={{background:C.bg,borderRadius:8,padding:"10px 12px",marginTop:4}}>
+                        <div style={{fontSize:11,fontWeight:700,marginBottom:6}}>Update amounts to match pump data</div>
+                        <div style={{display:"flex",gap:8,marginBottom:8}}>
+                          <div style={{flex:1}}>
+                            <div style={{fontSize:9,color:C.muted,marginBottom:2}}>HSD Rs.</div>
+                            <input value={editHsd} onChange={e=>setEditHsd(e.target.value)} type="number"
+                              style={{width:"100%",background:C.card,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 8px",color:C.text,fontSize:12,boxSizing:"border-box"}}/>
+                          </div>
+                          <div style={{flex:1}}>
+                            <div style={{fontSize:9,color:C.muted,marginBottom:2}}>Advance Rs.</div>
+                            <input value={editAdv} onChange={e=>setEditAdv(e.target.value)} type="number"
+                              style={{width:"100%",background:C.card,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 8px",color:C.text,fontSize:12,boxSizing:"border-box"}}/>
+                          </div>
+                        </div>
+                        <div style={{display:"flex",gap:6}}>
+                          <button onClick={()=>{resolveEntry(idx,"update_amounts",{hsd:Number(editHsd),advance:Number(editAdv)});setEditAmts(false);}}
+                            style={{background:C.green,color:"#fff",border:"none",borderRadius:6,padding:"6px 14px",fontSize:11,fontWeight:700,cursor:"pointer"}}>Save</button>
+                          <button onClick={()=>setEditAmts(false)} style={{background:C.dim,color:C.text,border:"none",borderRadius:6,padding:"6px 14px",fontSize:11,cursor:"pointer"}}>Cancel</button>
+                        </div>
                       </div>
                     )}
                   </div>
-
-                  {/* Action buttons (only if not resolved) */}
-                  {!isResolved && m.status==="mismatch" && totalDiff>0 && (
-                    <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-                      <button onClick={()=>resolveEntry(realIdx,"debit_employee")}
-                        style={{fontSize:10,fontWeight:600,background:C.orange+"22",color:C.orange,border:`1px solid ${C.orange}44`,
-                          borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
-                        👤 Debit Employee
-                      </button>
-                      {m.trip && !m.trip.driverSettled && (
-                        <button onClick={()=>resolveEntry(realIdx,"adjust_trip")}
-                          style={{fontSize:10,fontWeight:600,background:C.blue+"22",color:C.blue,border:`1px solid ${C.blue}44`,
-                            borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
-                          📝 Adjust Trip
-                        </button>
-                      )}
-                      <button onClick={()=>resolveEntry(realIdx,"recover_next")}
-                        style={{fontSize:10,fontWeight:600,background:C.purple+"22",color:C.purple,border:`1px solid ${C.purple}44`,
-                          borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
-                        🚛 Recover from Next Trip
-                      </button>
-                      <button onClick={()=>resolveEntry(realIdx,"write_off")}
-                        style={{fontSize:10,fontWeight:600,background:C.muted+"22",color:C.muted,border:`1px solid ${C.muted}44`,
-                          borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
-                        ✖ Write Off
-                      </button>
-                      <button onClick={()=>resolveEntry(realIdx,"flag")}
-                        style={{fontSize:10,fontWeight:600,background:C.red+"22",color:C.red,border:`1px solid ${C.red}44`,
-                          borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
-                        🚩 Flag
-                      </button>
-                    </div>
-                  )}
-                  {!isResolved && m.status==="not_in_app" && (
-                    <div style={{display:"flex",gap:6}}>
-                      <button onClick={()=>resolveEntry(realIdx,"recover_next")}
-                        style={{fontSize:10,fontWeight:600,background:C.purple+"22",color:C.purple,border:`1px solid ${C.purple}44`,
-                          borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
-                        🚛 Add to Vehicle Loan
-                      </button>
-                      <button onClick={()=>resolveEntry(realIdx,"flag")}
-                        style={{fontSize:10,fontWeight:600,background:C.red+"22",color:C.red,border:`1px solid ${C.red}44`,
-                          borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
-                        🚩 Flag for Investigation
-                      </button>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-
-            {/* Matched entries (collapsed) */}
-            {matchedCount > 0 && (
-              <details style={{background:C.green+"08",border:`1px solid ${C.green}22`,borderRadius:10,padding:"10px 14px"}}>
-                <summary style={{fontSize:12,fontWeight:700,color:C.green,cursor:"pointer"}}>
-                  ✅ {matchedCount} Matched Entries (tap to expand)
-                </summary>
-                <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:4}}>
-                  {reconMatches.filter(m=>m.status==="matched").map((m,i)=>(
-                    <div key={i} style={{fontSize:10,color:C.muted,display:"flex",justifyContent:"space-between",
-                      padding:"4px 0",borderBottom:`1px solid ${C.border}`}}>
-                      <span>{m.pump?.vehicle} · #{m.app?.indentNo}</span>
-                      <span>HSD {fmt(m.pump?.hsd||0)} · Adv {fmt(m.pump?.advance||0)}</span>
-                    </div>
-                  ))}
-                </div>
-              </details>
-            )}
-          </>)}
-        </div>);
+                );
+              })}
+              {complete.length>0&&(
+                <details style={{background:C.green+"08",border:`1px solid ${C.green}22`,borderRadius:10,padding:"10px 14px"}}>
+                  <summary style={{fontSize:12,fontWeight:700,color:C.green,cursor:"pointer"}}>
+                    {complete.length} Complete & Matched (Category 3)
+                  </summary>
+                  <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:4}}>
+                    {complete.map((m,i)=>(
+                      <div key={i} style={{fontSize:10,color:C.muted,display:"flex",justifyContent:"space-between",padding:"4px 0",borderBottom:`1px solid ${C.border}`}}>
+                        <span>{m.pump?.truckNo||m.app?.truckNo} / #{m.app?.indentNo||m.pump?.indentNo}</span>
+                        <span>HSD {fmt(m.pump?.hsd||0)} / LR {m.trip?.lrNo||"--"}</span>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
+            </>)}
+          </div>
+        );
       })()}
 
       {/* ── ALERT HISTORY VIEW ── */}
