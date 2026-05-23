@@ -12832,6 +12832,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                 confirmed:             reqs.filter(r=>r.status==="confirmed").length,
                 attached:              reqs.filter(r=>r.status==="attached" && r.confirmedAmount!=null).length,
                 attached_unconfirmed:  reqs.filter(r=>r.status==="attached" && r.confirmedAmount==null).length,
+                reconciled:            reqs.filter(r=>r.status==="reconciled").length,
               };
               const chips = [
                 {id:"all",               label:"All",                color:C.muted},
@@ -12839,6 +12840,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                 {id:"confirmed",         label:"✓ Confirmed",         color:C.teal},
                 {id:"attached",          label:"✅ Attached",          color:C.green},
                 {id:"attached_unconfirmed", label:"⚠ No Pump Confirm", color:"#d97706"},
+                {id:"reconciled",        label:"🔍 Reconciled",       color:C.purple},
               ];
               return (
                 <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
@@ -12875,6 +12877,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
               if(drStatusFilter==="confirmed"          && r.status!=="confirmed") return false;
               if(drStatusFilter==="attached"           && !(r.status==="attached" && r.confirmedAmount!=null)) return false;
               if(drStatusFilter==="attached_unconfirmed" && !(r.status==="attached" && r.confirmedAmount==null)) return false;
+              if(drStatusFilter==="reconciled" && r.status!=="reconciled") return false;
               // Search filter
               if(drSearch) {
                 const q = drSearch.toLowerCase();
@@ -12934,6 +12937,13 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                       )}
                       {req.lrNo && (
                         <div style={{color:C.green,fontSize:11,marginTop:2}}>✓ Attached to LR {req.lrNo}</div>
+                      )}
+                      {req.status==="reconciled" && (
+                        <div style={{color:C.purple,fontSize:11,marginTop:2,fontWeight:700}}>
+                          🔍 Reconciled via pump statement
+                          {req.reconciledAt&&<span style={{fontWeight:400,color:C.muted}}> � {req.reconciledAt.slice(0,10)}</span>}
+                          {req.amountNote&&<span style={{color:C.orange,fontWeight:400}}> � {req.amountNote}</span>}
+                        </div>
                       )}
                       {req.status==="attached" && req.confirmedAmount==null && (
                         <div style={{color:"#d97706",fontSize:10,marginTop:2,fontWeight:600,
@@ -13275,7 +13285,9 @@ This was already dispensed — only delete if it was recorded in error.`;
             return {pump:p,app:null,trip:null,cat:0,complete:false,hsdDiff:p.hsd,advDiff:p.advance,status:"not_in_app",resolution:"pending"};
           });
           // not_in_pump records are intentionally excluded from display
-          setReconMatches(matches); setReconScanning(false); setReconProgress("");
+          setReconMatches(matches);
+          saveSession(matches); // persist for reload without rescan
+          setReconScanning(false); setReconProgress("");
         };
 
         const resolveEntry = (idx, action, extra={}) => {
@@ -13331,6 +13343,113 @@ This was already dispensed — only delete if it was recorded in error.`;
           });
         };
 
+
+        // ── SAVE SESSION TO LOCALSTORAGE (avoid rescan) ──
+        const SESSION_KEY = "diesel_recon_" + (RC.clientId||"local");
+        const saveSession = (matches) => {
+          try { localStorage.setItem(SESSION_KEY, JSON.stringify({matches, savedAt:Date.now()})); } catch{}
+        };
+        const loadSession = () => {
+          try {
+            const s = JSON.parse(localStorage.getItem(SESSION_KEY)||"{}");
+            if(s.matches && (Date.now()-s.savedAt)<7*86400000) return s.matches; // valid for 7 days
+          } catch{}
+          return null;
+        };
+        const clearSession = () => { try{localStorage.removeItem(SESSION_KEY);}catch{} };
+
+        // ── CORE: apply one reconciled entry → update request + trip + loan if settled ──
+        const applyReconEntry = async (m) => {
+          if(!m.app || !m.pump) return;
+          const oldHsd  = Number(m.app.confirmedAmount ?? m.app.dieselAmount ?? m.app.amount ?? 0);
+          const newHsd  = m.pump.hsd || 0;
+          const newAdv  = m.pump.advance || 0;
+          const newTotal= newHsd + newAdv;
+          const oldTotal= oldHsd + Number(m.app.cashAmount||0);
+          const amountNote = oldHsd!==newHsd
+            ? `Amount changed: Rs.${oldHsd.toLocaleString("en-IN")} -> Rs.${newHsd.toLocaleString("en-IN")} (pump)`
+            : null;
+
+          // 1. Update diesel request
+          const updReq = {
+            ...m.app,
+            status: "reconciled",
+            confirmedAmount: newHsd,
+            cashAmount: newAdv,
+            reconciledAt: nowTs(),
+            amountNote: amountNote||m.app.amountNote||null,
+            confirmedReason: "pump_reconciled",
+          };
+          setDieselRequests(p=>p.map(r=>r.id===m.app.id?updReq:r));
+          DB.saveDieselRequest(updReq).catch(()=>{});
+
+          // 2. Update trip diesel estimate
+          const trip = m.trip || (trips||[]).find(t=>t.dieselIndentNo===String(m.app.indentNo)||t.id===m.app.tripId);
+          if(trip) {
+            const oldEst = trip.dieselEstimate||0;
+            const updTrip = {...trip, dieselEstimate: newTotal};
+            setTrips(p=>p.map(t=>t.id===trip.id?updTrip:t));
+            DB.saveTrip(updTrip).catch(()=>{});
+
+            // 3. If trip already settled and diesel increased → add to vehicle loan
+            if(trip.driverSettled && newTotal > oldEst) {
+              const deductAmt = newTotal - oldEst;
+              const vehicle = (vehicles||[]).find(v=>v.truckNo===trip.truckNo);
+              const loanTxn = {
+                id: uid(), type:"loan", date:today(),
+                amount: deductAmt, lrNo: trip.lrNo||"",
+                note: `Diesel recon adj: LR ${trip.lrNo||"--"} — Est Rs.${oldEst} -> Actual Rs.${newTotal}. Recover next trip.`
+              };
+              const updVeh = vehicle ? {
+                ...vehicle,
+                loan: (vehicle.loan||0) + deductAmt,
+                loanTxns: [...(vehicle.loanTxns||[]), loanTxn],
+              } : null;
+              if(updVeh) {
+                setVehicles(p=>p.map(v=>v.truckNo===trip.truckNo?updVeh:v));
+                DB.saveVehicle(updVeh).catch(()=>{});
+              }
+              // Add negative driver pay entry
+              const deduction = {
+                id: uid(), tripId:trip.id, truckNo:trip.truckNo, lrNo:trip.lrNo||"",
+                amount: -deductAmt, utr:`RECON-ADJ-${m.app.indentNo||""}`,
+                date: today(), notes:`Diesel recon: Rs.${oldEst}->Rs.${newTotal}`,
+                createdBy: user.username, createdAt: nowTs(),
+              };
+              setDriverPays(p=>[deduction,...(p||[])]);
+              await DB.saveDriverPay(deduction).catch(()=>{});
+              log("RECON LOAN ADJ",`${trip.truckNo} Rs.${deductAmt} added to loan — LR ${trip.lrNo}`);
+            }
+          }
+          log("RECON SAVE", `Indent #${m.app.indentNo} reconciled — HSD Rs.${newHsd} Adv Rs.${newAdv}${amountNote?" | "+amountNote:""}`);
+        };
+
+        // ── Save All Complete (Category 3) ──
+        const saveAllComplete = async () => {
+          if(!window.confirm(`Save ${complete.length} complete Category 3 entries?\nThis will update diesel requests to "reconciled" status, update trip diesel estimates, and handle loan adjustments for settled trips.`)) return;
+          for(const m of complete) await applyReconEntry(m);
+          // Mark as saved in reconMatches
+          setReconMatches(prev=>prev.map(m=>m.complete||m.status==="ok"
+            ? {...m, resolution:"saved", resolvedNote:"Reconciled & saved"}
+            : m));
+          saveSession(reconMatches);
+          alert(`Done! ${complete.length} diesel requests reconciled and saved.`);
+        };
+
+        // ── Save one resolved mismatch ──
+        const saveResolvedEntry = async (idx) => {
+          const m = (reconMatches||[])[idx];
+          if(!m||!m.app||!m.pump) return;
+          await applyReconEntry(m);
+          setReconMatches(prev=>{
+            const arr=[...prev];
+            arr[idx]={...arr[idx], resolution:"saved", resolvedNote:"Reconciled & saved"};
+            saveSession(arr);
+            return arr;
+          });
+        };
+
+
         const fmt = n => "Rs."+(n||0).toLocaleString("en-IN");
         const complete   = (reconMatches||[]).filter(m=>m.complete||m.status==="ok");
         const actionable = (reconMatches||[]).filter(m=>!m.complete&&m.status!=="ok");
@@ -13348,6 +13467,25 @@ This was already dispensed — only delete if it was recorded in error.`;
             <div style={{fontSize:14,fontWeight:700,color:C.text}}>Diesel Reconciliation</div>
             <div style={{fontSize:11,color:C.muted}}>Pump data is master. Scan statement, match with app requests, resolve mismatches.</div>
 
+            {/* Load previous session */}
+            {!reconMatches && !reconScanning && (()=>{
+              const saved=loadSession();
+              if(!saved) return null;
+              return (
+                <div style={{background:C.bg,borderRadius:8,padding:"8px 12px",fontSize:11,
+                  border:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <span style={{color:C.muted}}>Previous reconciliation session found</span>
+                  <div style={{display:"flex",gap:6}}>
+                    <button onClick={()=>setReconMatches(saved)}
+                      style={{background:C.accent,color:"#fff",border:"none",borderRadius:6,
+                        padding:"4px 10px",fontSize:11,fontWeight:700,cursor:"pointer"}}>Reload</button>
+                    <button onClick={()=>{clearSession();setReconMatches(null);}}
+                      style={{background:C.dim,color:C.muted,border:"none",borderRadius:6,
+                        padding:"4px 10px",fontSize:11,cursor:"pointer"}}>Clear</button>
+                  </div>
+                </div>
+              );
+            })()}
             {!reconMatches && (<>
               <div style={{background:C.bg,border:`2px dashed ${C.border}`,borderRadius:12,padding:20,textAlign:"center"}}>
                 <label style={{cursor:"pointer",color:C.accent,fontWeight:700,fontSize:13}}>
@@ -13395,6 +13533,13 @@ This was already dispensed — only delete if it was recorded in error.`;
                   <div key={idx} style={{background:C.card,border:`1.5px solid ${catCol}44`,borderRadius:12,padding:"12px 14px",opacity:isResolved?0.65:1}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
                       <span style={{fontSize:10,fontWeight:800,color:catCol,background:catCol+"18",padding:"2px 8px",borderRadius:10}}>{catLabel}</span>
+                      {isResolved && m.resolution!=="saved" && m.app && m.pump && (
+                        <button onClick={()=>saveResolvedEntry(idx)}
+                          style={{background:C.purple,color:"#fff",border:"none",borderRadius:6,
+                            padding:"3px 10px",fontSize:10,fontWeight:700,cursor:"pointer"}}>
+                          Save & Apply
+                        </button>
+                      )}
                       {isResolved && <span style={{fontSize:10,color:C.green,fontWeight:600}}>{m.resolvedNote}</span>}
                     </div>
                     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:8}}>
@@ -13572,6 +13717,13 @@ This was already dispensed — only delete if it was recorded in error.`;
                   <summary style={{fontSize:12,fontWeight:700,color:C.green,cursor:"pointer"}}>
                     {complete.length} Complete & Matched (Category 3)
                   </summary>
+                  {complete.some(m=>m.resolution!=="saved")&&(
+                    <button onClick={saveAllComplete}
+                      style={{margin:"8px 0",background:C.green,color:"#fff",border:"none",borderRadius:8,
+                        padding:"8px 16px",fontSize:12,fontWeight:700,cursor:"pointer",width:"100%"}}>
+                      Save & Apply All {complete.filter(m=>m.resolution!=="saved").length} Complete Records
+                    </button>
+                  )}
                   <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:4}}>
                     {complete.map((m,i)=>(
                       <div key={i} style={{fontSize:10,color:C.muted,display:"flex",justifyContent:"space-between",padding:"4px 0",borderBottom:`1px solid ${C.border}`}}>
