@@ -13391,7 +13391,7 @@ This was already dispensed — only delete if it was recorded in error.`;
                   :`CAT ${m.cat}: ${CAT_LABEL[m.cat]||""}`;
                 const isResolved=m.resolution!=="pending";
                 const lrMatches=(trips||[]).filter(t=>(t.lrNo||"").includes((cs.lrSearch||"").toUpperCase()));
-                return (
+                return (<>
                   <div key={idx} style={{background:C.card,border:`1.5px solid ${catCol}44`,borderRadius:12,padding:"12px 14px",opacity:isResolved?0.65:1}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
                       <span style={{fontSize:10,fontWeight:800,color:catCol,background:catCol+"18",padding:"2px 8px",borderRadius:10}}>{catLabel}</span>
@@ -13564,8 +13564,7 @@ This was already dispensed — only delete if it was recorded in error.`;
                         style={{fontSize:10,color:C.muted,background:"none",border:"none",cursor:"pointer",marginTop:6}}>Cancel</button>
                     </div>
                    )}
-
-                );
+                </>);
               });
               })()}
               {complete.length>0&&(
