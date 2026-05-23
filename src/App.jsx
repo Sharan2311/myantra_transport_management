@@ -11633,6 +11633,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
   const [reconData,     setReconData]     = useState(null); // [{pumpIndent, date, vehicle, hsd, advance}]
   const [reconMatches,  setReconMatches]  = useState(null); // matched results
   const [reconProgress, setReconProgress] = useState("");
+  const [reconCardState, setReconCardState] = useState({}); // per-card UI state
 
   const blankP = {name:"", contact:"", address:"", accountNo:"", ifsc:""};
   const [pf, setPf] = useState(blankP);
@@ -13370,22 +13371,19 @@ This was already dispensed — only delete if it was recorded in error.`;
               {actionable.length===0 && complete.length>0 && (
                 <div style={{textAlign:"center",padding:24,color:C.green,fontWeight:700,fontSize:14}}>All entries matched and complete!</div>
               )}
-              {actionable.map((m,xi)=>{
+              {(()=>{
+                // Per-card state helpers (avoids hooks in .map)
+                const getCS = i => reconCardState[i]||{showPin:false,showAttach:false,editAmts:false,lrSearch:"",editHsd:"",editAdv:"0",pinEntry:"",pinErr:false};
+                const setCS = (i,upd) => setReconCardState(p=>({...p,[i]:{...getCS(i),...upd}}));
+                return actionable.map((m,xi)=>{
                 const idx=(reconMatches||[]).indexOf(m);
+                const cs=getCS(idx);
                 const catCol=m.status==="not_in_app"?C.red:m.status==="not_in_pump"?C.muted:CAT_COLOR(m.cat);
                 const catLabel=m.status==="not_in_app"?"NOT IN APP"
                   :m.status==="not_in_pump"?"NOT IN PUMP"
                   :`CAT ${m.cat}: ${CAT_LABEL[m.cat]||""}`;
                 const isResolved=m.resolution!=="pending";
-                const [showAttach,setShowAttach]=React.useState(false);
-                const [lrSearch,setLrSearch]=React.useState("");
-                const [editAmts,setEditAmts]=React.useState(false);
-                const [editHsd,setEditHsd]=React.useState(String(m.app?.amount||""));
-                const [editAdv,setEditAdv]=React.useState(String(m.app?.cashAmount||"0"));
-                const [showPin,setShowPin]=React.useState(false);
-                const [pinEntry,setPinEntry]=React.useState("");
-                const [pinErr,setPinErr]=React.useState(false);
-                const lrMatches=(trips||[]).filter(t=>(t.lrNo||"").includes(lrSearch.toUpperCase()));
+                const lrMatches=(trips||[]).filter(t=>(t.lrNo||"").includes((cs.lrSearch||"").toUpperCase()));
                 return (
                   <div key={idx} style={{background:C.card,border:`1.5px solid ${catCol}44`,borderRadius:12,padding:"12px 14px",opacity:isResolved?0.65:1}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
@@ -13418,21 +13416,21 @@ This was already dispensed — only delete if it was recorded in error.`;
                       </div>
                     )}
                     {!isResolved&&(
-                      <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:showPin||showAttach||editAmts?8:0}}>
-                        {m.app&&(m.cat===1||m.cat===4)&&!showPin&&(
-                          <button onClick={()=>{setShowPin(true);setPinEntry("");setPinErr(false);}}
+                      <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:cs.showPin||cs.showAttach||cs.editAmts?8:0}}>
+                        {m.app&&(m.cat===1||m.cat===4)&&!cs.showPin&&(
+                          <button onClick={()=>setCS(idx,{showPin:true,pinEntry:"",pinErr:false})}
                             style={{fontSize:10,fontWeight:700,background:C.green+"22",color:C.green,border:`1px solid ${C.green}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
                             Confirm with PIN
                           </button>
                         )}
-                        {m.app&&(m.cat===1||m.cat===2)&&!showAttach&&(
-                          <button onClick={()=>setShowAttach(true)}
+                        {m.app&&(m.cat===1||m.cat===2)&&!cs.showAttach&&(
+                          <button onClick={()=>setCS(idx,{showAttach:true,lrSearch:""})}
                             style={{fontSize:10,fontWeight:700,background:C.blue+"22",color:C.blue,border:`1px solid ${C.blue}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
                             Attach to LR
                           </button>
                         )}
-                        {m.app&&(m.hsdDiff!==0||m.advDiff!==0)&&!editAmts&&(
-                          <button onClick={()=>setEditAmts(true)}
+                        {m.app&&(m.hsdDiff!==0||m.advDiff!==0)&&!cs.editAmts&&(
+                          <button onClick={()=>setCS(idx,{editAmts:true,editHsd:String(m.app?.amount||""),editAdv:String(m.app?.cashAmount||"0")})}
                             style={{fontSize:10,fontWeight:700,background:C.orange+"22",color:C.orange,border:`1px solid ${C.orange}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
                             Update Amounts
                           </button>
@@ -13451,29 +13449,29 @@ This was already dispensed — only delete if it was recorded in error.`;
                         )}
                       </div>
                     )}
-                    {showPin&&!isResolved&&(
+                    {cs.showPin&&!isResolved&&(
                       <div style={{background:C.bg,borderRadius:8,padding:"10px 12px",marginTop:4}}>
                         <div style={{fontSize:11,fontWeight:700,marginBottom:6}}>Enter pump PIN to confirm Indent #{m.app?.indentNo}</div>
                         <div style={{display:"flex",gap:6,marginBottom:6}}>
                           {[0,1,2,3].map(j=>(
-                            <div key={j} style={{width:32,height:40,background:C.card,borderRadius:6,border:`1px solid ${pinErr?C.red:C.border}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,fontWeight:700}}>
-                              {pinEntry[j]?"*":""}
+                            <div key={j} style={{width:32,height:40,background:C.card,borderRadius:6,border:`1px solid ${cs.pinErr?C.red:C.border}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,fontWeight:700}}>
+                              {(cs.pinEntry||"")[j]?"*":""}
                             </div>
                           ))}
                         </div>
-                        {pinErr&&<div style={{color:C.red,fontSize:10,marginBottom:4}}>Wrong PIN — try again</div>}
+                        {cs.pinErr&&<div style={{color:C.red,fontSize:10,marginBottom:4}}>Wrong PIN - try again</div>}
                         <div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:6}}>
                           {[1,2,3,4,5,6,7,8,9,"DEL",0,"OK"].map(k=>(
                             <button key={k} onClick={()=>{
-                              if(k==="DEL"){setPinEntry(p=>p.slice(0,-1));setPinErr(false);}
+                              if(k==="DEL"){setCS(idx,{pinEntry:(cs.pinEntry||"").slice(0,-1),pinErr:false});}
                               else if(k==="OK"){
-                                if(pinEntry===m.app?.pin){resolveEntry(idx,"confirm_pin",{amount:Number(m.pump?.hsd||m.app?.amount)});setShowPin(false);}
-                                else{setPinErr(true);setPinEntry("");}
-                              } else if(pinEntry.length<4){
-                                const np=pinEntry+String(k); setPinEntry(np); setPinErr(false);
+                                if(cs.pinEntry===m.app?.pin){resolveEntry(idx,"confirm_pin",{amount:Number(m.pump?.hsd||m.app?.amount)});setCS(idx,{showPin:false});}
+                                else{setCS(idx,{pinErr:true,pinEntry:""});}
+                              } else if((cs.pinEntry||"").length<4){
+                                const np=(cs.pinEntry||"")+String(k); setCS(idx,{pinEntry:np,pinErr:false});
                                 if(np.length===4){
-                                  if(np===m.app?.pin){resolveEntry(idx,"confirm_pin",{amount:Number(m.pump?.hsd||m.app?.amount)});setShowPin(false);}
-                                  else{setPinErr(true);setPinEntry("");}
+                                  if(np===m.app?.pin){resolveEntry(idx,"confirm_pin",{amount:Number(m.pump?.hsd||m.app?.amount)});setCS(idx,{showPin:false});}
+                                  else{setCS(idx,{pinErr:true,pinEntry:""});}
                                 }
                               }
                             }}
@@ -13482,51 +13480,52 @@ This was already dispensed — only delete if it was recorded in error.`;
                             </button>
                           ))}
                         </div>
-                        <button onClick={()=>setShowPin(false)} style={{fontSize:10,color:C.muted,background:"none",border:"none",cursor:"pointer"}}>Cancel</button>
+                        <button onClick={()=>setCS(idx,{showPin:false})} style={{fontSize:10,color:C.muted,background:"none",border:"none",cursor:"pointer"}}>Cancel</button>
                       </div>
                     )}
-                    {showAttach&&!isResolved&&(
+                    {cs.showAttach&&!isResolved&&(
                       <div style={{background:C.bg,borderRadius:8,padding:"10px 12px",marginTop:4}}>
                         <div style={{fontSize:11,fontWeight:700,marginBottom:6}}>Select LR to attach</div>
-                        <input value={lrSearch} onChange={e=>setLrSearch(e.target.value)} placeholder="Search LR / truck..."
+                        <input value={cs.lrSearch||""} onChange={e=>setCS(idx,{lrSearch:e.target.value})} placeholder="Search LR / truck..."
                           style={{width:"100%",background:C.card,border:`1px solid ${C.border}`,borderRadius:6,padding:"6px 8px",color:C.text,fontSize:12,marginBottom:6,boxSizing:"border-box"}}/>
                         <div style={{maxHeight:150,overflowY:"auto",display:"flex",flexDirection:"column",gap:4}}>
                           {lrMatches.slice(0,20).map(t=>(
-                            <button key={t.id} onClick={()=>{resolveEntry(idx,"attach_lr",{lrNo:t.lrNo});setShowAttach(false);}}
+                            <button key={t.id} onClick={()=>{resolveEntry(idx,"attach_lr",{lrNo:t.lrNo});setCS(idx,{showAttach:false});}}
                               style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:6,padding:"6px 10px",textAlign:"left",cursor:"pointer",fontSize:11}}>
                               <b>{t.lrNo}</b> / {t.truckNo} / {t.date}
                             </button>
                           ))}
                           {lrMatches.length===0&&<div style={{color:C.muted,fontSize:11}}>No matching trips found</div>}
                         </div>
-                        <button onClick={()=>setShowAttach(false)} style={{fontSize:10,color:C.muted,background:"none",border:"none",cursor:"pointer",marginTop:4}}>Cancel</button>
+                        <button onClick={()=>setCS(idx,{showAttach:false})} style={{fontSize:10,color:C.muted,background:"none",border:"none",cursor:"pointer",marginTop:4}}>Cancel</button>
                       </div>
                     )}
-                    {editAmts&&!isResolved&&(
+                    {cs.editAmts&&!isResolved&&(
                       <div style={{background:C.bg,borderRadius:8,padding:"10px 12px",marginTop:4}}>
                         <div style={{fontSize:11,fontWeight:700,marginBottom:6}}>Update amounts to match pump data</div>
                         <div style={{display:"flex",gap:8,marginBottom:8}}>
                           <div style={{flex:1}}>
                             <div style={{fontSize:9,color:C.muted,marginBottom:2}}>HSD Rs.</div>
-                            <input value={editHsd} onChange={e=>setEditHsd(e.target.value)} type="number"
+                            <input value={cs.editHsd||""} onChange={e=>setCS(idx,{editHsd:e.target.value})} type="number"
                               style={{width:"100%",background:C.card,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 8px",color:C.text,fontSize:12,boxSizing:"border-box"}}/>
                           </div>
                           <div style={{flex:1}}>
                             <div style={{fontSize:9,color:C.muted,marginBottom:2}}>Advance Rs.</div>
-                            <input value={editAdv} onChange={e=>setEditAdv(e.target.value)} type="number"
+                            <input value={cs.editAdv||"0"} onChange={e=>setCS(idx,{editAdv:e.target.value})} type="number"
                               style={{width:"100%",background:C.card,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 8px",color:C.text,fontSize:12,boxSizing:"border-box"}}/>
                           </div>
                         </div>
                         <div style={{display:"flex",gap:6}}>
-                          <button onClick={()=>{resolveEntry(idx,"update_amounts",{hsd:Number(editHsd),advance:Number(editAdv)});setEditAmts(false);}}
+                          <button onClick={()=>{resolveEntry(idx,"update_amounts",{hsd:Number(cs.editHsd),advance:Number(cs.editAdv)});setCS(idx,{editAmts:false});}}
                             style={{background:C.green,color:"#fff",border:"none",borderRadius:6,padding:"6px 14px",fontSize:11,fontWeight:700,cursor:"pointer"}}>Save</button>
-                          <button onClick={()=>setEditAmts(false)} style={{background:C.dim,color:C.text,border:"none",borderRadius:6,padding:"6px 14px",fontSize:11,cursor:"pointer"}}>Cancel</button>
+                          <button onClick={()=>setCS(idx,{editAmts:false})} style={{background:C.dim,color:C.text,border:"none",borderRadius:6,padding:"6px 14px",fontSize:11,cursor:"pointer"}}>Cancel</button>
                         </div>
                       </div>
                     )}
                   </div>
                 );
-              })}
+              });
+              })()}
               {complete.length>0&&(
                 <details style={{background:C.green+"08",border:`1px solid ${C.green}22`,borderRadius:10,padding:"10px 14px"}}>
                   <summary style={{fontSize:12,fontWeight:700,color:C.green,cursor:"pointer"}}>
