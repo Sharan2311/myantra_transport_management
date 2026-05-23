@@ -13536,7 +13536,8 @@ This was already dispensed — only delete if it was recorded in error.`;
                       </div>
                     )}
                   </div>
-                    {cs.showAttachReq&&!isResolved&&(<div style={{background:C.bg,borderRadius:8,padding:"10px 12px",marginTop:4}}>
+                    {!cs.showAttachReq||isResolved?null:(
+                    <div style={{background:C.bg,borderRadius:8,padding:"10px 12px",marginTop:4}}>
                       <div style={{fontSize:11,fontWeight:700,marginBottom:4}}>Attach to existing app request</div>
                       <div style={{fontSize:10,color:C.muted,marginBottom:6}}>Pump: {m.pump?.truckNo} / #{m.pump?.indentNo} / Rs.{m.pump?.hsd}</div>
                       <input value={cs.reqSearch||""} onChange={e=>setCS(idx,{reqSearch:e.target.value})}
@@ -13546,11 +13547,10 @@ This was already dispensed — only delete if it was recorded in error.`;
                       <div style={{maxHeight:180,overflowY:"auto",display:"flex",flexDirection:"column",gap:4}}>
                         {(dieselRequests||[]).filter(r=>
                           (r.status==="open"||r.status==="confirmed")&&
-                          ((r.truckNo||"").toUpperCase().includes((cs.reqSearch||"").toUpperCase())||
-                           String(r.indentNo||"").includes(cs.reqSearch||""))
+                          (!(cs.reqSearch||"")||((r.truckNo||"").toUpperCase().includes((cs.reqSearch||"").toUpperCase())||String(r.indentNo||"").includes(cs.reqSearch||"")))
                         ).slice(0,15).map(r=>(
                           <button key={r.id}
-                            onClick={()=>{resolveEntry(idx,"attach_to_request",{reqId:r.id});setCS(idx,{showAttachReq:false});}}
+                            onClick={()=>{ resolveEntry(idx,"attach_to_request",{reqId:r.id}); setCS(idx,{showAttachReq:false}); }}
                             style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:6,
                               padding:"7px 10px",textAlign:"left",cursor:"pointer",fontSize:11}}>
                             <div style={{fontWeight:700}}>{r.truckNo} / #{r.indentNo} / {r.date||"--"}</div>
@@ -13559,12 +13559,12 @@ This was already dispensed — only delete if it was recorded in error.`;
                             </div>
                           </button>
                         ))}
-                        {!(dieselRequests||[]).some(r=>(r.status==="open"||r.status==="confirmed")&&(r.truckNo||"").toUpperCase().includes((cs.reqSearch||"").toUpperCase()))&&
-                          <div style={{color:C.muted,fontSize:11,padding:4}}>No matching requests found</div>}
                       </div>
                       <button onClick={()=>setCS(idx,{showAttachReq:false})}
                         style={{fontSize:10,color:C.muted,background:"none",border:"none",cursor:"pointer",marginTop:6}}>Cancel</button>
-                    </div>)}
+                    </div>
+                   )}
+
                 );
               });
               })()}
