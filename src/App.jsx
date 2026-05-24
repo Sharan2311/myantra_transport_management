@@ -6965,22 +6965,31 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       if(_dieselDiff > 0) {
         const _loanVeh = vehicles.find(v=>v.truckNo===(editSheet.truckNo||"").toUpperCase().trim());
         const _loanNote = `Diesel overpayment - Indent #${_indentNo||"?"}, LR ${editSheet.lrNo||"--"}: Paid ₹${_actualPaid.toLocaleString("en-IN")}, should be ₹${_settledNet.toLocaleString("en-IN")} with diesel ₹${_liveDieselEst.toLocaleString("en-IN")}. Overpaid ₹${_dieselDiff.toLocaleString("en-IN")}. Recover next trip.`;
-        const _loanTxn = {id:uid(),type:"loan",date:today(),amount:_dieselDiff,lrNo:editSheet.lrNo||"",note:_loanNote};
-        const _updLoanVeh = _loanVeh ? {..._loanVeh, loan:(_loanVeh.loan||0)+_dieselDiff,
-          loanTxns:[...(_loanVeh.loanTxns||[]),_loanTxn]} : null;
+        // Stable ID per trip: prevents duplicate loan entries on re-save
+        const _loanStableId = `LOAN-DSL-${editSheet.id}`;
+        const _existingLoanTxn = (_loanVeh?.loanTxns||[]).find(t=>t.id===_loanStableId);
+        const _loanTxn = {id:_loanStableId, type:"given", date:today(),
+          amount:_dieselDiff, lrNo:editSheet.lrNo||"", note:_loanNote};
+        const _updLoanVeh = _loanVeh ? {
+          ..._loanVeh,
+          // Adjust loan balance: subtract old entry amount if replacing
+          loan: (_loanVeh.loan||0) + _dieselDiff - (_existingLoanTxn?.amount||0),
+          // Replace old entry (same stableId) or append new
+          loanTxns: [...(_loanVeh.loanTxns||[]).filter(t=>t.id!==_loanStableId), _loanTxn],
+        } : null;
         if(_updLoanVeh){
           setVehicles(p=>p.map(v=>v.truckNo===editSheet.truckNo?_updLoanVeh:v));
           DB.saveVehicle(_updLoanVeh).catch(()=>{});
         }
         const _deductPay = {
-          id:uid(), tripId:editSheet.id, truckNo:editSheet.truckNo,
+          id:`DEDUCT-DSL-${editSheet.id}`, tripId:editSheet.id, truckNo:editSheet.truckNo,
           lrNo:editSheet.lrNo||"", amount:-_dieselDiff,
           utr:`DIESEL-ADJ-${_indentNo||editSheet.id.slice(0,6)}`,
           date:today(),
           notes:`Diesel overpayment - Indent #${_indentNo}: ₹${_dieselDiff.toLocaleString("en-IN")} added to loan.`,
           createdBy:user.username, createdAt:nowTs(),
         };
-        setDriverPays(p=>[_deductPay,...(p||[])]);
+        setDriverPays(p=>[_deductPay,...(p||[]).filter(x=>x.id!==_deductPay.id)]);
         DB.saveDriverPay(_deductPay).catch(()=>{});
         log("DIESEL LOAN ADJ",`${editSheet.truckNo} ₹${_dieselDiff} to loan — LR ${editSheet.lrNo}, Indent #${_indentNo}`);
         window.alert(
