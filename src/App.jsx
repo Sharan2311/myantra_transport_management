@@ -6259,7 +6259,7 @@ function SealedInvoiceSheet({ trip, onMerge, onClose, embedded=false }) {
 }
 
 // ─── TRIPS ────────────────────────────────────────────────────────────────────
-function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles, indents, setIndents, settings, tripType, user, log, driverPays, employees, cashTransfers, setCashTransfers, allTripsLoaded, loadingAllTrips, loadAllTrips, dieselRequests=[], setDieselRequests}) {
+function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles, indents, setIndents, settings, tripType, user, log, driverPays, setDriverPays, employees, cashTransfers, setCashTransfers, allTripsLoaded, loadingAllTrips, loadAllTrips, dieselRequests=[], setDieselRequests}) {
   const isIn = tripType === "inbound";
   const ac   = isIn ? C.teal : C.accent;
 
@@ -6964,7 +6964,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       const _indentNo = (editSheet.dieselIndentNo||"").trim();
       if(_dieselDiff > 0) {
         const _loanVeh = vehicles.find(v=>v.truckNo===(editSheet.truckNo||"").toUpperCase().trim());
-        const _loanNote = `Excess diesel - Indent #${_indentNo||"?"}, LR ${editSheet.lrNo||"--"}: ₹${(+prevTrip.dieselEstimate||0).toLocaleString("en-IN")} → ₹${_liveDieselEst.toLocaleString("en-IN")} (₹${_dieselDiff.toLocaleString("en-IN")} overpaid). Recover next trip.`;
+        const _loanNote = `Diesel overpayment - Indent #${_indentNo||"?"}, LR ${editSheet.lrNo||"--"}: Paid ₹${_actualPaid.toLocaleString("en-IN")}, should be ₹${_settledNet.toLocaleString("en-IN")} with diesel ₹${_liveDieselEst.toLocaleString("en-IN")}. Overpaid ₹${_dieselDiff.toLocaleString("en-IN")}. Recover next trip.`;
         const _loanTxn = {id:uid(),type:"loan",date:today(),amount:_dieselDiff,lrNo:editSheet.lrNo||"",note:_loanNote};
         const _updLoanVeh = _loanVeh ? {..._loanVeh, loan:(_loanVeh.loan||0)+_dieselDiff,
           loanTxns:[...(_loanVeh.loanTxns||[]),_loanTxn]} : null;
