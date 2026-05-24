@@ -11511,7 +11511,9 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
           )}
 
           {historyRequests.map(req=>{
-            const effAmt = req.confirmedAmount??req.amount;
+            const effAmt = req.confirmedAmount!=null
+              ? req.confirmedAmount+(req.cashAmount||0)
+              : (req.dieselAmount!=null ? req.dieselAmount+(req.cashAmount||0) : req.amount);
             const changed = req.confirmedAmount!=null && req.confirmedAmount!==req.amount;
             const statusColor = req.status==="attached"?C.green:req.status==="confirmed"?C.teal:C.orange;
             const p = pumps.find(x=>x.id===req.pumpId);
@@ -12903,7 +12905,9 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
             }).sort((a,b)=>b.indentNo-a.indentNo).map(req=>{
               const pump    = pumps.find(p=>p.id===req.pumpId);
               const statusColor = req.status==="attached"?(req.confirmedAmount!=null?C.green:"#d97706"):req.status==="confirmed"?C.teal:C.orange;
-              const effAmt  = req.confirmedAmount??req.amount;
+              const effAmt  = req.confirmedAmount!=null
+                ? req.confirmedAmount+(req.cashAmount||0)
+                : (req.dieselAmount!=null ? req.dieselAmount+(req.cashAmount||0) : req.amount);
               const changed = req.confirmedAmount!=null && req.confirmedAmount!==req.amount;
               const isEditing = editReqId===req.id;
               const canEditReq = (user.role==="owner"||user.role==="fleet_manager"||user.role==="manager") && req.status==="open";
@@ -13348,18 +13352,28 @@ This was already dispensed — only delete if it was recorded in error.`;
               log("RECON ATTACH",`#${e.app.indentNo} -> LR ${extra.lrNo}`);
               m[idx]={...e,app:upd,trip,cat:getReqCat(upd),resolution:"attached",resolvedNote:`LR ${extra.lrNo}`};
             } else if(action==="update_amounts"){
-              const upd={...e.app,amount:extra.hsd||e.app.amount,cashAmount:extra.advance||0};
+              const newH=extra.hsd||0; const newA=extra.advance||0;
+              const upd={...e.app,amount:newH+newA,dieselAmount:newH,confirmedAmount:newH,cashAmount:newA};
               setDieselRequests(p=>p.map(r=>r.id===e.app.id?upd:r));
               DB.saveDieselRequest(upd).catch(()=>{});
               log("RECON UPDATE",`#${e.app.indentNo} amounts updated`);
-              m[idx]={...e,app:upd,hsdDiff:0,advDiff:0,resolution:"updated",resolvedNote:`HSD Rs.${extra.hsd||e.app.amount}`};
+              m[idx]={...e,app:upd,hsdDiff:0,advDiff:0,resolution:"updated",resolvedNote:`Rs.${newH+newA} (HSD ${newH}+Adv ${newA})`};
             } else if(action==="adjust_trip"){
               const trip=e.trip; if(!trip||trip.driverSettled) return prev;
-              const newD=(e.pump?.hsd||0)+(e.pump?.advance||0);
-              const upd={...trip,dieselEstimate:newD};
-              setTrips(p=>p.map(t=>t.id===trip.id?upd:t)); DB.saveTrip(upd).catch(()=>{});
+              const newHSD=(e.pump?.hsd||0); const newAdv=(e.pump?.advance||0);
+              const newD=newHSD+newAdv;
+              // Update diesel REQUEST (source of truth)
+              if(e.app){
+                const updReq={...e.app, amount:newD, dieselAmount:newHSD, confirmedAmount:newHSD, cashAmount:newAdv,
+                  confirmedReason:"pump_reconciled", reconciledAt:nowTs()};
+                setDieselRequests(p=>p.map(r=>r.id===e.app.id?updReq:r));
+                DB.saveDieselRequest(updReq).catch(()=>{});
+              }
+              // Sync trip dieselEstimate so calculations stay correct
+              const updTrip={...trip, dieselEstimate:newD};
+              setTrips(p=>p.map(t=>t.id===trip.id?updTrip:t)); DB.saveTrip(updTrip).catch(()=>{});
               log("RECON ADJUST",`LR ${trip.lrNo} diesel Rs.${newD}`);
-              m[idx]={...e,trip:upd,resolution:"adjusted",resolvedNote:`Trip diesel Rs.${newD}`};
+              m[idx]={...e,trip:updTrip,resolution:"adjusted",resolvedNote:`Diesel Rs.${newD}`};
             } else if(action==="attach_to_request"){
               // Attach a pump-only row to an existing app request
               const appReq=(dieselRequests||[]).find(r=>r.id===extra.reqId); if(!appReq) return prev;
@@ -13410,6 +13424,8 @@ This was already dispensed — only delete if it was recorded in error.`;
           const updReq = {
             ...m.app,
             status: "reconciled",
+            amount: newTotal,       // update to pump total
+            dieselAmount: newHsd,   // diesel-only component
             confirmedAmount: newHsd,
             cashAmount: newAdv,
             reconciledAt: nowTs(),
@@ -13818,10 +13834,11 @@ This was already dispensed — only delete if it was recorded in error.`;
                         style={{width:"100%",background:C.card,border:`1px solid ${C.border}`,borderRadius:6,
                           padding:"6px 8px",color:C.text,fontSize:12,marginBottom:6,boxSizing:"border-box"}}/>
                       <div style={{maxHeight:180,overflowY:"auto",display:"flex",flexDirection:"column",gap:4}}>
-                        {(dieselRequests||[]).filter(r=>
-                          (r.status==="open"||r.status==="confirmed")&&
-                          (!(cs.reqSearch||"")||((r.truckNo||"").toUpperCase().includes((cs.reqSearch||"").toUpperCase())||String(r.indentNo||"").includes(cs.reqSearch||"")))
-                        ).slice(0,15).map(r=>(
+                        {(dieselRequests||[]).filter(r=>{
+                          const q=(cs.reqSearch||"").toUpperCase();
+                          if(!q) return r.status!=="reconciled"; // default: skip reconciled
+                          return (r.truckNo||"").toUpperCase().includes(q)||String(r.indentNo||"").includes(q);
+                        }).slice(0,15).map(r=>(
                           <button key={r.id}
                             onClick={()=>{ resolveEntry(idx,"attach_to_request",{reqId:r.id}); setCS(idx,{showAttachReq:false}); }}
                             style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:6,
