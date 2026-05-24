@@ -6949,6 +6949,38 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       setCashTransfers(prev=>(prev||[]).filter(x=>x.id!=="XD-"+editSheet.id));
       DB.deleteCashTransfer("XD-"+editSheet.id).catch(()=>{});
     }}
+    // Diesel overpayment on settled trip => add to vehicle loan
+    if(prevTrip?.driverSettled && _liveDieselEst !== (+prevTrip.dieselEstimate||0)) {
+      const _dieselDiff = _liveDieselEst - (+prevTrip.dieselEstimate||0);
+      const _indentNo = (editSheet.dieselIndentNo||"").trim();
+      if(_dieselDiff > 0) {
+        const _loanVeh = vehicles.find(v=>v.truckNo===(editSheet.truckNo||"").toUpperCase().trim());
+        const _loanNote = `Excess diesel - Indent #${_indentNo||"?"}, LR ${editSheet.lrNo||"--"}: ₹${(+prevTrip.dieselEstimate||0).toLocaleString("en-IN")} → ₹${_liveDieselEst.toLocaleString("en-IN")} (₹${_dieselDiff.toLocaleString("en-IN")} overpaid). Recover next trip.`;
+        const _loanTxn = {id:uid(),type:"loan",date:today(),amount:_dieselDiff,lrNo:editSheet.lrNo||"",note:_loanNote};
+        const _updLoanVeh = _loanVeh ? {..._loanVeh, loan:(_loanVeh.loan||0)+_dieselDiff,
+          loanTxns:[...(_loanVeh.loanTxns||[]),_loanTxn]} : null;
+        if(_updLoanVeh){
+          setVehicles(p=>p.map(v=>v.truckNo===editSheet.truckNo?_updLoanVeh:v));
+          DB.saveVehicle(_updLoanVeh).catch(()=>{});
+        }
+        const _deductPay = {
+          id:uid(), tripId:editSheet.id, truckNo:editSheet.truckNo,
+          lrNo:editSheet.lrNo||"", amount:-_dieselDiff,
+          utr:`DIESEL-ADJ-${_indentNo||editSheet.id.slice(0,6)}`,
+          date:today(),
+          notes:`Diesel overpayment - Indent #${_indentNo}: ₹${_dieselDiff.toLocaleString("en-IN")} added to loan.`,
+          createdBy:user.username, createdAt:nowTs(),
+        };
+        setDriverPays(p=>[_deductPay,...(p||[])]);
+        DB.saveDriverPay(_deductPay).catch(()=>{});
+        log("DIESEL LOAN ADJ",`${editSheet.truckNo} ₹${_dieselDiff} to loan — LR ${editSheet.lrNo}, Indent #${_indentNo}`);
+        window.alert(
+          `⚠ LR ${editSheet.lrNo||"--"} already settled.\n`
+          +`Diesel: ₹${(+prevTrip.dieselEstimate||0).toLocaleString("en-IN")} → ₹${_liveDieselEst.toLocaleString("en-IN")}\n`
+          +`₹${_dieselDiff.toLocaleString("en-IN")} added to ${(editSheet.truckNo||"vehicle").toUpperCase()} loan.\n`
+          +`Indent: #${_indentNo||"?"}. Will auto-recover next trip.`);
+      }
+    }
     log("EDIT TRIP", `LR:${editSheet.lrNo} ${editSheet.truckNo}`);
     setEditSheet(null);
   };
