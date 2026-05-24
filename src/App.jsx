@@ -11634,6 +11634,15 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
   const [reconMatches,  setReconMatches]  = useState(null); // matched results
   const [reconProgress, setReconProgress] = useState("");
   const [reconCardState, setReconCardState] = useState({}); // per-card UI state
+  const [reconSaved, setReconSaved]         = useState([]); // persisted save-for-later items
+  const [reconView,  setReconView]          = useState("new"); // "new" | "saved"
+  const [reconSavedCS,setReconSavedCS]      = useState({}); // per-saved-card UI state
+
+  // Load persisted save-for-later recon items from Supabase
+  useEffect(()=>{
+    supabase.from("diesel_recon_saved").select("*").order("created_at",{ascending:false})
+      .then(({data})=>{ if(data) setReconSaved(data); });
+  },[]);
 
   const blankP = {name:"", contact:"", address:"", accountNo:"", ifsc:""};
   const [pf, setPf] = useState(blankP);
@@ -13477,6 +13486,72 @@ This was already dispensed — only delete if it was recorded in error.`;
         };
 
 
+        // Save for Later: persist to Supabase, remove from current scan
+        const saveForLater = async (idx) => {
+          const m = (reconMatches||[])[idx];
+          if(!m) return;
+          const item = {
+            pump_data: m.pump, app_data: m.app, trip_data: m.trip,
+            cat: m.cat, hsd_diff: m.hsdDiff, adv_diff: m.advDiff,
+            pump_total: m.pumpTotal||0, app_total: m.appTotal||0, status: m.status,
+          };
+          const {data, error} = await supabase.from("diesel_recon_saved").insert(item).select().single();
+          if(error){ alert("Save failed: "+error.message); return; }
+          setReconSaved(prev=>[data,...prev]);
+          setReconMatches(prev=>prev.filter((_,i)=>i!==idx));
+          setReconCardState(prev=>{ const n={...prev}; delete n[idx]; return n; });
+          saveSession((reconMatches||[]).filter((_,i)=>i!==idx));
+        };
+
+        // Saved tab card state helpers
+        const getSCS = i => reconSavedCS[i]||{showPin:false,showAttach:false,editAmts:false,lrSearch:"",editHsd:"",editAdv:"0",pinEntry:"",pinErr:false,showAttachReq:false,reqSearch:""};
+        const setSCS = (i,upd) => setReconSavedCS(p=>({...p,[i]:{...getSCS(i),...upd}}));
+
+        // Resolve from Saved tab: apply action + delete from Supabase
+        const resolveFromSaved = async (savedItem, si, action, extra={}) => {
+          const a = savedItem.app_data;
+          const p = savedItem.pump_data;
+          const trip = savedItem.trip_data;
+          if(action==="apply_all") {
+            const m = {app:a, pump:p, trip, cat:savedItem.cat,
+              hsdDiff:savedItem.hsd_diff, advDiff:savedItem.adv_diff,
+              pumpTotal:savedItem.pump_total, appTotal:savedItem.app_total, complete:true};
+            await applyReconEntry(m);
+          } else if(action==="confirm_pin") {
+            const amt=extra.amount||Number(a?.confirmedAmount??a?.amount??0);
+            const upd={...a,status:"confirmed",confirmed:true,confirmedAmount:amt,confirmedAt:nowTs(),pin:"****"};
+            setDieselRequests(pp=>pp.map(r=>r.id===a.id?upd:r));
+            DB.saveDieselRequest(upd).catch(()=>{});
+            log("PUMP CONFIRM",`Saved recon #${a?.indentNo} confirmed Rs.${amt}`);
+          } else if(action==="attach_lr") {
+            const t=(trips||[]).find(t=>t.lrNo===extra.lrNo); if(!t) return;
+            const upd={...a,lrNo:extra.lrNo,tripId:t.id,status:"attached"};
+            setDieselRequests(pp=>pp.map(r=>r.id===a.id?upd:r));
+            DB.saveDieselRequest(upd).catch(()=>{});
+            const updTrip={...t,dieselIndentNo:String(a?.indentNo)};
+            setTrips(pp=>pp.map(tt=>tt.id===t.id?updTrip:tt));
+            DB.saveTrip(updTrip).catch(()=>{});
+            log("RECON ATTACH",`Saved #${a?.indentNo} -> LR ${extra.lrNo}`);
+          } else if(action==="update_amounts") {
+            const upd={...a,amount:extra.hsd||a?.amount,cashAmount:extra.advance||0};
+            setDieselRequests(pp=>pp.map(r=>r.id===a.id?upd:r));
+            DB.saveDieselRequest(upd).catch(()=>{});
+            log("RECON UPDATE",`Saved #${a?.indentNo} amounts updated`);
+          } else if(action==="adjust_trip") {
+            if(!trip||trip.driverSettled) return;
+            const newD=(p?.hsd||0)+(p?.advance||0);
+            const upd={...trip,dieselEstimate:newD};
+            setTrips(pp=>pp.map(tt=>tt.id===trip.id?upd:tt));
+            DB.saveTrip(upd).catch(()=>{});
+            log("RECON ADJUST",`Saved LR ${trip.lrNo} diesel Rs.${newD}`);
+          } else if(action==="write_off") {
+            log("RECON WRITEOFF",`Saved: written off`);
+          }
+          // Delete from Supabase + remove from local state
+          await supabase.from("diesel_recon_saved").delete().eq("id",savedItem.id);
+          setReconSaved(prev=>prev.filter(s=>s.id!==savedItem.id));
+        };
+
         const fmt = n => "Rs."+(n||0).toLocaleString("en-IN");
         const complete   = (reconMatches||[]).filter(m=>m.complete||m.status==="ok");
         const alreadyReconList = (reconMatches||[]).filter(m=>m.status==="already_reconciled");
@@ -13494,9 +13569,19 @@ This was already dispensed — only delete if it was recorded in error.`;
         return (
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
             <div style={{fontSize:14,fontWeight:700,color:C.text}}>Diesel Reconciliation</div>
-            <div style={{fontSize:11,color:C.muted}}>Pump data is master. Scan statement, match with app requests, resolve mismatches.</div>
+            {/* Tab switcher */}
+            <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+              {[{v:"new",l:"New Scan"},{v:"saved",l:`Saved for Later${reconSaved.length>0?" ("+reconSaved.length+")":""}`}].map(t=>(
+                <button key={t.v} onClick={()=>setReconView(t.v)}
+                  style={{fontSize:11,fontWeight:700,padding:"5px 12px",borderRadius:8,border:"none",cursor:"pointer",
+                    background:reconView===t.v?C.accent:"transparent",color:reconView===t.v?"#fff":C.muted}}>
+                  {t.l}
+                </button>
+              ))}
+            </div>
+            {reconView==="new"&&<div style={{fontSize:11,color:C.muted}}>Pump data is master. Scan statement, match with app requests, resolve mismatches.</div>}
 
-            {/* Load previous session */}
+            {reconView==="new"&&/* Load previous session */(<>
             {!reconMatches && !reconScanning && (()=>{
               const saved=loadSession();
               if(!saved) return null;
@@ -13644,6 +13729,10 @@ This was already dispensed — only delete if it was recorded in error.`;
                             Attach to Existing Request
                           </button>
                         )}
+                        <button onClick={()=>saveForLater(idx)}
+                          style={{fontSize:10,fontWeight:700,background:"#78716c22",color:"#78716c",border:"1px solid #78716c44",borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                          Save for Later
+                        </button>
                       </div>
                     )}
                     {cs.showPin&&!isResolved&&(
@@ -13795,6 +13884,175 @@ This was already dispensed — only delete if it was recorded in error.`;
                 </details>
               )}
             </>)}
+          </>)}
+</>)}
+
+            {/* ── SAVED FOR LATER TAB ─────────────────────────────────────── */}
+            {reconView==="saved"&&(<>
+              {reconSaved.length===0?(
+                <div style={{textAlign:"center",padding:32,color:C.muted,fontSize:13}}>
+                  No items saved for later.
+                </div>
+              ):(
+                <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                  <div style={{fontSize:11,color:C.muted}}>
+                    {reconSaved.length} item{reconSaved.length!==1?"s":""} saved. Take action below — each item is deleted from this list once resolved.
+                  </div>
+                  {reconSaved.map((sv,si)=>{
+                    const scs=getSCS(si);
+                    const m={pump:sv.pump_data,app:sv.app_data,trip:sv.trip_data,
+                      cat:sv.cat,hsdDiff:sv.hsd_diff,advDiff:sv.adv_diff,
+                      pumpTotal:sv.pump_total,appTotal:sv.app_total,status:sv.status};
+                    const catCol=(m.cat===1?C.red:m.cat===2?C.orange:m.cat===3?C.blue:m.cat===4?C.purple:C.muted);
+                    const catLabel=m.status==="not_in_app"?"NOT IN APP":`CAT ${m.cat}: ${CAT_LABEL[m.cat]||""}`;
+                    const lrMatches=(trips||[]).filter(t=>(t.lrNo||"").includes((scs.lrSearch||"").toUpperCase()));
+                    return (
+                      <div key={sv.id} style={{background:C.card,border:`1.5px solid ${catCol}44`,borderRadius:12,padding:"12px 14px"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                          <span style={{fontSize:10,fontWeight:800,color:catCol,background:catCol+"18",padding:"2px 8px",borderRadius:10}}>{catLabel}</span>
+                          <span style={{fontSize:9,color:C.muted}}>{sv.created_at?new Date(sv.created_at).toLocaleDateString("en-IN"):""}</span>
+                        </div>
+                        {/* Pump vs App */}
+                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:8}}>
+                          <div style={{background:C.bg,borderRadius:8,padding:"8px 10px"}}>
+                            <div style={{fontSize:9,fontWeight:800,color:C.muted,marginBottom:3}}>PUMP (MASTER)</div>
+                            <div style={{fontSize:12,fontWeight:700}}>{m.pump?.truckNo||"--"}</div>
+                            <div style={{fontSize:10,color:C.muted}}>{m.pump?.date||"--"} / #{m.pump?.indentNo||"--"}</div>
+                            <div style={{fontSize:12,marginTop:3}}>HSD: <b>{fmt(m.pump?.hsd||0)}</b></div>
+                            <div style={{fontSize:12}}>Adv: <b>{fmt(m.pump?.advance||0)}</b></div>
+                            <div style={{fontSize:11,fontWeight:700,marginTop:3,borderTop:`1px solid ${C.border}`,paddingTop:3}}>Total: <b style={{color:C.green}}>{fmt(m.pumpTotal||0)}</b></div>
+                          </div>
+                          <div style={{background:C.bg,borderRadius:8,padding:"8px 10px"}}>
+                            <div style={{fontSize:9,fontWeight:800,color:C.muted,marginBottom:3}}>APP REQUEST</div>
+                            {m.app?(<>
+                              <div style={{fontSize:12,fontWeight:700}}>{m.app.truckNo||"--"}</div>
+                              <div style={{fontSize:10,color:C.muted}}>{m.app.date||"--"} / #{m.app.indentNo||"--"}</div>
+                              <div style={{fontSize:12,marginTop:3}}>Diesel: <b>{fmt(m.app.dieselAmount??m.app.amount??0)}</b></div>
+                              <div style={{fontSize:12}}>Cash: <b>{fmt(m.app.cashAmount??0)}</b></div>
+                              <div style={{fontSize:11,fontWeight:700,marginTop:3,borderTop:`1px solid ${C.border}`,paddingTop:3}}>Total: <b style={{color:m.appTotal!==m.pumpTotal?C.red:C.green}}>{fmt(m.appTotal||0)}</b></div>
+                              {m.trip&&<div style={{fontSize:10,color:C.accent,marginTop:2}}>LR: {m.trip.lrNo}</div>}
+                            </>):<div style={{fontSize:11,color:C.muted,paddingTop:8}}>No app record</div>}
+                          </div>
+                        </div>
+                        {(m.hsdDiff!==0||m.advDiff!==0)&&m.app&&(
+                          <div style={{fontSize:11,fontWeight:700,color:C.red,padding:"4px 8px",background:C.red+"11",borderRadius:6,marginBottom:8}}>
+                            Diff: HSD {m.hsdDiff>0?"+":""}{fmt(m.hsdDiff)}{m.advDiff!==0&&` / Adv ${m.advDiff>0?"+":""}${fmt(m.advDiff)}`} {(m.hsdDiff+m.advDiff)>0?"(pump higher)":"(app higher)"}
+                          </div>
+                        )}
+                        {/* ACTION BUTTONS */}
+                        <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                          {m.app&&(m.cat===1||m.cat===4)&&!scs.showPin&&(
+                            <button onClick={()=>setSCS(si,{showPin:true,pinEntry:"",pinErr:false})}
+                              style={{fontSize:10,fontWeight:700,background:C.green+"22",color:C.green,border:`1px solid ${C.green}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                              Confirm with PIN
+                            </button>
+                          )}
+                          {m.app&&(m.cat===1||m.cat===2)&&!scs.showAttach&&(
+                            <button onClick={()=>setSCS(si,{showAttach:true,lrSearch:""})}
+                              style={{fontSize:10,fontWeight:700,background:C.blue+"22",color:C.blue,border:`1px solid ${C.blue}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                              Attach to LR
+                            </button>
+                          )}
+                          {m.app&&(m.hsdDiff!==0||m.advDiff!==0)&&!scs.editAmts&&(
+                            <button onClick={()=>setSCS(si,{editAmts:true,editHsd:String(m.app?.amount||""),editAdv:String(m.app?.cashAmount||"0")})}
+                              style={{fontSize:10,fontWeight:700,background:C.orange+"22",color:C.orange,border:`1px solid ${C.orange}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                              Update Amounts
+                            </button>
+                          )}
+                          {m.app&&m.pumpTotal===m.appTotal&&(
+                            <button onClick={()=>resolveFromSaved(sv,si,"apply_all")}
+                              style={{fontSize:10,fontWeight:700,background:C.green+"22",color:C.green,border:`1px solid ${C.green}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                              Save & Apply
+                            </button>
+                          )}
+                          {m.trip&&!m.trip.driverSettled&&(m.hsdDiff!==0||m.advDiff!==0)&&(
+                            <button onClick={()=>resolveFromSaved(sv,si,"adjust_trip")}
+                              style={{fontSize:10,fontWeight:700,background:C.blue+"22",color:C.blue,border:`1px solid ${C.blue}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                              Adjust Trip Diesel
+                            </button>
+                          )}
+                          <button onClick={()=>resolveFromSaved(sv,si,"write_off")}
+                            style={{fontSize:10,fontWeight:700,background:C.muted+"22",color:C.muted,border:`1px solid ${C.muted}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                            Write Off
+                          </button>
+                        </div>
+                        {/* PIN PANEL */}
+                        {scs.showPin&&(
+                          <div style={{background:C.bg,borderRadius:8,padding:"10px 12px",marginTop:4}}>
+                            <div style={{fontSize:11,fontWeight:700,marginBottom:6}}>Enter pump PIN — Indent #{m.app?.indentNo}</div>
+                            <div style={{display:"flex",gap:6,marginBottom:6}}>
+                              {[0,1,2,3].map(j=>(<div key={j} style={{width:32,height:40,background:C.card,borderRadius:6,border:`1px solid ${scs.pinErr?C.red:C.border}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,fontWeight:700}}>{(scs.pinEntry||"")[j]?"*":""}</div>))}
+                            </div>
+                            {scs.pinErr&&<div style={{color:C.red,fontSize:10,marginBottom:4}}>Wrong PIN</div>}
+                            <div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:6}}>
+                              {[1,2,3,4,5,6,7,8,9,"DEL",0,"OK"].map(k=>(
+                                <button key={k} onClick={()=>{
+                                  if(k==="DEL"){setSCS(si,{pinEntry:(scs.pinEntry||"").slice(0,-1),pinErr:false});}
+                                  else if(k==="OK"){
+                                    if(scs.pinEntry===m.app?.pin){resolveFromSaved(sv,si,"confirm_pin",{amount:Number(m.pump?.hsd||m.app?.amount)});setSCS(si,{showPin:false});}
+                                    else{setSCS(si,{pinErr:true,pinEntry:""});}
+                                  } else if((scs.pinEntry||"").length<4){
+                                    const np=(scs.pinEntry||"")+String(k); setSCS(si,{pinEntry:np,pinErr:false});
+                                    if(np.length===4){
+                                      if(np===m.app?.pin){resolveFromSaved(sv,si,"confirm_pin",{amount:Number(m.pump?.hsd||m.app?.amount)});setSCS(si,{showPin:false});}
+                                      else{setSCS(si,{pinErr:true,pinEntry:""});}
+                                    }
+                                  }
+                                }}
+                                style={{width:36,height:36,borderRadius:6,border:`1px solid ${C.border}`,background:k==="OK"?C.green:k==="DEL"?C.red+"22":C.card,color:k==="OK"?"#fff":k==="DEL"?C.red:C.text,fontWeight:700,fontSize:k==="DEL"||k==="OK"?10:14,cursor:"pointer"}}>{k}</button>
+                              ))}
+                            </div>
+                            <button onClick={()=>setSCS(si,{showPin:false})} style={{fontSize:10,color:C.muted,background:"none",border:"none",cursor:"pointer"}}>Cancel</button>
+                          </div>
+                        )}
+                        {/* ATTACH TO LR PANEL */}
+                        {scs.showAttach&&(
+                          <div style={{background:C.bg,borderRadius:8,padding:"10px 12px",marginTop:4}}>
+                            <div style={{fontSize:11,fontWeight:700,marginBottom:6}}>Select LR to attach</div>
+                            <input value={scs.lrSearch||""} onChange={e=>setSCS(si,{lrSearch:e.target.value})} placeholder="Search LR / truck..."
+                              style={{width:"100%",background:C.card,border:`1px solid ${C.border}`,borderRadius:6,padding:"6px 8px",color:C.text,fontSize:12,marginBottom:6,boxSizing:"border-box"}}/>
+                            <div style={{maxHeight:150,overflowY:"auto",display:"flex",flexDirection:"column",gap:4}}>
+                              {lrMatches.slice(0,20).map(t=>(
+                                <button key={t.id} onClick={()=>{resolveFromSaved(sv,si,"attach_lr",{lrNo:t.lrNo});setSCS(si,{showAttach:false});}}
+                                  style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:6,padding:"6px 10px",textAlign:"left",cursor:"pointer",fontSize:11}}>
+                                  <b>{t.lrNo}</b> / {t.truckNo} / {t.date}
+                                </button>
+                              ))}
+                              {lrMatches.length===0&&<div style={{color:C.muted,fontSize:11}}>No matching trips</div>}
+                            </div>
+                            <button onClick={()=>setSCS(si,{showAttach:false})} style={{fontSize:10,color:C.muted,background:"none",border:"none",cursor:"pointer",marginTop:4}}>Cancel</button>
+                          </div>
+                        )}
+                        {/* EDIT AMOUNTS PANEL */}
+                        {scs.editAmts&&(
+                          <div style={{background:C.bg,borderRadius:8,padding:"10px 12px",marginTop:4}}>
+                            <div style={{fontSize:11,fontWeight:700,marginBottom:6}}>Update amounts to match pump</div>
+                            <div style={{display:"flex",gap:8,marginBottom:8}}>
+                              <div style={{flex:1}}>
+                                <div style={{fontSize:9,color:C.muted,marginBottom:2}}>HSD Rs.</div>
+                                <input value={scs.editHsd||""} onChange={e=>setSCS(si,{editHsd:e.target.value})} type="number"
+                                  style={{width:"100%",background:C.card,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 8px",color:C.text,fontSize:12,boxSizing:"border-box"}}/>
+                              </div>
+                              <div style={{flex:1}}>
+                                <div style={{fontSize:9,color:C.muted,marginBottom:2}}>Advance Rs.</div>
+                                <input value={scs.editAdv||"0"} onChange={e=>setSCS(si,{editAdv:e.target.value})} type="number"
+                                  style={{width:"100%",background:C.card,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 8px",color:C.text,fontSize:12,boxSizing:"border-box"}}/>
+                              </div>
+                            </div>
+                            <div style={{display:"flex",gap:6}}>
+                              <button onClick={()=>{resolveFromSaved(sv,si,"update_amounts",{hsd:Number(scs.editHsd),advance:Number(scs.editAdv)});setSCS(si,{editAmts:false});}}
+                                style={{background:C.green,color:"#fff",border:"none",borderRadius:6,padding:"6px 14px",fontSize:11,fontWeight:700,cursor:"pointer"}}>Save</button>
+                              <button onClick={()=>setSCS(si,{editAmts:false})} style={{background:C.dim,color:C.text,border:"none",borderRadius:6,padding:"6px 14px",fontSize:11,cursor:"pointer"}}>Cancel</button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>)}
+
           </div>
         );
       })()}
