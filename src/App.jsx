@@ -7603,16 +7603,34 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                     if(!pays.length) return null;
                     return (
                       <div style={{padding:"6px 12px 8px",borderTop:`1px solid ${C.border}22`,display:"flex",flexDirection:"column",gap:3}}>
-                        {pays.map((p,i)=>(
+                        {pays.map((p,i)=>{
+                          const isDieselAdj=(p.amount||0)<0&&(p.id?.startsWith("DEDUCT-DSL-")||p.utr?.startsWith("DIESEL-ADJ"));
+                          return (
                           <div key={p.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:11}}>
-                            <div style={{color:C.muted}}>
-                              <span style={{fontWeight:700,color:C.green}}>₹{(p.amount||0).toLocaleString("en-IN")}</span>
+                            <div style={{color:C.muted,flex:1}}>
+                              <span style={{fontWeight:700,color:(p.amount||0)<0?C.red:C.green}}>
+                                {(p.amount||0)<0?"-":""}₹{Math.abs(p.amount||0).toLocaleString("en-IN")}
+                              </span>
                               {p.paidTo&&<span style={{marginLeft:6}}>→ <b style={{color:C.text}}>{p.paidTo}</b></span>}
                               {p.utr&&<span style={{marginLeft:6,fontFamily:"monospace",color:C.blue,fontSize:10}}>{p.utr}</span>}
                             </div>
-                            <div style={{color:C.muted,fontSize:10}}>{p.createdAt||p.date||""}</div>
-                          </div>
-                        ))}
+                            <div style={{display:"flex",alignItems:"center",gap:4}}>
+                              <span style={{color:C.muted,fontSize:10}}>{(p.createdAt||p.date||"").slice(0,16)}</span>
+                              {isDieselAdj&&user?.role==="owner"&&(
+                                <button onClick={e=>{e.stopPropagation();
+                                  if(!window.confirm(`Delete diesel adj ₹${Math.abs(p.amount||0).toLocaleString("en-IN")} (${p.utr||p.id})?\nThis also removes the loan entry.`)) return;
+                                  setDriverPays(pp=>pp.filter(x=>x.id!==p.id));
+                                  DB.deleteDriverPay(p.id).catch(()=>{});
+                                  const _lId=p.id?.startsWith("DEDUCT-DSL-")?p.id.replace("DEDUCT-DSL-","LOAN-DSL-"):null;
+                                  if(_lId){const _v=(vehicles||[]).find(v=>v.truckNo===t.truckNo);if(_v){const _ot=(_v.loanTxns||[]).find(x=>x.id===_lId);const _uv={..._v,loan:Math.max(0,(_v.loan||0)-(_ot?.amount||0)),loanTxns:(_v.loanTxns||[]).filter(x=>x.id!==_lId)};setVehicles(pp=>pp.map(v=>v.truckNo===t.truckNo?_uv:v));DB.saveVehicle(_uv).catch(()=>{}); }}
+                                  log("DELETE DIESEL ADJ",`LR ${t.lrNo}`);
+                                }}
+                                style={{background:"none",border:`1px solid ${C.red}44`,borderRadius:4,color:C.red,fontSize:9,padding:"1px 5px",cursor:"pointer",flexShrink:0}}>
+                                🗑
+                              </button>)}
+                            </div>
+                          </div>);
+                        })}
                       </div>
                     );
                   })()}
