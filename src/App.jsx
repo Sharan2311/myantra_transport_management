@@ -12491,8 +12491,9 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
       {view==="requests" && (()=>{
         const usedNos = new Set((dieselRequests||[]).map(r=>r.indentNo).filter(Boolean));
         // Find lowest available number — continues from existing sequence, fills gaps on delete
-        let nextNo = usedNos.size > 0 ? Math.min(...usedNos) : 1;
-        while(usedNos.has(nextNo)) nextNo++;
+        // max+1 prevents gap-filling if reconcile changes indentNo
+        const _appNos=[...usedNos].filter(n=>Number.isFinite(+n)&&+n<10000);
+        let nextNo = _appNos.length>0 ? Math.max(..._appNos.map(Number))+1 : 1;
 
         // Generate a unique PIN per truck — different from any existing open PIN for that truck
         const genUniquePinForTruck = (truckNo) => {
@@ -12970,10 +12971,9 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                           )}
                         </div>
                       )}
-                      {changed && (
+                      {(changed||req.amountNote) && (
                         <div style={{color:C.orange,fontSize:11,marginTop:2}}>
-                          ⚠ Amount changed: ₹{req.amount.toLocaleString("en-IN")} → ₹{req.confirmedAmount.toLocaleString("en-IN")}
-                          {req.confirmedReason&&<span style={{color:C.muted}}> ({req.confirmedReason})</span>}
+                          ⚠ {req.amountNote||`Changed: ₹${req.amount.toLocaleString("en-IN")} → ₹${req.confirmedAmount.toLocaleString("en-IN")}`}
                         </div>
                       )}
                     </div>
@@ -13377,9 +13377,10 @@ This was already dispensed — only delete if it was recorded in error.`;
             } else if(action==="attach_to_request"){
               // Attach a pump-only row to an existing app request
               const appReq=(dieselRequests||[]).find(r=>r.id===extra.reqId); if(!appReq) return prev;
-              const upd={...appReq, amount:e.pump?.hsd||appReq.amount,
-                cashAmount:e.pump?.advance||appReq.cashAmount||0,
-                indentNo:e.pump?.indentNo||appReq.indentNo};
+              const upd={...appReq,
+                amount:(e.pump?.hsd||0)+(e.pump?.advance||0),
+                dieselAmount:e.pump?.hsd||appReq.dieselAmount||appReq.amount,
+                cashAmount:e.pump?.advance||0};
               setDieselRequests(p=>p.map(r=>r.id===appReq.id?upd:r));
               DB.saveDieselRequest(upd).catch(()=>{});
               log("RECON ATTACH_REQ",`Pump #${e.pump?.indentNo} -> Req #${appReq.indentNo} ${appReq.truckNo}`);
@@ -13416,8 +13417,8 @@ This was already dispensed — only delete if it was recorded in error.`;
           const newAdv  = m.pump.advance || 0;
           const newTotal= newHsd + newAdv;
           const oldTotal= oldHsd + Number(m.app.cashAmount||0);
-          const amountNote = oldHsd!==newHsd
-            ? `Amount changed: Rs.${oldHsd.toLocaleString("en-IN")} -> Rs.${newHsd.toLocaleString("en-IN")} (pump)`
+          const amountNote = oldTotal!==newTotal
+            ? `Amount changed: Rs.${oldTotal.toLocaleString("en-IN")} -> Rs.${newTotal.toLocaleString("en-IN")} (pump_reconciled)`
             : null;
 
           // 1. Update diesel request
