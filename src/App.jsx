@@ -6950,8 +6950,17 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       DB.deleteCashTransfer("XD-"+editSheet.id).catch(()=>{});
     }}
     // Diesel overpayment on settled trip => add to vehicle loan
-    if(prevTrip?.driverSettled && _liveDieselEst !== (+prevTrip.dieselEstimate||0)) {
-      const _dieselDiff = _liveDieselEst - (+prevTrip.dieselEstimate||0);
+    // Compare actual paid amount vs what SHOULD have been paid with current diesel
+    const _settledNet = (() => {
+      const _g = (+editSheet.qty||0)*(+editSheet.givenRate||0);
+      return _g - (+editSheet.tafal||0) - (+editSheet.advance||0) - _liveDieselEst
+           - (+editSheet.shortageRecovery||0) - (+editSheet.loanRecovery||0);
+    })();
+    const _actualPaid = (driverPays||[]).filter(p=>p.tripId===editSheet.id)
+      .reduce((s,p)=>s+(+p.amount||0),0);
+    const _overpaid = Math.round(_actualPaid - _settledNet);
+    if(prevTrip?.driverSettled && _overpaid > 10) {
+      const _dieselDiff = _overpaid;
       const _indentNo = (editSheet.dieselIndentNo||"").trim();
       if(_dieselDiff > 0) {
         const _loanVeh = vehicles.find(v=>v.truckNo===(editSheet.truckNo||"").toUpperCase().trim());
@@ -9068,7 +9077,10 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
 
         const attachReq = (r) => {
           ff("dieselIndentNo")(String(r.indentNo));
-          ff("dieselEstimate")(String(r.confirmedAmount??r.amount));
+          // Set total (diesel+cash) as estimate, not just diesel part
+          const _rd = Number(r.dieselAmount??r.confirmedAmount??r.amount??0);
+          const _rc = Number(r.cashAmount||0);
+          ff("dieselEstimate")(String(_rd+_rc));
         };
         const clearReq = () => { ff("dieselIndentNo")(""); ff("dieselEstimate")("0"); };
 
@@ -9083,7 +9095,9 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
 
             {/* ── Already-attached request — show with option to remove (owner only) ── */}
             {truckReqs.filter(r=>r.status==="attached").map(r=>{
-              const amt = r.confirmedAmount??r.amount;
+              const _rDiesel = Number(r.dieselAmount??r.confirmedAmount??r.amount??0);
+              const _rCash   = Number(r.cashAmount||0);
+              const amt = _rDiesel + _rCash; // total = diesel + cash
               const isConf = r.confirmedAmount!=null;
               return (
                 <div key={r.id} style={{background:isConf?C.teal+"11":C.orange+"11",
