@@ -13282,6 +13282,19 @@ This was already dispensed — only delete if it was recorded in error.`;
               const trip=(trips||[]).find(t=>t.dieselIndentNo===String(a.indentNo)||t.id===a.tripId);
               return {pump:p,app:a,trip:trip||null,cat,complete,hsdDiff:p.hsd-appHsd,advDiff:p.advance-appAdv,status:complete?"ok":"mismatch",resolution:"pending"};
             }
+            // Check if pump row already exists as a reconciled request
+            const alreadyRecon = (dieselRequests||[]).find(r => {
+              if(r.status!=="reconciled") return false;
+              if(p.indentNo && String(r.indentNo).trim()===p.indentNo) return true;
+              const dClose = (d1,d2)=>{ if(!d1||!d2) return true; return Math.abs(new Date(d1)-new Date(d2))<=86400000; };
+              return vMatch(p.truckNo,r.truckNo) && dClose(p.date,r.date);
+            });
+            if(alreadyRecon) {
+              const trip=(trips||[]).find(t=>t.dieselIndentNo===String(alreadyRecon.indentNo)||t.id===alreadyRecon.tripId);
+              return {pump:p,app:alreadyRecon,trip:trip||null,cat:3,complete:true,hsdDiff:0,advDiff:0,
+                status:"already_reconciled",resolution:"already_reconciled",
+                resolvedNote:"Already reconciled"};
+            }
             return {pump:p,app:null,trip:null,cat:0,complete:false,hsdDiff:p.hsd,advDiff:p.advance,status:"not_in_app",resolution:"pending"};
           });
           // not_in_pump records are intentionally excluded from display
@@ -13452,7 +13465,8 @@ This was already dispensed — only delete if it was recorded in error.`;
 
         const fmt = n => "Rs."+(n||0).toLocaleString("en-IN");
         const complete   = (reconMatches||[]).filter(m=>m.complete||m.status==="ok");
-        const actionable = (reconMatches||[]).filter(m=>!m.complete&&m.status!=="ok");
+        const alreadyReconList = (reconMatches||[]).filter(m=>m.status==="already_reconciled");
+        const actionable = (reconMatches||[]).filter(m=>!m.complete&&m.status!=="ok"&&m.status!=="already_reconciled");
         const SUMMARY = [
           {l:"Complete", v:complete.length, c:C.green},
           {l:"Cat 1: No Confirm/No LR", v:actionable.filter(m=>m.cat===1).length, c:C.red},
@@ -13460,6 +13474,7 @@ This was already dispensed — only delete if it was recorded in error.`;
           {l:"Cat 3 Value Mismatch",    v:actionable.filter(m=>m.cat===3).length, c:C.blue},
           {l:"Cat 4: No Confirm/LR",    v:actionable.filter(m=>m.cat===4).length, c:C.purple},
           {l:"Not in App",              v:actionable.filter(m=>m.status==="not_in_app").length, c:C.red},
+          {l:"Already Reconciled",       v:alreadyReconList.length, c:C.green},
         ];
 
         return (
@@ -13712,6 +13727,22 @@ This was already dispensed — only delete if it was recorded in error.`;
                 </>);
               });
               })()}
+              {alreadyReconList.length>0&&(
+                <details style={{background:C.green+"08",border:`1px solid ${C.green}22`,borderRadius:10,padding:"10px 14px"}}>
+                  <summary style={{fontSize:12,fontWeight:700,color:C.green,cursor:"pointer"}}>
+                    {alreadyReconList.length} Already Reconciled (skip rescan)
+                  </summary>
+                  <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:4}}>
+                    {alreadyReconList.map((m,i)=>(
+                      <div key={i} style={{fontSize:10,color:C.muted,display:"flex",justifyContent:"space-between",
+                        padding:"4px 0",borderBottom:`1px solid ${C.border}`}}>
+                        <span style={{color:C.green,fontWeight:600}}>                          {m.pump?.truckNo||m.app?.truckNo} / #{m.app?.indentNo||m.pump?.indentNo}</span>
+                        <span>HSD Rs.{m.pump?.hsd||0} / LR {m.trip?.lrNo||"--"}</span>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
               {complete.length>0&&(
                 <details style={{background:C.green+"08",border:`1px solid ${C.green}22`,borderRadius:10,padding:"10px 14px"}}>
                   <summary style={{fontSize:12,fontWeight:700,color:C.green,cursor:"pointer"}}>
