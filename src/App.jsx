@@ -13275,8 +13275,13 @@ This was already dispensed — only delete if it was recorded in error.`;
             if(best){
               usedApp.add(best.ai); const a=best.a;
               const cat=getReqCat(a);
-              const appHsd=Number(a.confirmedAmount??a.dieselAmount??a.amount??0);
-              const appAdv=Number(a.cashAmount??0);
+              // Use diesel-only field to avoid double-counting cash in total
+              const appAdv=Number(a.cashAmount||0);
+              const appHsd=Number(
+                a.dieselAmount!=null ? a.dieselAmount :
+                a.confirmedAmount!=null ? a.confirmedAmount-appAdv :
+                (a.amount||0)-appAdv
+              );
               // Total-based matching: App(diesel+cash) must equal Pump(HSD+advance)
               const pumpTotal=(p.hsd||0)+(p.advance||0);
               const appTotal=appHsd+appAdv;
@@ -13778,7 +13783,12 @@ This was already dispensed — only delete if it was recorded in error.`;
                     {complete.map((m,i)=>(
                       <div key={i} style={{fontSize:10,color:C.muted,display:"flex",justifyContent:"space-between",padding:"4px 0",borderBottom:`1px solid ${C.border}`}}>
                         <span>{m.pump?.truckNo||m.app?.truckNo} / #{m.app?.indentNo||m.pump?.indentNo}</span>
-                        <span>HSD {fmt(m.pump?.hsd||0)} / LR {m.trip?.lrNo||"--"}</span>
+                        <span>
+                          HSD {fmt(m.pump?.hsd||0)}
+                          {(m.pump?.advance||0)>0 && <> + Adv {fmt(m.pump?.advance)}</>}
+                          {" = "}{fmt(m.pumpTotal||m.pump?.hsd||0)}
+                          {m.trip && <> / LR {m.trip.lrNo}</>}
+                        </span>
                       </div>
                     ))}
                   </div>
