@@ -8565,7 +8565,13 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
     : (+(f.frRate)||0) - (+(f.givenRate)||0);
   const marginOk = perMTMargin >= 30;
   const tafalAmt = +f.tafal||0;
-  const net      = gross - (+f.advance||0) - tafalAmt - (+f.dieselEstimate||0);
+  // Live diesel estimate from attached request (f.dieselEstimate may be stale)
+  const _calcIndNo = (f.dieselIndentNo||"").trim();
+  const _calcReq   = _calcIndNo ? (dieselRequests||[]).find(r=>String(r.indentNo)===_calcIndNo) : null;
+  const _calcHsd   = _calcReq ? Number(_calcReq.confirmedAmount??_calcReq.dieselAmount??_calcReq.amount??0) : 0;
+  const _calcAdv   = _calcReq ? Number(_calcReq.cashAmount||0) : 0;
+  const liveDieselEst = _calcReq ? (_calcHsd + _calcAdv) : (+f.dieselEstimate||0);
+  const net      = gross - (+f.advance||0) - tafalAmt - liveDieselEst;
   const veh      = vehicles.find(x => x.truckNo===(f.truckNo||"").toUpperCase().trim());
   const isOwner  = user?.role === "owner";
   // Fields locked after scan for non-owners
@@ -8979,7 +8985,11 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
         const val = (f.dieselIndentNo||"").trim();
         // Find the attached/matched request for display
         const attachedReq = val ? (dieselRequests||[]).find(r=>String(r.indentNo)===val) : null;
-        const dispAmt = attachedReq ? (attachedReq.confirmedAmount??attachedReq.amount) : (+f.dieselEstimate||0);
+        // Show diesel-only component, not total (total includes cash advance)
+        const _dispDiesel = attachedReq ? Number(attachedReq.dieselAmount??attachedReq.confirmedAmount??attachedReq.amount??0) : 0;
+        const _dispCash   = attachedReq ? Number(attachedReq.cashAmount||0) : 0;
+        const _dispTotal  = _dispDiesel + _dispCash;
+        const dispAmt = _dispTotal || (+f.dieselEstimate||0);
 
         // Non-owners: always locked — just show the current indent info
         if(!isOwner) return (
@@ -8992,7 +9002,8 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
               {val || dispAmt>0 ? (
                 <div>
                   {val && <span style={{fontSize:14,fontWeight:700,color:C.text}}>#{val}</span>}
-                  {dispAmt>0 && <span style={{fontSize:12,color:C.orange,marginLeft:val?10:0}}>⛽ {fmt(dispAmt)}</span>}
+                  {_dispDiesel>0 && <span style={{fontSize:12,color:C.orange,marginLeft:val?10:0}}>⛽ {fmt(_dispDiesel)}</span>}
+                  {_dispCash>0   && <span style={{fontSize:12,color:C.green,  marginLeft:6}}>💵 {fmt(_dispCash)}</span>}
                   {attachedReq && (
                     <span style={{fontSize:11,color:attachedReq.status==="confirmed"?C.teal:C.orange,marginLeft:8}}>
                       {attachedReq.status==="confirmed"?"✓ Confirmed":"⚠ Not confirmed"}
@@ -9254,7 +9265,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
             {l:"Gross to Driver",             v:fmt(gross),                              c:C.orange},
             {l:"(−) Advance",                 v:fmt(+f.advance||0),                     c:C.red},
             {l:"(−) TAFAL",                   v:fmt(tafalAmt),                           c:C.purple},
-            {l:"(−) Diesel (estimate)",       v:fmt(+f.dieselEstimate||0),              c:C.orange},
+            {l:"(−) Diesel (estimate)",       v:fmt(liveDieselEst),                      c:C.orange},
             {l:"(−) Shortage Recovery",       v:fmt(+f.shortageRecovery||0),            c:(+f.shortageRecovery||0)>0?C.red:C.muted},
             {l:"(−) Loan Recovery",           v:fmt(+f.loanRecovery||0),               c:(+f.loanRecovery||0)>0?C.red:C.muted},
             {l:marginOk?"My Margin ✓":"⚠ Margin", v:`${fmt(margin)} (₹${perMTMargin.toFixed(0)}/MT)`, c:marginOk?C.green:C.red},
