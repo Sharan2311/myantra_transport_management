@@ -13277,10 +13277,19 @@ This was already dispensed — only delete if it was recorded in error.`;
               const cat=getReqCat(a);
               const appHsd=Number(a.confirmedAmount??a.dieselAmount??a.amount??0);
               const appAdv=Number(a.cashAmount??0);
-              const hsdOk=Math.abs(p.hsd-appHsd)<=5; const advOk=Math.abs(p.advance-appAdv)<=5;
-              const complete=cat===3&&hsdOk&&advOk&&vMatch(p.truckNo,a.truckNo);
+              // Total-based matching: App(diesel+cash) must equal Pump(HSD+advance)
+              const pumpTotal=(p.hsd||0)+(p.advance||0);
+              const appTotal=appHsd+appAdv;
+              const hsdOk=Math.abs(p.hsd-appHsd)<=5;
+              const advOk=Math.abs(p.advance-appAdv)<=5;
+              const totalOk=Math.abs(pumpTotal-appTotal)<=10;
+              // Complete = total matches AND vehicle matches (individual components may differ)
+              const complete=cat===3&&totalOk&&vMatch(p.truckNo,a.truckNo);
               const trip=(trips||[]).find(t=>t.dieselIndentNo===String(a.indentNo)||t.id===a.tripId);
-              return {pump:p,app:a,trip:trip||null,cat,complete,hsdDiff:p.hsd-appHsd,advDiff:p.advance-appAdv,status:complete?"ok":"mismatch",resolution:"pending"};
+              return {pump:p,app:a,trip:trip||null,cat,complete,
+                hsdDiff:p.hsd-appHsd,advDiff:p.advance-appAdv,totalDiff:pumpTotal-appTotal,
+                pumpTotal,appTotal,
+                status:complete?"ok":"mismatch",resolution:"pending"};
             }
             // Check if pump row already exists as a reconciled request
             const alreadyRecon = (dieselRequests||[]).find(r => {
@@ -13562,24 +13571,34 @@ This was already dispensed — only delete if it was recorded in error.`;
                         <div style={{fontSize:9,fontWeight:800,color:C.muted,marginBottom:3}}>PUMP (MASTER)</div>
                         <div style={{fontSize:12,fontWeight:700}}>{m.pump?.truckNo||"--"}</div>
                         <div style={{fontSize:10,color:C.muted}}>{m.pump?.date||"--"} / #{m.pump?.indentNo||"--"}</div>
-                        <div style={{fontSize:12,marginTop:3}}>HSD: <b style={{color:m.hsdDiff?C.red:C.green}}>{fmt(m.pump?.hsd||0)}</b></div>
+                        <div style={{fontSize:12,marginTop:3}}>HSD: <b>{fmt(m.pump?.hsd||0)}</b></div>
                         <div style={{fontSize:12}}>Adv: <b>{fmt(m.pump?.advance||0)}</b></div>
+                        <div style={{fontSize:11,fontWeight:700,marginTop:3,borderTop:`1px solid ${C.border}`,paddingTop:3}}>Total: <b style={{color:m.totalDiff&&m.totalDiff!==0?C.red:C.green}}>{fmt(m.pumpTotal||0)}</b></div>
                       </div>
                       <div style={{background:C.bg,borderRadius:8,padding:"8px 10px"}}>
                         <div style={{fontSize:9,fontWeight:800,color:C.muted,marginBottom:3}}>APP REQUEST</div>
                         {m.app?(<>
                           <div style={{fontSize:12,fontWeight:700}}>{m.app.truckNo||"--"}</div>
                           <div style={{fontSize:10,color:C.muted}}>{m.app.date||"--"} / #{m.app.indentNo||"--"}</div>
-                          <div style={{fontSize:12,marginTop:3}}>HSD: <b style={{color:m.hsdDiff?C.red:C.green}}>{fmt(m.app.confirmedAmount??m.app.dieselAmount??m.app.amount??0)}</b></div>
-                          <div style={{fontSize:12}}>Adv: <b>{fmt(m.app.cashAmount??0)}</b></div>
+                          <div style={{fontSize:12,marginTop:3}}>Diesel: <b>{fmt(m.app.confirmedAmount??m.app.dieselAmount??m.app.amount??0)}</b></div>
+                          <div style={{fontSize:12}}>Cash: <b>{fmt(m.app.cashAmount??0)}</b></div>
+                          <div style={{fontSize:11,fontWeight:700,marginTop:3,borderTop:`1px solid ${C.border}`,paddingTop:3}}>Total: <b style={{color:m.totalDiff&&m.totalDiff!==0?C.red:C.green}}>{fmt(m.appTotal||0)}</b></div>
                           {m.trip&&<div style={{fontSize:10,color:C.accent,marginTop:2}}>LR: {m.trip.lrNo}</div>}
                           <div style={{fontSize:9,color:C.muted,marginTop:2}}>By: {m.app.createdBy||"--"}</div>
                         </>):<div style={{fontSize:11,color:C.muted,paddingTop:8}}>No app record found</div>}
                       </div>
                     </div>
-                    {(m.hsdDiff!==0||m.advDiff!==0)&&m.app&&(
+                    {m.app&&(m.totalDiff!==0&&m.totalDiff!=null)&&(
                       <div style={{fontSize:11,fontWeight:700,color:C.red,padding:"4px 8px",background:C.red+"11",borderRadius:6,marginBottom:8}}>
-                        Diff: HSD {m.hsdDiff>0?"+":""}{fmt(m.hsdDiff)}{m.advDiff!==0&&` / Adv ${m.advDiff>0?"+":""}${fmt(m.advDiff)}`} {(m.hsdDiff+m.advDiff)>0?"(pump higher)":"(app higher)"}
+                        Total diff: {m.totalDiff>0?"+":""}{fmt(m.totalDiff)}
+                        {m.hsdDiff!==0&&<span style={{fontWeight:400}}> (HSD {m.hsdDiff>0?"+":""}{fmt(m.hsdDiff)})</span>}
+                        {m.advDiff!==0&&<span style={{fontWeight:400}}> (Adv {m.advDiff>0?"+":""}{fmt(m.advDiff)})</span>}
+                        <span style={{fontWeight:400}}> {m.totalDiff>0?"pump higher":"app higher"}</span>
+                      </div>
+                    )}
+                    {m.app&&m.totalDiff===0&&(m.hsdDiff!==0||m.advDiff!==0)&&(
+                      <div style={{fontSize:11,color:C.orange,padding:"4px 8px",background:C.orange+"11",borderRadius:6,marginBottom:8}}>
+                        Total matches but components differ: HSD {m.hsdDiff>0?"+":""}{fmt(m.hsdDiff)} / Adv {m.advDiff>0?"+":""}{fmt(m.advDiff)}
                       </div>
                     )}
                     {!isResolved&&(

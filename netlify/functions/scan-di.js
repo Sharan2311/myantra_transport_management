@@ -49,23 +49,26 @@ Return ONLY this JSON, no markdown, no explanation:
   "date": "<YYYY-MM-DD or null>"
 }`;
 
-const PUMP_PROMPT = `You are reading a diesel pump slip or Excel screenshot from a petrol pump.
+const PUMP_PROMPT = `You are reading a diesel pump statement Excel screenshot.
+This is a financial document — read every cell value exactly as shown.
 
-Extract ALL vehicle rows. For each row copy these values exactly as printed:
-- truckNo: vehicle registration number — uppercase, remove all spaces (e.g. "KA 34 B 4788" → "KA34B4788")
-- indentNo: the indent or serial number — copy exactly, or null if not visible
-- date: date in YYYY-MM-DD format, or null if not visible
-- hsd: the HSD/diesel amount column — number only, no ₹ no commas
-- advance: the Advance column — number only, 0 if blank or zero
+Extract ALL vehicle data rows. For each row extract:
+- truckNo: vehicle registration number — uppercase, remove all spaces (e.g. "KA 34 B 4788" -> "KA34B4788")
+- indentNo: the INDENT NO / serial number column — copy exactly as shown, or null
+- date: date in YYYY-MM-DD format (e.g. "16-May-26" -> "2026-05-16"), or null
+- hsd: the HSD column — diesel fuel amount — number only, no Rs. no commas (e.g. "Rs.13,000.00" -> 13000)
+- advance: the ADVANCE column — cash advance amount — number only, no Rs. no commas.
+  CRITICAL: Read the ADVANCE column carefully. Return the actual value shown.
+  "Rs.3,000.00" -> 3000. "Rs.2,000.00" -> 2000. Only return 0 if the cell is blank or shows Rs.0.00
 
 STRICT RULES:
 - Skip total/summary/header rows
-- Include ALL vehicle rows even if advance is 0
-- If a value is not clearly readable, use null for that field (not 0 or "")
+- Include ALL vehicle data rows
+- Remove Rs. symbol and commas from amounts before returning
 - Return ONLY the JSON array, no other text
 
 Return ONLY a JSON array:
-[{"truckNo":"KA32D2753","indentNo":"25748","date":"2026-03-05","hsd":31596,"advance":3000},...]`;
+[{"truckNo":"KA32D2753","indentNo":"25748","date":"2026-05-16","hsd":13000,"advance":3000},...]`;
 
 exports.handler = async (event) => {
   if (event.httpMethod !== "POST") {
