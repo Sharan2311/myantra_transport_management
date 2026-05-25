@@ -6369,7 +6369,10 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     if((t.grade||"").toLowerCase().includes(q)) return true;
     return false;
   }) : dlist;
-  const shown  = filter==="All" ? slist : slist.filter(t => t.status===filter);
+  const shown  = filter==="All" ? slist
+    : filter==="Confirmation Email Received"
+      ? slist.filter(t=>t.status==="Confirmation Email Received"&&t.orderType==="party")
+      : slist.filter(t => t.status===filter);
 
   // When truck number changes, check if tafalExempt
   const onTruckChange = v => {
@@ -7099,6 +7102,36 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     }
   };
 
+  // Backfill: create AUTO-PAY entries for existing trips with confirmation already received
+  useEffect(()=>{
+    if(!trips||!driverPays||!setDriverPays) return;
+    const toCreate=[];
+    (trips||[]).forEach(t=>{
+      if(t.orderType!=="party") return;
+      if(t.status!=="Confirmation Email Received") return;
+      const _autoId=`AUTO-PAY-${t.id}`;
+      if((driverPays||[]).find(p=>p.id===_autoId)) return; // already exists
+      const _paid=(driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(+p.amount||0),0);
+      const _gross=(+t.qty||0)*(+t.givenRate||0);
+      const _indNo=(t.dieselIndentNo||"").trim();
+      const _req=_indNo?(dieselRequests||[]).find(r=>String(r.indentNo)===_indNo):null;
+      const _dsl=_req?(Number(_req.confirmedAmount??_req.dieselAmount??_req.amount??0)+Number(_req.cashAmount||0)):(+t.dieselEstimate||0);
+      const _net=_gross-(+t.tafal||0)-(+t.advance||0)-_dsl-(+t.shortageRecovery||0)-(+t.loanRecovery||0)-(+t.pouchBalance||0);
+      const _bal=Math.round(_net-_paid);
+      if(_bal>0) toCreate.push({id:_autoId,tripId:t.id,truckNo:t.truckNo,
+        lrNo:t.lrNo||"",amount:_bal,utr:"",date:t.receiptUploadedAt?.slice(0,10)||today(),
+        notes:"Auto created via Confirmation Received",
+        createdBy:"system",createdAt:nowTs()});
+    });
+    if(toCreate.length>0){
+      setDriverPays(p=>[...toCreate,...(p||[]).filter(x=>!toCreate.find(n=>n.id===x.id))]);
+      toCreate.forEach(pr=>DB.saveDriverPay(pr).catch(()=>{}));
+      log("AUTO PAY BACKFILL",`${toCreate.length} pay requests created for existing confirmed party trips`);
+    }
+  // Run once when trips+driverPays both load; trips.length guards against empty initial state
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[trips?.length, driverPays?.length]);
+
   return (
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
 
@@ -7277,7 +7310,12 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
           style={{background:"none",border:"none",color:C.muted,fontSize:18,cursor:"pointer",padding:"0 4px"}}>✕</button>}
       </div>
 
-      <PillBar items={["All","Pending Bill","Yet to Bill","Billed","Paid"].map(s=>({id:s,label:s+(s!=="All"?` (${list.filter(t=>t.status===s).length})`:""),color:SC(s)}))} active={filter} onSelect={setFilter} />
+      <PillBar items={[
+        ...["All","Pending Bill","Yet to Bill","Billed","Paid"].map(s=>({id:s,label:s+(s!=="All"?` (${list.filter(t=>t.status===s).length})`:""),color:SC(s)})),
+        {id:"Confirmation Email Received",
+         label:`📤 Confirmed (${list.filter(t=>t.status==="Confirmation Email Received"&&t.orderType==="party").length})`,
+         color:C.teal},
+      ]} active={filter} onSelect={setFilter} />
 
       {/* Order type filter — only for outbound trips */}
       {!isIn && (
@@ -7705,7 +7743,27 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                                   ...(mergedPath?{status:"Confirmation Email Received",mergedPdfPath:mergedPath,receiptFilePath:path,receiptUploadedAt:ts}:{})};
                                 setTrips(p=>p.map(x=>x.id===t.id?u:x));
                                 setTimeout(()=>DB.saveTrip(u).catch(er=>console.error("saveTrip confirm:",er)),0);
-                                log("CONFIRM PDF","LR:"+t.lrNo+(mergedPath?" + auto-merged":" — merge failed"));
+                                log("CONFIRM PDF","LR:"+t.lrNo+(mergedPath?" + auto-merged":""));
+                                // Auto-create driver pay if confirmation received and balance > 0
+                                if(mergedPath && u.status==="Confirmation Email Received"){
+                                  const _paid=(driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(+p.amount||0),0);
+                                  const _gross=(+t.qty||0)*(+t.givenRate||0);
+                                  const _indNo=(t.dieselIndentNo||"").trim();
+                                  const _req=_indNo?(dieselRequests||[]).find(r=>String(r.indentNo)===_indNo):null;
+                                  const _dsl=_req?(Number(_req.confirmedAmount??_req.dieselAmount??_req.amount??0)+Number(_req.cashAmount||0)):(+t.dieselEstimate||0);
+                                  const _net=_gross-(+t.tafal||0)-(+t.advance||0)-_dsl-(+t.shortageRecovery||0)-(+t.loanRecovery||0)-(+t.pouchBalance||0);
+                                  const _bal=Math.round(_net-_paid);
+                                  const _autoId=`AUTO-PAY-${t.id}`;
+                                  if(_bal>0&&!(driverPays||[]).find(p=>p.id===_autoId)){
+                                    const _pr={id:_autoId,tripId:t.id,truckNo:t.truckNo,
+                                      lrNo:t.lrNo||"",amount:_bal,utr:"",date:today(),
+                                      notes:"Auto created via Confirmation Received",
+                                      createdBy:user.username,createdAt:nowTs()};
+                                    setDriverPays(p=>[_pr,...(p||[])]);
+                                    DB.saveDriverPay(_pr).catch(()=>{});
+                                    log("AUTO PAY",`LR ${t.lrNo} ₹${_bal} auto-req on confirm`);
+                                  }
+                                }
                               }catch(err){alert("Upload failed: "+err.message);}
                             }}/>
                         </label>
