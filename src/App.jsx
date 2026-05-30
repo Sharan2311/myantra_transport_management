@@ -14798,6 +14798,9 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
   const [pdfTo,    setPdfTo]    = useState("");
   const [showDateFilter, setShowDateFilter] = useState(false);
   const [ownerReportSheet, setOwnerReportSheet] = useState(null);
+  // Multi-account form state (for vehicle add/edit sheet)
+  const [showAddAcc,  setShowAddAcc]  = useState(false);
+  const [newAccForm,  setNewAccForm]  = useState({name:"",accountNo:"",ifsc:""});
 
   // Loan txn form
   const [lAmt,  setLAmt]  = useState(""); const [lDate,  setLDate]  = useState(new Date().toISOString().slice(0,10));
@@ -15211,7 +15214,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
               🗑 Clear Phones
             </Btn>
           )}
-          {isOwner && <Btn onClick={()=>{setEditId(null);setF(blank);setSheet(true);}} sm>+ Add</Btn>}
+          {isOwner && <Btn onClick={()=>{setEditId(null);setF(blank);setSheet(true);setShowAddAcc(false);setNewAccForm({name:"",accountNo:"",ifsc:""});}} sm>+ Add</Btn>}
           {isOwner && <Btn sm outline color={C.blue} onClick={()=>setOwnerReportSheet("")}>📊 Owner Report</Btn>}
           {isOwner && (
             <Btn sm outline color={C.red} onClick={()=>{
@@ -15395,41 +15398,36 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
               </div>
             )}
             {/* Add account button */}
-            {(()=>{
-              const [_showAddAcc, _setShowAddAcc] = React.useState(false);
-              const [_newAcc, _setNewAcc] = React.useState({name:"",accountNo:"",ifsc:""});
-              if(!_showAddAcc) return (
-                <button onClick={()=>_setShowAddAcc(true)}
-                  style={{background:C.green+"11",border:`1px dashed ${C.green}66`,borderRadius:8,
-                    color:C.green,fontSize:12,fontWeight:700,padding:"8px 14px",cursor:"pointer",textAlign:"left"}}>
-                  + Add Another Bank Account
-                </button>
-              );
-              return (
-                <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
-                  <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:8}}>NEW ACCOUNT</div>
-                  <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                    <Field label="Account Holder Name" value={_newAcc.name} onChange={v=>_setNewAcc(p=>({...p,name:v}))} />
-                    <div style={{display:"flex",gap:8}}>
-                      <Field label="A/C No" value={_newAcc.accountNo} onChange={v=>_setNewAcc(p=>({...p,accountNo:v}))} half />
-                      <Field label="IFSC"   value={_newAcc.ifsc}      onChange={v=>_setNewAcc(p=>({...p,ifsc:v}))}      half />
-                    </div>
-                    <div style={{display:"flex",gap:8}}>
-                      <Btn onClick={()=>{
-                        if(!_newAcc.name.trim()||!_newAcc.accountNo.trim()||!_newAcc.ifsc.trim()){
-                          alert("Name, Account No, and IFSC are all required.");return;
-                        }
-                        const newAccEntry={id:"ACC"+uid(),name:_newAcc.name.trim(),
-                          accountNo:_newAcc.accountNo.trim(),ifsc:_newAcc.ifsc.trim(),isPrimary:false};
-                        setF(p=>({...p,accounts:[...(p.accounts||[]),newAccEntry]}));
-                        _setNewAcc({name:"",accountNo:"",ifsc:""});_setShowAddAcc(false);
-                      }} sm color={C.green}>Save Account</Btn>
-                      <Btn onClick={()=>{_setShowAddAcc(false);_setNewAcc({name:"",accountNo:"",ifsc:""});}} sm outline color={C.muted}>Cancel</Btn>
-                    </div>
+            {!showAddAcc ? (
+              <button onClick={()=>{setShowAddAcc(true);setNewAccForm({name:"",accountNo:"",ifsc:""}); }}
+                style={{background:C.green+"11",border:`1px dashed ${C.green}66`,borderRadius:8,
+                  color:C.green,fontSize:12,fontWeight:700,padding:"8px 14px",cursor:"pointer",textAlign:"left"}}>
+                + Add Another Bank Account
+              </button>
+            ) : (
+              <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
+                <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:8}}>NEW ACCOUNT</div>
+                <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                  <Field label="Account Holder Name" value={newAccForm.name} onChange={v=>setNewAccForm(p=>({...p,name:v}))} />
+                  <div style={{display:"flex",gap:8}}>
+                    <Field label="A/C No" value={newAccForm.accountNo} onChange={v=>setNewAccForm(p=>({...p,accountNo:v}))} half />
+                    <Field label="IFSC"   value={newAccForm.ifsc}      onChange={v=>setNewAccForm(p=>({...p,ifsc:v}))}      half />
+                  </div>
+                  <div style={{display:"flex",gap:8}}>
+                    <Btn onClick={()=>{
+                      if(!newAccForm.name.trim()||!newAccForm.accountNo.trim()||!newAccForm.ifsc.trim()){
+                        alert("Name, Account No, and IFSC are all required.");return;
+                      }
+                      const newAccEntry={id:"ACC"+uid(),name:newAccForm.name.trim(),
+                        accountNo:newAccForm.accountNo.trim(),ifsc:newAccForm.ifsc.trim(),isPrimary:false};
+                      setF(p=>({...p,accounts:[...(p.accounts||[]),newAccEntry]}));
+                      setNewAccForm({name:"",accountNo:"",ifsc:""});setShowAddAcc(false);
+                    }} sm color={C.green}>Save Account</Btn>
+                    <Btn onClick={()=>{setShowAddAcc(false);setNewAccForm({name:"",accountNo:"",ifsc:""});}} sm outline color={C.muted}>Cancel</Btn>
                   </div>
                 </div>
-              );
-            })()}
+              </div>
+            )}
 
             <div style={{color:C.red,fontSize:11,fontWeight:700,letterSpacing:1,marginTop:4}}>LOAN / DEDUCTIONS</div>
             <div style={{display:"flex",gap:10}}>
@@ -16401,6 +16399,9 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
   // wallet PDF date filter
   const [wFrom,  setWFrom]  = useState("");
   const [wTo,    setWTo]    = useState("");
+  // Multi-account form state (for employee add sheet)
+  const [showEmpAcc,  setShowEmpAcc]  = useState(false);
+  const [newEmpAcc,   setNewEmpAcc]   = useState({name:"",accountNo:"",ifsc:""});
   const blank = {name:"",phone:"",role:"Fleet Agent",loan:"0",loanRecovered:"0",linkedTrucks:"",accounts:[]};
   const [f,setF] = useState(blank);
   const ff = k => v => setF(p=>({...p,[k]:v}));
@@ -16545,7 +16546,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
         <Btn onClick={()=>setSheet(true)} sm>+ Add</Btn>
       </div>
 
-      {sheet&&<Sheet title="Add Employee" onClose={()=>{setSheet(false);setF(blank);}}>
+      {sheet&&<Sheet title="Add Employee" onClose={()=>{setSheet(false);setF(blank);setShowEmpAcc(false);setNewEmpAcc({name:"",accountNo:"",ifsc:""});}}>
         <div style={{display:"flex",flexDirection:"column",gap:13}}>
           <div style={{display:"flex",gap:10}}><Field label="Name" value={f.name} onChange={ff("name")} half /><Field label="Phone" value={f.phone} onChange={ff("phone")} type="tel" half /></div>
           <Field label="Role" value={f.role} onChange={ff("role")} opts={["Fleet Agent","Driver Liaison","Field Staff","Accountant"].map(x=>({v:x,l:x}))} />
@@ -16566,29 +16567,30 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                   style={{background:"none",border:`1px solid ${C.red}44`,borderRadius:5,color:C.red,fontSize:10,padding:"2px 6px",cursor:"pointer"}}>🗑</button>
               </div>
             ))}
-            {(()=>{
-              const [_sa, _setSa] = React.useState(false);
-              const [_na, _setNa] = React.useState({name:"",accountNo:"",ifsc:""});
-              if(!_sa) return <button onClick={()=>_setSa(true)} style={{background:C.green+"11",border:`1px dashed ${C.green}66`,borderRadius:7,color:C.green,fontSize:11,fontWeight:700,padding:"6px 12px",cursor:"pointer",width:"100%"}}>+ Add Bank Account</button>;
-              return (
-                <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                  <Field label="Account Holder Name" value={_na.name} onChange={v=>_setNa(p=>({...p,name:v}))} />
-                  <div style={{display:"flex",gap:8}}>
-                    <Field label="A/C No" value={_na.accountNo} onChange={v=>_setNa(p=>({...p,accountNo:v}))} half />
-                    <Field label="IFSC"   value={_na.ifsc}      onChange={v=>_setNa(p=>({...p,ifsc:v}))}      half />
-                  </div>
-                  <div style={{display:"flex",gap:8}}>
-                    <Btn onClick={()=>{
-                      if(!_na.name.trim()||!_na.accountNo.trim()||!_na.ifsc.trim()){alert("All fields required.");return;}
-                      const na={id:"ACC"+uid(),name:_na.name.trim(),accountNo:_na.accountNo.trim(),ifsc:_na.ifsc.trim()};
-                      setF(p=>({...p,accounts:[...(p.accounts||[]),na]}));
-                      _setNa({name:"",accountNo:"",ifsc:""});_setSa(false);
-                    }} sm color={C.green}>Save</Btn>
-                    <Btn onClick={()=>{_setSa(false);_setNa({name:"",accountNo:"",ifsc:""});}} sm outline color={C.muted}>Cancel</Btn>
-                  </div>
+            {!showEmpAcc ? (
+              <button onClick={()=>{setShowEmpAcc(true);setNewEmpAcc({name:"",accountNo:"",ifsc:""}); }}
+                style={{background:C.green+"11",border:`1px dashed ${C.green}66`,borderRadius:7,
+                  color:C.green,fontSize:11,fontWeight:700,padding:"6px 12px",cursor:"pointer",width:"100%"}}>
+                + Add Bank Account
+              </button>
+            ) : (
+              <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                <Field label="Account Holder Name" value={newEmpAcc.name} onChange={v=>setNewEmpAcc(p=>({...p,name:v}))} />
+                <div style={{display:"flex",gap:8}}>
+                  <Field label="A/C No" value={newEmpAcc.accountNo} onChange={v=>setNewEmpAcc(p=>({...p,accountNo:v}))} half />
+                  <Field label="IFSC"   value={newEmpAcc.ifsc}      onChange={v=>setNewEmpAcc(p=>({...p,ifsc:v}))}      half />
                 </div>
-              );
-            })()}
+                <div style={{display:"flex",gap:8}}>
+                  <Btn onClick={()=>{
+                    if(!newEmpAcc.name.trim()||!newEmpAcc.accountNo.trim()||!newEmpAcc.ifsc.trim()){alert("All fields required.");return;}
+                    const na={id:"ACC"+uid(),name:newEmpAcc.name.trim(),accountNo:newEmpAcc.accountNo.trim(),ifsc:newEmpAcc.ifsc.trim()};
+                    setF(p=>({...p,accounts:[...(p.accounts||[]),na]}));
+                    setNewEmpAcc({name:"",accountNo:"",ifsc:""});setShowEmpAcc(false);
+                  }} sm color={C.green}>Save</Btn>
+                  <Btn onClick={()=>{setShowEmpAcc(false);setNewEmpAcc({name:"",accountNo:"",ifsc:""});}} sm outline color={C.muted}>Cancel</Btn>
+                </div>
+              </div>
+            )}
           </div>
           <Btn onClick={()=>{const e={...f,id:uid(),loan:+f.loan,loanRecovered:+f.loanRecovered,linkedTrucks:f.linkedTrucks.split(",").map(s=>s.trim()).filter(Boolean),accounts:f.accounts||[],createdBy:user.username}; setEmployees(p=>[...(p||[]),e]); log("ADD EMPLOYEE",e.name); setF(blank); setSheet(false);}} full>Save</Btn>
         </div>
