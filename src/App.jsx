@@ -19597,7 +19597,7 @@ function ShortageRecoverBtn({v, setVehicles, log}) {
 }
 
 // ─── REQUEST PAYMENT SHEET ───────────────────────────────────────────────────
-function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentRequests, setPaymentRequests, driverPays=[], user, log, onClose}) {
+function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentRequests, setPaymentRequests, driverPays=[], dieselRequests=[], user, log, onClose}) {
   const t = trip;
   const veh = (vehicles||[]).find(v=>v.truckNo===t.truckNo);
   // Compute actual balance (trip may not have .balance if coming from raw trips array)
@@ -19777,6 +19777,28 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
             Balance: ₹{_balance.toLocaleString("en-IN")}
           </div>
         </div>
+
+        {/* Diesel unconfirmed warning */}
+        {(()=>{
+          if(!t.dieselEstimate || +t.dieselEstimate<=0) return null;
+          const dreq = (dieselRequests||[]).find(r=>r.tripId===t.id || (t.dieselIndentNo && String(r.indentNo)===String(t.dieselIndentNo).trim()));
+          if(!dreq) return null;
+          const isUnconf = dreq.status==="open" || (dreq.status==="attached" && dreq.confirmedAmount==null);
+          if(!isUnconf) return null;
+          return (
+            <div style={{background:C.orange+"11",border:`1.5px solid ${C.orange}44`,borderRadius:10,
+              padding:"10px 14px",display:"flex",gap:10,alignItems:"flex-start"}}>
+              <span style={{fontSize:16,flexShrink:0}}>⚠️</span>
+              <div>
+                <div style={{fontWeight:700,color:C.orange,fontSize:13}}>Diesel Not Yet Confirmed</div>
+                <div style={{color:C.muted,fontSize:11,marginTop:2}}>
+                  Indent #{dreq.indentNo} · ₹{(+t.dieselEstimate).toLocaleString("en-IN")} is attached but the pump has not confirmed it yet.
+                  The diesel deduction may change once confirmed.
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
         {hasPending && (()=>{
           const pendingReq = (paymentRequests||[]).find(r=>r.tripId===t.id&&r.status==="pending");
@@ -20746,9 +20768,11 @@ This will auto-recover in the next trip.`);
               {/* Diesel confirmation status */}
               {(()=>{
                 if(!t.dieselEstimate || +t.dieselEstimate<=0) return null;
-                const req = (dieselRequests||[]).find(r=>r.tripId===t.id || r.lrNo===t.lrNo);
+                const req = (dieselRequests||[]).find(r=>r.tripId===t.id || (t.dieselIndentNo && String(r.indentNo)===String(t.dieselIndentNo).trim()));
                 if(!req) return <div style={{fontSize:10,color:C.orange,fontWeight:700,marginTop:3}}>⛽ Diesel ₹{(+t.dieselEstimate).toLocaleString("en-IN")} — no indent linked</div>;
-                if(req.status==="open") return (
+                // Unconfirmed = attached but pump hasn't confirmed yet
+                const isUnconfirmed = req.status==="open" || (req.status==="attached" && req.confirmedAmount==null);
+                if(isUnconfirmed) return (
                   <div style={{fontSize:10,color:C.red,fontWeight:700,marginTop:3,background:C.red+"11",padding:"3px 8px",borderRadius:4,display:"inline-block"}}>
                     ⛽ Diesel NOT CONFIRMED — Indent #{req.indentNo} · ₹{(+t.dieselEstimate).toLocaleString("en-IN")}
                   </div>
@@ -21009,6 +21033,7 @@ This will auto-recover in the next trip.`);
           paymentRequests={paymentRequests||[]}
           setPaymentRequests={setPaymentRequests}
           driverPays={driverPays||[]}
+          dieselRequests={dieselRequests||[]}
           user={user}
           log={log}
           onClose={()=>setPayReqSheet(null)}
