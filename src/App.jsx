@@ -6817,9 +6817,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     // Sync dieselEstimate from live request amount (not stale editSheet snapshot)
     const _saveIndNo = (editSheet.dieselIndentNo||"").trim();
     const _saveReq = _saveIndNo ? (dieselRequests||[]).find(r=>String(r.indentNo)===_saveIndNo) : null;
-    const _saveHsd = _saveReq ? Number(_saveReq.confirmedAmount??_saveReq.dieselAmount??_saveReq.amount??0) : 0;
-    const _saveAdv = _saveReq ? Number(_saveReq.cashAmount||0) : 0;
-    const _liveDieselEst = _saveReq ? (_saveHsd+_saveAdv) : +editSheet.dieselEstimate;
+    const _liveDieselEst = _saveReq ? Number(_saveReq.amount||0) : +editSheet.dieselEstimate; // amount is always diesel+cash total
     setTrips(p => p.map(t => t.id===editSheet.id ? {
       ...editSheet,
       qty:+editSheet.qty, bags:+editSheet.bags,
@@ -8694,9 +8692,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
   // Live diesel estimate from attached request (f.dieselEstimate may be stale)
   const _calcIndNo = (f.dieselIndentNo||"").trim();
   const _calcReq   = _calcIndNo ? (dieselRequests||[]).find(r=>String(r.indentNo)===_calcIndNo) : null;
-  const _calcHsd   = _calcReq ? Number(_calcReq.confirmedAmount??_calcReq.dieselAmount??_calcReq.amount??0) : 0;
-  const _calcAdv   = _calcReq ? Number(_calcReq.cashAmount||0) : 0;
-  const liveDieselEst = _calcReq ? (_calcHsd + _calcAdv) : (+f.dieselEstimate||0);
+  const liveDieselEst = _calcReq ? Number(_calcReq.amount||0) : (+f.dieselEstimate||0); // amount is always diesel+cash total
   const net      = gross - (+f.advance||0) - tafalAmt - liveDieselEst;
   const veh      = vehicles.find(x => x.truckNo===(f.truckNo||"").toUpperCase().trim());
   const isOwner  = user?.role === "owner";
@@ -9093,9 +9089,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
               // Live value: read from current dieselRequests state, not stale form snapshot
               const _indNo = (f.dieselIndentNo||"").trim();
               const _req = _indNo ? (dieselRequests||[]).find(r=>String(r.indentNo)===_indNo) : null;
-              const _hsd = _req ? Number(_req.confirmedAmount??_req.dieselAmount??_req.amount??0) : 0;
-              const _adv = _req ? Number(_req.cashAmount||0) : 0;
-              const _liveEst = _req ? (_hsd + _adv) : (+f.dieselEstimate||0);
+              const _liveEst = _req ? Number(_req.amount||0) : (+f.dieselEstimate||0); // amount is always diesel+cash total
               return (<>
                 <span>{_liveEst>0?("₹"+_liveEst.toLocaleString("en-IN")):"—"}</span>
                 <span style={{fontSize:10,color:C.muted}}>From indent{_req&&_hsd>0&&_adv>0&&<span style={{marginLeft:4,color:C.teal}}>(⛽+💵)</span>}</span>
