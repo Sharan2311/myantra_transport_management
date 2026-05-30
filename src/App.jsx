@@ -20920,14 +20920,19 @@ This will auto-recover in the next trip.`);
                     {/* Diesel confirmation warning */}
                     {(()=>{
                       if(!trip || !trip.dieselEstimate || +trip.dieselEstimate<=0) return null;
-                      const dreq = (dieselRequests||[]).find(r=>r.tripId===trip.id || r.lrNo===trip.lrNo);
-                      if(!dreq) return <div style={{fontSize:10,color:C.orange,fontWeight:700,marginTop:3}}>⛽ Diesel ₹{(+trip.dieselEstimate).toLocaleString("en-IN")} — no indent linked</div>;
-                      if(dreq.status==="open") return (
-                        <div style={{fontSize:10,color:"#fff",fontWeight:700,marginTop:3,background:"#dc2626",padding:"3px 8px",borderRadius:4,display:"inline-block"}}>
-                          ⛽ DIESEL NOT CONFIRMED — Indent #{dreq.indentNo}
+                      const dreq = (dieselRequests||[]).find(r=>
+                        r.tripId===trip.id ||
+                        (trip.dieselIndentNo && String(r.indentNo)===String(trip.dieselIndentNo).trim())
+                      );
+                      if(!dreq) return null;
+                      const isUnconf = dreq.status==="open" || (dreq.status==="attached" && dreq.confirmedAmount==null);
+                      if(!isUnconf) return null;
+                      return (
+                        <div style={{fontSize:10,color:"#fff",fontWeight:700,marginTop:4,background:"#dc2626",
+                          padding:"3px 8px",borderRadius:4,display:"inline-block"}}>
+                          ⛽ Diesel NOT confirmed — Indent #{dreq.indentNo} · ₹{(+trip.dieselEstimate).toLocaleString("en-IN")}
                         </div>
                       );
-                      return null;
                     })()}
                   </div>
                   <div style={{textAlign:"right"}}>
