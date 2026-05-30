@@ -2765,7 +2765,7 @@ Rules:
         .filter(r => r.truckNo===truckNo && r.status==="confirmed" && (r.date||"")>=_4daysAgo);
       const autoReqG = confirmedReqsG.length >= 1 ? confirmedReqsG[0] : null;
       const autoIndentNo = autoReqG ? String(autoReqG.indentNo) : "";
-      const autoDiesel   = autoReqG ? String(autoReqG.confirmedAmount??autoReqG.amount) : "0";
+      const autoDiesel   = autoReqG ? String((autoReqG.dieselAmount??autoReqG.amount||0)+(autoReqG.cashAmount||0)) : "0";
       return {
         id: uid(),
         truckNo,
@@ -2826,7 +2826,7 @@ Rules:
         const solo = {
           id:uid(), truckNo:g.truckNo, diIds:[itemId],
           client:g.client, tafal:g.tafal,
-          diesel: autoReqS ? String(autoReqS.confirmedAmount??autoReqS.amount) : "0",
+          diesel: autoReqS ? String((autoReqS.dieselAmount??autoReqS.amount||0)+(autoReqS.cashAmount||0)) : "0",
           dieselIndentNo: autoReqS ? String(autoReqS.indentNo) : "",
           advance:"0", cashEmpId:"",
           shortageRecovery:String(autoSR2), loanRecovery:String(autoLR2),
@@ -3237,11 +3237,11 @@ Rules:
             }
           }
           if (chosenReq) {
-            const effAmt = chosenReq.confirmedAmount??chosenReq.amount;
-            const changed = chosenReq.confirmedAmount!=null && chosenReq.confirmedAmount!==chosenReq.amount;
+            // amount is always the correct total (diesel+cash), use it directly
+            const effAmt = Number(chosenReq.amount||0);
             const truckWarn = chosenReq.truckNo!==truckNo ? `\n⚠ Request was for ${chosenReq.truckNo}, attaching to ${truckNo}` : "";
             const attach = window.confirm(
-              `⛽ Indent #${chosenReq.indentNo} · ${chosenReq.truckNo}\n₹${effAmt.toLocaleString("en-IN")}${changed?" ⚠ (AMOUNT CHANGED AT PUMP)":""}${truckWarn}\n\nAttach to LR ${lrNo} and fill Diesel column?`
+              `⛽ Indent #${chosenReq.indentNo} · ${chosenReq.truckNo}\n₹${effAmt.toLocaleString("en-IN")}${truckWarn}\n\nAttach to LR ${lrNo} and fill Diesel column?`
             );
             if (attach) {
               const updReq = {...chosenReq, status:"attached", tripId:trip.id, lrNo};
@@ -3411,11 +3411,11 @@ Rules:
             }
           }
           if (chosenReq) {
-            const effAmt = chosenReq.confirmedAmount??chosenReq.amount;
-            const changed = chosenReq.confirmedAmount!=null && chosenReq.confirmedAmount!==chosenReq.amount;
+            // amount is always the correct total (diesel+cash), use it directly
+            const effAmt = Number(chosenReq.amount||0);
             const truckWarn = chosenReq.truckNo!==truckNo ? `\n⚠ Request was for ${chosenReq.truckNo}, attaching to ${truckNo}` : "";
             const attach = window.confirm(
-              `⛽ Indent #${chosenReq.indentNo} · ${chosenReq.truckNo}\n₹${effAmt.toLocaleString("en-IN")}${changed?" ⚠ (AMOUNT CHANGED AT PUMP)":""}${truckWarn}\n\nAttach to LR ${lrNo} and fill Diesel column?`
+              `⛽ Indent #${chosenReq.indentNo} · ${chosenReq.truckNo}\n₹${effAmt.toLocaleString("en-IN")}${truckWarn}\n\nAttach to LR ${lrNo} and fill Diesel column?`
             );
             if (attach) {
               const updReq = {...chosenReq, status:"attached", tripId:trip.id, lrNo};
@@ -7115,7 +7115,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       const _gross=(+t.qty||0)*(+t.givenRate||0);
       const _indNo=(t.dieselIndentNo||"").trim();
       const _req=_indNo?(dieselRequests||[]).find(r=>String(r.indentNo)===_indNo):null;
-      const _dsl=_req?(Number(_req.confirmedAmount??_req.dieselAmount??_req.amount??0)+Number(_req.cashAmount||0)):(+t.dieselEstimate||0);
+      const _dsl=_req?(Number(_req.amount||0)):(+t.dieselEstimate||0); // amount is always diesel+cash total
       const _net=_gross-(+t.tafal||0)-(+t.advance||0)-_dsl-(+t.shortageRecovery||0)-(+t.loanRecovery||0)-(+t.pouchBalance||0);
       const _bal=Math.round(_net-_paid);
       if(_bal>0) toCreate.push({id:_autoId,tripId:t.id,truckNo:t.truckNo,
@@ -7750,7 +7750,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                                   const _gross=(+t.qty||0)*(+t.givenRate||0);
                                   const _indNo=(t.dieselIndentNo||"").trim();
                                   const _req=_indNo?(dieselRequests||[]).find(r=>String(r.indentNo)===_indNo):null;
-                                  const _dsl=_req?(Number(_req.confirmedAmount??_req.dieselAmount??_req.amount??0)+Number(_req.cashAmount||0)):(+t.dieselEstimate||0);
+                                  const _dsl=_req?(Number(_req.amount||0)):(+t.dieselEstimate||0); // amount is always diesel+cash total
                                   const _net=_gross-(+t.tafal||0)-(+t.advance||0)-_dsl-(+t.shortageRecovery||0)-(+t.loanRecovery||0)-(+t.pouchBalance||0);
                                   const _bal=Math.round(_net-_paid);
                                   const _autoId=`AUTO-PAY-${t.id}`;
@@ -8719,7 +8719,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
     if(confirmed.length === 1) {
       // Exactly one confirmed request — auto-attach silently
       ff("dieselIndentNo")(String(confirmed[0].indentNo));
-      ff("dieselEstimate")(String(confirmed[0].confirmedAmount ?? confirmed[0].amount));
+      ff("dieselEstimate")(String((confirmed[0].dieselAmount??confirmed[0].amount||0)+(confirmed[0].cashAmount||0)));
     }
     // open (unconfirmed) requests → shown as warning cards, not auto-attached
   }, [f.truckNo]);
@@ -11271,8 +11271,9 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
   const [activeTab,   setActiveTab]   = useState("open");   // open | history | payments
   const [lrSearch,    setLrSearch]    = useState("");
   const [selected,    setSelected]    = useState(null);
-  const [newAmount,   setNewAmount]   = useState("");
-  const [reason,      setReason]      = useState("");
+  const [newDieselAmt, setNewDieselAmt] = useState("");  // editable diesel component
+  const [newCashAmt,   setNewCashAmt]   = useState("");  // editable cash component
+  const [reason,       setReason]       = useState("");
   const [pinEntry,    setPinEntry]    = useState("");
   const [pinError,    setPinError]    = useState(false);
   const [confirmed,   setConfirmed]   = useState(null);
@@ -11304,16 +11305,20 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
     .sort((a,b)=>b.indentNo-a.indentNo);
 
   // Payment summary scoped to this pump
-  const totalIndentAmt  = scopedRequests.filter(r=>r.status==="confirmed"||r.status==="attached").reduce((s,r)=>s+(r.confirmedAmount??r.amount),0);
+  const totalIndentAmt  = scopedRequests.filter(r=>r.status==="confirmed"||r.status==="attached").reduce((s,r)=>s+(r.amount||0),0);
   const totalPaid       = scopedPayments.reduce((s,p)=>s+(+(p.amount)||0),0);
   const pendingAmt      = Math.max(0, totalIndentAmt - totalPaid);
 
   const resetFlow = () => {
-    setSelected(null); setNewAmount(""); setReason("");
+    setSelected(null); setNewDieselAmt(""); setNewCashAmt(""); setReason("");
     setPinEntry(""); setPinError(false); setStep("list");
   };
   const startEdit = (req) => {
-    setSelected(req); setNewAmount(String(req.amount)); setReason("");
+    setSelected(req);
+    // Pre-fill with the current diesel & cash components so pump operator sees exact split
+    setNewDieselAmt(String(req.dieselAmount ?? req.amount));
+    setNewCashAmt(String(req.cashAmount ?? 0));
+    setReason("");
     setPinEntry(""); setPinError(false); setStep("review");
   };
   const keyPress = (k) => {
@@ -11327,18 +11332,34 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
   const validatePin = async (pin) => {
     if(!selected) return;
     if(pin !== selected.pin) { setPinError(true); setPinEntry(""); return; }
-    const effAmt = newAmount && +newAmount > 0 ? +newAmount : selected.amount;
-    const changed = effAmt !== selected.amount;
+    // Resolve confirmed diesel and cash — fall back to original if operator left blank
+    const origDiesel = selected.dieselAmount ?? selected.amount;
+    const origCash   = selected.cashAmount   ?? 0;
+    const confDiesel = newDieselAmt && +newDieselAmt >= 0 ? +newDieselAmt : origDiesel;
+    const confCash   = newCashAmt   && +newCashAmt   >= 0 ? +newCashAmt   : origCash;
+    const confTotal  = confDiesel + confCash;
+    const dieselChanged = confDiesel !== origDiesel;
+    const cashChanged   = confCash   !== origCash;
+    const changed = dieselChanged || cashChanged;
     const updReq = {
-      ...selected, status:"confirmed",
-      confirmedAmount:effAmt,
+      ...selected,
+      status:          "confirmed",
+      dieselAmount:    confDiesel,   // confirmed HSD component
+      cashAmount:      confCash,     // confirmed cash component
+      amount:          confTotal,    // total = diesel + cash (always in sync)
+      confirmedAmount: confDiesel,   // diesel-only stored here for legacy compat
+      confirmedCash:   confCash,     // explicit cash confirmation field
       confirmedReason: changed ? (reason||"Changed at pump") : null,
-      confirmedAt:nowTs(), pin:"****",
+      confirmedAt:     nowTs(),
+      pin:             "****",
+      // Track originals for the "changed" display
+      originalDieselAmount: changed ? origDiesel  : selected.originalDieselAmount,
+      originalCashAmount:   changed ? origCash    : selected.originalCashAmount,
     };
     setDieselRequests(p=>p.map(r=>r.id===selected.id ? updReq : r));
     await DB.saveDieselRequest(updReq);
-    log("PUMP CONFIRM",`Indent #${selected.indentNo} · ${selected.truckNo} · ₹${effAmt}${changed?` (was ₹${selected.amount})`:""}`);
-    setConfirmed({...updReq, changed, originalAmount:selected.amount});
+    log("PUMP CONFIRM",`Indent #${selected.indentNo} · ${selected.truckNo} · Diesel ₹${confDiesel} Cash ₹${confCash} Total ₹${confTotal}${changed?` (was Diesel ₹${origDiesel} Cash ₹${origCash})`:""}`)
+    setConfirmed({...updReq, changed, dieselChanged, cashChanged, origDiesel, origCash});
     setStep("done");
   };
 
@@ -11350,7 +11371,7 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
     if(!rows.length){ alert("No history records in selected date range."); return; }
     const fromLabel = histFrom||"All";
     const toLabel   = histTo  ||"All";
-    const total = rows.reduce((s,r)=>s+(r.confirmedAmount??r.amount),0);
+    const total = rows.reduce((s,r)=>s+(r.amount||0),0);
     const pumpName = assignedPump ? assignedPump.name : "All Pumps";
     const html = `<!DOCTYPE html>
 <html>
@@ -11400,7 +11421,7 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
           <td><b>#${r.indentNo}</b></td>
           <td>${r.truckNo}</td>
           <td>${r.date}</td>
-          <td class="amount">&#8377;${amt.toLocaleString("en-IN")}</td>
+          <td class="amount">&#8377;${(r.amount||0).toLocaleString("en-IN")}</td>
           <td>${r.dieselAmount ? "&#8377;"+r.dieselAmount.toLocaleString("en-IN") : "&#8212;"}</td>
           <td>${r.cashAmount   ? "&#8377;"+r.cashAmount.toLocaleString("en-IN")   : "&#8212;"}</td>
           <td>${r.lrNo||"&#8212;"}</td>
@@ -11522,28 +11543,71 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
                 </div>
               ))}
             </div>
-            <div style={{background:C.orange+"11",border:`2px solid ${C.orange}`,borderRadius:12,padding:"16px",textAlign:"center"}}>
-              <div style={{color:C.orange,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Authorised Amount</div>
-              <div style={{fontWeight:800,fontSize:38,color:C.orange}}>{fmt(selected.amount)}</div>
-              <div style={{color:C.muted,fontSize:12,marginTop:4}}>Fill exactly this amount OR enter actual below if different</div>
-            </div>
-            <div style={{background:C.card,borderRadius:12,padding:"14px 16px",display:"flex",flexDirection:"column",gap:10}}>
-              <div style={{color:C.text,fontWeight:700,fontSize:13}}>⚠ Amount Different? Enter Actual</div>
-              <Field label="Actual Amount Filled (₹)" value={newAmount} onChange={setNewAmount} type="number" placeholder={String(selected.amount)}/>
-              <Field label="Reason for Change" value={reason} onChange={setReason}
-                opts={[
-                  {v:"",           l:"— select reason —"},
-                  {v:"no_cash",    l:"No cash available at pump"},
-                  {v:"partial",    l:"Partial fill only"},
-                  {v:"extra_fill", l:"Extra diesel filled"},
-                  {v:"driver_req", l:"Driver requested change"},
-                  {v:"other",      l:"Other"},
-                ]}/>
-              {newAmount && +newAmount !== selected.amount && !reason && (
-                <div style={{color:C.red,fontSize:12}}>⚠ Select a reason when amount is different</div>
-              )}
-            </div>
-            <Btn onClick={()=>{ if(newAmount && +newAmount !== selected.amount && !reason){alert("Select a reason for the amount change");return;} setStep("pin"); }} full color={C.teal}>
+            {(()=>{
+              const _origDiesel = selected.dieselAmount ?? selected.amount;
+              const _origCash   = selected.cashAmount   ?? 0;
+              const _actDiesel  = newDieselAmt !== "" ? +newDieselAmt : _origDiesel;
+              const _actCash    = newCashAmt   !== "" ? +newCashAmt   : _origCash;
+              const _actTotal   = _actDiesel + _actCash;
+              const _dChanged   = _actDiesel !== _origDiesel;
+              const _cChanged   = _actCash   !== _origCash;
+              const _anyChanged = _dChanged || _cChanged;
+              return (<>
+              {/* Authorised reference: two rows + computed total */}
+              <div style={{background:C.orange+"11",border:`2px solid ${C.orange}`,borderRadius:12,padding:"14px 16px"}}>
+                <div style={{color:C.orange,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Authorised Amount</div>
+                <div style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:`1px solid ${C.orange}22`,fontSize:14}}>
+                  <span style={{color:C.muted}}>⛽ Diesel</span>
+                  <span style={{fontWeight:800,color:C.orange}}>{fmt(_origDiesel)}</span>
+                </div>
+                <div style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:`1px solid ${C.orange}22`,fontSize:14}}>
+                  <span style={{color:C.muted}}>💵 Cash</span>
+                  <span style={{fontWeight:800,color:C.orange}}>{fmt(_origCash)}</span>
+                </div>
+                <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0 0 0",fontSize:15}}>
+                  <span style={{color:C.text,fontWeight:700}}>Total</span>
+                  <span style={{fontWeight:800,fontSize:18,color:C.orange}}>{fmt(_origDiesel+_origCash)}</span>
+                </div>
+                <div style={{color:C.muted,fontSize:11,marginTop:6}}>Fill exactly these amounts OR enter actual below if different</div>
+              </div>
+              {/* Edit fields: diesel + cash separately */}
+              <div style={{background:C.card,borderRadius:12,padding:"14px 16px",display:"flex",flexDirection:"column",gap:10}}>
+                <div style={{color:C.text,fontWeight:700,fontSize:13}}>⚠ Amounts Different? Enter Actual</div>
+                <div style={{display:"flex",gap:10}}>
+                  <div style={{flex:1}}>
+                    <Field label="⛽ Actual Diesel (₹)" value={newDieselAmt} onChange={setNewDieselAmt} type="number" placeholder={String(_origDiesel)}/>
+                  </div>
+                  <div style={{flex:1}}>
+                    <Field label="💵 Actual Cash (₹)" value={newCashAmt} onChange={setNewCashAmt} type="number" placeholder={String(_origCash)}/>
+                  </div>
+                </div>
+                {/* Non-editable computed total */}
+                <div style={{background:C.bg,borderRadius:8,padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <span style={{fontSize:12,color:C.muted,fontWeight:700}}>ACTUAL TOTAL</span>
+                  <span style={{fontSize:18,fontWeight:800,color:_anyChanged?C.orange:C.text}}>{fmt(_actTotal)}</span>
+                </div>
+                <Field label="Reason for Change" value={reason} onChange={setReason}
+                  opts={[
+                    {v:"",           l:"— select reason —"},
+                    {v:"no_cash",    l:"No cash available at pump"},
+                    {v:"partial",    l:"Partial fill only"},
+                    {v:"extra_fill", l:"Extra diesel filled"},
+                    {v:"driver_req", l:"Driver requested change"},
+                    {v:"other",      l:"Other"},
+                  ]}/>
+                {_anyChanged && !reason && (
+                  <div style={{color:C.red,fontSize:12}}>⚠ Select a reason when amount is different</div>
+                )}
+              </div>
+              </>);
+            })()}
+            <Btn onClick={()=>{
+              const _d = newDieselAmt !== "" ? +newDieselAmt : (selected.dieselAmount ?? selected.amount);
+              const _c = newCashAmt   !== "" ? +newCashAmt   : (selected.cashAmount   ?? 0);
+              const _changed = _d !== (selected.dieselAmount ?? selected.amount) || _c !== (selected.cashAmount ?? 0);
+              if(_changed && !reason){alert("Select a reason for the amount change");return;}
+              setStep("pin");
+            }} full color={C.teal}>
               Proceed to Driver PIN Verification →
             </Btn>
           </div>
@@ -11558,15 +11622,36 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
                 <span style={{color:C.muted}}>Indent</span>
                 <span style={{fontWeight:700}}>#{selected.indentNo} · {selected.truckNo}</span>
               </div>
-              <div style={{display:"flex",justifyContent:"space-between",fontSize:14}}>
-                <span style={{color:C.muted}}>Amount</span>
-                <div style={{textAlign:"right"}}>
-                  {newAmount && +newAmount !== selected.amount ? (
-                    <><span style={{color:C.muted,textDecoration:"line-through",fontSize:12,marginRight:6}}>{fmt(selected.amount)}</span>
-                    <span style={{fontWeight:800,color:C.orange,fontSize:16}}>{fmt(+newAmount)}</span></>
-                  ) : <span style={{fontWeight:800,fontSize:16}}>{fmt(selected.amount)}</span>}
-                </div>
-              </div>
+              {(()=>{
+                const _od = selected.dieselAmount ?? selected.amount;
+                const _oc = selected.cashAmount   ?? 0;
+                const _nd = newDieselAmt !== "" ? +newDieselAmt : _od;
+                const _nc = newCashAmt   !== "" ? +newCashAmt   : _oc;
+                const _dc = _nd !== _od;
+                const _cc = _nc !== _oc;
+                return (<>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:3}}>
+                    <span style={{color:C.muted}}>⛽ Diesel</span>
+                    <div style={{textAlign:"right"}}>
+                      {_dc
+                        ? <><span style={{color:C.muted,textDecoration:"line-through",fontSize:11,marginRight:5}}>{fmt(_od)}</span><span style={{fontWeight:800,color:C.orange}}>{fmt(_nd)}</span></>
+                        : <span style={{fontWeight:700}}>{fmt(_nd)}</span>}
+                    </div>
+                  </div>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:3}}>
+                    <span style={{color:C.muted}}>💵 Cash</span>
+                    <div style={{textAlign:"right"}}>
+                      {_cc
+                        ? <><span style={{color:C.muted,textDecoration:"line-through",fontSize:11,marginRight:5}}>{fmt(_oc)}</span><span style={{fontWeight:800,color:C.orange}}>{fmt(_nc)}</span></>
+                        : <span style={{fontWeight:700}}>{fmt(_nc)}</span>}
+                    </div>
+                  </div>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:14,borderTop:`1px solid ${C.border}`,paddingTop:6}}>
+                    <span style={{color:C.text,fontWeight:700}}>Total</span>
+                    <span style={{fontWeight:800,fontSize:16,color:(_dc||_cc)?C.orange:C.text}}>{fmt(_nd+_nc)}</span>
+                  </div>
+                </>);
+              })()}
             </div>
             <div style={{background:C.card,borderRadius:12,padding:"20px 16px",textAlign:"center"}}>
               <div style={{color:C.text,fontWeight:700,fontSize:14,marginBottom:4}}>Driver PIN Required</div>
@@ -11611,10 +11696,14 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
             <div style={{background:C.green+"11",border:`2px solid ${C.green}`,borderRadius:14,padding:"24px 20px",textAlign:"center"}}>
               <div style={{fontSize:44,marginBottom:8}}>✅</div>
               <div style={{fontWeight:800,fontSize:18,color:C.green,marginBottom:4}}>Confirmed & Locked</div>
-              <div style={{fontWeight:800,fontSize:32,color:C.text,marginBottom:8}}>{fmt(confirmed.confirmedAmount)}</div>
+              <div style={{display:"flex",flexDirection:"column",gap:4,marginBottom:8,alignItems:"center"}}>
+                <div style={{fontSize:13,color:C.muted}}>⛽ Diesel: <b style={{color:C.text}}>{fmt(confirmed.dieselAmount)}</b>  {" "}💵 Cash: <b style={{color:C.text}}>{fmt(confirmed.cashAmount)}</b></div>
+                <div style={{fontWeight:800,fontSize:32,color:C.text}}>Total: {fmt(confirmed.amount)}</div>
+              </div>
               {confirmed.changed && (
                 <div style={{color:C.orange,fontSize:13,marginBottom:8}}>
-                  Original: {fmt(confirmed.originalAmount)} → Changed to {fmt(confirmed.confirmedAmount)}
+                  {confirmed.dieselChanged && <div>⛽ Diesel: {fmt(confirmed.origDiesel)} → {fmt(confirmed.dieselAmount)}</div>}
+                  {confirmed.cashChanged   && <div>💵 Cash:   {fmt(confirmed.origCash)}   → {fmt(confirmed.cashAmount)}</div>}
                   {confirmed.confirmedReason && <div style={{color:C.muted,fontSize:12,marginTop:2}}>{confirmed.confirmedReason}</div>}
                 </div>
               )}
@@ -11669,10 +11758,13 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
           )}
 
           {historyRequests.map(req=>{
-            const effAmt = req.confirmedAmount!=null
-              ? req.confirmedAmount+(req.cashAmount||0)
-              : (req.dieselAmount!=null ? req.dieselAmount+(req.cashAmount||0) : req.amount);
-            const changed = req.confirmedAmount!=null && req.confirmedAmount!==req.amount;
+            // amount is always diesel+cash total (kept in sync on every write)
+            const effAmt = req.amount || 0;
+            const origDsl = req.originalDieselAmount;
+            const origCsh = req.originalCashAmount;
+            const dslChanged = origDsl != null && origDsl !== req.dieselAmount;
+            const cshChanged = origCsh != null && origCsh !== req.cashAmount;
+            const changed = dslChanged || cshChanged;
             const statusColor = req.status==="attached"?C.green:req.status==="confirmed"?C.teal:C.orange;
             const p = pumps.find(x=>x.id===req.pumpId);
             return (
@@ -11689,7 +11781,12 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
                         {req.cashAmount   ? <span style={{fontSize:11,color:C.muted}}>💵 <b style={{color:C.text}}>₹{req.cashAmount.toLocaleString("en-IN")}</b></span>   : null}
                       </div>
                     ) : null}
-                    {changed && <div style={{color:C.orange,fontSize:11,marginTop:2}}>⚠ Changed: ₹{req.amount.toLocaleString("en-IN")} → ₹{effAmt.toLocaleString("en-IN")}</div>}
+                    {changed && (
+                      <div style={{color:C.orange,fontSize:11,marginTop:2}}>
+                        {dslChanged && <div>⛽ Diesel: ₹{(origDsl||0).toLocaleString("en-IN")} → ₹{(req.dieselAmount||0).toLocaleString("en-IN")}</div>}
+                        {cshChanged && <div>💵 Cash: ₹{(origCsh||0).toLocaleString("en-IN")} → ₹{(req.cashAmount||0).toLocaleString("en-IN")}</div>}
+                      </div>
+                    )}
                     {req.lrNo && <div style={{color:C.green,fontSize:11,marginTop:2}}>✓ LR {req.lrNo}</div>}
                   </div>
                   <div style={{textAlign:"right",flexShrink:0,marginLeft:10}}>
@@ -13064,10 +13161,13 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
             }).sort((a,b)=>b.indentNo-a.indentNo).map(req=>{
               const pump    = pumps.find(p=>p.id===req.pumpId);
               const statusColor = req.status==="attached"?(req.confirmedAmount!=null?C.green:"#d97706"):req.status==="confirmed"?C.teal:C.orange;
-              const effAmt  = req.confirmedAmount!=null
-                ? req.confirmedAmount+(req.cashAmount||0)
-                : (req.dieselAmount!=null ? req.dieselAmount+(req.cashAmount||0) : req.amount);
-              const changed = req.confirmedAmount!=null && req.confirmedAmount!==req.amount;
+              // amount is always diesel+cash total
+              const effAmt  = req.amount || 0;
+              const _origDsl = req.originalDieselAmount;
+              const _origCsh = req.originalCashAmount;
+              const _dslChg = _origDsl != null && _origDsl !== req.dieselAmount;
+              const _cshChg = _origCsh != null && _origCsh !== req.cashAmount;
+              const changed = _dslChg || _cshChg;
               const isEditing = editReqId===req.id;
               const canEditReq = (user.role==="owner"||user.role==="fleet_manager"||user.role==="manager") && req.status==="open";
               return (
@@ -13099,11 +13199,20 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                       {req.status==="confirmed" && (
                         <div style={{color:C.teal,fontSize:11,marginTop:2}}>
                           ✓ Confirmed by pump — PIN invalidated
-                          {req.confirmedAmount!=null && req.confirmedAmount!==req.amount && (
-                            <span style={{color:C.orange,fontWeight:700,marginLeft:6}}>
-                              ⚠ Amount changed: ₹{req.amount.toLocaleString("en-IN")} → ₹{req.confirmedAmount.toLocaleString("en-IN")}
-                              {req.confirmedReason?` (${req.confirmedReason})`:""}
-                            </span>
+                          {(req.originalDieselAmount!=null||req.originalCashAmount!=null) && (
+                            <div style={{marginTop:2}}>
+                              {req.originalDieselAmount!=null && req.originalDieselAmount!==req.dieselAmount && (
+                                <span style={{color:C.orange,fontWeight:700,marginRight:8}}>
+                                  ⚠ Diesel: ₹{(req.originalDieselAmount||0).toLocaleString("en-IN")} → ₹{(req.dieselAmount||0).toLocaleString("en-IN")}
+                                </span>
+                              )}
+                              {req.originalCashAmount!=null && req.originalCashAmount!==req.cashAmount && (
+                                <span style={{color:C.orange,fontWeight:700}}>
+                                  💵 Cash: ₹{(req.originalCashAmount||0).toLocaleString("en-IN")} → ₹{(req.cashAmount||0).toLocaleString("en-IN")}
+                                </span>
+                              )}
+                              {req.confirmedReason && <span style={{color:C.muted,fontWeight:400,marginLeft:4}}>({req.confirmedReason})</span>}
+                            </div>
                           )}
                         </div>
                       )}
@@ -13113,8 +13222,8 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                       {req.status==="reconciled" && (
                         <div style={{color:C.purple,fontSize:11,marginTop:2,fontWeight:700}}>
                           🔍 Reconciled via pump statement
-                          {req.reconciledAt&&<span style={{fontWeight:400,color:C.muted}}> � {req.reconciledAt.slice(0,10)}</span>}
-                          {req.amountNote&&<span style={{color:C.orange,fontWeight:400}}> � {req.amountNote}</span>}
+                          {req.reconciledAt&&<span style={{fontWeight:400,color:C.muted}}> � {req.reconciledAt.slice(0,10)}</span>}
+                          {req.amountNote&&<span style={{color:C.orange,fontWeight:400}}> � {req.amountNote}</span>}
                         </div>
                       )}
                       {req.status==="attached" && req.confirmedAmount==null && (
@@ -13131,7 +13240,13 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                       )}
                       {(changed||req.amountNote) && (
                         <div style={{color:C.orange,fontSize:11,marginTop:2}}>
-                          ⚠ {req.amountNote||`Changed: ₹${req.amount.toLocaleString("en-IN")} → ₹${req.confirmedAmount.toLocaleString("en-IN")}`}
+                          {req.amountNote
+                            ? <span>⚠ {req.amountNote}</span>
+                            : <>
+                                {_dslChg && <div>⛽ Diesel: ₹{(_origDsl||0).toLocaleString("en-IN")} → ₹{(req.dieselAmount||0).toLocaleString("en-IN")}</div>}
+                                {_cshChg && <div>💵 Cash: ₹{(_origCsh||0).toLocaleString("en-IN")} → ₹{(req.cashAmount||0).toLocaleString("en-IN")}</div>}
+                              </>
+                          }
                         </div>
                       )}
                     </div>
@@ -13493,37 +13608,86 @@ This was already dispensed — only delete if it was recorded in error.`;
             const m=[...prev]; const e=m[idx]; if(!e) return prev;
             const totalDiff=(e.hsdDiff||0)+(e.advDiff||0);
             if(action==="confirm_pin"){
-              const amt=extra.amount||Number(e.app?.confirmedAmount??e.app?.amount??0);
-              const upd={...e.app,status:"confirmed",confirmed:true,confirmedAmount:amt,confirmedAt:nowTs(),pin:"****"};
+              // extra may carry {diesel, cash} from pump data; fall back to app values
+              const _confDiesel = extra.diesel != null ? Number(extra.diesel) : Number(e.app?.dieselAmount ?? e.app?.amount ?? 0);
+              const _confCash   = extra.cash   != null ? Number(extra.cash)   : Number(e.app?.cashAmount ?? 0);
+              const _confTotal  = _confDiesel + _confCash;
+              const _origDiesel = e.app?.dieselAmount ?? e.app?.amount ?? 0;
+              const _origCash   = e.app?.cashAmount   ?? 0;
+              const _anyChg     = _confDiesel !== _origDiesel || _confCash !== _origCash;
+              const upd={
+                ...e.app, status:"confirmed", confirmed:true,
+                dieselAmount:    _confDiesel,
+                cashAmount:      _confCash,
+                amount:          _confTotal,
+                confirmedAmount: _confDiesel,
+                confirmedCash:   _confCash,
+                confirmedAt:     nowTs(), pin:"****",
+                originalDieselAmount: _anyChg ? _origDiesel : e.app?.originalDieselAmount,
+                originalCashAmount:   _anyChg ? _origCash   : e.app?.originalCashAmount,
+              };
               setDieselRequests(p=>p.map(r=>r.id===e.app.id?upd:r));
               DB.saveDieselRequest(upd).catch(()=>{});
-              log("PUMP CONFIRM",`Recon: #${e.app.indentNo} confirmed Rs.${amt}`);
-              m[idx]={...e,app:upd,cat:getReqCat(upd),resolution:"confirmed",resolvedNote:`Confirmed Rs.${amt}`};
+              log("PUMP CONFIRM",`Recon: #${e.app.indentNo} Diesel ₹${_confDiesel} Cash ₹${_confCash} Total ₹${_confTotal}`);
+              m[idx]={...e,app:upd,cat:getReqCat(upd),resolution:"confirmed",resolvedNote:`Confirmed ₹${_confTotal}`};
             } else if(action==="attach_lr"){
               const trip=(trips||[]).find(t=>t.lrNo===extra.lrNo); if(!trip) return prev;
               const upd={...e.app,lrNo:extra.lrNo,tripId:trip.id,status:"attached"};
               setDieselRequests(p=>p.map(r=>r.id===e.app.id?upd:r));
               DB.saveDieselRequest(upd).catch(()=>{});
-              const updTrip={...trip,dieselIndentNo:String(e.app.indentNo)};
+              // Use app's indentNo (not pump's), update dieselEstimate = diesel + cash
+              const _attDiesel = Number(upd.dieselAmount ?? upd.amount ?? 0);
+              const _attCash   = Number(upd.cashAmount   ?? 0);
+              const updTrip={...trip, dieselIndentNo:String(e.app.indentNo), dieselEstimate:_attDiesel+_attCash};
               setTrips(p=>p.map(t=>t.id===trip.id?updTrip:t));
               DB.saveTrip(updTrip).catch(()=>{});
-              log("RECON ATTACH",`#${e.app.indentNo} -> LR ${extra.lrNo}`);
-              m[idx]={...e,app:upd,trip,cat:getReqCat(upd),resolution:"attached",resolvedNote:`LR ${extra.lrNo}`};
+              log("RECON ATTACH",`#${e.app.indentNo} -> LR ${extra.lrNo} | dieselEst ₹${_attDiesel+_attCash}`);
+              m[idx]={...e,app:upd,trip:updTrip,cat:getReqCat(upd),resolution:"attached",resolvedNote:`LR ${extra.lrNo}`};
             } else if(action==="update_amounts"){
               const newH=extra.hsd||0; const newA=extra.advance||0;
-              const upd={...e.app,amount:newH+newA,dieselAmount:newH,confirmedAmount:newH,cashAmount:newA};
+              const _oldDiesel = e.app?.dieselAmount ?? e.app?.amount ?? 0;
+              const _oldCash   = e.app?.cashAmount   ?? 0;
+              const _rcChanged = newH !== _oldDiesel || newA !== _oldCash;
+              const upd={
+                ...e.app,
+                amount:          newH+newA,
+                dieselAmount:    newH,
+                cashAmount:      newA,
+                confirmedAmount: newH,
+                confirmedCash:   newA,
+                originalDieselAmount: _rcChanged ? _oldDiesel : e.app?.originalDieselAmount,
+                originalCashAmount:   _rcChanged ? _oldCash   : e.app?.originalCashAmount,
+              };
               setDieselRequests(p=>p.map(r=>r.id===e.app.id?upd:r));
               DB.saveDieselRequest(upd).catch(()=>{});
-              log("RECON UPDATE",`#${e.app.indentNo} amounts updated`);
-              m[idx]={...e,app:upd,hsdDiff:0,advDiff:0,resolution:"updated",resolvedNote:`Rs.${newH+newA} (HSD ${newH}+Adv ${newA})`};
+              // Also update linked trip's dieselEstimate
+              if(e.trip){
+                const updTrip={...e.trip, dieselEstimate:newH+newA};
+                setTrips(p=>p.map(t=>t.id===e.trip.id?updTrip:t));
+                DB.saveTrip(updTrip).catch(()=>{});
+              }
+              log("RECON UPDATE",`#${e.app.indentNo} Diesel ₹${newH} Cash ₹${newA} Total ₹${newH+newA}`);
+              m[idx]={...e,app:upd,hsdDiff:0,advDiff:0,resolution:"updated",resolvedNote:`₹${newH+newA} (HSD ${newH}+Adv ${newA})`};
             } else if(action==="adjust_trip"){
               const trip=e.trip; if(!trip||trip.driverSettled) return prev;
               const newHSD=(e.pump?.hsd||0); const newAdv=(e.pump?.advance||0);
               const newD=newHSD+newAdv;
-              // Update diesel REQUEST (source of truth)
               if(e.app){
-                const updReq={...e.app, amount:newD, dieselAmount:newHSD, confirmedAmount:newHSD, cashAmount:newAdv,
-                  confirmedReason:"pump_reconciled", reconciledAt:nowTs()};
+                const _oldDsl = e.app.dieselAmount ?? e.app.amount ?? 0;
+                const _oldCsh = e.app.cashAmount   ?? 0;
+                const _adjChg = newHSD !== _oldDsl || newAdv !== _oldCsh;
+                const updReq={
+                  ...e.app,
+                  amount:          newD,
+                  dieselAmount:    newHSD,
+                  cashAmount:      newAdv,
+                  confirmedAmount: newHSD,
+                  confirmedCash:   newAdv,
+                  confirmedReason: "pump_reconciled",
+                  reconciledAt:    nowTs(),
+                  originalDieselAmount: _adjChg ? _oldDsl : e.app?.originalDieselAmount,
+                  originalCashAmount:   _adjChg ? _oldCsh : e.app?.originalCashAmount,
+                };
                 setDieselRequests(p=>p.map(r=>r.id===e.app.id?updReq:r));
                 DB.saveDieselRequest(updReq).catch(()=>{});
               }
@@ -13693,25 +13857,60 @@ This was already dispensed — only delete if it was recorded in error.`;
               pumpTotal:savedItem.pump_total, appTotal:savedItem.app_total, complete:true};
             await applyReconEntry(m);
           } else if(action==="confirm_pin") {
-            const amt=extra.amount||Number(a?.confirmedAmount??a?.amount??0);
-            const upd={...a,status:"confirmed",confirmed:true,confirmedAmount:amt,confirmedAt:nowTs(),pin:"****"};
+            const _cD = extra.diesel != null ? Number(extra.diesel) : Number(a?.dieselAmount ?? a?.amount ?? 0);
+            const _cC = extra.cash   != null ? Number(extra.cash)   : Number(a?.cashAmount ?? 0);
+            const _cT = _cD + _cC;
+            const _odD = a?.dieselAmount ?? a?.amount ?? 0;
+            const _odC = a?.cashAmount   ?? 0;
+            const _sc  = _cD !== _odD || _cC !== _odC;
+            const upd={
+              ...a, status:"confirmed", confirmed:true,
+              dieselAmount:    _cD, cashAmount:_cC, amount:_cT,
+              confirmedAmount: _cD, confirmedCash:_cC,
+              confirmedAt:nowTs(), pin:"****",
+              originalDieselAmount: _sc ? _odD : a?.originalDieselAmount,
+              originalCashAmount:   _sc ? _odC : a?.originalCashAmount,
+            };
             setDieselRequests(pp=>pp.map(r=>r.id===a.id?upd:r));
             DB.saveDieselRequest(upd).catch(()=>{});
-            log("PUMP CONFIRM",`Saved recon #${a?.indentNo} confirmed Rs.${amt}`);
+            log("PUMP CONFIRM",`Saved recon #${a?.indentNo} Diesel ₹${_cD} Cash ₹${_cC} Total ₹${_cT}`);
           } else if(action==="attach_lr") {
             const t=(trips||[]).find(t=>t.lrNo===extra.lrNo); if(!t) return;
             const upd={...a,lrNo:extra.lrNo,tripId:t.id,status:"attached"};
             setDieselRequests(pp=>pp.map(r=>r.id===a.id?upd:r));
             DB.saveDieselRequest(upd).catch(()=>{});
-            const updTrip={...t,dieselIndentNo:String(a?.indentNo)};
+            const _saDiesel = Number(upd.dieselAmount ?? upd.amount ?? 0);
+            const _saCash   = Number(upd.cashAmount   ?? 0);
+            const updTrip={...t, dieselIndentNo:String(a?.indentNo), dieselEstimate:_saDiesel+_saCash};
             setTrips(pp=>pp.map(tt=>tt.id===t.id?updTrip:tt));
             DB.saveTrip(updTrip).catch(()=>{});
-            log("RECON ATTACH",`Saved #${a?.indentNo} -> LR ${extra.lrNo}`);
+            log("RECON ATTACH",`Saved #${a?.indentNo} -> LR ${extra.lrNo} | dieselEst ₹${_saDiesel+_saCash}`);
           } else if(action==="update_amounts") {
-            const upd={...a,amount:extra.hsd||a?.amount,cashAmount:extra.advance||0};
+            const _uH = extra.hsd  != null ? Number(extra.hsd)  : Number(a?.dieselAmount ?? a?.amount ?? 0);
+            const _uA = extra.cash != null ? Number(extra.cash) : Number(a?.cashAmount   ?? 0);
+            const _uT = _uH + _uA;
+            const _uOldD = a?.dieselAmount ?? a?.amount ?? 0;
+            const _uOldC = a?.cashAmount   ?? 0;
+            const _uChg  = _uH !== _uOldD || _uA !== _uOldC;
+            const upd={
+              ...a,
+              amount:          _uT,
+              dieselAmount:    _uH,
+              cashAmount:      _uA,
+              confirmedAmount: _uH,
+              confirmedCash:   _uA,
+              originalDieselAmount: _uChg ? _uOldD : a?.originalDieselAmount,
+              originalCashAmount:   _uChg ? _uOldC : a?.originalCashAmount,
+            };
             setDieselRequests(pp=>pp.map(r=>r.id===a.id?upd:r));
             DB.saveDieselRequest(upd).catch(()=>{});
-            log("RECON UPDATE",`Saved #${a?.indentNo} amounts updated`);
+            // Backfill trip dieselEstimate
+            if(trip){
+              const updTrip={...trip, dieselEstimate:_uT};
+              setTrips(pp=>pp.map(tt=>tt.id===trip.id?updTrip:tt));
+              DB.saveTrip(updTrip).catch(()=>{});
+            }
+            log("RECON UPDATE",`Saved #${a?.indentNo} Diesel ₹${_uH} Cash ₹${_uA} Total ₹${_uT}`);
           } else if(action==="adjust_trip") {
             if(!trip||trip.driverSettled) return;
             const newD=(p?.hsd||0)+(p?.advance||0);
@@ -13881,7 +14080,7 @@ This was already dispensed — only delete if it was recorded in error.`;
                           </button>
                         )}
                         {m.app&&(m.hsdDiff!==0||m.advDiff!==0)&&!cs.editAmts&&(
-                          <button onClick={()=>setCS(idx,{editAmts:true,editHsd:String(m.app?.amount||""),editAdv:String(m.app?.cashAmount||"0")})}
+                          <button onClick={()=>setCS(idx,{editAmts:true,editHsd:String(m.app?.dieselAmount??m.app?.amount||""),editAdv:String(m.app?.cashAmount||"0")})}
                             style={{fontSize:10,fontWeight:700,background:C.orange+"22",color:C.orange,border:`1px solid ${C.orange}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
                             Update Amounts
                           </button>
