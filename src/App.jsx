@@ -9092,7 +9092,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
               const _liveEst = _req ? Number(_req.amount||0) : (+f.dieselEstimate||0); // amount is always diesel+cash total
               return (<>
                 <span>{_liveEst>0?("₹"+_liveEst.toLocaleString("en-IN")):"—"}</span>
-                <span style={{fontSize:10,color:C.muted}}>From indent{_req&&_hsd>0&&_adv>0&&<span style={{marginLeft:4,color:C.teal}}>(⛽+💵)</span>}</span>
+                <span style={{fontSize:10,color:C.muted}}>From indent{_req&&(_req.dieselAmount||0)>0&&(_req.cashAmount||0)>0&&<span style={{marginLeft:4,color:C.teal}}>(⛽+💵)</span>}</span>
               </>);
             })()}
           </div>
