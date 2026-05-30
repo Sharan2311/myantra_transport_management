@@ -2765,7 +2765,7 @@ Rules:
         .filter(r => r.truckNo===truckNo && r.status==="confirmed" && (r.date||"")>=_4daysAgo);
       const autoReqG = confirmedReqsG.length >= 1 ? confirmedReqsG[0] : null;
       const autoIndentNo = autoReqG ? String(autoReqG.indentNo) : "";
-      const autoDiesel   = autoReqG ? String((autoReqG.dieselAmount??autoReqG.amount||0)+(autoReqG.cashAmount||0)) : "0";
+      const autoDiesel   = autoReqG ? String(((autoReqG.dieselAmount??autoReqG.amount)||0)+(autoReqG.cashAmount||0)) : "0";
       return {
         id: uid(),
         truckNo,
@@ -2826,7 +2826,7 @@ Rules:
         const solo = {
           id:uid(), truckNo:g.truckNo, diIds:[itemId],
           client:g.client, tafal:g.tafal,
-          diesel: autoReqS ? String((autoReqS.dieselAmount??autoReqS.amount||0)+(autoReqS.cashAmount||0)) : "0",
+          diesel: autoReqS ? String(((autoReqS.dieselAmount??autoReqS.amount)||0)+(autoReqS.cashAmount||0)) : "0",
           dieselIndentNo: autoReqS ? String(autoReqS.indentNo) : "",
           advance:"0", cashEmpId:"",
           shortageRecovery:String(autoSR2), loanRecovery:String(autoLR2),
@@ -8719,7 +8719,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
     if(confirmed.length === 1) {
       // Exactly one confirmed request — auto-attach silently
       ff("dieselIndentNo")(String(confirmed[0].indentNo));
-      ff("dieselEstimate")(String((confirmed[0].dieselAmount??confirmed[0].amount||0)+(confirmed[0].cashAmount||0)));
+      ff("dieselEstimate")(String(((confirmed[0].dieselAmount??confirmed[0].amount)||0)+(confirmed[0].cashAmount||0)));
     }
     // open (unconfirmed) requests → shown as warning cards, not auto-attached
   }, [f.truckNo]);
@@ -14080,7 +14080,7 @@ This was already dispensed — only delete if it was recorded in error.`;
                           </button>
                         )}
                         {m.app&&(m.hsdDiff!==0||m.advDiff!==0)&&!cs.editAmts&&(
-                          <button onClick={()=>setCS(idx,{editAmts:true,editHsd:String(m.app?.dieselAmount??m.app?.amount||""),editAdv:String(m.app?.cashAmount||"0")})}
+                          <button onClick={()=>setCS(idx,{editAmts:true,editHsd:String((m.app?.dieselAmount??m.app?.amount)||""),editAdv:String(m.app?.cashAmount||"0")})}
                             style={{fontSize:10,fontWeight:700,background:C.orange+"22",color:C.orange,border:`1px solid ${C.orange}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
                             Update Amounts
                           </button>
