@@ -2679,7 +2679,11 @@ Rules:
           ? {...x, status:"done", extracted:{...extracted, client: extracted.client || client},
               orderType: extracted._autoOrderType || "godown",
               ownerName: ((vehicles||[]).find(v=>v.truckNo===(extracted.truckNo||"").toUpperCase().replace(/\s/g,""))?.ownerName) || extracted.ownerName || "",
-              pouchBalance: extracted._autoOrderType === "party" ? 700 : 0,
+              pouchBalance: (() => {
+                if(extracted._autoOrderType !== "party") return 0;
+                const _pVeh = (vehicles||[]).find(v=>v.truckNo===(extracted.truckNo||"").toUpperCase().trim());
+                return _pVeh?.pouchExempt ? 0 : 700;
+              })(),
               partyDriverPhone: "",  // driver phone is manual entry
               partyName: extracted._partyName || "",
               partyNumber: extracted._partyPhone || "",  // party phone auto-fills party number
@@ -2774,6 +2778,7 @@ Rules:
         tafal: (() => {
           const gVehT = (vehicles||[]).find(v=>v.truckNo===truckNo);
           if(gVehT?.tafalExempt) return "0";
+          if(gVehT?.tafalOverride!=null) return String(gVehT.tafalOverride);
           return String(settings?.tafalPerTrip||300);
         })(),
         diesel: autoDiesel,
@@ -3138,7 +3143,11 @@ Rules:
           salesOfficerEmail: item.salesOfficerEmail || "",
           partyNumber: item.partyNumber || "",
           partyName: item.partyName || item.extracted?._partyName || "",
-          pouchBalance: item.orderType==="party" ? (item.pouchBalance||700) : 0,
+          pouchBalance: (() => {
+            if(item.orderType!=="party") return 0;
+            const _pVeh2 = (vehicles||[]).find(v=>v.truckNo===truckNo);
+            return _pVeh2?.pouchExempt ? 0 : (item.pouchBalance||700);
+          })(),
           grParticulars: item.extracted?._grParticulars || null,
           createdBy:user.username, createdAt:nowTs(),
         };
@@ -3188,7 +3197,8 @@ Rules:
             // Warn if attaching unconfirmed (open) indent
             let doAttach = true;
             if (preReq.status === "open") {
-              doAttach = window.confirm(`⚠ Indent #${preReq.indentNo} is UNCONFIRMED by pump.\n\nAttach anyway to LR ${lrNo}?`);
+              alert(`⚠ Indent #${preReq.indentNo} is not yet confirmed by pump.\n\nAsk the pump operator to confirm it first, then re-save this trip.`);
+              doAttach = false;
             }
             if (doAttach) {
               const updPreReq = {...preReq, status:"attached", tripId:trip.id, lrNo};
@@ -3207,15 +3217,15 @@ Rules:
           if (!truckMatch) {
             // Also check older/open requests for manual owner override
             // Show truck-specific indents first; only fall back to other trucks if none found
-            const sametruckUnattached = (dieselRequests||[]).filter(r => (r.status==="open"||r.status==="confirmed") && r.truckNo===truckNo);
+            const sametruckUnattached = (dieselRequests||[]).filter(r => r.status==="confirmed" && r.truckNo===truckNo);
             const allUnattached = sametruckUnattached.length > 0
               ? sametruckUnattached
-              : (dieselRequests||[]).filter(r => r.status==="open" || r.status==="confirmed");
+              : (dieselRequests||[]).filter(r => r.status==="confirmed");
             const isOtherTruckFallback = sametruckUnattached.length === 0;
             if (allUnattached.length > 0) {
               const listStr = allUnattached.map(r=>{
                 const age = Math.floor((Date.now()-new Date(r.date||0).getTime())/86400000);
-                const warn = r.status==="open"?" ⚠UNCONFIRMED":"";
+                const warn = ""; // only confirmed shown
                 const old = age>4?" ⚠OLD("+age+"d)":"";
                 const truckLabel = r.truckNo!==truckNo ? ` [OTHER TRUCK: ${r.truckNo}]` : "";
                 return `  #${r.indentNo} · ${r.truckNo} · ₹${(r.confirmedAmount??r.amount).toLocaleString("en-IN")}${warn}${old}${truckLabel}`;
@@ -3230,9 +3240,7 @@ Rules:
                 const selNo = parseInt(sel.trim(), 10);
                 chosenReq = allUnattached.find(r => r.indentNo===selNo);
                 if (!chosenReq) alert(`No request found with Indent #${selNo}.`);
-                else if (chosenReq.status==="open") {
-                  if (!window.confirm(`⚠ Indent #${selNo} is UNCONFIRMED (pump has not verified).\n\nAre you sure you want to attach it?`)) chosenReq = null;
-                }
+
               }
             }
           }
@@ -3356,7 +3364,12 @@ Rules:
           salesOfficerEmail: (groupItems.find(x=>x.orderType==="party")?.salesOfficerEmail) || primary.salesOfficerEmail || "",
           partyNumber: (groupItems.find(x=>x.orderType==="party")?.partyNumber) || primary.partyNumber || "",
           partyName: (groupItems.find(x=>x.orderType==="party")?.partyName) || primary.partyName || primary.extracted?._partyName || "",
-          pouchBalance: diLines.some(d=>d.orderType==="party") ? ((groupItems.find(x=>x.orderType==="party")?.pouchBalance)??700) : 0,
+          pouchBalance: (() => {
+            if(!diLines.some(d=>d.orderType==="party")) return 0;
+            const _pVeh3 = (vehicles||[]).find(v=>v.truckNo===truckNo);
+            if(_pVeh3?.pouchExempt) return 0;
+            return (groupItems.find(x=>x.orderType==="party")?.pouchBalance)??700;
+          })(),
           grParticulars: primary.extracted?._grParticulars || null,
           createdBy:user.username, createdAt:nowTs(),
         };
@@ -3381,15 +3394,15 @@ Rules:
           let chosenReq = truckMatch;
           if (!truckMatch) {
             // Show truck-specific indents first; only fall back to other trucks if none found
-            const sametruckUnattached = (dieselRequests||[]).filter(r => (r.status==="open"||r.status==="confirmed") && r.truckNo===truckNo);
+            const sametruckUnattached = (dieselRequests||[]).filter(r => r.status==="confirmed" && r.truckNo===truckNo);
             const allUnattached = sametruckUnattached.length > 0
               ? sametruckUnattached
-              : (dieselRequests||[]).filter(r => r.status==="open" || r.status==="confirmed");
+              : (dieselRequests||[]).filter(r => r.status==="confirmed");
             const isOtherTruckFallback = sametruckUnattached.length === 0;
             if (allUnattached.length > 0) {
               const listStr = allUnattached.map(r=>{
                 const age = Math.floor((Date.now()-new Date(r.date||0).getTime())/86400000);
-                const warn = r.status==="open"?" ⚠UNCONFIRMED":"";
+                const warn = ""; // only confirmed shown
                 const old = age>4?" ⚠OLD("+age+"d)":"";
                 const truckLabel = r.truckNo!==truckNo ? ` [OTHER TRUCK: ${r.truckNo}]` : "";
                 return `  #${r.indentNo} · ${r.truckNo} · ₹${(r.confirmedAmount??r.amount).toLocaleString("en-IN")}${warn}${old}${truckLabel}`;
@@ -3404,9 +3417,7 @@ Rules:
                 const selNo = parseInt(sel.trim(), 10);
                 chosenReq = allUnattached.find(r => r.indentNo===selNo);
                 if (!chosenReq) alert(`No request found with Indent #${selNo}.`);
-                else if (chosenReq.status==="open") {
-                  if (!window.confirm(`⚠ Indent #${selNo} is UNCONFIRMED (pump has not verified).\n\nAre you sure you want to attach it?`)) chosenReq = null;
-                }
+
               }
             }
           }
@@ -3741,8 +3752,10 @@ Rules:
                             <select value={item.orderType||"godown"}
                               onChange={e=>{
                                 updateItem(item.id,"orderType",e.target.value);
-                                if(e.target.value==="party") updateItem(item.id,"pouchBalance",700);
-                                else updateItem(item.id,"pouchBalance",0);
+                                if(e.target.value==="party") {
+                                  const _pv = (vehicles||[]).find(v=>v.truckNo===(g.truckNo||"").toUpperCase().trim());
+                                  updateItem(item.id,"pouchBalance",_pv?.pouchExempt?0:700);
+                                } else updateItem(item.id,"pouchBalance",0);
                               }}
                               style={{width:"100%",background:C.card,border:`1.5px solid ${C.border}`,
                                 borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none"}}>
@@ -4139,7 +4152,7 @@ Rules:
                 // Unattached requests for this truck (not yet on any LR)
                 const availReqs = (dieselRequests||[]).filter(r=>
                   r.truckNo===g.truckNo &&
-                  (r.status==="confirmed"||r.status==="open") &&
+                  r.status==="confirmed" &&  // only confirmed requests can be attached
                   !r.tripId && !r.lrNo
                 );
                 const alreadyAttached = displayReq != null;
@@ -4217,7 +4230,7 @@ Rules:
                       const lev=(a,b)=>{const m=a.length,n=b.length,dp=Array.from({length:m+1},(_,i)=>Array.from({length:n+1},(_,j)=>i?j?0:i:j));for(let i=1;i<=m;i++)for(let j=1;j<=n;j++)dp[i][j]=a[i-1]===b[j-1]?dp[i-1][j-1]:1+Math.min(dp[i-1][j],dp[i][j-1],dp[i-1][j-1]);return dp[m][n];};
                       const trk = g.truckNo.toUpperCase();
                       const fuzzy = (dieselRequests||[]).filter(r=>
-                        (r.status==="confirmed"||r.status==="open") && !r.tripId && !r.lrNo &&
+                        r.status==="confirmed" && !r.tripId && !r.lrNo &&  // only confirmed
                         r.truckNo!==trk && lev(r.truckNo,trk)<=2
                       ).slice(0,3);
                       if(!fuzzy.length) return null;
@@ -6728,7 +6741,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     if (t.dieselIndentNo && typeof setDieselRequests === "function") {
       const indentNo = parseInt(t.dieselIndentNo, 10);
       const matchReq = (dieselRequests||[]).find(r =>
-        r.indentNo === indentNo && (r.status==="open" || r.status==="confirmed")
+        r.indentNo === indentNo && r.status==="confirmed" // only confirmed requests can attach
       );
       if (matchReq) {
         const updReq = {...matchReq, status:"attached", tripId:t.id, lrNo:t.lrNo||""};
@@ -6835,7 +6848,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     if (editSheet.dieselIndentNo?.trim() && typeof setDieselRequests === "function") {
       const indentNo = parseInt(editSheet.dieselIndentNo.trim(), 10);
       const matchReq = (dieselRequests||[]).find(r =>
-        r.indentNo === indentNo && (r.status==="open" || r.status==="confirmed")
+        r.indentNo === indentNo && r.status==="confirmed" // only confirmed requests can attach
       );
       if (matchReq) {
         const updReq = {...matchReq, status:"attached", tripId:editSheet.id, lrNo:editSheet.lrNo||""};
@@ -9137,12 +9150,11 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
             </div>
           </div>
         );
-        // Include open/confirmed requests + the already-attached one (if any)
+        // Only confirmed + already-attached requests can interact with trips
         const allOpen = (dieselRequests||[]).filter(r=>
-          r.status==="open" || r.status==="confirmed" ||
+          r.status==="confirmed" ||
           (r.status==="attached" && val && String(r.indentNo)===val)
         );
-        // Requests for this truck — only unattached (or currently attached to this trip)
         const truckReqs = (dieselRequests||[])
           .filter(r=>r.truckNo===truck && (
             r.status==="open" || r.status==="confirmed" ||
@@ -9244,40 +9256,22 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
               </div>
             )}
 
-            {/* ── Pending (open/unconfirmed) requests — warning + explicit override ── */}
-            {truckReqs.filter(r=>r.status==="open").map(r=>{
-              const isSel = val===String(r.indentNo);
-              return (
-                <div key={r.id} style={{background:"#fffbeb",border:`1.5px solid ${C.orange}`,
-                  borderRadius:8,padding:"10px 12px",fontSize:12}}>
-                  <div style={{fontWeight:800,color:C.orange,marginBottom:4}}>
-                    ⚠ Pending — not yet confirmed by pump
-                  </div>
-                  <div style={{color:C.muted,fontSize:11,marginBottom:6}}>
-                    Indent #{r.indentNo} · ₹{r.amount.toLocaleString("en-IN")}
-                    {" · PIN: "}<b style={{fontFamily:"monospace",letterSpacing:2,color:C.orange}}>{r.pin!=="****"?r.pin:"—"}</b>
-                  </div>
-                  <div style={{fontSize:11,color:"#92400e",marginBottom:8,lineHeight:1.5}}>
-                    Pump operator hasn't confirmed this yet. Ask the driver to share the PIN.<br/>
-                    <b>Recommended: wait for confirmation before attaching.</b>
-                  </div>
-                  <div style={{display:"flex",gap:8}}>
-                    <button onClick={()=>isSel?clearReq():attachReq(r)}
-                      style={{flex:1,padding:"7px 0",borderRadius:7,fontWeight:700,fontSize:11,
-                        cursor:"pointer",border:`1.5px solid ${C.orange}`,
-                        background:isSel?C.orange:"transparent",color:isSel?"#fff":C.orange}}>
-                      {isSel?"✕ Remove":"Attach (unconfirmed)"}
-                    </button>
-                  </div>
-                  {isSel && (
-                    <div style={{marginTop:6,background:C.orange+"11",borderRadius:6,padding:"5px 8px",
-                      fontSize:10,color:"#92400e",fontWeight:600}}>
-                      Status will be saved as "Attached without pump confirmation"
-                    </div>
-                  )}
+            {/* ── Pending (open/unconfirmed) requests — info only, cannot attach ── */}
+            {truckReqs.filter(r=>r.status==="open").map(r=>(
+              <div key={r.id} style={{background:"#fffbeb",border:`1.5px solid ${C.orange}`,
+                borderRadius:8,padding:"10px 12px",fontSize:12}}>
+                <div style={{fontWeight:800,color:C.orange,marginBottom:4}}>
+                  ⚠ Pending — awaiting pump confirmation
                 </div>
-              );
-            })}
+                <div style={{color:C.muted,fontSize:11,marginBottom:4}}>
+                  Indent #{r.indentNo} · ₹{r.amount.toLocaleString("en-IN")}
+                  {" · PIN: "}<b style={{fontFamily:"monospace",letterSpacing:2,color:C.orange}}>{r.pin!=="****"?r.pin:"—"}</b>
+                </div>
+                <div style={{fontSize:11,color:"#92400e",lineHeight:1.5}}>
+                  This indent cannot be attached until the pump operator confirms it.
+                </div>
+              </div>
+            ))}
 
             {/* No requests for this truck — info message */}
             {truckReqs.length===0 && !val && truck && (
@@ -9295,7 +9289,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
                   🔄 Override — all available indents
                   <span style={{fontSize:10,fontWeight:400,color:C.muted}}>(owner only — use to fix wrong attachment)</span>
                 </div>
-                {[...truckReqs.filter(r=>r.status!=="attached"),...otherReqs]
+                {[...truckReqs.filter(r=>r.status==="confirmed"),...otherReqs.filter(r=>r.status==="confirmed")]
                   .sort((a,b)=>{
                     const sameA=a.truckNo===truck?1:0, sameB=b.truckNo===truck?1:0;
                     if(sameA!==sameB)return sameB-sameA;
@@ -9307,7 +9301,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
                     </div>
                   ) : (
                     <SearchableIndentSelect
-                      options={[...truckReqs.filter(r=>r.status!=="attached"),...otherReqs]
+                      options={[...truckReqs.filter(r=>r.status==="confirmed"),...otherReqs.filter(r=>r.status==="confirmed")]
                         .sort((a,b)=>{
                           const sA=a.truckNo===truck?1:0,sB=b.truckNo===truck?1:0;
                           if(sA!==sB)return sB-sA;
@@ -9939,11 +9933,18 @@ function TafalMod({trips, vehicles, setVehicles, employees, settings, setSetting
               <div style={{color:C.muted,fontSize:12}}>{v.ownerName}</div>
             </div>
             <div style={{display:"flex",gap:10,alignItems:"center"}}>
-              <Badge label={v.tafalExempt?"Exempt":`₹${tafalRate}/trip`} color={v.tafalExempt?C.muted:C.purple} />
-              <button onClick={()=>setVehicles(p=>p.map(x=>x.id===v.id?{...x,tafalExempt:!x.tafalExempt}:x))}
-                style={{background:v.tafalExempt?C.dim:C.purple+"22",border:`1px solid ${v.tafalExempt?C.border:C.purple}`,color:v.tafalExempt?C.muted:C.purple,borderRadius:8,padding:"5px 12px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
-                {v.tafalExempt?"Enable":"Exempt"}
-              </button>
+              {v.tafalExempt
+                ? <Badge label="Exempt" color={C.muted} />
+                : v.tafalOverride!=null
+                  ? <Badge label={`₹${v.tafalOverride}/trip`} color={C.purple} />
+                  : <Badge label={`₹${tafalRate}/trip`} color={C.purple} />}
+              {user?.role==="owner" && (
+                <button onClick={()=>setVehicles(p=>p.map(x=>x.id===v.id?{...x,tafalExempt:!x.tafalExempt,tafalOverride:null}:x))}
+                  style={{background:v.tafalExempt?C.dim:C.red+"22",border:`1px solid ${v.tafalExempt?C.border:C.red}`,
+                    color:v.tafalExempt?C.muted:C.red,borderRadius:8,padding:"5px 10px",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+                  {v.tafalExempt?"Enable":"Exempt"}
+                </button>
+              )}
             </div>
           </div>
         ))}
@@ -14819,7 +14820,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
     truckNo:"", ownerName:"", phone:"",
     driverName:"", driverPhone:"", driverLicense:"",
     accountNo:"", ifsc:"",
-    loan:"0", loanRecovered:"0", deductPerTrip:"0", shortageDeductPerTrip:"0", tafalExempt:false,
+    loan:"0", loanRecovered:"0", deductPerTrip:"0", shortageDeductPerTrip:"0", tafalExempt:false, tafalOverride:"", pouchExempt:false, accounts:[],
   };
   const [f, setF] = useState(blank);
   const ff = k => v => setF(p => ({...p,[k]:v}));
@@ -15366,11 +15367,69 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
             </div>
             <Field label="Driver License No" value={f.driverLicense||""} onChange={ff("driverLicense")} placeholder="e.g. KA0320180012345" />
 
-            <div style={{color:C.green,fontSize:11,fontWeight:700,letterSpacing:1,marginTop:4}}>BANK DETAILS</div>
-            <div style={{display:"flex",gap:10}}>
-              <Field label="Bank A/C No" value={f.accountNo||""} onChange={ff("accountNo")} half />
-              <Field label="IFSC Code"   value={f.ifsc||""}      onChange={ff("ifsc")}      half />
+            <div style={{color:C.green,fontSize:11,fontWeight:700,letterSpacing:1,marginTop:4}}>BANK ACCOUNTS</div>
+            {/* Primary account — always shown */}
+            <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
+              <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:6}}>PRIMARY ACCOUNT</div>
+              <div style={{display:"flex",gap:10}}>
+                <Field label="Bank A/C No" value={f.accountNo||""} onChange={ff("accountNo")} half />
+                <Field label="IFSC Code"   value={f.ifsc||""}      onChange={ff("ifsc")}      half />
+              </div>
             </div>
+            {/* Additional accounts */}
+            {(f.accounts||[]).length>0 && (
+              <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                <div style={{color:C.muted,fontSize:11,fontWeight:700}}>ADDITIONAL ACCOUNTS</div>
+                {(f.accounts||[]).map((acc,ai)=>(
+                  <div key={acc.id||ai} style={{background:C.bg,borderRadius:8,padding:"8px 10px",display:"flex",gap:8,alignItems:"flex-start"}}>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:12,fontWeight:700,color:C.text}}>{acc.name||"Account "+(ai+2)}</div>
+                      <div style={{fontSize:11,color:C.blue,fontFamily:"monospace"}}>{acc.accountNo}</div>
+                      {acc.ifsc&&<div style={{fontSize:10,color:C.muted}}>IFSC: {acc.ifsc}</div>}
+                    </div>
+                    <button onClick={()=>setF(p=>({...p,accounts:(p.accounts||[]).filter((_,i)=>i!==ai)}))}
+                      style={{background:"none",border:`1px solid ${C.red}44`,borderRadius:5,
+                        color:C.red,fontSize:10,padding:"2px 6px",cursor:"pointer",flexShrink:0}}>🗑</button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {/* Add account button */}
+            {(()=>{
+              const [_showAddAcc, _setShowAddAcc] = React.useState(false);
+              const [_newAcc, _setNewAcc] = React.useState({name:"",accountNo:"",ifsc:""});
+              if(!_showAddAcc) return (
+                <button onClick={()=>_setShowAddAcc(true)}
+                  style={{background:C.green+"11",border:`1px dashed ${C.green}66`,borderRadius:8,
+                    color:C.green,fontSize:12,fontWeight:700,padding:"8px 14px",cursor:"pointer",textAlign:"left"}}>
+                  + Add Another Bank Account
+                </button>
+              );
+              return (
+                <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
+                  <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:8}}>NEW ACCOUNT</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                    <Field label="Account Holder Name" value={_newAcc.name} onChange={v=>_setNewAcc(p=>({...p,name:v}))} />
+                    <div style={{display:"flex",gap:8}}>
+                      <Field label="A/C No" value={_newAcc.accountNo} onChange={v=>_setNewAcc(p=>({...p,accountNo:v}))} half />
+                      <Field label="IFSC"   value={_newAcc.ifsc}      onChange={v=>_setNewAcc(p=>({...p,ifsc:v}))}      half />
+                    </div>
+                    <div style={{display:"flex",gap:8}}>
+                      <Btn onClick={()=>{
+                        if(!_newAcc.name.trim()||!_newAcc.accountNo.trim()||!_newAcc.ifsc.trim()){
+                          alert("Name, Account No, and IFSC are all required.");return;
+                        }
+                        const newAccEntry={id:"ACC"+uid(),name:_newAcc.name.trim(),
+                          accountNo:_newAcc.accountNo.trim(),ifsc:_newAcc.ifsc.trim(),isPrimary:false};
+                        setF(p=>({...p,accounts:[...(p.accounts||[]),newAccEntry]}));
+                        _setNewAcc({name:"",accountNo:"",ifsc:""});_setShowAddAcc(false);
+                      }} sm color={C.green}>Save Account</Btn>
+                      <Btn onClick={()=>{_setShowAddAcc(false);_setNewAcc({name:"",accountNo:"",ifsc:""});}} sm outline color={C.muted}>Cancel</Btn>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
 
             <div style={{color:C.red,fontSize:11,fontWeight:700,letterSpacing:1,marginTop:4}}>LOAN / DEDUCTIONS</div>
             <div style={{display:"flex",gap:10}}>
@@ -15380,9 +15439,43 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
             <Field label="Deduct Per Trip ₹ (Loan)" value={f.deductPerTrip} onChange={ff("deductPerTrip")} type="number" />
             <Field label="Shortage Deduct Per Trip ₹" value={f.shortageDeductPerTrip||"0"} onChange={ff("shortageDeductPerTrip")} type="number"
               note="0 = deduct full balance in one trip" />
-            <div style={{display:"flex",gap:10,alignItems:"center",padding:"4px 0"}}>
-              <input type="checkbox" checked={f.tafalExempt} onChange={e=>setF(p=>({...p,tafalExempt:e.target.checked}))} style={{width:20,height:20}} />
-              <span style={{color:C.text,fontSize:15}}>TAFAL Exempt</span>
+            {/* TAFAL override — owner only */}
+            <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
+              <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:8,textTransform:"uppercase",letterSpacing:1}}>TAFAL Setting (Owner)</div>
+              <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                <button onClick={()=>setF(p=>({...p,tafalExempt:!p.tafalExempt,tafalOverride:""}))}
+                  style={{padding:"6px 14px",borderRadius:8,border:`1.5px solid ${f.tafalExempt?C.red:C.border}`,
+                    background:f.tafalExempt?C.red+"22":"transparent",color:f.tafalExempt?C.red:C.muted,
+                    fontWeight:700,fontSize:12,cursor:"pointer"}}>
+                  {f.tafalExempt?"✓ Exempt":"Exempt"}
+                </button>
+                <span style={{color:C.muted,fontSize:12}}>or override amount:</span>
+                <input type="number" value={f.tafalOverride||""} onChange={e=>setF(p=>({...p,tafalOverride:e.target.value,tafalExempt:false}))}
+                  placeholder="e.g. 200 (blank = global)"
+                  disabled={f.tafalExempt}
+                  style={{width:130,background:C.card,border:`1.5px solid ${f.tafalOverride&&!f.tafalExempt?C.purple:C.border}`,
+                    borderRadius:8,padding:"6px 10px",fontSize:12,color:C.text,outline:"none",opacity:f.tafalExempt?0.4:1}}/>
+              </div>
+              <div style={{fontSize:11,color:C.muted,marginTop:6}}>
+                {f.tafalExempt?"Exempt — no TAFAL deducted"
+                 :f.tafalOverride?`₹${f.tafalOverride}/trip (custom override)`
+                 :"Using global rate (set in TAFAL tab)"}
+              </div>
+            </div>
+            {/* Pouch Deduction Exemption — owner only */}
+            <div style={{background:C.bg,borderRadius:10,padding:"10px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div>
+                <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Party Pouch Deduction (Owner)</div>
+                <div style={{color:C.muted,fontSize:11,marginTop:2}}>
+                  {f.pouchExempt?"Exempt — ₹0 deducted on party orders":"₹700 deducted on party orders (default)"}
+                </div>
+              </div>
+              <button onClick={()=>setF(p=>({...p,pouchExempt:!p.pouchExempt}))}
+                style={{padding:"6px 14px",borderRadius:8,border:`1.5px solid ${f.pouchExempt?C.muted:C.teal}`,
+                  background:f.pouchExempt?C.dim:C.teal+"22",color:f.pouchExempt?C.muted:C.teal,
+                  fontWeight:700,fontSize:12,cursor:"pointer",flexShrink:0,marginLeft:8}}>
+                {f.pouchExempt?"Un-Exempt":"Exempt"}
+              </button>
             </div>
 
             {(!f.driverName.trim() || !f.driverPhone.trim() || (f.driverPhone.replace(/\\D/g,"").length!==10)) && (
@@ -15408,6 +15501,8 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                 setVehicles(p=>p.map(v=>v.id===editId?{...v,...f,
                   loan:+f.loan,loanRecovered:+f.loanRecovered,deductPerTrip:+f.deductPerTrip,
                   shortageDeductPerTrip:+f.shortageDeductPerTrip||0,
+                  tafalOverride: f.tafalOverride!=='' ? +f.tafalOverride : null,
+                  pouchExempt: !!f.pouchExempt,
                   truckNo:f.truckNo.toUpperCase().trim()}:v));
                 log("EDIT VEHICLE",`${f.truckNo} updated`);
               } else {
@@ -15415,6 +15510,8 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                   truckNo:f.truckNo.toUpperCase().trim(),
                   loan:+f.loan,loanRecovered:+f.loanRecovered,deductPerTrip:+f.deductPerTrip,
                   shortageDeductPerTrip:+f.shortageDeductPerTrip||0,
+                  tafalOverride: f.tafalOverride!=='' ? +f.tafalOverride : null,
+                  pouchExempt: !!f.pouchExempt,
                   loanTxns:[],shortageTxns:[],createdBy:user.username};
                 setVehicles(p=>[...(p||[]),v]);
                 log("ADD VEHICLE",`${v.truckNo} driver:${v.driverPhone}`);
@@ -15916,7 +16013,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                   loan:String(v.loan||0),loanRecovered:String(v.loanRecovered||0),
                   deductPerTrip:String(v.deductPerTrip||0),
                   shortageDeductPerTrip:String(v.shortageDeductPerTrip||0),
-                  tafalExempt:v.tafalExempt||false,
+                  tafalExempt:v.tafalExempt||false, tafalOverride:v.tafalOverride!=null?String(v.tafalOverride):"", pouchExempt:v.pouchExempt||false, accounts:v.accounts||[],
                 });setEditId(v.id);setSheet(true);}}
                   style={{background:"none",border:`1px solid ${C.muted}44`,borderRadius:6,
                     padding:"3px 8px",color:C.muted,cursor:"pointer",fontSize:11}}>✏ Edit</button>
@@ -16304,7 +16401,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
   // wallet PDF date filter
   const [wFrom,  setWFrom]  = useState("");
   const [wTo,    setWTo]    = useState("");
-  const blank = {name:"",phone:"",role:"Fleet Agent",loan:"0",loanRecovered:"0",linkedTrucks:""};
+  const blank = {name:"",phone:"",role:"Fleet Agent",loan:"0",loanRecovered:"0",linkedTrucks:"",accounts:[]};
   const [f,setF] = useState(blank);
   const ff = k => v => setF(p=>({...p,[k]:v}));
   const isOwner = user?.role==="owner";
@@ -16454,7 +16551,46 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
           <Field label="Role" value={f.role} onChange={ff("role")} opts={["Fleet Agent","Driver Liaison","Field Staff","Accountant"].map(x=>({v:x,l:x}))} />
           <div style={{display:"flex",gap:10}}><Field label="Loan ₹" value={f.loan} onChange={ff("loan")} type="number" half /><Field label="Recovered ₹" value={f.loanRecovered} onChange={ff("loanRecovered")} type="number" half /></div>
           <Field label="Linked Trucks (comma sep)" value={f.linkedTrucks} onChange={ff("linkedTrucks")} placeholder="KA34C4617, AP29V8469" />
-          <Btn onClick={()=>{const e={...f,id:uid(),loan:+f.loan,loanRecovered:+f.loanRecovered,linkedTrucks:f.linkedTrucks.split(",").map(s=>s.trim()).filter(Boolean),createdBy:user.username}; setEmployees(p=>[...(p||[]),e]); log("ADD EMPLOYEE",e.name); setF(blank); setSheet(false);}} full>Save</Btn>
+          {/* Bank accounts for this employee */}
+          <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
+            <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:6}}>BANK ACCOUNTS</div>
+            {(f.accounts||[]).length===0 && <div style={{color:C.muted,fontSize:11,marginBottom:6}}>No accounts added yet</div>}
+            {(f.accounts||[]).map((acc,ai)=>(
+              <div key={acc.id||ai} style={{background:C.card,borderRadius:8,padding:"7px 10px",marginBottom:6,display:"flex",gap:8,alignItems:"center"}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:12,fontWeight:700}}>{acc.name}</div>
+                  <div style={{fontSize:11,color:C.blue,fontFamily:"monospace"}}>{acc.accountNo}</div>
+                  {acc.ifsc&&<div style={{fontSize:10,color:C.muted}}>IFSC: {acc.ifsc}</div>}
+                </div>
+                <button onClick={()=>setF(p=>({...p,accounts:(p.accounts||[]).filter((_,i)=>i!==ai)}))}
+                  style={{background:"none",border:`1px solid ${C.red}44`,borderRadius:5,color:C.red,fontSize:10,padding:"2px 6px",cursor:"pointer"}}>🗑</button>
+              </div>
+            ))}
+            {(()=>{
+              const [_sa, _setSa] = React.useState(false);
+              const [_na, _setNa] = React.useState({name:"",accountNo:"",ifsc:""});
+              if(!_sa) return <button onClick={()=>_setSa(true)} style={{background:C.green+"11",border:`1px dashed ${C.green}66`,borderRadius:7,color:C.green,fontSize:11,fontWeight:700,padding:"6px 12px",cursor:"pointer",width:"100%"}}>+ Add Bank Account</button>;
+              return (
+                <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                  <Field label="Account Holder Name" value={_na.name} onChange={v=>_setNa(p=>({...p,name:v}))} />
+                  <div style={{display:"flex",gap:8}}>
+                    <Field label="A/C No" value={_na.accountNo} onChange={v=>_setNa(p=>({...p,accountNo:v}))} half />
+                    <Field label="IFSC"   value={_na.ifsc}      onChange={v=>_setNa(p=>({...p,ifsc:v}))}      half />
+                  </div>
+                  <div style={{display:"flex",gap:8}}>
+                    <Btn onClick={()=>{
+                      if(!_na.name.trim()||!_na.accountNo.trim()||!_na.ifsc.trim()){alert("All fields required.");return;}
+                      const na={id:"ACC"+uid(),name:_na.name.trim(),accountNo:_na.accountNo.trim(),ifsc:_na.ifsc.trim()};
+                      setF(p=>({...p,accounts:[...(p.accounts||[]),na]}));
+                      _setNa({name:"",accountNo:"",ifsc:""});_setSa(false);
+                    }} sm color={C.green}>Save</Btn>
+                    <Btn onClick={()=>{_setSa(false);_setNa({name:"",accountNo:"",ifsc:""});}} sm outline color={C.muted}>Cancel</Btn>
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+          <Btn onClick={()=>{const e={...f,id:uid(),loan:+f.loan,loanRecovered:+f.loanRecovered,linkedTrucks:f.linkedTrucks.split(",").map(s=>s.trim()).filter(Boolean),accounts:f.accounts||[],createdBy:user.username}; setEmployees(p=>[...(p||[]),e]); log("ADD EMPLOYEE",e.name); setF(blank); setSheet(false);}} full>Save</Btn>
         </div>
       </Sheet>}
 
