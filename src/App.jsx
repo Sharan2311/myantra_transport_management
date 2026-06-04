@@ -4109,11 +4109,10 @@ Rules:
                 );
               })()}
 
-              {/* ── Pending diesel — soft warning only, saving IS allowed ── */}
+              {/* ── Pending diesel — info only, cannot be attached until confirmed ── */}
               {(()=>{
                 const truck = (g.truckNo||"").toUpperCase().trim();
                 const attachedIndentNo = g.dieselIndentNo?.trim();
-                // Only warn about UNATTACHED open requests (not the one already selected)
                 const unattachedPending = (dieselRequests||[]).filter(r=>
                   r.truckNo===truck && r.status==="open" &&
                   String(r.indentNo)!==attachedIndentNo
@@ -4122,13 +4121,16 @@ Rules:
                 return (
                   <div style={{background:"#fffbeb",border:"1px solid #d97706",
                     borderRadius:8,padding:"8px 10px",fontSize:11,color:"#92400e"}}>
-                    <div style={{fontWeight:700,marginBottom:3}}>⚠ Unconfirmed diesel request exists</div>
+                    <div style={{fontWeight:700,marginBottom:3}}>⚠ Unconfirmed diesel request — cannot attach</div>
                     {unattachedPending.map(r=>(
                       <div key={r.id}>
                         Indent #{r.indentNo} · PIN: <b style={{fontFamily:"monospace",letterSpacing:2}}>{r.pin!=="****"?r.pin:"—"}</b>
                       </div>
                     ))}
-                    <div style={{marginTop:4,fontSize:10}}>You can still save. Ask pump to confirm later.</div>
+                    <div style={{marginTop:4,fontSize:10,fontWeight:700,color:"#b45309"}}>
+                      ⛔ This indent will NOT be attached until pump confirms it.<br/>
+                      Ask the pump operator to confirm using the PIN above.
+                    </div>
                   </div>
                 );
               })()}
