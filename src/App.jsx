@@ -3193,20 +3193,12 @@ Rules:
         setTrips(p=>[trip,...(p||[])]);
         // ── Mark pre-filled diesel indent as "attached" ───────────────────
         if (g.dieselIndentNo.trim() && typeof setDieselRequests === "function") {
-          const preReq = (dieselRequests||[]).find(r => String(r.indentNo)===g.dieselIndentNo.trim() && r.status!=="attached");
+          const preReq = (dieselRequests||[]).find(r => String(r.indentNo)===g.dieselIndentNo.trim() && r.status==="confirmed");
           if (preReq) {
-            // Warn if attaching unconfirmed (open) indent
-            let doAttach = true;
-            if (preReq.status === "open") {
-              alert(`⚠ Indent #${preReq.indentNo} is not yet confirmed by pump.\n\nAsk the pump operator to confirm it first, then re-save this trip.`);
-              doAttach = false;
-            }
-            if (doAttach) {
               const updPreReq = {...preReq, status:"attached", tripId:trip.id, lrNo};
               setDieselRequests(p=>p.map(r=>r.id===preReq.id?updPreReq:r));
               await DB.saveDieselRequest(updPreReq);
-              log("DIESEL ATTACH", `Indent #${preReq.indentNo} → LR ${lrNo} · ₹${preReq.confirmedAmount??preReq.amount} (manual${preReq.status==="open"?" ⚠UNCONFIRMED":""})`);
-            }
+              log("DIESEL ATTACH", `Indent #${preReq.indentNo} → LR ${lrNo} · ₹${preReq.amount} (manual)`);
           }
         }
         // ── Auto-attach confirmed diesel request for this truck (within 4 days) ──
@@ -3235,7 +3227,7 @@ Rules:
                 ? `\n⚠ NO INDENT FOUND FOR ${truckNo} — showing OTHER TRUCKS. Verify before attaching!`
                 : "";
               const sel = window.prompt(
-                `⛽ No confirmed Diesel Request (within 4 days) for ${truckNo}.\n\nAvailable requests:${fallbackNote}\n${listStr}\n\n⚠ UNCONFIRMED/OLD requests need owner verification.\nEnter Indent # to attach (or Cancel to skip):`, ""
+                `⛽ No confirmed Diesel Request (within 4 days) for ${truckNo}.\n\nConfirmed requests available:${fallbackNote}\n${listStr}\n\nEnter Indent # to attach (or Cancel to skip):`, ""
               );
               if (sel && sel.trim()) {
                 const selNo = parseInt(sel.trim(), 10);
@@ -3412,7 +3404,7 @@ Rules:
                 ? `\n⚠ NO INDENT FOUND FOR ${truckNo} — showing OTHER TRUCKS. Verify before attaching!`
                 : "";
               const sel = window.prompt(
-                `⛽ No confirmed Diesel Request (within 4 days) for ${truckNo}.\n\nAvailable requests:${fallbackNote}\n${listStr}\n\n⚠ UNCONFIRMED/OLD requests need owner verification.\nEnter Indent # to attach (or Cancel to skip):`, ""
+                `⛽ No confirmed Diesel Request (within 4 days) for ${truckNo}.\n\nConfirmed requests available:${fallbackNote}\n${listStr}\n\nEnter Indent # to attach (or Cancel to skip):`, ""
               );
               if (sel && sel.trim()) {
                 const selNo = parseInt(sel.trim(), 10);
