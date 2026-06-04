@@ -3003,7 +3003,7 @@ Rules:
       // Net to driver check per group
       const totalQty  = groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0),0);
       const totalGross = groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0)*(+x.givenRate||0),0);
-      const tafalVal  = +g.tafal || (settings?.tafalPerTrip||300);
+      const tafalVal  = g.tafal!==undefined && g.tafal!=="" ? +g.tafal : (settings?.tafalPerTrip||300);
       const _net = totalGross - (+g.advance||0) - tafalVal - (+g.diesel||0)
                  - (+g.shortageRecovery||0) - (+g.loanRecovery||0);
       if(_net < 0) {
@@ -3097,8 +3097,9 @@ Rules:
         }
       }
 
-      const tafalVal = +g.tafal!==undefined&&g.tafal!==""
-        ? +g.tafal : tafal;
+      const gVehTafal = vehicles.find(v=>v.truckNo===g.truckNo);
+      const _tafalDefault = gVehTafal?.tafalExempt ? 0 : (gVehTafal?.tafalOverride!=null ? gVehTafal.tafalOverride : tafal);
+      const tafalVal = g.tafal!=="" ? +g.tafal : _tafalDefault;
 
       if(groupItems.length === 1) {
         // ── SINGLE DI ──────────────────────────────────────────────────────
@@ -4339,7 +4340,7 @@ Rules:
               {/* Net preview */}
               {(()=>{
                 const totalGross = groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0)*(+x.givenRate||0),0);
-                const tafalVal   = +g.tafal||(settings?.tafalPerTrip||300);
+                const tafalVal   = g.tafal!=="" ? +g.tafal : (settings?.tafalPerTrip||300);
                 const net = totalGross-(+g.advance||0)-tafalVal-(+g.diesel||0)-(+g.shortageRecovery||0)-(+g.loanRecovery||0);
                 if(!totalGross) return null;
                 return (
@@ -6144,7 +6145,8 @@ function SealedInvoiceSheet({ trip, onMerge, onClose, embedded=false }) {
 
   const handleMerge = async () => {
     if(files.length===0){setError("Please upload at least one sealed invoice file.");return;}
-    // For multi-DI trips, GR/Invoice may be on diLines not on trip root
+    const partyDIs=(trip.diLines||[]).filter(d=>d.orderType==="party");
+    if(partyDIs.length>1){const missingInv=partyDIs.filter(d=>!d.invoiceFilePath);if(missingInv.length>0){setError("This trip has "+partyDIs.length+" party DIs. All must have invoices uploaded before merging. Missing: DI "+missingInv.map(d=>d.diNo||"?").join(", ")+".");return;}}
     const anyGR  = trip.grFilePath || (trip.diLines||[]).find(d=>d.grFilePath)?.grFilePath;
     const anyInv = trip.invoiceFilePath || (trip.diLines||[]).find(d=>d.invoiceFilePath)?.invoiceFilePath;
     if(!anyGR||!anyInv){
@@ -6410,7 +6412,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     setF(p => ({
       ...p,
       truckNo: v,
-      tafal: veh?.tafalExempt ? "0" : String(settings?.tafalPerTrip||300),
+      tafal: veh?.tafalExempt ? "0" : String(veh?.tafalOverride!=null ? veh.tafalOverride : (settings?.tafalPerTrip||300)),
       loanRecovery: String(autoLoanRecov),
       shortageRecovery: String(autoShortageRecov),
       givenRate: p.givenRate||"" ? p.givenRate : String(lastTrip?.givenRate||""),
@@ -7739,6 +7741,11 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                                 const invPath=t.invoiceFilePath||(t.diLines||[]).find(d=>d.invoiceFilePath)?.invoiceFilePath;
                                 if(grPath&&invPath){
                                   try{
+                                    const partyDICount=(t.diLines||[]).filter(d=>d.orderType==="party").length;
+                                    if(partyDICount>1&&!window.confirm("This trip has "+partyDICount+" party DIs.\n\nDoes this confirmation email cover ALL "+partyDICount+" DIs?\n\nOK = Yes, merge now\nCancel = No, skip merge")){
+                                      const{data:{signedUrl:cu2}}=await supabase.storage.from("party-trip-files").createSignedUrl(path,86400*365);
+                                      const u2={...t,confirmPdfPath:cu2||path};setTrips(p=>p.map(x=>x.id===t.id?u2:x));setTimeout(()=>DB.saveTrip(u2).catch(()=>{}),0);log("CONFIRM PDF","LR:"+t.lrNo+" partial multi-DI");return;
+                                    }
                                     const confBuf=await file.arrayBuffer();
                                     const[grBuf,invBuf]=await Promise.all([fetchStorageFile(grPath),fetchStorageFile(invPath)]);
                                     const merged=await mergePDFs([confBuf,grBuf,invBuf]);
@@ -8413,7 +8420,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
             ff={k=>v=>setEditSheet(p=>({...p,[k]:v}))}
             isIn={isIn} ac={C.blue} vehicles={vehicles} settings={settings}
             employees={employees||[]} cashTransfers={cashTransfers||[]}
-            onTruckChange={v=>{const veh=vehicles.find(x=>x.truckNo===v.toUpperCase().trim()); setEditSheet(p=>({...p,truckNo:v,tafal:veh?.tafalExempt?0:(settings?.tafalPerTrip||300)}));}}
+            onTruckChange={v=>{const veh=vehicles.find(x=>x.truckNo===v.toUpperCase().trim()); setEditSheet(p=>({...p,truckNo:v,tafal:veh?.tafalExempt?0:(veh?.tafalOverride!=null?veh.tafalOverride:(settings?.tafalPerTrip||300))}));}}
             onSubmit={saveEdit} submitLabel="Save Changes" user={user}
             showStatus={true}
             wasScanned={user.role !== "owner"}
@@ -9087,7 +9094,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
             <div style={{color:C.green,fontSize:11}}>This vehicle is TAFAL exempt</div>
           </div>
         ) : (
-          <Field label={`TAFAL ₹${veh?.tafalExempt?" (Exempt — Owner override)":""}`}
+          <Field label={`TAFAL ₹${veh?.tafalExempt?" (Exempt)":""}`}
             value={f.tafal||""} onChange={ff("tafal")} type="number" half
             placeholder="0"
             note={veh?.tafalExempt?"⚠ Exempt vehicle — only owner can change this":""}/>
@@ -9849,14 +9856,16 @@ function Settlement({trips, setTrips, vehicles, setVehicles, settlements, setSet
 }
 
 // ─── TAFAL MODULE ─────────────────────────────────────────────────────────────
-function TafalMod({trips, vehicles, setVehicles, employees, settings, setSettings, user, dieselRequests=[]}) {
+function TafalMod({trips, vehicles, setVehicles, employees, settings, setSettings, cashTransfers=[], user, dieselRequests=[]}) {
   const [month, setMonth] = useState(today().slice(0,7));
   const tafalRate = settings?.tafalPerTrip || 300;
 
   const monthTrips  = trips.filter(t => t.date.startsWith(month) && t.tafal>0);
   const collected   = monthTrips.reduce((s,t) => s+(t.tafal||0), 0);
+  const monthPaid   = (cashTransfers||[]).filter(t => t.type==="tafal" && (t.forMonth||"").startsWith(month)).reduce((s,t) => s+Number(t.amount||0), 0);
+  const remaining   = Math.max(0, collected - monthPaid);
   const activeEmps  = employees.length || 1;
-  const perEmployee = activeEmps>0 ? collected/activeEmps : 0;
+  const perEmployee = activeEmps>0 ? remaining/activeEmps : 0;
 
   // Indent book range — local state so saves only on button press
   const usedNosSet = new Set((dieselRequests||[]).map(r=>r.indentNo).filter(Boolean));
@@ -9885,10 +9894,17 @@ function TafalMod({trips, vehicles, setVehicles, employees, settings, setSetting
 
       <Field label="Select Month" value={month} onChange={setMonth} type="month" />
 
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-        <KPI icon="🤝" label="Collected" value={fmt(collected)} color={C.purple} sub={`${monthTrips.length} trips`} />
-        <KPI icon="👤" label="Per Employee" value={fmt(perEmployee)} color={C.green} sub={`÷ ${activeEmps} employees`} />
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
+        <KPI icon="🤝" label="Collected" value={fmt(collected)} color={C.purple} sub={monthTrips.length+" trips"} />
+        <KPI icon="✅" label="Paid Out" value={fmt(monthPaid)} color={C.green} sub="this month" />
+        <KPI icon="⏳" label="Remaining" value={fmt(remaining)} color={remaining>0?C.orange:C.muted} sub="to distribute" />
       </div>
+      {remaining>0 && (
+        <div style={{background:C.orange+"11",border:"1px solid "+C.orange+"33",borderRadius:10,padding:"10px 14px",fontSize:12}}>
+          <div style={{fontWeight:700,color:C.orange,marginBottom:4}}>{"₹"+fmt(remaining)+" remaining to pay out"}</div>
+          <div style={{color:C.muted}}>{"Each employee: "}<b style={{color:C.text}}>{fmt(perEmployee)}</b>{" · "+activeEmps+" employee"+(activeEmps!==1?"s":"")}</div>
+        </div>
+      )}
 
       {/* Trip breakdown */}
       <div>
@@ -9910,7 +9926,7 @@ function TafalMod({trips, vehicles, setVehicles, employees, settings, setSetting
       {/* Distribution table */}
       <div style={{background:C.card,borderRadius:12,padding:"14px 16px"}}>
         <div style={{color:C.muted,fontSize:12,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Monthly Distribution</div>
-        <div style={{color:C.muted,fontSize:12,marginBottom:10}}>{fmt(collected)} ÷ {activeEmps} = <b style={{color:C.green}}>{fmt(perEmployee)} each</b></div>
+        <div style={{color:C.muted,fontSize:12,marginBottom:10}}>{fmt(remaining)} remaining ÷ {activeEmps} = <b style={{color:C.green}}>{fmt(perEmployee)} each</b></div>
         {employees.map(e => (
           <div key={e.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:`1px solid ${C.border}22`}}>
             <div>
@@ -12883,7 +12899,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                   const loanDeduct = loanBal>0 ? (veh.deductPerTrip||0) : 0;
                   const shortageDeduct = shortageBal>0 ? (veh.shortageDeductPerTrip||0) : 0;
                   if(loanBal<=0 && shortageBal<=0) return null;
-                  const tafalAmt = veh.tafalExempt ? 0 : (settings?.tafalPerTrip||300);
+                  const tafalAmt = veh.tafalExempt ? 0 : (veh.tafalOverride!=null ? veh.tafalOverride : (settings?.tafalPerTrip||300));
                   const perTripDeduct = loanDeduct + shortageDeduct + tafalAmt;
                   const totalReq = (+drDieselAmt||0) + (+drCashAmt||0);
                   return (
