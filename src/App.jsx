@@ -18282,26 +18282,57 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
             const invNo   = cb.invoiceNo.trim();
             const invDate = cb.invoiceDate;
             const updatedTrips = [];
-            setTrips(prev => prev.map(t => {
-              if(!selectedIds.includes(t.id)) return t;
-              const billedAmt = Number(t.qty||0) * rate;
-              const updated = {
-                ...t,
-                invoiceNo:   invNo,
-                invoiceDate: invDate,
-                billedToShree: billedAmt,
-                status:      "Billed",
-                billedBy:    user.username,
-                billedAt:    nowTs(),
-                shreeStatus: "billed",
-                client:      t.client || "Shree Cement Kodla",
-                ...(cb.isPrevFY ? {prevFY:true, prevFYLabel} : {}),
-              };
-              updatedTrips.push(updated);
-              return updated;
-            }));
-            Promise.all(updatedTrips.map(t => DB.saveTrip(t).catch(e => console.error("saveTrip clinker bill:", e))));
-            log && log("CLINKER BILL " + invNo + " · " + selectedTrips.length + " trips · " + selectedTons.toFixed(2) + " MT · ₹" + total.toLocaleString("en-IN"));
+
+            if(selectedTrips.length === 0 && cb.isPrevFY) {
+              // No trips selected — create one synthetic placeholder trip to anchor the invoice
+              const enteredTons  = tons;
+              const enteredTotal = rate * enteredTons; // billedToShree = taxable amount
+              const placeholder = mkTrip({
+                id:            uid(),
+                invoiceNo:     invNo,
+                invoiceDate:   invDate,
+                billedToShree: enteredTotal,
+                qty:           enteredTons,
+                frRate:        rate,
+                givenRate:     rate,
+                to:            "Patas",
+                grade:         "Clinker",
+                status:        "Billed",
+                billedBy:      user.username,
+                billedAt:      nowTs(),
+                shreeStatus:   "billed",
+                client:        "Shree Cement Kodla",
+                type:          "outbound",
+                date:          invDate,
+                prevFY:        true,
+                prevFYLabel,
+                clinkerPlaceholder: true, // flag so it can be identified later
+              });
+              setTrips(prev => [...prev, placeholder]);
+              DB.saveTrip(placeholder).catch(e => console.error("saveTrip clinker placeholder:", e));
+              log && log("CLINKER BILL (prevFY placeholder) " + invNo + " · " + enteredTons + " MT · ₹" + enteredTotal.toLocaleString("en-IN"));
+            } else {
+              setTrips(prev => prev.map(t => {
+                if(!selectedIds.includes(t.id)) return t;
+                const billedAmt = Number(t.qty||0) * rate;
+                const updated = {
+                  ...t,
+                  invoiceNo:   invNo,
+                  invoiceDate: invDate,
+                  billedToShree: billedAmt,
+                  status:      "Billed",
+                  billedBy:    user.username,
+                  billedAt:    nowTs(),
+                  shreeStatus: "billed",
+                  client:      t.client || "Shree Cement Kodla",
+                  ...(cb.isPrevFY ? {prevFY:true, prevFYLabel} : {}),
+                };
+                updatedTrips.push(updated);
+                return updated;
+              }));
+              Promise.all(updatedTrips.map(t => DB.saveTrip(t).catch(e => console.error("saveTrip clinker bill:", e))));
+              log && log("CLINKER BILL " + invNo + " · " + selectedTrips.length + " trips · " + selectedTons.toFixed(2) + " MT · ₹" + total.toLocaleString("en-IN"));
+            }
             setShowClinkerBill(false);
             setClinkerBill({invoiceNo:"", invoiceDate:"", rate:"", tons:"", gstPct:"5", isPrevFY:false});
             setManualClinkerSelect(false);
