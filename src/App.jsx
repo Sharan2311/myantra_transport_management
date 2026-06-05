@@ -18274,7 +18274,8 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
 
           // Allow ±0.5 MT tolerance
           const tonsMatch = tons > 0 && Math.abs(selectedTons - tons) <= 0.5;
-          const canSave   = cb.invoiceNo.trim() && cb.invoiceDate && selectedTrips.length > 0 && rate > 0 && tonsMatch;
+          // For prevFY bills: skip tons matching — just need invoice no, date, rate, and at least one trip
+          const canSave   = cb.invoiceNo.trim() && cb.invoiceDate && rate > 0 && (tonsMatch || cb.isPrevFY);
 
           const handleSaveClinkerBill = () => {
             if(!canSave) return;
