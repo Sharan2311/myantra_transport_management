@@ -18287,8 +18287,10 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
               // No trips selected — create one synthetic placeholder trip to anchor the invoice
               const enteredTons  = tons;
               const enteredTotal = rate * enteredTons; // billedToShree = taxable amount
+              const _plId = uid();
               const placeholder = mkTrip({
-                id:            uid(),
+                id:            _plId,
+                lrNo:          "CLK-" + _plId.slice(0,8).toUpperCase(), // unique LR to avoid DB constraint
                 invoiceNo:     invNo,
                 invoiceDate:   invDate,
                 billedToShree: enteredTotal,
@@ -18306,7 +18308,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                 date:          invDate,
                 prevFY:        true,
                 prevFYLabel,
-                clinkerPlaceholder: true, // flag so it can be identified later
+                clinkerPlaceholder: true,
               });
               setTrips(prev => [...prev, placeholder]);
               DB.saveTrip(placeholder).catch(e => console.error("saveTrip clinker placeholder:", e));
