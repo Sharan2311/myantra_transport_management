@@ -1828,6 +1828,8 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   const [unbilledOpen,   setUnbilledOpen]   = useState(false);
   const [unbilledGodownOpen, setUnbilledGodownOpen] = useState(false);
   const [unbilledPartyOpen,  setUnbilledPartyOpen]  = useState(false);
+  const [unbilledClinkerOpen, setUnbilledClinkerOpen] = useState(false);
+  const [billedClinkerOpen,   setBilledClinkerOpen]   = useState(false);
 
   const allFyTrips = fyTrips || trips;
   // Apply client filter then month filter
@@ -2304,6 +2306,10 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
                       ))}
                     </div>
                   );
+                  const isClinker = t => (t.to||"").toLowerCase().includes("patas") && (t.grParticulars?.goods||"").toLowerCase().includes("clinker");
+                  const clinkerUnbilled = unbilledTrips.filter(isClinker);
+                  const clinkerAmt = clinkerUnbilled.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
+                  const clinkerTons = clinkerUnbilled.reduce((s,t)=>s+(t.qty||0),0);
                   return (
                     <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:8}}>
                       {/* Godown sub-section */}
@@ -2336,11 +2342,91 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
                           {unbilledPartyOpen && <div style={{marginTop:6}}><TripList list={partyUnbilled}/></div>}
                         </div>
                       )}
+                      {/* Clinker sub-section */}
+                      {clinkerUnbilled.length>0 && (
+                        <div>
+                          <button onClick={()=>setUnbilledClinkerOpen(p=>!p)}
+                            style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,
+                              borderRadius:8,padding:"7px 10px",cursor:"pointer",
+                              display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                            <span style={{color:C.text,fontSize:11,fontWeight:700}}>
+                              🪨 Clinker <span style={{color:C.muted,fontWeight:400}}>({clinkerUnbilled.length}) · {clinkerTons.toFixed(2)} MT · {fmt(clinkerAmt)}</span>
+                            </span>
+                            <span style={{color:C.muted,fontSize:12}}>{unbilledClinkerOpen?"▲":"▼"}</span>
+                          </button>
+                          {unbilledClinkerOpen && (
+                            <div style={{marginTop:6}}>
+                              <div style={{display:"flex",flexDirection:"column",gap:4,maxHeight:220,overflowY:"auto"}}>
+                                {clinkerUnbilled.slice().sort((a,b)=>(b.date||"").localeCompare(a.date||"")).map(t=>(
+                                  <div key={t.id} style={{background:C.bg,borderRadius:8,padding:"8px 10px",
+                                    borderLeft:"3px solid #9333ea"}}>
+                                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                                      <div>
+                                        <span style={{color:C.text,fontWeight:700,fontSize:12}}>{t.truckNo}</span>
+                                        <span style={{color:C.muted,fontSize:10,marginLeft:6}}>{t.lrNo||"—"}</span>
+                                      </div>
+                                      <span style={{color:"#9333ea",fontWeight:800,fontSize:12}}>{t.qty} MT · {fmt((t.qty||0)*(t.frRate||0))}</span>
+                                    </div>
+                                    <div style={{color:C.muted,fontSize:10,marginTop:2}}>
+                                      {t.date} · {t.to||"—"}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   );
                 })()}
               </div>
             )}
+
+            {/* ── Billed Clinker block ── */}
+            {(()=>{
+              const isClinkerTrip = t => (t.to||"").toLowerCase().includes("patas") && (t.grParticulars?.goods||"").toLowerCase().includes("clinker");
+              const billedClinker = displayTrips.filter(t => isClinkerTrip(t) && t.invoiceNo && t.billedToShree);
+              if(billedClinker.length===0) return null;
+              const billedClinkerAmt  = billedClinker.reduce((s,t)=>s+Number(t.billedToShree||0),0);
+              const billedClinkerTons = billedClinker.reduce((s,t)=>s+Number(t.qty||0),0);
+              return (
+                <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${"#9333ea"}44`}}>
+                  <button onClick={()=>setBilledClinkerOpen(p=>!p)}
+                    style={{width:"100%",background:"none",border:"none",padding:0,cursor:"pointer",
+                      display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                    <div>
+                      <span style={{color:"#9333ea",fontWeight:700,fontSize:12}}>
+                        🪨 Billed Clinker
+                      </span>
+                      <span style={{color:C.muted,fontSize:11,marginLeft:8}}>
+                        {billedClinker.length} trip{billedClinker.length!==1?"s":""} · {billedClinkerTons.toFixed(2)} MT · {fmt(billedClinkerAmt)}
+                      </span>
+                    </div>
+                    <span style={{color:"#9333ea",fontSize:14}}>{billedClinkerOpen?"▲":"▼"}</span>
+                  </button>
+                  {billedClinkerOpen && (
+                    <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:4,maxHeight:260,overflowY:"auto"}}>
+                      {billedClinker.slice().sort((a,b)=>(b.date||"").localeCompare(a.date||"")).map(t=>(
+                        <div key={t.id} style={{background:C.bg,borderRadius:8,padding:"8px 10px",
+                          borderLeft:"3px solid #9333ea"}}>
+                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                            <div>
+                              <span style={{color:C.text,fontWeight:700,fontSize:12}}>{t.truckNo}</span>
+                              <span style={{color:C.muted,fontSize:10,marginLeft:6}}>{t.lrNo||"—"}</span>
+                            </div>
+                            <span style={{color:"#9333ea",fontWeight:800,fontSize:12}}>{t.qty} MT · {fmt(t.billedToShree)}</span>
+                          </div>
+                          <div style={{color:C.muted,fontSize:10,marginTop:2}}>
+                            {t.date} · {t.invoiceNo} · {t.to||"—"}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* Client × Cement breakdown */}
             {clientData.length>0 && (
@@ -17274,6 +17360,8 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
   const [clinkerBill, setClinkerBill] = useState({
     invoiceNo:"", invoiceDate:"", rate:"", tons:"", gstPct:"5",
   });
+  const [manualClinkerSelect, setManualClinkerSelect] = useState(false);
+  const [manualClinkerIds,    setManualClinkerIds]    = useState([]);
   const [searchInv,   setSearchInv]   = useState("");
   const [searchAdv,   setSearchAdv]   = useState("");
   const [searchShort, setSearchShort] = useState("");
@@ -18149,16 +18237,12 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
           const rate   = Number(cb.rate||0);
           const tons   = Number(cb.tons||0);
           const gstPct = Number(cb.gstPct||0);
-          const taxable = rate * tons;
-          const cgst    = taxable * gstPct / 200; // half of GST (intra-state split)
-          const sgst    = taxable * gstPct / 200;
-          const total   = taxable + cgst + sgst;
 
           // Clinker trips: to contains "patas" AND grParticulars.goods contains "clinker"
           const allClinkerTrips = (trips||[]).filter(t => {
-            const toMatch   = (t.to||"").toLowerCase().includes("patas");
+            const toMatch    = (t.to||"").toLowerCase().includes("patas");
             const goodsMatch = (t.grParticulars?.goods||"").toLowerCase().includes("clinker");
-            const notBilled  = !t.invoiceNo; // only unbilled trips
+            const notBilled  = !t.invoiceNo;
             return toMatch && goodsMatch && notBilled;
           }).sort((a,b) => (a.date||"").localeCompare(b.date||"")); // oldest first
 
@@ -18170,11 +18254,25 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
             autoSelected.push(t.id);
             running += Number(t.qty||0);
           }
-          const selectedIds = autoSelected;
+
+          // In manual mode use manualClinkerIds, otherwise use autoSelected
+          const selectedIds   = manualClinkerSelect ? manualClinkerIds : autoSelected;
           const selectedTrips = allClinkerTrips.filter(t => selectedIds.includes(t.id));
           const selectedTons  = selectedTrips.reduce((s,t) => s + Number(t.qty||0), 0);
-          const tonsMatch     = tons > 0 && Math.abs(selectedTons - tons) < 0.01;
-          const canSave       = cb.invoiceNo.trim() && cb.invoiceDate && tons > 0 && rate > 0 && tonsMatch;
+
+          // Compute amounts based on SELECTED tons (not entered tons)
+          const taxable = rate * selectedTons;
+          const cgst    = taxable * gstPct / 200;
+          const sgst    = taxable * gstPct / 200;
+          const total   = taxable + cgst + sgst;
+
+          const autoTonsMatch = tons > 0 && Math.abs(
+            (allClinkerTrips.filter(t=>autoSelected.includes(t.id)).reduce((s,t)=>s+Number(t.qty||0),0)) - tons
+          ) < 0.01;
+
+          // Allow ±0.5 MT tolerance
+          const tonsMatch = tons > 0 && Math.abs(selectedTons - tons) <= 0.5;
+          const canSave   = cb.invoiceNo.trim() && cb.invoiceDate && selectedTrips.length > 0 && rate > 0 && tonsMatch;
 
           const handleSaveClinkerBill = () => {
             if(!canSave) return;
@@ -18199,9 +18297,11 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
               return updated;
             }));
             Promise.all(updatedTrips.map(t => DB.saveTrip(t).catch(e => console.error("saveTrip clinker bill:", e))));
-            log && log("CLINKER BILL " + invNo + " · " + selectedTrips.length + " trips · " + selectedTons + " MT · ₹" + total.toLocaleString("en-IN"));
+            log && log("CLINKER BILL " + invNo + " · " + selectedTrips.length + " trips · " + selectedTons.toFixed(2) + " MT · ₹" + total.toLocaleString("en-IN"));
             setShowClinkerBill(false);
             setClinkerBill({invoiceNo:"", invoiceDate:"", rate:"", tons:"", gstPct:"5"});
+            setManualClinkerSelect(false);
+            setManualClinkerIds([]);
             setActiveTab("invoices");
           };
 
@@ -18270,8 +18370,27 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
 
                 {/* Trip selector */}
                 <div style={{background:C.bg,borderRadius:10,padding:"10px 14px"}}>
-                  <div style={{fontSize:10,color:C.muted,fontWeight:700,letterSpacing:1,marginBottom:6}}>
-                    CLINKER TRIPS (To: Patas · Goods: Clinker · Unbilled)
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                    <div style={{fontSize:10,color:C.muted,fontWeight:700,letterSpacing:1}}>
+                      CLINKER TRIPS (To: Patas · Goods: Clinker · Unbilled)
+                    </div>
+                    {/* Manual select toggle — only shown when auto fails */}
+                    {allClinkerTrips.length>0 && !autoTonsMatch && tons>0 && (
+                      <button onClick={()=>{
+                        if(manualClinkerSelect){
+                          setManualClinkerSelect(false);
+                          setManualClinkerIds([]);
+                        } else {
+                          setManualClinkerSelect(true);
+                          setManualClinkerIds([...autoSelected]); // start with auto as base
+                        }
+                      }} style={{fontSize:10,fontWeight:700,padding:"3px 10px",borderRadius:6,
+                        cursor:"pointer",border:`1.5px solid ${manualClinkerSelect?C.orange:C.blue}`,
+                        background:manualClinkerSelect?C.orange+"22":C.blue+"11",
+                        color:manualClinkerSelect?C.orange:C.blue}}>
+                        {manualClinkerSelect?"✕ Exit Manual":"✎ Select Manually"}
+                      </button>
+                    )}
                   </div>
                   {allClinkerTrips.length === 0 ? (
                     <div style={{color:C.muted,fontSize:12,fontStyle:"italic",padding:"8px 0"}}>
@@ -18280,7 +18399,10 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   ) : (
                     <>
                       <div style={{fontSize:11,color:C.muted,marginBottom:8}}>
-                        {allClinkerTrips.length} eligible trip{allClinkerTrips.length!==1?"s":""} · Sorted oldest first · Auto-selected to match tons
+                        {allClinkerTrips.length} eligible trip{allClinkerTrips.length!==1?"s":""} · Sorted oldest first
+                        {manualClinkerSelect
+                          ? <span style={{color:C.orange,fontWeight:700}}> · Manual selection mode — tap to toggle</span>
+                          : <span> · Auto-selected to match tons</span>}
                       </div>
                       {/* Tons match indicator */}
                       <div style={{
@@ -18290,24 +18412,35 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                         display:"flex", justifyContent:"space-between", alignItems:"center",
                       }}>
                         <span style={{fontSize:12,color:tonsMatch?C.green:C.orange,fontWeight:700}}>
-                          {tonsMatch ? "✓ Tons match exactly" : tons>0 ? `⚠ Selected ${selectedTons} MT of ${tons} MT required` : "Enter tons to auto-select trips"}
+                          {!tons>0 ? "Enter tons to auto-select trips"
+                            : tonsMatch
+                              ? `✓ Tons within ±0.5 MT (selected ${selectedTons.toFixed(2)} MT)`
+                              : `⚠ Selected ${selectedTons.toFixed(2)} MT — need ${tons} MT (±0.5 MT)`}
                         </span>
                         <span style={{fontSize:12,fontWeight:800,color:tonsMatch?C.green:C.text}}>
-                          {selectedTrips.length} trip{selectedTrips.length!==1?"s":""} · {selectedTons} MT
+                          {selectedTrips.length} trip{selectedTrips.length!==1?"s":""} · {selectedTons.toFixed(2)} MT
                         </span>
                       </div>
                       {/* Trip list */}
-                      <div style={{maxHeight:220,overflowY:"auto",display:"flex",flexDirection:"column",gap:4}}>
+                      <div style={{maxHeight:280,overflowY:"auto",display:"flex",flexDirection:"column",gap:4}}>
                         {allClinkerTrips.map((t,idx)=>{
                           const isSel = selectedIds.includes(t.id);
-                          const wouldExceed = !isSel && tons>0 && selectedTons + Number(t.qty||0) > tons + 0.01;
+                          const manualToggle = () => {
+                            if(!manualClinkerSelect) return;
+                            setManualClinkerIds(prev =>
+                              prev.includes(t.id) ? prev.filter(id=>id!==t.id) : [...prev, t.id]
+                            );
+                          };
                           return (
-                            <div key={t.id} style={{
-                              background: isSel ? C.green+"11" : C.card,
-                              border: `1px solid ${isSel ? C.green : wouldExceed ? C.red+"44" : C.border}`,
-                              borderRadius:7, padding:"7px 10px",
-                              opacity: wouldExceed ? 0.4 : 1,
-                            }}>
+                            <div key={t.id}
+                              onClick={manualClinkerSelect ? manualToggle : undefined}
+                              style={{
+                                background: isSel ? C.green+"11" : C.card,
+                                border: `1.5px solid ${isSel ? C.green : C.border}`,
+                                borderRadius:7, padding:"7px 10px",
+                                cursor: manualClinkerSelect ? "pointer" : "default",
+                                transition:"border-color 0.1s,background 0.1s",
+                              }}>
                               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                                 <div>
                                   <span style={{fontFamily:"monospace",fontSize:11,color:C.blue,fontWeight:700}}>
@@ -18322,7 +18455,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                                     fontSize:9,fontWeight:800,padding:"2px 6px",borderRadius:4,
                                     background: isSel ? C.green+"22" : C.dim,
                                     color: isSel ? C.green : C.muted,
-                                  }}>{isSel ? "✓ SELECTED" : wouldExceed ? "EXCEEDS" : `#${idx+1}`}</span>
+                                  }}>{isSel ? "✓" : manualClinkerSelect ? "TAP" : `#${idx+1}`}</span>
                                 </div>
                               </div>
                               <div style={{fontSize:10,color:C.muted,marginTop:2}}>
@@ -18332,9 +18465,15 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                           );
                         })}
                       </div>
-                      {!tonsMatch && tons > 0 && selectedTons < tons && (
-                        <div style={{marginTop:6,fontSize:11,color:C.red,fontWeight:700}}>
-                          ⚠ Not enough unbilled clinker trips to match {tons} MT. Only {selectedTons} MT available.
+                      {!tonsMatch && tons > 0 && (
+                        <div style={{marginTop:6,fontSize:11,
+                          color: Math.abs(selectedTons-tons)<=0.5 ? C.green : C.red,
+                          fontWeight:700}}>
+                          {Math.abs(selectedTons-tons)<=0.5
+                            ? `✓ Within tolerance (diff: ${Math.abs(selectedTons-tons).toFixed(2)} MT)`
+                            : selectedTons < tons
+                              ? `⚠ ${(tons-selectedTons).toFixed(2)} MT short — ${manualClinkerSelect?"select more trips":"use Manual Select"}`
+                              : `⚠ ${(selectedTons-tons).toFixed(2)} MT over — ${manualClinkerSelect?"deselect some trips":"use Manual Select"}`}
                         </div>
                       )}
                     </>
@@ -18354,8 +18493,8 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   full color={canSave ? C.green : C.muted}
                   style={{opacity: canSave ? 1 : 0.5, cursor: canSave ? "pointer" : "not-allowed"}}>
                   {canSave
-                    ? `✓ Save Bill — ${selectedTrips.length} trip${selectedTrips.length!==1?"s":""} · ${selectedTons} MT · ₹${total.toLocaleString("en-IN",{maximumFractionDigits:0})}`
-                    : "Fill all fields and match tons to save"}
+                    ? `✓ Save Bill — ${selectedTrips.length} trip${selectedTrips.length!==1?"s":""} · ${selectedTons.toFixed(2)} MT · ₹${total.toLocaleString("en-IN",{maximumFractionDigits:0})}`
+                    : "Fill all fields and match tons (±0.5 MT) to save"}
                 </Btn>
               </div>
             </Sheet>
