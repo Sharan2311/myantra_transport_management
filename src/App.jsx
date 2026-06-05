@@ -17358,7 +17358,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
   // Clinker Bill state
   const [showClinkerBill, setShowClinkerBill] = useState(false);
   const [clinkerBill, setClinkerBill] = useState({
-    invoiceNo:"", invoiceDate:"", rate:"", tons:"", gstPct:"5",
+    invoiceNo:"", invoiceDate:"", rate:"", tons:"", gstPct:"5", isPrevFY:false,
   });
   const [manualClinkerSelect, setManualClinkerSelect] = useState(false);
   const [manualClinkerIds,    setManualClinkerIds]    = useState([]);
@@ -18237,6 +18237,8 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
           const rate   = Number(cb.rate||0);
           const tons   = Number(cb.tons||0);
           const gstPct = Number(cb.gstPct||0);
+          const prevFYNum   = currentFY() - 1;
+          const prevFYLabel = FY_LABEL(prevFYNum); // e.g. "FY 2024–25"
 
           // Clinker trips: to contains "patas" AND grParticulars.goods contains "clinker"
           const allClinkerTrips = (trips||[]).filter(t => {
@@ -18292,6 +18294,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                 billedAt:    nowTs(),
                 shreeStatus: "billed",
                 client:      t.client || "Shree Cement Kodla",
+                ...(cb.isPrevFY ? {prevFY:true, prevFYLabel} : {}),
               };
               updatedTrips.push(updated);
               return updated;
@@ -18299,7 +18302,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
             Promise.all(updatedTrips.map(t => DB.saveTrip(t).catch(e => console.error("saveTrip clinker bill:", e))));
             log && log("CLINKER BILL " + invNo + " · " + selectedTrips.length + " trips · " + selectedTons.toFixed(2) + " MT · ₹" + total.toLocaleString("en-IN"));
             setShowClinkerBill(false);
-            setClinkerBill({invoiceNo:"", invoiceDate:"", rate:"", tons:"", gstPct:"5"});
+            setClinkerBill({invoiceNo:"", invoiceDate:"", rate:"", tons:"", gstPct:"5", isPrevFY:false});
             setManualClinkerSelect(false);
             setManualClinkerIds([]);
             setActiveTab("invoices");
@@ -18314,6 +18317,31 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   <div style={{fontSize:12,color:C.text,fontWeight:700}}>Shree Cement Limited</div>
                   <div style={{fontSize:11,color:C.muted,marginTop:2}}>Patas, Maharashtra · State Code 27</div>
                   <div style={{fontSize:11,color:C.muted}}>GSTIN: 27AACCS8796G2ZQ</div>
+                </div>
+
+                {/* Previous FY toggle */}
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                  background:cb.isPrevFY?C.orange+"11":C.bg,
+                  border:`1.5px solid ${cb.isPrevFY?C.orange:C.border}`,
+                  borderRadius:10,padding:"10px 14px"}}>
+                  <div>
+                    <div style={{fontWeight:700,fontSize:12,color:cb.isPrevFY?C.orange:C.text}}>
+                      {cb.isPrevFY ? `📅 Saving as ${prevFYLabel}` : "📅 Financial Year"}
+                    </div>
+                    <div style={{fontSize:11,color:C.muted,marginTop:2}}>
+                      {cb.isPrevFY
+                        ? `Invoice will be tagged as ${prevFYLabel} — trips get prevFY flag`
+                        : `Current FY: ${FY_LABEL(currentFY())}`}
+                    </div>
+                  </div>
+                  <button onClick={()=>setClinkerBill(p=>({...p,isPrevFY:!p.isPrevFY}))}
+                    style={{flexShrink:0,marginLeft:12,padding:"6px 14px",borderRadius:8,fontWeight:700,
+                      fontSize:11,cursor:"pointer",
+                      border:`1.5px solid ${cb.isPrevFY?C.orange:C.border}`,
+                      background:cb.isPrevFY?C.orange:C.dim,
+                      color:cb.isPrevFY?"#fff":C.muted}}>
+                    {cb.isPrevFY ? `${prevFYLabel} ✓` : "Save as Prev FY"}
+                  </button>
                 </div>
 
                 {/* Invoice details */}
