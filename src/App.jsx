@@ -17269,6 +17269,11 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
   const [scanError,   setScanError]   = useState(null);
   const [showAlert,   setShowAlert]   = useState(true);
   const [newExp,      setNewExp]      = useState({tripId:"", label:"", amount:""});
+  // Clinker Bill state
+  const [showClinkerBill, setShowClinkerBill] = useState(false);
+  const [clinkerBill, setClinkerBill] = useState({
+    invoiceNo:"", invoiceDate:"", rate:"", tons:"", gstPct:"5",
+  });
   const [searchInv,   setSearchInv]   = useState("");
   const [searchAdv,   setSearchAdv]   = useState("");
   const [searchShort, setSearchShort] = useState("");
@@ -18138,6 +18143,225 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
       <div style={{padding:14}}>
 
         {/* ══ OVERVIEW ══════════════════════════════════════════════ */}
+        {/* ══ CLINKER BILL SHEET ══════════════════════════════════════════════ */}
+        {showClinkerBill && isOwner && (()=>{
+          const cb = clinkerBill;
+          const rate   = Number(cb.rate||0);
+          const tons   = Number(cb.tons||0);
+          const gstPct = Number(cb.gstPct||0);
+          const taxable = rate * tons;
+          const cgst    = taxable * gstPct / 200; // half of GST (intra-state split)
+          const sgst    = taxable * gstPct / 200;
+          const total   = taxable + cgst + sgst;
+
+          // Clinker trips: to contains "patas" AND grParticulars.goods contains "clinker"
+          const allClinkerTrips = (trips||[]).filter(t => {
+            const toMatch   = (t.to||"").toLowerCase().includes("patas");
+            const goodsMatch = (t.grParticulars?.goods||"").toLowerCase().includes("clinker");
+            const notBilled  = !t.invoiceNo; // only unbilled trips
+            return toMatch && goodsMatch && notBilled;
+          }).sort((a,b) => (a.date||"").localeCompare(b.date||"")); // oldest first
+
+          // Auto-select: pick oldest trips until qty matches tons
+          let running = 0;
+          const autoSelected = [];
+          for(const t of allClinkerTrips) {
+            if(running >= tons) break;
+            autoSelected.push(t.id);
+            running += Number(t.qty||0);
+          }
+          const selectedIds = autoSelected;
+          const selectedTrips = allClinkerTrips.filter(t => selectedIds.includes(t.id));
+          const selectedTons  = selectedTrips.reduce((s,t) => s + Number(t.qty||0), 0);
+          const tonsMatch     = tons > 0 && Math.abs(selectedTons - tons) < 0.01;
+          const canSave       = cb.invoiceNo.trim() && cb.invoiceDate && tons > 0 && rate > 0 && tonsMatch;
+
+          const handleSaveClinkerBill = () => {
+            if(!canSave) return;
+            const invNo   = cb.invoiceNo.trim();
+            const invDate = cb.invoiceDate;
+            const updatedTrips = [];
+            setTrips(prev => prev.map(t => {
+              if(!selectedIds.includes(t.id)) return t;
+              const billedAmt = Number(t.qty||0) * rate;
+              const updated = {
+                ...t,
+                invoiceNo:   invNo,
+                invoiceDate: invDate,
+                billedToShree: billedAmt,
+                status:      "Billed",
+                billedBy:    user.username,
+                billedAt:    nowTs(),
+                shreeStatus: "billed",
+                client:      t.client || "Shree Cement Kodla",
+              };
+              updatedTrips.push(updated);
+              return updated;
+            }));
+            Promise.all(updatedTrips.map(t => DB.saveTrip(t).catch(e => console.error("saveTrip clinker bill:", e))));
+            log && log("CLINKER BILL " + invNo + " · " + selectedTrips.length + " trips · " + selectedTons + " MT · ₹" + total.toLocaleString("en-IN"));
+            setShowClinkerBill(false);
+            setClinkerBill({invoiceNo:"", invoiceDate:"", rate:"", tons:"", gstPct:"5"});
+            setActiveTab("invoices");
+          };
+
+          return (
+            <Sheet title="Add Clinker Bill Manually" onClose={()=>setShowClinkerBill(false)}>
+              <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                {/* Bill To — fixed */}
+                <div style={{background:C.bg,borderRadius:10,padding:"10px 14px"}}>
+                  <div style={{fontSize:10,color:C.muted,fontWeight:700,letterSpacing:1,marginBottom:6}}>BILL TO (FIXED)</div>
+                  <div style={{fontSize:12,color:C.text,fontWeight:700}}>Shree Cement Limited</div>
+                  <div style={{fontSize:11,color:C.muted,marginTop:2}}>Patas, Maharashtra · State Code 27</div>
+                  <div style={{fontSize:11,color:C.muted}}>GSTIN: 27AACCS8796G2ZQ</div>
+                </div>
+
+                {/* Invoice details */}
+                <div style={{display:"flex",gap:10}}>
+                  <div style={{flex:1}}>
+                    <Field label="Invoice No" value={cb.invoiceNo}
+                      onChange={v=>setClinkerBill(p=>({...p,invoiceNo:v}))} placeholder="e.g. MYE/CLK/2026/01" />
+                  </div>
+                  <div style={{flex:1}}>
+                    <Field label="Invoice Date" value={cb.invoiceDate} type="date"
+                      onChange={v=>setClinkerBill(p=>({...p,invoiceDate:v}))} />
+                  </div>
+                </div>
+
+                {/* Rate and Tons */}
+                <div style={{display:"flex",gap:10}}>
+                  <div style={{flex:1}}>
+                    <Field label="Rate ₹/MT" value={cb.rate} type="number"
+                      onChange={v=>setClinkerBill(p=>({...p,rate:v}))} placeholder="e.g. 450" />
+                  </div>
+                  <div style={{flex:1}}>
+                    <Field label="Total Tons (MT)" value={cb.tons} type="number"
+                      onChange={v=>setClinkerBill(p=>({...p,tons:v}))} placeholder="e.g. 1200" />
+                  </div>
+                </div>
+
+                {/* GST % */}
+                <Field label="GST %" value={cb.gstPct}
+                  onChange={v=>setClinkerBill(p=>({...p,gstPct:v}))}
+                  opts={[
+                    {v:"5",l:"5%"},{v:"12",l:"12%"},{v:"18",l:"18%"},{v:"28",l:"28%"},
+                  ]} />
+
+                {/* Auto-computed amounts */}
+                {taxable > 0 && (
+                  <div style={{background:C.bg,borderRadius:10,padding:"10px 14px"}}>
+                    <div style={{fontSize:10,color:C.muted,fontWeight:700,letterSpacing:1,marginBottom:8}}>AMOUNT BREAKDOWN</div>
+                    {[
+                      {label:"Taxable Amount",       val:taxable, color:C.text},
+                      {label:`CGST @ ${gstPct/2}%`,  val:cgst,    color:C.muted},
+                      {label:`SGST @ ${gstPct/2}%`,  val:sgst,    color:C.muted},
+                      {label:"Total Invoice Amount",  val:total,   color:C.green, bold:true},
+                    ].map(r=>(
+                      <div key={r.label} style={{display:"flex",justifyContent:"space-between",
+                        padding:"4px 0",borderBottom:`1px solid ${C.border}`,fontSize:12}}>
+                        <span style={{color:r.color,fontWeight:r.bold?700:400}}>{r.label}</span>
+                        <span style={{color:r.color,fontWeight:r.bold?800:600,fontFamily:"monospace"}}>
+                          ₹{r.val.toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2})}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Trip selector */}
+                <div style={{background:C.bg,borderRadius:10,padding:"10px 14px"}}>
+                  <div style={{fontSize:10,color:C.muted,fontWeight:700,letterSpacing:1,marginBottom:6}}>
+                    CLINKER TRIPS (To: Patas · Goods: Clinker · Unbilled)
+                  </div>
+                  {allClinkerTrips.length === 0 ? (
+                    <div style={{color:C.muted,fontSize:12,fontStyle:"italic",padding:"8px 0"}}>
+                      No unbilled clinker trips to Patas found.
+                    </div>
+                  ) : (
+                    <>
+                      <div style={{fontSize:11,color:C.muted,marginBottom:8}}>
+                        {allClinkerTrips.length} eligible trip{allClinkerTrips.length!==1?"s":""} · Sorted oldest first · Auto-selected to match tons
+                      </div>
+                      {/* Tons match indicator */}
+                      <div style={{
+                        background: tonsMatch ? C.green+"11" : tons>0 ? C.orange+"11" : C.bg,
+                        border: `1px solid ${tonsMatch ? C.green : tons>0 ? C.orange : C.border}`,
+                        borderRadius:8, padding:"8px 12px", marginBottom:8,
+                        display:"flex", justifyContent:"space-between", alignItems:"center",
+                      }}>
+                        <span style={{fontSize:12,color:tonsMatch?C.green:C.orange,fontWeight:700}}>
+                          {tonsMatch ? "✓ Tons match exactly" : tons>0 ? `⚠ Selected ${selectedTons} MT of ${tons} MT required` : "Enter tons to auto-select trips"}
+                        </span>
+                        <span style={{fontSize:12,fontWeight:800,color:tonsMatch?C.green:C.text}}>
+                          {selectedTrips.length} trip{selectedTrips.length!==1?"s":""} · {selectedTons} MT
+                        </span>
+                      </div>
+                      {/* Trip list */}
+                      <div style={{maxHeight:220,overflowY:"auto",display:"flex",flexDirection:"column",gap:4}}>
+                        {allClinkerTrips.map((t,idx)=>{
+                          const isSel = selectedIds.includes(t.id);
+                          const wouldExceed = !isSel && tons>0 && selectedTons + Number(t.qty||0) > tons + 0.01;
+                          return (
+                            <div key={t.id} style={{
+                              background: isSel ? C.green+"11" : C.card,
+                              border: `1px solid ${isSel ? C.green : wouldExceed ? C.red+"44" : C.border}`,
+                              borderRadius:7, padding:"7px 10px",
+                              opacity: wouldExceed ? 0.4 : 1,
+                            }}>
+                              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                                <div>
+                                  <span style={{fontFamily:"monospace",fontSize:11,color:C.blue,fontWeight:700}}>
+                                    {t.lrNo||"—"}
+                                  </span>
+                                  <span style={{fontSize:10,color:C.muted,marginLeft:8}}>{t.date}</span>
+                                  <span style={{fontSize:10,color:C.muted,marginLeft:8}}>{t.truckNo}</span>
+                                </div>
+                                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                                  <span style={{fontSize:12,fontWeight:700,color:C.text}}>{t.qty} MT</span>
+                                  <span style={{
+                                    fontSize:9,fontWeight:800,padding:"2px 6px",borderRadius:4,
+                                    background: isSel ? C.green+"22" : C.dim,
+                                    color: isSel ? C.green : C.muted,
+                                  }}>{isSel ? "✓ SELECTED" : wouldExceed ? "EXCEEDS" : `#${idx+1}`}</span>
+                                </div>
+                              </div>
+                              <div style={{fontSize:10,color:C.muted,marginTop:2}}>
+                                {t.grParticulars?.goods||t.grade||"—"}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      {!tonsMatch && tons > 0 && selectedTons < tons && (
+                        <div style={{marginTop:6,fontSize:11,color:C.red,fontWeight:700}}>
+                          ⚠ Not enough unbilled clinker trips to match {tons} MT. Only {selectedTons} MT available.
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+
+                {/* Save */}
+                {!canSave && tons>0 && rate>0 && cb.invoiceNo && cb.invoiceDate && (
+                  <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:8,
+                    padding:"8px 12px",fontSize:11,color:C.orange,fontWeight:700}}>
+                    {!tonsMatch ? `⚠ Selected ${selectedTons} MT does not match ${tons} MT. Adjust tons or check available trips.` : ""}
+                    {!cb.invoiceNo.trim() ? "Enter Invoice No." : ""}
+                    {!cb.invoiceDate ? " Enter Invoice Date." : ""}
+                  </div>
+                )}
+                <Btn onClick={handleSaveClinkerBill}
+                  full color={canSave ? C.green : C.muted}
+                  style={{opacity: canSave ? 1 : 0.5, cursor: canSave ? "pointer" : "not-allowed"}}>
+                  {canSave
+                    ? `✓ Save Bill — ${selectedTrips.length} trip${selectedTrips.length!==1?"s":""} · ${selectedTons} MT · ₹${total.toLocaleString("en-IN",{maximumFractionDigits:0})}`
+                    : "Fill all fields and match tons to save"}
+                </Btn>
+              </div>
+            </Sheet>
+          );
+        })()}
+
         {activeTab==="overview"&&(
           <div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:10,marginBottom:16}}>
@@ -18172,6 +18396,19 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   </div>
                 ))}
               </div>
+
+              {/* Manual clinker bill button — owner only */}
+              {isOwner && (
+                <div style={{marginTop:4}}>
+                  <button onClick={()=>setShowClinkerBill(true)}
+                    style={{width:"100%",background:C.purple+"11",border:`1.5px dashed ${C.purple}88`,
+                      borderRadius:8,padding:"12px 14px",cursor:"pointer",textAlign:"center"}}>
+                    <div style={{fontSize:20,marginBottom:4}}>📋</div>
+                    <div style={{color:C.purple,fontWeight:700,fontSize:13}}>Add Clinker Bill Manually</div>
+                    <div style={{fontSize:11,color:C.muted,marginTop:3}}>Rate × Tons + GST · Auto-selects Patas clinker trips</div>
+                  </button>
+                </div>
+              )}
 
               {scanning&&(
                 <div style={{marginTop:14,textAlign:"center",color:"#1565c0",fontSize:13}}>
