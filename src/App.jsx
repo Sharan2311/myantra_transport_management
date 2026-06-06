@@ -1476,11 +1476,13 @@ function AppMain() {
   const dbSetDriverPays = (updater) => {
     setDriverPays(prev => {
       const next = typeof updater === "function" ? updater(prev) : updater;
-      const prevIds = new Set((prev||[]).map(p=>p.id));
-      const nextIds = new Set(next.map(p=>p.id));
-      (prev||[]).filter(p=>!nextIds.has(p.id)).forEach(p => DB.deleteDriverPay(p.id).catch(e=>setSaveErr(e.message)));
-      next.filter(p => !prevIds.has(p.id)).forEach(p => DB.saveDriverPay(p).catch(e => setSaveErr(e.message)));
-      return next;
+      // Strip any AUTO-PAY phantom records from in-memory state — these should never be saved
+      const cleaned = next.filter(p => !String(p.id||"").startsWith("AUTO-PAY-"));
+      const prevIds = new Set((prev||[]).filter(p=>!String(p.id||"").startsWith("AUTO-PAY-")).map(p=>p.id));
+      const nextIds = new Set(cleaned.map(p=>p.id));
+      (prev||[]).filter(p=>!nextIds.has(p.id)&&!String(p.id||"").startsWith("AUTO-PAY-")).forEach(p => DB.deleteDriverPay(p.id).catch(e=>setSaveErr(e.message)));
+      cleaned.filter(p => !prevIds.has(p.id)).forEach(p => DB.saveDriverPay(p).catch(e => setSaveErr(e.message)));
+      return cleaned;
     });
   };
 
