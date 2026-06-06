@@ -7815,7 +7815,6 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                                 setTimeout(()=>DB.saveTrip(u).catch(er=>console.error("saveTrip confirm:",er)),0);
                                 log("CONFIRM PDF","LR:"+t.lrNo+(mergedPath?" + auto-merged":""));
                                 // AUTO-PAY on confirmation removed — payments must be recorded manually with UTR
-                                }
                               }catch(err){alert("Upload failed: "+err.message);}
                             }}/>
                         </label>
