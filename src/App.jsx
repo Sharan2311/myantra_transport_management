@@ -7195,35 +7195,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     }
   };
 
-  // Backfill: create AUTO-PAY entries for existing trips with confirmation already received
-  useEffect(()=>{
-    if(!trips||!driverPays||!setDriverPays) return;
-    const toCreate=[];
-    (trips||[]).forEach(t=>{
-      if(t.orderType!=="party") return;
-      if(t.status!=="Confirmation Email Received") return;
-      const _autoId=`AUTO-PAY-${t.id}`;
-      if((driverPays||[]).find(p=>p.id===_autoId)) return; // already exists
-      const _paid=(driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(+p.amount||0),0);
-      const _gross=(+t.qty||0)*(+t.givenRate||0);
-      const _indNo=(t.dieselIndentNo||"").trim();
-      const _req=_indNo?(dieselRequests||[]).find(r=>String(r.indentNo)===_indNo):null;
-      const _dsl=_req?(Number(_req.amount||0)):(+t.dieselEstimate||0); // amount is always diesel+cash total
-      const _net=_gross-(+t.tafal||0)-(+t.advance||0)-_dsl-(+t.shortageRecovery||0)-(+t.loanRecovery||0)-(+t.pouchBalance||0);
-      const _bal=Math.round(_net-_paid);
-      if(_bal>0) toCreate.push({id:_autoId,tripId:t.id,truckNo:t.truckNo,
-        lrNo:t.lrNo||"",amount:_bal,utr:"",date:t.receiptUploadedAt?.slice(0,10)||today(),
-        notes:"Auto created via Confirmation Received",
-        createdBy:"system",createdAt:nowTs()});
-    });
-    if(toCreate.length>0){
-      setDriverPays(p=>[...toCreate,...(p||[]).filter(x=>!toCreate.find(n=>n.id===x.id))]);
-      toCreate.forEach(pr=>DB.saveDriverPay(pr).catch(()=>{}));
-      log("AUTO PAY BACKFILL",`${toCreate.length} pay requests created for existing confirmed party trips`);
-    }
-  // Run once when trips+driverPays both load; trips.length guards against empty initial state
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  },[trips?.length, driverPays?.length]);
+  // AUTO-PAY backfill removed — was incorrectly creating phantom payment records on confirmation PDF upload
 
   return (
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
@@ -7842,25 +7814,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                                 setTrips(p=>p.map(x=>x.id===t.id?u:x));
                                 setTimeout(()=>DB.saveTrip(u).catch(er=>console.error("saveTrip confirm:",er)),0);
                                 log("CONFIRM PDF","LR:"+t.lrNo+(mergedPath?" + auto-merged":""));
-                                // Auto-create driver pay if confirmation received and balance > 0
-                                if(mergedPath && u.status==="Confirmation Email Received"){
-                                  const _paid=(driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(+p.amount||0),0);
-                                  const _gross=(+t.qty||0)*(+t.givenRate||0);
-                                  const _indNo=(t.dieselIndentNo||"").trim();
-                                  const _req=_indNo?(dieselRequests||[]).find(r=>String(r.indentNo)===_indNo):null;
-                                  const _dsl=_req?(Number(_req.amount||0)):(+t.dieselEstimate||0); // amount is always diesel+cash total
-                                  const _net=_gross-(+t.tafal||0)-(+t.advance||0)-_dsl-(+t.shortageRecovery||0)-(+t.loanRecovery||0)-(+t.pouchBalance||0);
-                                  const _bal=Math.round(_net-_paid);
-                                  const _autoId=`AUTO-PAY-${t.id}`;
-                                  if(_bal>0&&!(driverPays||[]).find(p=>p.id===_autoId)){
-                                    const _pr={id:_autoId,tripId:t.id,truckNo:t.truckNo,
-                                      lrNo:t.lrNo||"",amount:_bal,utr:"",date:today(),
-                                      notes:"Auto created via Confirmation Received",
-                                      createdBy:user.username,createdAt:nowTs()};
-                                    setDriverPays(p=>[_pr,...(p||[])]);
-                                    DB.saveDriverPay(_pr).catch(()=>{});
-                                    log("AUTO PAY",`LR ${t.lrNo} ₹${_bal} auto-req on confirm`);
-                                  }
+                                // AUTO-PAY on confirmation removed — payments must be recorded manually with UTR
                                 }
                               }catch(err){alert("Upload failed: "+err.message);}
                             }}/>
@@ -21255,20 +21209,65 @@ This will auto-recover in the next trip.`);
               <span style={{color:t.balance>0?C.accent:C.green,fontWeight:900,fontSize:14}}>{fmt(t.balance)}</span>
             </div>
           </div>
+          {/* Payment requests for this trip */}
+          {(()=>{
+            const tripReqs = (paymentRequests||[]).filter(r=>r.tripId===t.id||r.lrNo===t.lrNo);
+            if(!tripReqs.length) return null;
+            return (
+              <div style={{display:"flex",flexDirection:"column",gap:4,marginBottom:8}}>
+                {tripReqs.map(pr=>(
+                  <div key={pr.id} style={{background:pr.status==="done"?C.green+"11":C.purple+"11",
+                    border:`1px solid ${pr.status==="done"?C.green:C.purple}33`,
+                    borderRadius:6,padding:"8px 10px",fontSize:11}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                      <span style={{fontWeight:700,color:pr.status==="done"?C.green:C.purple}}>
+                        {pr.status==="done"?"✓ Request Fulfilled":"⏳ Payment Requested"}
+                      </span>
+                      <span style={{color:C.muted,fontSize:10}}>{(pr.createdAt||"").slice(0,10)}</span>
+                    </div>
+                    <div style={{color:C.muted}}>
+                      {"Requested by: "}<b style={{color:C.text}}>{pr.createdBy||"—"}</b>
+                    </div>
+                    <div style={{color:C.muted}}>
+                      {"Recipient: "}<b style={{color:C.text}}>{pr.recipientName||"—"}</b>
+                      {pr.accountNo&&<span style={{fontFamily:"monospace",marginLeft:6,color:C.blue}}>{pr.accountNo}</span>}
+                    </div>
+                    {pr.status==="done"&&(
+                      <div style={{color:C.green,marginTop:3}}>
+                        {"Resolved by: "}<b>{pr.paidBy||"—"}</b>{" on "}{pr.paidAt||"—"}
+                      </div>
+                    )}
+                    {pr.notes&&<div style={{color:C.muted,marginTop:2,fontStyle:"italic"}}>{pr.notes}</div>}
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
           {/* Previous payments */}
           {(driverPays||[]).filter(p=>p.tripId===t.id).map(p=>(
-            <div key={p.id} style={{background:C.green+"11",borderRadius:6,padding:"6px 10px",marginBottom:4,
-              display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:12}}>
-              <span style={{color:C.muted}}>{p.date} · UTR: {p.utr}</span>
-              <div style={{display:"flex",alignItems:"center",gap:8}}>
-                <span style={{color:C.green,fontWeight:700}}>{fmt(p.amount)}</span>
-                {user.role==="owner" && (
-                  <button onClick={()=>{if(window.confirm(`Delete payment of ${fmt(p.amount)}?\nBalance will be restored. If this was the final payment, the trip will be un-settled.`)) deleteDriverPay(p.id);}}
-                    style={{background:"none",border:`1px solid ${C.red}44`,borderRadius:4,
-                      color:C.red,fontSize:10,padding:"1px 6px",cursor:"pointer"}}>
-                    🗑
-                  </button>
-                )}
+            <div key={p.id} style={{background:C.green+"11",borderRadius:6,padding:"8px 10px",marginBottom:4,fontSize:12}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{color:C.muted}}>
+                    {p.date}
+                    {" · UTR: "}<b style={{color:p.utr?C.text:C.red,fontFamily:"monospace"}}>{p.utr||"NOT RECORDED"}</b>
+                  </div>
+                  <div style={{color:C.muted,marginTop:2}}>
+                    {"Paid to: "}<b style={{color:p.paidTo?C.text:C.orange}}>{p.paidTo||"—"}</b>
+                    {" · Recorded by: "}<b style={{color:C.accent}}>{p.createdBy||"—"}</b>
+                  </div>
+                  {p.notes&&<div style={{color:C.muted,fontSize:10,marginTop:1}}>{p.notes}</div>}
+                </div>
+                <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0,marginLeft:8}}>
+                  <span style={{color:C.green,fontWeight:700}}>{fmt(p.amount)}</span>
+                  {user.role==="owner"&&(
+                    <button onClick={()=>{if(window.confirm(`Delete payment of ${fmt(p.amount)}?\nBalance will be restored. If this was the final payment, the trip will be un-settled.`)) deleteDriverPay(p.id);}}
+                      style={{background:"none",border:`1px solid ${C.red}44`,borderRadius:4,
+                        color:C.red,fontSize:10,padding:"1px 6px",cursor:"pointer"}}>
+                      🗑
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           ))}
