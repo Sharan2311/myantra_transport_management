@@ -30,6 +30,13 @@ STRICT RULES:
 - frRate: extract ONLY from the rate column of THIS specific document. Return null if not clearly visible.
 - Return null (not 0, not "") for any numeric field you cannot read clearly
 - Return null (not "") for any text field you cannot read clearly
+- DIGIT ACCURACY FOR diNo IS CRITICAL — read each digit individually:
+  - "8" and "6" look similar: 8 has two loops, 6 has one loop and a tail
+  - "8" and "3" look similar: 8 is closed top and bottom, 3 is open on left
+  - "0" and "9" look similar: check carefully
+  - "4" and "9" look similar: check carefully
+  - After reading diNo, count again: must be exactly 10 digits
+  - If unsure about any digit, look at it a second time before returning
 
 Return ONLY this JSON, no markdown, no explanation:
 {
@@ -77,7 +84,7 @@ exports.handler = async (event) => {
 
   try {
     const body_parsed = JSON.parse(event.body);
-    const { base64, mediaType, promptType } = body_parsed;
+    const { base64, mediaType, promptType, expectedDI } = body_parsed;
     const apiKey = body_parsed.anthropicKey || process.env.ANTHROPIC_API_KEY;
     if (!apiKey) {
       return { statusCode: 500, body: JSON.stringify({ error: "ANTHROPIC_API_KEY not set" }) };
@@ -86,11 +93,19 @@ exports.handler = async (event) => {
     // promptType: "di" | "pump" | undefined (legacy — falls back to client prompt if passed)
     const clientPrompt = body_parsed.prompt; // legacy: app sends prompt directly
 
-    const selectedPrompt =
+    let selectedPrompt =
       promptType === "pump" ? PUMP_PROMPT :
       promptType === "di"   ? DI_PROMPT   :
       clientPrompt          ? clientPrompt :  // legacy fallback
       DI_PROMPT;
+
+    // When caller provides expectedDI (from GR scan), hint the AI to cross-check
+    if (expectedDI && (promptType === "di" || !promptType)) {
+      const cleanExpected = String(expectedDI).replace(/\D/g, "");
+      if (cleanExpected.length === 10) {
+        selectedPrompt += `\n\nIMPORTANT VERIFICATION HINT: The GR for this trip has already been verified and shows DI No = ${cleanExpected}. If you extract a different 10-digit number, re-examine every digit of that field very carefully — a single digit OCR misread is likely. The correct DI should be ${cleanExpected}.`;
+      }
+    }
 
     const isImage = mediaType && mediaType.startsWith("image/");
     const contentBlock = isImage

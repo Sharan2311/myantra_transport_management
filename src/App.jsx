@@ -2625,7 +2625,8 @@ Rules:
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify({ base64, anthropicKey: RC.anthropicKey,
           mediaType: isImage ? file.type : "application/pdf",
-          promptType: "di"
+          promptType: "di",
+          expectedDI: (expectedDI||"").replace(/\D/g,"") || undefined,
         }),
       });
       const data = await resp.json();
