@@ -18274,7 +18274,8 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                 grParticulars: { goods:"Clinker", prevFY:true, prevFYLabel, clinkerPlaceholder:true,
                                  gstPct, taxable:enteredTotal, total:enteredTotal*(1+gstPct/100) },
               });
-              dbSetTrips(prev => [...prev, placeholder]);
+              setTrips(prev => [...prev, placeholder]);
+              DB.saveTrip(placeholder).catch(e => console.error("saveTrip clinker placeholder:", e));
               log && log("CLINKER BILL (prevFY placeholder) " + invNo + " · " + enteredTons + " MT · ₹" + enteredTotal.toLocaleString("en-IN"));
               log && log("CLINKER BILL (prevFY placeholder) " + invNo + " · " + enteredTons + " MT · ₹" + enteredTotal.toLocaleString("en-IN"));
             } else {
