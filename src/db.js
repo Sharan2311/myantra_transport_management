@@ -353,7 +353,18 @@ export const DB = {
     if (cutoff) q = q.gte('date', cutoff);
     const { data, error } = await q;
     if (error) throw error;
-    return (data||[]).map(tripFromDB);
+    const trips = (data||[]).map(tripFromDB);
+    // Also fetch clinker placeholder trips (they have DD-MM-YYYY dates that fail the cutoff filter)
+    const { data: clinkerData, error: clinkerErr } = await supabase
+      .from('mye_trips')
+      .select('*')
+      .like('batch_id', 'CLINKER-PREVFY-%');
+    if (!clinkerErr && clinkerData) {
+      const existingIds = new Set(trips.map(t => t.id));
+      const clinkerTrips = clinkerData.map(tripFromDB).filter(t => !existingIds.has(t.id));
+      return [...trips, ...clinkerTrips];
+    }
+    return trips;
   },
   getTripsAll: async () => {
     const { data, error } = await supabase.from('mye_trips').select('*').order('date', {ascending: false}).order('id');
