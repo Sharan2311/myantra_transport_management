@@ -18274,13 +18274,20 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                 grParticulars: { goods:"Clinker", prevFY:true, prevFYLabel, clinkerPlaceholder:true,
                                  gstPct, taxable:enteredTotal, total:enteredTotal*(1+gstPct/100) },
               });
-              setTrips(prev => [...prev, placeholder]);
+              // Save to DB first, then reload trips so placeholder enters state via normal load path
+              // (avoids race condition where dbSetTrips delete-logic removes placeholder)
               DB.saveTrip(placeholder).then(r => {
                 if(r && r.success === false) {
-                  alert("⚠ Clinker bill saved locally but DB save failed: " + (r.error || JSON.stringify(r)));
+                  alert("⚠ Clinker bill DB save failed: " + (r.error || JSON.stringify(r)));
+                  return;
                 }
+                // Add to in-memory state using functional updater to get latest prev
+                setTrips(prev => {
+                  if(prev.find(t=>t.id===placeholder.id)) return prev; // already added
+                  return [...prev, placeholder];
+                });
+                log && log("CLINKER BILL (prevFY placeholder) " + invNo + " · " + enteredTons + " MT · ₹" + enteredTotal.toLocaleString("en-IN"));
               }).catch(e => alert("⚠ Clinker bill DB save failed: " + e.message));
-              log && log("CLINKER BILL (prevFY placeholder) " + invNo + " · " + enteredTons + " MT · ₹" + enteredTotal.toLocaleString("en-IN"));
             } else {
               setTrips(prev => prev.map(t => {
                 if(!selectedIds.includes(t.id)) return t;
