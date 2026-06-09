@@ -18251,7 +18251,6 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
               const enteredTons  = tons;
               const enteredTotal = rate * enteredTons; // billedToShree = taxable amount
               const _plId = uid();
-              const _plId = uid();
               const placeholder = mkTrip({
                 id:            _plId,
                 lrNo:          "CLK-" + _plId.slice(0,8).toUpperCase(),
