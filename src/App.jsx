@@ -17410,9 +17410,16 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     const map = {};
     const isValidDate = d => /^\d{4}-\d{2}-\d{2}$/.test(d);
     payTrips.filter(t=>t.billedToShree&&t.invoiceNo).forEach(t => {
-      if(!map[t.invoiceNo]) map[t.invoiceNo] = {
-        invoiceNo:t.invoiceNo, invoiceDate:parseDD(t.invoiceDate||""), totalAmt:0, trips:[], status:"billed"
-      };
+      if(!map[t.invoiceNo]) {
+        const isClinkerPrev = (t.batchId||"").startsWith("CLINKER-PREVFY-");
+        const clinkerPrevFYNum = isClinkerPrev ? parseInt((t.batchId||"").split("CLINKER-PREVFY-")[1]||"0") : null;
+        map[t.invoiceNo] = {
+          invoiceNo:t.invoiceNo, invoiceDate:parseDD(t.invoiceDate||""), totalAmt:0, trips:[], status:"billed",
+          prevFY: isClinkerPrev || t.prevFY || t.grParticulars?.prevFY || false,
+          prevFYLabel: isClinkerPrev ? FY_LABEL(clinkerPrevFYNum) : (t.prevFYLabel||t.grParticulars?.prevFYLabel||""),
+          clinkerInvoice: isClinkerPrev || t.grParticulars?.clinkerPlaceholder || false,
+        };
+      }
       map[t.invoiceNo].trips.push(t);
       map[t.invoiceNo].totalAmt += Number(t.billedToShree||0);
       if(t.paymentDate) map[t.invoiceNo].status = "paid";
@@ -18244,9 +18251,11 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
               const enteredTons  = tons;
               const enteredTotal = rate * enteredTons; // billedToShree = taxable amount
               const _plId = uid();
+              const _plId = uid();
               const placeholder = mkTrip({
                 id:            _plId,
-                lrNo:          "CLK-" + _plId.slice(0,8).toUpperCase(), // unique LR to avoid DB constraint
+                lrNo:          "CLK-" + _plId.slice(0,8).toUpperCase(),
+                truckNo:       "CLINKER-BILL",
                 invoiceNo:     invNo,
                 invoiceDate:   invDate,
                 billedToShree: enteredTotal,
@@ -18262,12 +18271,12 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                 client:        "Shree Cement Kodla",
                 type:          "outbound",
                 date:          invDate,
-                prevFY:        true,
-                prevFYLabel,
-                clinkerPlaceholder: true,
+                batchId:       "CLINKER-PREVFY-" + prevFYNum,
+                grParticulars: { goods:"Clinker", prevFY:true, prevFYLabel, clinkerPlaceholder:true,
+                                 gstPct, taxable:enteredTotal, total:enteredTotal*(1+gstPct/100) },
               });
-              setTrips(prev => [...prev, placeholder]);
-              DB.saveTrip(placeholder).catch(e => console.error("saveTrip clinker placeholder:", e));
+              dbSetTrips(prev => [...prev, placeholder]);
+              log && log("CLINKER BILL (prevFY placeholder) " + invNo + " · " + enteredTons + " MT · ₹" + enteredTotal.toLocaleString("en-IN"));
               log && log("CLINKER BILL (prevFY placeholder) " + invNo + " · " + enteredTons + " MT · ₹" + enteredTotal.toLocaleString("en-IN"));
             } else {
               setTrips(prev => prev.map(t => {
