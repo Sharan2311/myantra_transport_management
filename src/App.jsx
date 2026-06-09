@@ -18275,8 +18275,11 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                                  gstPct, taxable:enteredTotal, total:enteredTotal*(1+gstPct/100) },
               });
               setTrips(prev => [...prev, placeholder]);
-              DB.saveTrip(placeholder).catch(e => console.error("saveTrip clinker placeholder:", e));
-              log && log("CLINKER BILL (prevFY placeholder) " + invNo + " · " + enteredTons + " MT · ₹" + enteredTotal.toLocaleString("en-IN"));
+              DB.saveTrip(placeholder).then(r => {
+                if(r && r.success === false) {
+                  alert("⚠ Clinker bill saved locally but DB save failed: " + (r.error || JSON.stringify(r)));
+                }
+              }).catch(e => alert("⚠ Clinker bill DB save failed: " + e.message));
               log && log("CLINKER BILL (prevFY placeholder) " + invNo + " · " + enteredTons + " MT · ₹" + enteredTotal.toLocaleString("en-IN"));
             } else {
               setTrips(prev => prev.map(t => {
