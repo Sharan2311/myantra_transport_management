@@ -100,7 +100,8 @@ const vehicleFromDB = r => ({
   driverName: r.driver_name||"", driverPhone: r.driver_phone||"", driverLicense: r.driver_license||"",
   loan: +r.loan, loanRecovered: +r.loan_recovered, deductPerTrip: +r.deduct_per_trip,
   shortageDeductPerTrip: +(r.shortage_deduct_per_trip||0),
-  tafalExempt: r.tafal_exempt, shortageOwed: +(r.shortage_owed||0),
+  tafalExempt: r.tafal_exempt, tafalOverride: r.tafal_override!=null ? +r.tafal_override : null,
+  pouchExempt: r.pouch_exempt||false, shortageOwed: +(r.shortage_owed||0),
   shortageRecovered: +(r.shortage_recovered||0), createdBy: r.created_by,
   loanTxns: r.loan_txns||[], shortageTxns: r.shortage_txns||[],
   accounts: r.accounts||[],
@@ -111,7 +112,8 @@ const vehicleToDB = v => ({
   driver_name: v.driverName||"", driver_phone: v.driverPhone||"", driver_license: v.driverLicense||"",
   loan: v.loan, loan_recovered: v.loanRecovered, deduct_per_trip: v.deductPerTrip,
   shortage_deduct_per_trip: v.shortageDeductPerTrip||0,
-  tafal_exempt: v.tafalExempt, shortage_owed: v.shortageOwed||0,
+  tafal_exempt: v.tafalExempt, tafal_override: v.tafalOverride!=null ? v.tafalOverride : null,
+  pouch_exempt: v.pouchExempt||false, shortage_owed: v.shortageOwed||0,
   shortage_recovered: v.shortageRecovered||0, created_by: v.createdBy,
   loan_txns: v.loanTxns||[], shortage_txns: v.shortageTxns||[],
   accounts: v.accounts||[],
@@ -351,7 +353,18 @@ export const DB = {
     if (cutoff) q = q.gte('date', cutoff);
     const { data, error } = await q;
     if (error) throw error;
-    return (data||[]).map(tripFromDB);
+    const trips = (data||[]).map(tripFromDB);
+    // Also fetch clinker placeholder trips (they have DD-MM-YYYY dates that fail the cutoff filter)
+    const { data: clinkerData, error: clinkerErr } = await supabase
+      .from('mye_trips')
+      .select('*')
+      .like('batch_id', 'CLINKER-PREVFY-%');
+    if (!clinkerErr && clinkerData) {
+      const existingIds = new Set(trips.map(t => t.id));
+      const clinkerTrips = clinkerData.map(tripFromDB).filter(t => !existingIds.has(t.id));
+      return [...trips, ...clinkerTrips];
+    }
+    return trips;
   },
   getTripsAll: async () => {
     const { data, error } = await supabase.from('mye_trips').select('*').order('date', {ascending: false}).order('id');

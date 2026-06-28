@@ -47,30 +47,39 @@ exports.handler = async (event) => {
       return { statusCode: 400, body: JSON.stringify({ error: "No image data provided" }) };
     }
 
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 1024,
-        messages: [{
-          role: "user",
-          content: [
-            {
-              type: "image",
-              source: { type: "base64", media_type: mediaType || "image/jpeg", data: base64 }
-            },
-            { type: "text", text: PAYMENT_PROMPT }
-          ]
-        }]
-      }),
-    });
-
-    const data = await response.json();
+    // Retry up to 3 times on Anthropic 529 Overloaded
+    let response, data;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) await new Promise(r => setTimeout(r, attempt * 2000)); // 2s, 4s backoff
+      response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 1024,
+          messages: [{
+            role: "user",
+            content: [
+              {
+                type: "image",
+                source: { type: "base64", media_type: mediaType || "image/jpeg", data: base64 }
+              },
+              { type: "text", text: PAYMENT_PROMPT }
+            ]
+          }]
+        }),
+      });
+      data = await response.json();
+      if (response.status !== 529) break; // Not overloaded, proceed
+      console.log(`[scan-payment] Overloaded (529), attempt ${attempt+1}/3, retrying...`);
+    }
+    if (response.status === 529) {
+      return { statusCode: 503, body: JSON.stringify({ error: "Anthropic API is busy. Please try again in a moment." }) };
+    }
 
     // Calculate actual cost from token usage and include in response
     let _costInr = 0;

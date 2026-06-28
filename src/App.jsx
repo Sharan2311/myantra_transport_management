@@ -4,6 +4,30 @@ import { loadRuntimeConfig, RC, canFeature as canFeatureRC, logScan, isPaymentDu
 import { initSupabase } from "./supabase.js";
 import { supabase } from "./supabase.js";
 
+// Network retry wrapper for Safari iOS "Load failed" / transient network errors
+// Retries up to 3x with 1s, 2s backoff
+const _dbRetry = async (fn, maxAttempts = 3) => {
+  for (let i = 1; i <= maxAttempts; i++) {
+    try { return await fn(); }
+    catch (e) {
+      const isNet = /(Load failed|Failed to fetch|NetworkError|fetch)/i.test(e.message || "") || e.name === "TypeError";
+      if (i === maxAttempts || !isNet) throw e;
+      console.warn(`[DB retry] attempt ${i} failed: ${e.message}. Retrying in ${i}s...`);
+      await new Promise(r => setTimeout(r, i * 1000));
+    }
+  }
+};
+// Patch all DB methods transparently so every DB call gets retry for free
+(function patchDB() {
+  const proto = Object.getPrototypeOf(DB);
+  const src = (proto && proto !== Object.prototype) ? proto : DB;
+  [...new Set([...Object.getOwnPropertyNames(src), ...Object.keys(DB)])].forEach(k => {
+    if (k === "constructor" || typeof DB[k] !== "function") return;
+    const orig = DB[k].bind(DB);
+    DB[k] = (...args) => _dbRetry(() => orig(...args));
+  });
+})();
+
 
 // ─── LOGO ────────────────────────────────────────────────────────────────────
 // LOGO_SRC now comes from RC.logoSrc (loaded at runtime)
@@ -1452,11 +1476,13 @@ function AppMain() {
   const dbSetDriverPays = (updater) => {
     setDriverPays(prev => {
       const next = typeof updater === "function" ? updater(prev) : updater;
-      const prevIds = new Set((prev||[]).map(p=>p.id));
-      const nextIds = new Set(next.map(p=>p.id));
-      (prev||[]).filter(p=>!nextIds.has(p.id)).forEach(p => DB.deleteDriverPay(p.id).catch(e=>setSaveErr(e.message)));
-      next.filter(p => !prevIds.has(p.id)).forEach(p => DB.saveDriverPay(p).catch(e => setSaveErr(e.message)));
-      return next;
+      // Strip any AUTO-PAY phantom records from in-memory state — these should never be saved
+      const cleaned = next.filter(p => !String(p.id||"").startsWith("AUTO-PAY-"));
+      const prevIds = new Set((prev||[]).filter(p=>!String(p.id||"").startsWith("AUTO-PAY-")).map(p=>p.id));
+      const nextIds = new Set(cleaned.map(p=>p.id));
+      (prev||[]).filter(p=>!nextIds.has(p.id)&&!String(p.id||"").startsWith("AUTO-PAY-")).forEach(p => DB.deleteDriverPay(p.id).catch(e=>setSaveErr(e.message)));
+      cleaned.filter(p => !prevIds.has(p.id)).forEach(p => DB.saveDriverPay(p).catch(e => setSaveErr(e.message)));
+      return cleaned;
     });
   };
 
@@ -1804,6 +1830,8 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   const [unbilledOpen,   setUnbilledOpen]   = useState(false);
   const [unbilledGodownOpen, setUnbilledGodownOpen] = useState(false);
   const [unbilledPartyOpen,  setUnbilledPartyOpen]  = useState(false);
+  const [unbilledClinkerOpen, setUnbilledClinkerOpen] = useState(false);
+  const [billedClinkerOpen,   setBilledClinkerOpen]   = useState(false);
 
   const allFyTrips = fyTrips || trips;
   // Apply client filter then month filter
@@ -2280,6 +2308,10 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
                       ))}
                     </div>
                   );
+                  const isClinker = t => (t.to||"").toLowerCase().includes("patas") && (t.grParticulars?.goods||"").toLowerCase().includes("clinker");
+                  const clinkerUnbilled = unbilledTrips.filter(isClinker);
+                  const clinkerAmt = clinkerUnbilled.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
+                  const clinkerTons = clinkerUnbilled.reduce((s,t)=>s+(t.qty||0),0);
                   return (
                     <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:8}}>
                       {/* Godown sub-section */}
@@ -2312,11 +2344,91 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
                           {unbilledPartyOpen && <div style={{marginTop:6}}><TripList list={partyUnbilled}/></div>}
                         </div>
                       )}
+                      {/* Clinker sub-section */}
+                      {clinkerUnbilled.length>0 && (
+                        <div>
+                          <button onClick={()=>setUnbilledClinkerOpen(p=>!p)}
+                            style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,
+                              borderRadius:8,padding:"7px 10px",cursor:"pointer",
+                              display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                            <span style={{color:C.text,fontSize:11,fontWeight:700}}>
+                              🪨 Clinker <span style={{color:C.muted,fontWeight:400}}>({clinkerUnbilled.length}) · {clinkerTons.toFixed(2)} MT · {fmt(clinkerAmt)}</span>
+                            </span>
+                            <span style={{color:C.muted,fontSize:12}}>{unbilledClinkerOpen?"▲":"▼"}</span>
+                          </button>
+                          {unbilledClinkerOpen && (
+                            <div style={{marginTop:6}}>
+                              <div style={{display:"flex",flexDirection:"column",gap:4,maxHeight:220,overflowY:"auto"}}>
+                                {clinkerUnbilled.slice().sort((a,b)=>(b.date||"").localeCompare(a.date||"")).map(t=>(
+                                  <div key={t.id} style={{background:C.bg,borderRadius:8,padding:"8px 10px",
+                                    borderLeft:"3px solid #9333ea"}}>
+                                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                                      <div>
+                                        <span style={{color:C.text,fontWeight:700,fontSize:12}}>{t.truckNo}</span>
+                                        <span style={{color:C.muted,fontSize:10,marginLeft:6}}>{t.lrNo||"—"}</span>
+                                      </div>
+                                      <span style={{color:"#9333ea",fontWeight:800,fontSize:12}}>{t.qty} MT · {fmt((t.qty||0)*(t.frRate||0))}</span>
+                                    </div>
+                                    <div style={{color:C.muted,fontSize:10,marginTop:2}}>
+                                      {t.date} · {t.to||"—"}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   );
                 })()}
               </div>
             )}
+
+            {/* ── Billed Clinker block ── */}
+            {(()=>{
+              const isClinkerTrip = t => (t.to||"").toLowerCase().includes("patas") && (t.grParticulars?.goods||"").toLowerCase().includes("clinker");
+              const billedClinker = displayTrips.filter(t => isClinkerTrip(t) && t.invoiceNo && t.billedToShree);
+              if(billedClinker.length===0) return null;
+              const billedClinkerAmt  = billedClinker.reduce((s,t)=>s+Number(t.billedToShree||0),0);
+              const billedClinkerTons = billedClinker.reduce((s,t)=>s+Number(t.qty||0),0);
+              return (
+                <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${"#9333ea"}44`}}>
+                  <button onClick={()=>setBilledClinkerOpen(p=>!p)}
+                    style={{width:"100%",background:"none",border:"none",padding:0,cursor:"pointer",
+                      display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                    <div>
+                      <span style={{color:"#9333ea",fontWeight:700,fontSize:12}}>
+                        🪨 Billed Clinker
+                      </span>
+                      <span style={{color:C.muted,fontSize:11,marginLeft:8}}>
+                        {billedClinker.length} trip{billedClinker.length!==1?"s":""} · {billedClinkerTons.toFixed(2)} MT · {fmt(billedClinkerAmt)}
+                      </span>
+                    </div>
+                    <span style={{color:"#9333ea",fontSize:14}}>{billedClinkerOpen?"▲":"▼"}</span>
+                  </button>
+                  {billedClinkerOpen && (
+                    <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:4,maxHeight:260,overflowY:"auto"}}>
+                      {billedClinker.slice().sort((a,b)=>(b.date||"").localeCompare(a.date||"")).map(t=>(
+                        <div key={t.id} style={{background:C.bg,borderRadius:8,padding:"8px 10px",
+                          borderLeft:"3px solid #9333ea"}}>
+                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                            <div>
+                              <span style={{color:C.text,fontWeight:700,fontSize:12}}>{t.truckNo}</span>
+                              <span style={{color:C.muted,fontSize:10,marginLeft:6}}>{t.lrNo||"—"}</span>
+                            </div>
+                            <span style={{color:"#9333ea",fontWeight:800,fontSize:12}}>{t.qty} MT · {fmt(t.billedToShree)}</span>
+                          </div>
+                          <div style={{color:C.muted,fontSize:10,marginTop:2}}>
+                            {t.date} · {t.invoiceNo} · {t.to||"—"}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* Client × Cement breakdown */}
             {clientData.length>0 && (
@@ -2513,7 +2625,8 @@ Rules:
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify({ base64, anthropicKey: RC.anthropicKey,
           mediaType: isImage ? file.type : "application/pdf",
-          promptType: "di"
+          promptType: "di",
+          expectedDI: (expectedDI||"").replace(/\D/g,"") || undefined,
         }),
       });
       const data = await resp.json();
@@ -2655,7 +2768,11 @@ Rules:
           ? {...x, status:"done", extracted:{...extracted, client: extracted.client || client},
               orderType: extracted._autoOrderType || "godown",
               ownerName: ((vehicles||[]).find(v=>v.truckNo===(extracted.truckNo||"").toUpperCase().replace(/\s/g,""))?.ownerName) || extracted.ownerName || "",
-              pouchBalance: extracted._autoOrderType === "party" ? 700 : 0,
+              pouchBalance: (() => {
+                if(extracted._autoOrderType !== "party") return 0;
+                const _pVeh = (vehicles||[]).find(v=>v.truckNo===(extracted.truckNo||"").toUpperCase().trim());
+                return _pVeh?.pouchExempt ? 0 : 700;
+              })(),
               partyDriverPhone: "",  // driver phone is manual entry
               partyName: extracted._partyName || "",
               partyNumber: extracted._partyPhone || "",  // party phone auto-fills party number
@@ -2741,7 +2858,7 @@ Rules:
         .filter(r => r.truckNo===truckNo && r.status==="confirmed" && (r.date||"")>=_4daysAgo);
       const autoReqG = confirmedReqsG.length >= 1 ? confirmedReqsG[0] : null;
       const autoIndentNo = autoReqG ? String(autoReqG.indentNo) : "";
-      const autoDiesel   = autoReqG ? String(autoReqG.confirmedAmount??autoReqG.amount) : "0";
+      const autoDiesel   = autoReqG ? String(((autoReqG.dieselAmount??autoReqG.amount)||0)+(autoReqG.cashAmount||0)) : "0";
       return {
         id: uid(),
         truckNo,
@@ -2750,6 +2867,7 @@ Rules:
         tafal: (() => {
           const gVehT = (vehicles||[]).find(v=>v.truckNo===truckNo);
           if(gVehT?.tafalExempt) return "0";
+          if(gVehT?.tafalOverride!=null) return String(gVehT.tafalOverride);
           return String(settings?.tafalPerTrip||300);
         })(),
         diesel: autoDiesel,
@@ -2802,7 +2920,7 @@ Rules:
         const solo = {
           id:uid(), truckNo:g.truckNo, diIds:[itemId],
           client:g.client, tafal:g.tafal,
-          diesel: autoReqS ? String(autoReqS.confirmedAmount??autoReqS.amount) : "0",
+          diesel: autoReqS ? String(((autoReqS.dieselAmount??autoReqS.amount)||0)+(autoReqS.cashAmount||0)) : "0",
           dieselIndentNo: autoReqS ? String(autoReqS.indentNo) : "",
           advance:"0", cashEmpId:"",
           shortageRecovery:String(autoSR2), loanRecovery:String(autoLR2),
@@ -2974,7 +3092,7 @@ Rules:
       // Net to driver check per group
       const totalQty  = groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0),0);
       const totalGross = groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0)*(+x.givenRate||0),0);
-      const tafalVal  = +g.tafal || (settings?.tafalPerTrip||300);
+      const tafalVal  = g.tafal!==undefined && g.tafal!=="" ? +g.tafal : (settings?.tafalPerTrip||300);
       const _net = totalGross - (+g.advance||0) - tafalVal - (+g.diesel||0)
                  - (+g.shortageRecovery||0) - (+g.loanRecovery||0);
       if(_net < 0) {
@@ -3068,8 +3186,9 @@ Rules:
         }
       }
 
-      const tafalVal = +g.tafal!==undefined&&g.tafal!==""
-        ? +g.tafal : tafal;
+      const gVehTafal = vehicles.find(v=>v.truckNo===g.truckNo);
+      const _tafalDefault = gVehTafal?.tafalExempt ? 0 : (gVehTafal?.tafalOverride!=null ? gVehTafal.tafalOverride : tafal);
+      const tafalVal = g.tafal!=="" ? +g.tafal : _tafalDefault;
 
       if(groupItems.length === 1) {
         // ── SINGLE DI ──────────────────────────────────────────────────────
@@ -3114,7 +3233,11 @@ Rules:
           salesOfficerEmail: item.salesOfficerEmail || "",
           partyNumber: item.partyNumber || "",
           partyName: item.partyName || item.extracted?._partyName || "",
-          pouchBalance: item.orderType==="party" ? (item.pouchBalance||700) : 0,
+          pouchBalance: (() => {
+            if(item.orderType!=="party") return 0;
+            const _pVeh2 = (vehicles||[]).find(v=>v.truckNo===truckNo);
+            return _pVeh2?.pouchExempt ? 0 : (item.pouchBalance||700);
+          })(),
           grParticulars: item.extracted?._grParticulars || null,
           createdBy:user.username, createdAt:nowTs(),
         };
@@ -3159,19 +3282,12 @@ Rules:
         setTrips(p=>[trip,...(p||[])]);
         // ── Mark pre-filled diesel indent as "attached" ───────────────────
         if (g.dieselIndentNo.trim() && typeof setDieselRequests === "function") {
-          const preReq = (dieselRequests||[]).find(r => String(r.indentNo)===g.dieselIndentNo.trim() && r.status!=="attached");
+          const preReq = (dieselRequests||[]).find(r => String(r.indentNo)===g.dieselIndentNo.trim() && r.status==="confirmed");
           if (preReq) {
-            // Warn if attaching unconfirmed (open) indent
-            let doAttach = true;
-            if (preReq.status === "open") {
-              doAttach = window.confirm(`⚠ Indent #${preReq.indentNo} is UNCONFIRMED by pump.\n\nAttach anyway to LR ${lrNo}?`);
-            }
-            if (doAttach) {
               const updPreReq = {...preReq, status:"attached", tripId:trip.id, lrNo};
               setDieselRequests(p=>p.map(r=>r.id===preReq.id?updPreReq:r));
               await DB.saveDieselRequest(updPreReq);
-              log("DIESEL ATTACH", `Indent #${preReq.indentNo} → LR ${lrNo} · ₹${preReq.confirmedAmount??preReq.amount} (manual${preReq.status==="open"?" ⚠UNCONFIRMED":""})`);
-            }
+              log("DIESEL ATTACH", `Indent #${preReq.indentNo} → LR ${lrNo} · ₹${preReq.amount} (manual)`);
           }
         }
         // ── Auto-attach confirmed diesel request for this truck (within 4 days) ──
@@ -3183,15 +3299,15 @@ Rules:
           if (!truckMatch) {
             // Also check older/open requests for manual owner override
             // Show truck-specific indents first; only fall back to other trucks if none found
-            const sametruckUnattached = (dieselRequests||[]).filter(r => (r.status==="open"||r.status==="confirmed") && r.truckNo===truckNo);
+            const sametruckUnattached = (dieselRequests||[]).filter(r => r.status==="confirmed" && r.truckNo===truckNo);
             const allUnattached = sametruckUnattached.length > 0
               ? sametruckUnattached
-              : (dieselRequests||[]).filter(r => r.status==="open" || r.status==="confirmed");
+              : (dieselRequests||[]).filter(r => r.status==="confirmed");
             const isOtherTruckFallback = sametruckUnattached.length === 0;
             if (allUnattached.length > 0) {
               const listStr = allUnattached.map(r=>{
                 const age = Math.floor((Date.now()-new Date(r.date||0).getTime())/86400000);
-                const warn = r.status==="open"?" ⚠UNCONFIRMED":"";
+                const warn = ""; // only confirmed shown
                 const old = age>4?" ⚠OLD("+age+"d)":"";
                 const truckLabel = r.truckNo!==truckNo ? ` [OTHER TRUCK: ${r.truckNo}]` : "";
                 return `  #${r.indentNo} · ${r.truckNo} · ₹${(r.confirmedAmount??r.amount).toLocaleString("en-IN")}${warn}${old}${truckLabel}`;
@@ -3200,24 +3316,22 @@ Rules:
                 ? `\n⚠ NO INDENT FOUND FOR ${truckNo} — showing OTHER TRUCKS. Verify before attaching!`
                 : "";
               const sel = window.prompt(
-                `⛽ No confirmed Diesel Request (within 4 days) for ${truckNo}.\n\nAvailable requests:${fallbackNote}\n${listStr}\n\n⚠ UNCONFIRMED/OLD requests need owner verification.\nEnter Indent # to attach (or Cancel to skip):`, ""
+                `⛽ No confirmed Diesel Request (within 4 days) for ${truckNo}.\n\nConfirmed requests available:${fallbackNote}\n${listStr}\n\nEnter Indent # to attach (or Cancel to skip):`, ""
               );
               if (sel && sel.trim()) {
                 const selNo = parseInt(sel.trim(), 10);
                 chosenReq = allUnattached.find(r => r.indentNo===selNo);
                 if (!chosenReq) alert(`No request found with Indent #${selNo}.`);
-                else if (chosenReq.status==="open") {
-                  if (!window.confirm(`⚠ Indent #${selNo} is UNCONFIRMED (pump has not verified).\n\nAre you sure you want to attach it?`)) chosenReq = null;
-                }
+
               }
             }
           }
           if (chosenReq) {
-            const effAmt = chosenReq.confirmedAmount??chosenReq.amount;
-            const changed = chosenReq.confirmedAmount!=null && chosenReq.confirmedAmount!==chosenReq.amount;
+            // amount is always the correct total (diesel+cash), use it directly
+            const effAmt = Number(chosenReq.amount||0);
             const truckWarn = chosenReq.truckNo!==truckNo ? `\n⚠ Request was for ${chosenReq.truckNo}, attaching to ${truckNo}` : "";
             const attach = window.confirm(
-              `⛽ Indent #${chosenReq.indentNo} · ${chosenReq.truckNo}\n₹${effAmt.toLocaleString("en-IN")}${changed?" ⚠ (AMOUNT CHANGED AT PUMP)":""}${truckWarn}\n\nAttach to LR ${lrNo} and fill Diesel column?`
+              `⛽ Indent #${chosenReq.indentNo} · ${chosenReq.truckNo}\n₹${effAmt.toLocaleString("en-IN")}${truckWarn}\n\nAttach to LR ${lrNo} and fill Diesel column?`
             );
             if (attach) {
               const updReq = {...chosenReq, status:"attached", tripId:trip.id, lrNo};
@@ -3332,7 +3446,12 @@ Rules:
           salesOfficerEmail: (groupItems.find(x=>x.orderType==="party")?.salesOfficerEmail) || primary.salesOfficerEmail || "",
           partyNumber: (groupItems.find(x=>x.orderType==="party")?.partyNumber) || primary.partyNumber || "",
           partyName: (groupItems.find(x=>x.orderType==="party")?.partyName) || primary.partyName || primary.extracted?._partyName || "",
-          pouchBalance: diLines.some(d=>d.orderType==="party") ? ((groupItems.find(x=>x.orderType==="party")?.pouchBalance)??700) : 0,
+          pouchBalance: (() => {
+            if(!diLines.some(d=>d.orderType==="party")) return 0;
+            const _pVeh3 = (vehicles||[]).find(v=>v.truckNo===truckNo);
+            if(_pVeh3?.pouchExempt) return 0;
+            return (groupItems.find(x=>x.orderType==="party")?.pouchBalance)??700;
+          })(),
           grParticulars: primary.extracted?._grParticulars || null,
           createdBy:user.username, createdAt:nowTs(),
         };
@@ -3357,15 +3476,15 @@ Rules:
           let chosenReq = truckMatch;
           if (!truckMatch) {
             // Show truck-specific indents first; only fall back to other trucks if none found
-            const sametruckUnattached = (dieselRequests||[]).filter(r => (r.status==="open"||r.status==="confirmed") && r.truckNo===truckNo);
+            const sametruckUnattached = (dieselRequests||[]).filter(r => r.status==="confirmed" && r.truckNo===truckNo);
             const allUnattached = sametruckUnattached.length > 0
               ? sametruckUnattached
-              : (dieselRequests||[]).filter(r => r.status==="open" || r.status==="confirmed");
+              : (dieselRequests||[]).filter(r => r.status==="confirmed");
             const isOtherTruckFallback = sametruckUnattached.length === 0;
             if (allUnattached.length > 0) {
               const listStr = allUnattached.map(r=>{
                 const age = Math.floor((Date.now()-new Date(r.date||0).getTime())/86400000);
-                const warn = r.status==="open"?" ⚠UNCONFIRMED":"";
+                const warn = ""; // only confirmed shown
                 const old = age>4?" ⚠OLD("+age+"d)":"";
                 const truckLabel = r.truckNo!==truckNo ? ` [OTHER TRUCK: ${r.truckNo}]` : "";
                 return `  #${r.indentNo} · ${r.truckNo} · ₹${(r.confirmedAmount??r.amount).toLocaleString("en-IN")}${warn}${old}${truckLabel}`;
@@ -3374,24 +3493,22 @@ Rules:
                 ? `\n⚠ NO INDENT FOUND FOR ${truckNo} — showing OTHER TRUCKS. Verify before attaching!`
                 : "";
               const sel = window.prompt(
-                `⛽ No confirmed Diesel Request (within 4 days) for ${truckNo}.\n\nAvailable requests:${fallbackNote}\n${listStr}\n\n⚠ UNCONFIRMED/OLD requests need owner verification.\nEnter Indent # to attach (or Cancel to skip):`, ""
+                `⛽ No confirmed Diesel Request (within 4 days) for ${truckNo}.\n\nConfirmed requests available:${fallbackNote}\n${listStr}\n\nEnter Indent # to attach (or Cancel to skip):`, ""
               );
               if (sel && sel.trim()) {
                 const selNo = parseInt(sel.trim(), 10);
                 chosenReq = allUnattached.find(r => r.indentNo===selNo);
                 if (!chosenReq) alert(`No request found with Indent #${selNo}.`);
-                else if (chosenReq.status==="open") {
-                  if (!window.confirm(`⚠ Indent #${selNo} is UNCONFIRMED (pump has not verified).\n\nAre you sure you want to attach it?`)) chosenReq = null;
-                }
+
               }
             }
           }
           if (chosenReq) {
-            const effAmt = chosenReq.confirmedAmount??chosenReq.amount;
-            const changed = chosenReq.confirmedAmount!=null && chosenReq.confirmedAmount!==chosenReq.amount;
+            // amount is always the correct total (diesel+cash), use it directly
+            const effAmt = Number(chosenReq.amount||0);
             const truckWarn = chosenReq.truckNo!==truckNo ? `\n⚠ Request was for ${chosenReq.truckNo}, attaching to ${truckNo}` : "";
             const attach = window.confirm(
-              `⛽ Indent #${chosenReq.indentNo} · ${chosenReq.truckNo}\n₹${effAmt.toLocaleString("en-IN")}${changed?" ⚠ (AMOUNT CHANGED AT PUMP)":""}${truckWarn}\n\nAttach to LR ${lrNo} and fill Diesel column?`
+              `⛽ Indent #${chosenReq.indentNo} · ${chosenReq.truckNo}\n₹${effAmt.toLocaleString("en-IN")}${truckWarn}\n\nAttach to LR ${lrNo} and fill Diesel column?`
             );
             if (attach) {
               const updReq = {...chosenReq, status:"attached", tripId:trip.id, lrNo};
@@ -3717,8 +3834,10 @@ Rules:
                             <select value={item.orderType||"godown"}
                               onChange={e=>{
                                 updateItem(item.id,"orderType",e.target.value);
-                                if(e.target.value==="party") updateItem(item.id,"pouchBalance",700);
-                                else updateItem(item.id,"pouchBalance",0);
+                                if(e.target.value==="party") {
+                                  const _pv = (vehicles||[]).find(v=>v.truckNo===(g.truckNo||"").toUpperCase().trim());
+                                  updateItem(item.id,"pouchBalance",_pv?.pouchExempt?0:700);
+                                } else updateItem(item.id,"pouchBalance",0);
                               }}
                               style={{width:"100%",background:C.card,border:`1.5px solid ${C.border}`,
                                 borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none"}}>
@@ -4079,11 +4198,10 @@ Rules:
                 );
               })()}
 
-              {/* ── Pending diesel — soft warning only, saving IS allowed ── */}
+              {/* ── Pending diesel — info only, cannot be attached until confirmed ── */}
               {(()=>{
                 const truck = (g.truckNo||"").toUpperCase().trim();
                 const attachedIndentNo = g.dieselIndentNo?.trim();
-                // Only warn about UNATTACHED open requests (not the one already selected)
                 const unattachedPending = (dieselRequests||[]).filter(r=>
                   r.truckNo===truck && r.status==="open" &&
                   String(r.indentNo)!==attachedIndentNo
@@ -4092,13 +4210,16 @@ Rules:
                 return (
                   <div style={{background:"#fffbeb",border:"1px solid #d97706",
                     borderRadius:8,padding:"8px 10px",fontSize:11,color:"#92400e"}}>
-                    <div style={{fontWeight:700,marginBottom:3}}>⚠ Unconfirmed diesel request exists</div>
+                    <div style={{fontWeight:700,marginBottom:3}}>⚠ Unconfirmed diesel request — cannot attach</div>
                     {unattachedPending.map(r=>(
                       <div key={r.id}>
                         Indent #{r.indentNo} · PIN: <b style={{fontFamily:"monospace",letterSpacing:2}}>{r.pin!=="****"?r.pin:"—"}</b>
                       </div>
                     ))}
-                    <div style={{marginTop:4,fontSize:10}}>You can still save. Ask pump to confirm later.</div>
+                    <div style={{marginTop:4,fontSize:10,fontWeight:700,color:"#b45309"}}>
+                      ⛔ This indent will NOT be attached until pump confirms it.<br/>
+                      Ask the pump operator to confirm using the PIN above.
+                    </div>
                   </div>
                 );
               })()}
@@ -4115,7 +4236,7 @@ Rules:
                 // Unattached requests for this truck (not yet on any LR)
                 const availReqs = (dieselRequests||[]).filter(r=>
                   r.truckNo===g.truckNo &&
-                  (r.status==="confirmed"||r.status==="open") &&
+                  r.status==="confirmed" &&  // only confirmed requests can be attached
                   !r.tripId && !r.lrNo
                 );
                 const alreadyAttached = displayReq != null;
@@ -4193,7 +4314,7 @@ Rules:
                       const lev=(a,b)=>{const m=a.length,n=b.length,dp=Array.from({length:m+1},(_,i)=>Array.from({length:n+1},(_,j)=>i?j?0:i:j));for(let i=1;i<=m;i++)for(let j=1;j<=n;j++)dp[i][j]=a[i-1]===b[j-1]?dp[i-1][j-1]:1+Math.min(dp[i-1][j],dp[i][j-1],dp[i-1][j-1]);return dp[m][n];};
                       const trk = g.truckNo.toUpperCase();
                       const fuzzy = (dieselRequests||[]).filter(r=>
-                        (r.status==="confirmed"||r.status==="open") && !r.tripId && !r.lrNo &&
+                        r.status==="confirmed" && !r.tripId && !r.lrNo &&  // only confirmed
                         r.truckNo!==trk && lev(r.truckNo,trk)<=2
                       ).slice(0,3);
                       if(!fuzzy.length) return null;
@@ -4302,7 +4423,7 @@ Rules:
               {/* Net preview */}
               {(()=>{
                 const totalGross = groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0)*(+x.givenRate||0),0);
-                const tafalVal   = +g.tafal||(settings?.tafalPerTrip||300);
+                const tafalVal   = g.tafal!=="" ? +g.tafal : (settings?.tafalPerTrip||300);
                 const net = totalGross-(+g.advance||0)-tafalVal-(+g.diesel||0)-(+g.shortageRecovery||0)-(+g.loanRecovery||0);
                 if(!totalGross) return null;
                 return (
@@ -6107,7 +6228,8 @@ function SealedInvoiceSheet({ trip, onMerge, onClose, embedded=false }) {
 
   const handleMerge = async () => {
     if(files.length===0){setError("Please upload at least one sealed invoice file.");return;}
-    // For multi-DI trips, GR/Invoice may be on diLines not on trip root
+    const partyDIs=(trip.diLines||[]).filter(d=>d.orderType==="party");
+    if(partyDIs.length>1){const missingInv=partyDIs.filter(d=>!d.invoiceFilePath);if(missingInv.length>0){setError("This trip has "+partyDIs.length+" party DIs. All must have invoices uploaded before merging. Missing: DI "+missingInv.map(d=>d.diNo||"?").join(", ")+".");return;}}
     const anyGR  = trip.grFilePath || (trip.diLines||[]).find(d=>d.grFilePath)?.grFilePath;
     const anyInv = trip.invoiceFilePath || (trip.diLines||[]).find(d=>d.invoiceFilePath)?.invoiceFilePath;
     if(!anyGR||!anyInv){
@@ -6235,7 +6357,7 @@ function SealedInvoiceSheet({ trip, onMerge, onClose, embedded=false }) {
 }
 
 // ─── TRIPS ────────────────────────────────────────────────────────────────────
-function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles, indents, setIndents, settings, tripType, user, log, driverPays, employees, cashTransfers, setCashTransfers, allTripsLoaded, loadingAllTrips, loadAllTrips, dieselRequests=[], setDieselRequests}) {
+function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles, indents, setIndents, settings, tripType, user, log, driverPays, setDriverPays, employees, cashTransfers, setCashTransfers, allTripsLoaded, loadingAllTrips, loadAllTrips, dieselRequests=[], setDieselRequests}) {
   const isIn = tripType === "inbound";
   const ac   = isIn ? C.teal : C.accent;
 
@@ -6345,7 +6467,10 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     if((t.grade||"").toLowerCase().includes(q)) return true;
     return false;
   }) : dlist;
-  const shown  = filter==="All" ? slist : slist.filter(t => t.status===filter);
+  const shown  = filter==="All" ? slist
+    : filter==="Confirmation Email Received"
+      ? slist.filter(t=>t.status==="Confirmation Email Received"&&t.orderType==="party")
+      : slist.filter(t => t.status===filter);
 
   // When truck number changes, check if tafalExempt
   const onTruckChange = v => {
@@ -6370,7 +6495,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     setF(p => ({
       ...p,
       truckNo: v,
-      tafal: veh?.tafalExempt ? "0" : String(settings?.tafalPerTrip||300),
+      tafal: veh?.tafalExempt ? "0" : String(veh?.tafalOverride!=null ? veh.tafalOverride : (settings?.tafalPerTrip||300)),
       loanRecovery: String(autoLoanRecov),
       shortageRecovery: String(autoShortageRecov),
       givenRate: p.givenRate||"" ? p.givenRate : String(lastTrip?.givenRate||""),
@@ -6701,7 +6826,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     if (t.dieselIndentNo && typeof setDieselRequests === "function") {
       const indentNo = parseInt(t.dieselIndentNo, 10);
       const matchReq = (dieselRequests||[]).find(r =>
-        r.indentNo === indentNo && (r.status==="open" || r.status==="confirmed")
+        r.indentNo === indentNo && r.status==="confirmed" // only confirmed requests can attach
       );
       if (matchReq) {
         const updReq = {...matchReq, status:"attached", tripId:t.id, lrNo:t.lrNo||""};
@@ -6787,6 +6912,10 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         return;
       }
     }
+    // Sync dieselEstimate from live request amount (not stale editSheet snapshot)
+    const _saveIndNo = (editSheet.dieselIndentNo||"").trim();
+    const _saveReq = _saveIndNo ? (dieselRequests||[]).find(r=>String(r.indentNo)===_saveIndNo) : null;
+    const _liveDieselEst = _saveReq ? Number(_saveReq.amount||0) : +editSheet.dieselEstimate; // amount is always diesel+cash total
     setTrips(p => p.map(t => t.id===editSheet.id ? {
       ...editSheet,
       qty:+editSheet.qty, bags:+editSheet.bags,
@@ -6796,7 +6925,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       advance:+editSheet.advance,
       shortage:+editSheet.shortage, tafal:+editSheet.tafal,
       shortageRecovery:+editSheet.shortageRecovery||0, loanRecovery:+editSheet.loanRecovery||0,
-      dieselEstimate:+editSheet.dieselEstimate,
+      dieselEstimate:_liveDieselEst,
       cashEmpId: editSheet.cashEmpId||"",
       editedBy:user.username, editedAt:nowTs(),
     } : t));
@@ -6804,7 +6933,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     if (editSheet.dieselIndentNo?.trim() && typeof setDieselRequests === "function") {
       const indentNo = parseInt(editSheet.dieselIndentNo.trim(), 10);
       const matchReq = (dieselRequests||[]).find(r =>
-        r.indentNo === indentNo && (r.status==="open" || r.status==="confirmed")
+        r.indentNo === indentNo && r.status==="confirmed" // only confirmed requests can attach
       );
       if (matchReq) {
         const updReq = {...matchReq, status:"attached", tripId:editSheet.id, lrNo:editSheet.lrNo||""};
@@ -6919,6 +7048,56 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       setCashTransfers(prev=>(prev||[]).filter(x=>x.id!=="XD-"+editSheet.id));
       DB.deleteCashTransfer("XD-"+editSheet.id).catch(()=>{});
     }}
+    // Diesel overpayment on settled trip => add to vehicle loan
+    // Compare actual paid amount vs what SHOULD have been paid with current diesel
+    const _settledNet = (() => {
+      const _g = (+editSheet.qty||0)*(+editSheet.givenRate||0);
+      return _g - (+editSheet.tafal||0) - (+editSheet.advance||0) - _liveDieselEst
+           - (+editSheet.shortageRecovery||0) - (+editSheet.loanRecovery||0);
+    })();
+    const _actualPaid = (driverPays||[]).filter(p=>p.tripId===editSheet.id)
+      .reduce((s,p)=>s+(+p.amount||0),0);
+    const _overpaid = Math.round(_actualPaid - _settledNet);
+    if(prevTrip?.driverSettled && _overpaid > 10) {
+      const _dieselDiff = _overpaid;
+      const _indentNo = (editSheet.dieselIndentNo||"").trim();
+      if(_dieselDiff > 0) {
+        const _loanVeh = vehicles.find(v=>v.truckNo===(editSheet.truckNo||"").toUpperCase().trim());
+        const _loanNote = `Diesel overpayment - Indent #${_indentNo||"?"}, LR ${editSheet.lrNo||"--"}: Paid ₹${_actualPaid.toLocaleString("en-IN")}, should be ₹${_settledNet.toLocaleString("en-IN")} with diesel ₹${_liveDieselEst.toLocaleString("en-IN")}. Overpaid ₹${_dieselDiff.toLocaleString("en-IN")}. Recover next trip.`;
+        // Stable ID per trip: prevents duplicate loan entries on re-save
+        const _loanStableId = `LOAN-DSL-${editSheet.id}`;
+        const _existingLoanTxn = (_loanVeh?.loanTxns||[]).find(t=>t.id===_loanStableId);
+        const _loanTxn = {id:_loanStableId, type:"given", date:today(),
+          amount:_dieselDiff, lrNo:editSheet.lrNo||"", note:_loanNote};
+        const _updLoanVeh = _loanVeh ? {
+          ..._loanVeh,
+          // Adjust loan balance: subtract old entry amount if replacing
+          loan: (_loanVeh.loan||0) + _dieselDiff - (_existingLoanTxn?.amount||0),
+          // Replace old entry (same stableId) or append new
+          loanTxns: [...(_loanVeh.loanTxns||[]).filter(t=>t.id!==_loanStableId), _loanTxn],
+        } : null;
+        if(_updLoanVeh){
+          setVehicles(p=>p.map(v=>v.truckNo===editSheet.truckNo?_updLoanVeh:v));
+          DB.saveVehicle(_updLoanVeh).catch(()=>{});
+        }
+        const _deductPay = {
+          id:`DEDUCT-DSL-${editSheet.id}`, tripId:editSheet.id, truckNo:editSheet.truckNo,
+          lrNo:editSheet.lrNo||"", amount:-_dieselDiff,
+          utr:`DIESEL-ADJ-${_indentNo||editSheet.id.slice(0,6)}`,
+          date:today(),
+          notes:`Diesel overpayment - Indent #${_indentNo}: ₹${_dieselDiff.toLocaleString("en-IN")} added to loan.`,
+          createdBy:user.username, createdAt:nowTs(),
+        };
+        setDriverPays(p=>[_deductPay,...(p||[]).filter(x=>x.id!==_deductPay.id)]);
+        DB.saveDriverPay(_deductPay).catch(()=>{});
+        log("DIESEL LOAN ADJ",`${editSheet.truckNo} ₹${_dieselDiff} to loan — LR ${editSheet.lrNo}, Indent #${_indentNo}`);
+        window.alert(
+          `⚠ LR ${editSheet.lrNo||"--"} already settled.\n`
+          +`Diesel: ₹${(+prevTrip.dieselEstimate||0).toLocaleString("en-IN")} → ₹${_liveDieselEst.toLocaleString("en-IN")}\n`
+          +`₹${_dieselDiff.toLocaleString("en-IN")} added to ${(editSheet.truckNo||"vehicle").toUpperCase()} loan.\n`
+          +`Indent: #${_indentNo||"?"}. Will auto-recover next trip.`);
+      }
+    }
     log("EDIT TRIP", `LR:${editSheet.lrNo} ${editSheet.truckNo}`);
     setEditSheet(null);
   };
@@ -7018,6 +7197,8 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       alert("Failed to delete from database: " + e.message);
     }
   };
+
+  // AUTO-PAY backfill removed — was incorrectly creating phantom payment records on confirmation PDF upload
 
   return (
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
@@ -7197,7 +7378,12 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
           style={{background:"none",border:"none",color:C.muted,fontSize:18,cursor:"pointer",padding:"0 4px"}}>✕</button>}
       </div>
 
-      <PillBar items={["All","Pending Bill","Yet to Bill","Billed","Paid"].map(s=>({id:s,label:s+(s!=="All"?` (${list.filter(t=>t.status===s).length})`:""),color:SC(s)}))} active={filter} onSelect={setFilter} />
+      <PillBar items={[
+        ...["All","Pending Bill","Yet to Bill","Billed","Paid"].map(s=>({id:s,label:s+(s!=="All"?` (${list.filter(t=>t.status===s).length})`:""),color:SC(s)})),
+        {id:"Confirmation Email Received",
+         label:`📤 Confirmed (${list.filter(t=>t.status==="Confirmation Email Received"&&t.orderType==="party").length})`,
+         color:C.teal},
+      ]} active={filter} onSelect={setFilter} />
 
       {/* Order type filter — only for outbound trips */}
       {!isIn && (
@@ -7523,16 +7709,34 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                     if(!pays.length) return null;
                     return (
                       <div style={{padding:"6px 12px 8px",borderTop:`1px solid ${C.border}22`,display:"flex",flexDirection:"column",gap:3}}>
-                        {pays.map((p,i)=>(
+                        {pays.map((p,i)=>{
+                          const isDieselAdj=(p.amount||0)<0&&(p.id?.startsWith("DEDUCT-DSL-")||p.utr?.startsWith("DIESEL-ADJ"));
+                          return (
                           <div key={p.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:11}}>
-                            <div style={{color:C.muted}}>
-                              <span style={{fontWeight:700,color:C.green}}>₹{(p.amount||0).toLocaleString("en-IN")}</span>
+                            <div style={{color:C.muted,flex:1}}>
+                              <span style={{fontWeight:700,color:(p.amount||0)<0?C.red:C.green}}>
+                                {(p.amount||0)<0?"-":""}₹{Math.abs(p.amount||0).toLocaleString("en-IN")}
+                              </span>
                               {p.paidTo&&<span style={{marginLeft:6}}>→ <b style={{color:C.text}}>{p.paidTo}</b></span>}
                               {p.utr&&<span style={{marginLeft:6,fontFamily:"monospace",color:C.blue,fontSize:10}}>{p.utr}</span>}
                             </div>
-                            <div style={{color:C.muted,fontSize:10}}>{p.createdAt||p.date||""}</div>
-                          </div>
-                        ))}
+                            <div style={{display:"flex",alignItems:"center",gap:4}}>
+                              <span style={{color:C.muted,fontSize:10}}>{(p.createdAt||p.date||"").slice(0,16)}</span>
+                              {isDieselAdj&&user?.role==="owner"&&(
+                                <button onClick={e=>{e.stopPropagation();
+                                  if(!window.confirm(`Delete diesel adj ₹${Math.abs(p.amount||0).toLocaleString("en-IN")} (${p.utr||p.id})?\nThis also removes the loan entry.`)) return;
+                                  setDriverPays(pp=>pp.filter(x=>x.id!==p.id));
+                                  DB.deleteDriverPay(p.id).catch(()=>{});
+                                  const _lId=p.id?.startsWith("DEDUCT-DSL-")?p.id.replace("DEDUCT-DSL-","LOAN-DSL-"):null;
+                                  if(_lId){const _v=(vehicles||[]).find(v=>v.truckNo===t.truckNo);if(_v){const _ot=(_v.loanTxns||[]).find(x=>x.id===_lId);const _uv={..._v,loan:Math.max(0,(_v.loan||0)-(_ot?.amount||0)),loanTxns:(_v.loanTxns||[]).filter(x=>x.id!==_lId)};setVehicles(pp=>pp.map(v=>v.truckNo===t.truckNo?_uv:v));DB.saveVehicle(_uv).catch(()=>{}); }}
+                                  log("DELETE DIESEL ADJ",`LR ${t.lrNo}`);
+                                }}
+                                style={{background:"none",border:`1px solid ${C.red}44`,borderRadius:4,color:C.red,fontSize:9,padding:"1px 5px",cursor:"pointer",flexShrink:0}}>
+                                🗑
+                              </button>)}
+                            </div>
+                          </div>);
+                        })}
                       </div>
                     );
                   })()}
@@ -7592,6 +7796,11 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                                 const invPath=t.invoiceFilePath||(t.diLines||[]).find(d=>d.invoiceFilePath)?.invoiceFilePath;
                                 if(grPath&&invPath){
                                   try{
+                                    const partyDICount=(t.diLines||[]).filter(d=>d.orderType==="party").length;
+                                    if(partyDICount>1&&!window.confirm("This trip has "+partyDICount+" party DIs.\n\nDoes this confirmation email cover ALL "+partyDICount+" DIs?\n\nOK = Yes, merge now\nCancel = No, skip merge")){
+                                      const{data:{signedUrl:cu2}}=await supabase.storage.from("party-trip-files").createSignedUrl(path,86400*365);
+                                      const u2={...t,confirmPdfPath:cu2||path};setTrips(p=>p.map(x=>x.id===t.id?u2:x));setTimeout(()=>DB.saveTrip(u2).catch(()=>{}),0);log("CONFIRM PDF","LR:"+t.lrNo+" partial multi-DI");return;
+                                    }
                                     const confBuf=await file.arrayBuffer();
                                     const[grBuf,invBuf]=await Promise.all([fetchStorageFile(grPath),fetchStorageFile(invPath)]);
                                     const merged=await mergePDFs([confBuf,grBuf,invBuf]);
@@ -7607,7 +7816,8 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                                   ...(mergedPath?{status:"Confirmation Email Received",mergedPdfPath:mergedPath,receiptFilePath:path,receiptUploadedAt:ts}:{})};
                                 setTrips(p=>p.map(x=>x.id===t.id?u:x));
                                 setTimeout(()=>DB.saveTrip(u).catch(er=>console.error("saveTrip confirm:",er)),0);
-                                log("CONFIRM PDF","LR:"+t.lrNo+(mergedPath?" + auto-merged":" — merge failed"));
+                                log("CONFIRM PDF","LR:"+t.lrNo+(mergedPath?" + auto-merged":""));
+                                // AUTO-PAY on confirmation removed — payments must be recorded manually with UTR
                               }catch(err){alert("Upload failed: "+err.message);}
                             }}/>
                         </label>
@@ -8246,7 +8456,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
             ff={k=>v=>setEditSheet(p=>({...p,[k]:v}))}
             isIn={isIn} ac={C.blue} vehicles={vehicles} settings={settings}
             employees={employees||[]} cashTransfers={cashTransfers||[]}
-            onTruckChange={v=>{const veh=vehicles.find(x=>x.truckNo===v.toUpperCase().trim()); setEditSheet(p=>({...p,truckNo:v,tafal:veh?.tafalExempt?0:(settings?.tafalPerTrip||300)}));}}
+            onTruckChange={v=>{const veh=vehicles.find(x=>x.truckNo===v.toUpperCase().trim()); setEditSheet(p=>({...p,truckNo:v,tafal:veh?.tafalExempt?0:(veh?.tafalOverride!=null?veh.tafalOverride:(settings?.tafalPerTrip||300))}));}}
             onSubmit={saveEdit} submitLabel="Save Changes" user={user}
             showStatus={true}
             wasScanned={user.role !== "owner"}
@@ -8535,7 +8745,11 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
     : (+(f.frRate)||0) - (+(f.givenRate)||0);
   const marginOk = perMTMargin >= 30;
   const tafalAmt = +f.tafal||0;
-  const net      = gross - (+f.advance||0) - tafalAmt - (+f.dieselEstimate||0);
+  // Live diesel estimate from attached request (f.dieselEstimate may be stale)
+  const _calcIndNo = (f.dieselIndentNo||"").trim();
+  const _calcReq   = _calcIndNo ? (dieselRequests||[]).find(r=>String(r.indentNo)===_calcIndNo) : null;
+  const liveDieselEst = _calcReq ? Number(_calcReq.amount||0) : (+f.dieselEstimate||0); // amount is always diesel+cash total
+  const net      = gross - (+f.advance||0) - tafalAmt - liveDieselEst;
   const veh      = vehicles.find(x => x.truckNo===(f.truckNo||"").toUpperCase().trim());
   const isOwner  = user?.role === "owner";
   // Fields locked after scan for non-owners
@@ -8557,7 +8771,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
     if(confirmed.length === 1) {
       // Exactly one confirmed request — auto-attach silently
       ff("dieselIndentNo")(String(confirmed[0].indentNo));
-      ff("dieselEstimate")(String(confirmed[0].confirmedAmount ?? confirmed[0].amount));
+      ff("dieselEstimate")(String(((confirmed[0].dieselAmount??confirmed[0].amount)||0)+(confirmed[0].cashAmount||0)));
     }
     // open (unconfirmed) requests → shown as warning cards, not auto-attached
   }, [f.truckNo]);
@@ -8916,7 +9130,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
             <div style={{color:C.green,fontSize:11}}>This vehicle is TAFAL exempt</div>
           </div>
         ) : (
-          <Field label={`TAFAL ₹${veh?.tafalExempt?" (Exempt — Owner override)":""}`}
+          <Field label={`TAFAL ₹${veh?.tafalExempt?" (Exempt)":""}`}
             value={f.tafal||""} onChange={ff("tafal")} type="number" half
             placeholder="0"
             note={veh?.tafalExempt?"⚠ Exempt vehicle — only owner can change this":""}/>
@@ -8927,8 +9141,16 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
           <div style={{background:C.dim,border:`1.5px solid ${C.border}`,borderRadius:10,
             color:C.text,padding:"13px 12px",fontSize:15,
             display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-            <span>{f.dieselEstimate>0?("₹"+(+f.dieselEstimate).toLocaleString("en-IN")):"—"}</span>
-            <span style={{fontSize:10,color:C.muted}}>From indent</span>
+            {(()=>{
+              // Live value: read from current dieselRequests state, not stale form snapshot
+              const _indNo = (f.dieselIndentNo||"").trim();
+              const _req = _indNo ? (dieselRequests||[]).find(r=>String(r.indentNo)===_indNo) : null;
+              const _liveEst = _req ? Number(_req.amount||0) : (+f.dieselEstimate||0); // amount is always diesel+cash total
+              return (<>
+                <span>{_liveEst>0?("₹"+_liveEst.toLocaleString("en-IN")):"—"}</span>
+                <span style={{fontSize:10,color:C.muted}}>From indent{_req&&(_req.dieselAmount||0)>0&&(_req.cashAmount||0)>0&&<span style={{marginLeft:4,color:C.teal}}>(⛽+💵)</span>}</span>
+              </>);
+            })()}
           </div>
         </div>
       </div>
@@ -8939,7 +9161,11 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
         const val = (f.dieselIndentNo||"").trim();
         // Find the attached/matched request for display
         const attachedReq = val ? (dieselRequests||[]).find(r=>String(r.indentNo)===val) : null;
-        const dispAmt = attachedReq ? (attachedReq.confirmedAmount??attachedReq.amount) : (+f.dieselEstimate||0);
+        // Show diesel-only component, not total (total includes cash advance)
+        const _dispDiesel = attachedReq ? Number(attachedReq.dieselAmount??attachedReq.confirmedAmount??attachedReq.amount??0) : 0;
+        const _dispCash   = attachedReq ? Number(attachedReq.cashAmount||0) : 0;
+        const _dispTotal  = _dispDiesel + _dispCash;
+        const dispAmt = _dispTotal || (+f.dieselEstimate||0);
 
         // Non-owners: always locked — just show the current indent info
         if(!isOwner) return (
@@ -8952,7 +9178,8 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
               {val || dispAmt>0 ? (
                 <div>
                   {val && <span style={{fontSize:14,fontWeight:700,color:C.text}}>#{val}</span>}
-                  {dispAmt>0 && <span style={{fontSize:12,color:C.orange,marginLeft:val?10:0}}>⛽ {fmt(dispAmt)}</span>}
+                  {_dispDiesel>0 && <span style={{fontSize:12,color:C.orange,marginLeft:val?10:0}}>⛽ {fmt(_dispDiesel)}</span>}
+                  {_dispCash>0   && <span style={{fontSize:12,color:C.green,  marginLeft:6}}>💵 {fmt(_dispCash)}</span>}
                   {attachedReq && (
                     <span style={{fontSize:11,color:attachedReq.status==="confirmed"?C.teal:C.orange,marginLeft:8}}>
                       {attachedReq.status==="confirmed"?"✓ Confirmed":"⚠ Not confirmed"}
@@ -8966,12 +9193,11 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
             </div>
           </div>
         );
-        // Include open/confirmed requests + the already-attached one (if any)
+        // Only confirmed + already-attached requests can interact with trips
         const allOpen = (dieselRequests||[]).filter(r=>
-          r.status==="open" || r.status==="confirmed" ||
+          r.status==="confirmed" ||
           (r.status==="attached" && val && String(r.indentNo)===val)
         );
-        // Requests for this truck — only unattached (or currently attached to this trip)
         const truckReqs = (dieselRequests||[])
           .filter(r=>r.truckNo===truck && (
             r.status==="open" || r.status==="confirmed" ||
@@ -8985,7 +9211,10 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
 
         const attachReq = (r) => {
           ff("dieselIndentNo")(String(r.indentNo));
-          ff("dieselEstimate")(String(r.confirmedAmount??r.amount));
+          // Set total (diesel+cash) as estimate, not just diesel part
+          const _rd = Number(r.dieselAmount??r.confirmedAmount??r.amount??0);
+          const _rc = Number(r.cashAmount||0);
+          ff("dieselEstimate")(String(_rd+_rc));
         };
         const clearReq = () => { ff("dieselIndentNo")(""); ff("dieselEstimate")("0"); };
 
@@ -9000,7 +9229,9 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
 
             {/* ── Already-attached request — show with option to remove (owner only) ── */}
             {truckReqs.filter(r=>r.status==="attached").map(r=>{
-              const amt = r.confirmedAmount??r.amount;
+              const _rDiesel = Number(r.dieselAmount??r.confirmedAmount??r.amount??0);
+              const _rCash   = Number(r.cashAmount||0);
+              const amt = _rDiesel + _rCash; // total = diesel + cash
               const isConf = r.confirmedAmount!=null;
               return (
                 <div key={r.id} style={{background:isConf?C.teal+"11":C.orange+"11",
@@ -9068,40 +9299,22 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
               </div>
             )}
 
-            {/* ── Pending (open/unconfirmed) requests — warning + explicit override ── */}
-            {truckReqs.filter(r=>r.status==="open").map(r=>{
-              const isSel = val===String(r.indentNo);
-              return (
-                <div key={r.id} style={{background:"#fffbeb",border:`1.5px solid ${C.orange}`,
-                  borderRadius:8,padding:"10px 12px",fontSize:12}}>
-                  <div style={{fontWeight:800,color:C.orange,marginBottom:4}}>
-                    ⚠ Pending — not yet confirmed by pump
-                  </div>
-                  <div style={{color:C.muted,fontSize:11,marginBottom:6}}>
-                    Indent #{r.indentNo} · ₹{r.amount.toLocaleString("en-IN")}
-                    {" · PIN: "}<b style={{fontFamily:"monospace",letterSpacing:2,color:C.orange}}>{r.pin!=="****"?r.pin:"—"}</b>
-                  </div>
-                  <div style={{fontSize:11,color:"#92400e",marginBottom:8,lineHeight:1.5}}>
-                    Pump operator hasn't confirmed this yet. Ask the driver to share the PIN.<br/>
-                    <b>Recommended: wait for confirmation before attaching.</b>
-                  </div>
-                  <div style={{display:"flex",gap:8}}>
-                    <button onClick={()=>isSel?clearReq():attachReq(r)}
-                      style={{flex:1,padding:"7px 0",borderRadius:7,fontWeight:700,fontSize:11,
-                        cursor:"pointer",border:`1.5px solid ${C.orange}`,
-                        background:isSel?C.orange:"transparent",color:isSel?"#fff":C.orange}}>
-                      {isSel?"✕ Remove":"Attach (unconfirmed)"}
-                    </button>
-                  </div>
-                  {isSel && (
-                    <div style={{marginTop:6,background:C.orange+"11",borderRadius:6,padding:"5px 8px",
-                      fontSize:10,color:"#92400e",fontWeight:600}}>
-                      Status will be saved as "Attached without pump confirmation"
-                    </div>
-                  )}
+            {/* ── Pending (open/unconfirmed) requests — info only, cannot attach ── */}
+            {truckReqs.filter(r=>r.status==="open").map(r=>(
+              <div key={r.id} style={{background:"#fffbeb",border:`1.5px solid ${C.orange}`,
+                borderRadius:8,padding:"10px 12px",fontSize:12}}>
+                <div style={{fontWeight:800,color:C.orange,marginBottom:4}}>
+                  ⚠ Pending — awaiting pump confirmation
                 </div>
-              );
-            })}
+                <div style={{color:C.muted,fontSize:11,marginBottom:4}}>
+                  Indent #{r.indentNo} · ₹{r.amount.toLocaleString("en-IN")}
+                  {" · PIN: "}<b style={{fontFamily:"monospace",letterSpacing:2,color:C.orange}}>{r.pin!=="****"?r.pin:"—"}</b>
+                </div>
+                <div style={{fontSize:11,color:"#92400e",lineHeight:1.5}}>
+                  This indent cannot be attached until the pump operator confirms it.
+                </div>
+              </div>
+            ))}
 
             {/* No requests for this truck — info message */}
             {truckReqs.length===0 && !val && truck && (
@@ -9119,7 +9332,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
                   🔄 Override — all available indents
                   <span style={{fontSize:10,fontWeight:400,color:C.muted}}>(owner only — use to fix wrong attachment)</span>
                 </div>
-                {[...truckReqs.filter(r=>r.status!=="attached"),...otherReqs]
+                {[...truckReqs.filter(r=>r.status==="confirmed"),...otherReqs.filter(r=>r.status==="confirmed")]
                   .sort((a,b)=>{
                     const sameA=a.truckNo===truck?1:0, sameB=b.truckNo===truck?1:0;
                     if(sameA!==sameB)return sameB-sameA;
@@ -9131,7 +9344,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
                     </div>
                   ) : (
                     <SearchableIndentSelect
-                      options={[...truckReqs.filter(r=>r.status!=="attached"),...otherReqs]
+                      options={[...truckReqs.filter(r=>r.status==="confirmed"),...otherReqs.filter(r=>r.status==="confirmed")]
                         .sort((a,b)=>{
                           const sA=a.truckNo===truck?1:0,sB=b.truckNo===truck?1:0;
                           if(sA!==sB)return sB-sA;
@@ -9214,7 +9427,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
             {l:"Gross to Driver",             v:fmt(gross),                              c:C.orange},
             {l:"(−) Advance",                 v:fmt(+f.advance||0),                     c:C.red},
             {l:"(−) TAFAL",                   v:fmt(tafalAmt),                           c:C.purple},
-            {l:"(−) Diesel (estimate)",       v:fmt(+f.dieselEstimate||0),              c:C.orange},
+            {l:"(−) Diesel (estimate)",       v:fmt(liveDieselEst),                      c:C.orange},
             {l:"(−) Shortage Recovery",       v:fmt(+f.shortageRecovery||0),            c:(+f.shortageRecovery||0)>0?C.red:C.muted},
             {l:"(−) Loan Recovery",           v:fmt(+f.loanRecovery||0),               c:(+f.loanRecovery||0)>0?C.red:C.muted},
             {l:marginOk?"My Margin ✓":"⚠ Margin", v:`${fmt(margin)} (₹${perMTMargin.toFixed(0)}/MT)`, c:marginOk?C.green:C.red},
@@ -9679,14 +9892,16 @@ function Settlement({trips, setTrips, vehicles, setVehicles, settlements, setSet
 }
 
 // ─── TAFAL MODULE ─────────────────────────────────────────────────────────────
-function TafalMod({trips, vehicles, setVehicles, employees, settings, setSettings, user, dieselRequests=[]}) {
+function TafalMod({trips, vehicles, setVehicles, employees, settings, setSettings, cashTransfers=[], user, dieselRequests=[]}) {
   const [month, setMonth] = useState(today().slice(0,7));
   const tafalRate = settings?.tafalPerTrip || 300;
 
   const monthTrips  = trips.filter(t => t.date.startsWith(month) && t.tafal>0);
   const collected   = monthTrips.reduce((s,t) => s+(t.tafal||0), 0);
+  const monthPaid   = (cashTransfers||[]).filter(t => t.type==="tafal" && (t.forMonth||"").startsWith(month)).reduce((s,t) => s+Number(t.amount||0), 0);
+  const remaining   = Math.max(0, collected - monthPaid);
   const activeEmps  = employees.length || 1;
-  const perEmployee = activeEmps>0 ? collected/activeEmps : 0;
+  const perEmployee = activeEmps>0 ? remaining/activeEmps : 0;
 
   // Indent book range — local state so saves only on button press
   const usedNosSet = new Set((dieselRequests||[]).map(r=>r.indentNo).filter(Boolean));
@@ -9715,10 +9930,17 @@ function TafalMod({trips, vehicles, setVehicles, employees, settings, setSetting
 
       <Field label="Select Month" value={month} onChange={setMonth} type="month" />
 
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-        <KPI icon="🤝" label="Collected" value={fmt(collected)} color={C.purple} sub={`${monthTrips.length} trips`} />
-        <KPI icon="👤" label="Per Employee" value={fmt(perEmployee)} color={C.green} sub={`÷ ${activeEmps} employees`} />
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
+        <KPI icon="🤝" label="Collected" value={fmt(collected)} color={C.purple} sub={monthTrips.length+" trips"} />
+        <KPI icon="✅" label="Paid Out" value={fmt(monthPaid)} color={C.green} sub="this month" />
+        <KPI icon="⏳" label="Remaining" value={fmt(remaining)} color={remaining>0?C.orange:C.muted} sub="to distribute" />
       </div>
+      {remaining>0 && (
+        <div style={{background:C.orange+"11",border:"1px solid "+C.orange+"33",borderRadius:10,padding:"10px 14px",fontSize:12}}>
+          <div style={{fontWeight:700,color:C.orange,marginBottom:4}}>{"₹"+fmt(remaining)+" remaining to pay out"}</div>
+          <div style={{color:C.muted}}>{"Each employee: "}<b style={{color:C.text}}>{fmt(perEmployee)}</b>{" · "+activeEmps+" employee"+(activeEmps!==1?"s":"")}</div>
+        </div>
+      )}
 
       {/* Trip breakdown */}
       <div>
@@ -9740,7 +9962,7 @@ function TafalMod({trips, vehicles, setVehicles, employees, settings, setSetting
       {/* Distribution table */}
       <div style={{background:C.card,borderRadius:12,padding:"14px 16px"}}>
         <div style={{color:C.muted,fontSize:12,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Monthly Distribution</div>
-        <div style={{color:C.muted,fontSize:12,marginBottom:10}}>{fmt(collected)} ÷ {activeEmps} = <b style={{color:C.green}}>{fmt(perEmployee)} each</b></div>
+        <div style={{color:C.muted,fontSize:12,marginBottom:10}}>{fmt(remaining)} remaining ÷ {activeEmps} = <b style={{color:C.green}}>{fmt(perEmployee)} each</b></div>
         {employees.map(e => (
           <div key={e.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:`1px solid ${C.border}22`}}>
             <div>
@@ -9763,11 +9985,18 @@ function TafalMod({trips, vehicles, setVehicles, employees, settings, setSetting
               <div style={{color:C.muted,fontSize:12}}>{v.ownerName}</div>
             </div>
             <div style={{display:"flex",gap:10,alignItems:"center"}}>
-              <Badge label={v.tafalExempt?"Exempt":`₹${tafalRate}/trip`} color={v.tafalExempt?C.muted:C.purple} />
-              <button onClick={()=>setVehicles(p=>p.map(x=>x.id===v.id?{...x,tafalExempt:!x.tafalExempt}:x))}
-                style={{background:v.tafalExempt?C.dim:C.purple+"22",border:`1px solid ${v.tafalExempt?C.border:C.purple}`,color:v.tafalExempt?C.muted:C.purple,borderRadius:8,padding:"5px 12px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
-                {v.tafalExempt?"Enable":"Exempt"}
-              </button>
+              {v.tafalExempt
+                ? <Badge label="Exempt" color={C.muted} />
+                : v.tafalOverride!=null
+                  ? <Badge label={`₹${v.tafalOverride}/trip`} color={C.purple} />
+                  : <Badge label={`₹${tafalRate}/trip`} color={C.purple} />}
+              {user?.role==="owner" && (
+                <button onClick={()=>setVehicles(p=>p.map(x=>x.id===v.id?{...x,tafalExempt:!x.tafalExempt,tafalOverride:null}:x))}
+                  style={{background:v.tafalExempt?C.dim:C.red+"22",border:`1px solid ${v.tafalExempt?C.border:C.red}`,
+                    color:v.tafalExempt?C.muted:C.red,borderRadius:8,padding:"5px 10px",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+                  {v.tafalExempt?"Enable":"Exempt"}
+                </button>
+              )}
             </div>
           </div>
         ))}
@@ -11089,8 +11318,9 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
   const [activeTab,   setActiveTab]   = useState("open");   // open | history | payments
   const [lrSearch,    setLrSearch]    = useState("");
   const [selected,    setSelected]    = useState(null);
-  const [newAmount,   setNewAmount]   = useState("");
-  const [reason,      setReason]      = useState("");
+  const [newDieselAmt, setNewDieselAmt] = useState("");  // editable diesel component
+  const [newCashAmt,   setNewCashAmt]   = useState("");  // editable cash component
+  const [reason,       setReason]       = useState("");
   const [pinEntry,    setPinEntry]    = useState("");
   const [pinError,    setPinError]    = useState(false);
   const [confirmed,   setConfirmed]   = useState(null);
@@ -11122,16 +11352,20 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
     .sort((a,b)=>b.indentNo-a.indentNo);
 
   // Payment summary scoped to this pump
-  const totalIndentAmt  = scopedRequests.filter(r=>r.status==="confirmed"||r.status==="attached").reduce((s,r)=>s+(r.confirmedAmount??r.amount),0);
+  const totalIndentAmt  = scopedRequests.filter(r=>r.status==="confirmed"||r.status==="attached").reduce((s,r)=>s+(r.amount||0),0);
   const totalPaid       = scopedPayments.reduce((s,p)=>s+(+(p.amount)||0),0);
   const pendingAmt      = Math.max(0, totalIndentAmt - totalPaid);
 
   const resetFlow = () => {
-    setSelected(null); setNewAmount(""); setReason("");
+    setSelected(null); setNewDieselAmt(""); setNewCashAmt(""); setReason("");
     setPinEntry(""); setPinError(false); setStep("list");
   };
   const startEdit = (req) => {
-    setSelected(req); setNewAmount(String(req.amount)); setReason("");
+    setSelected(req);
+    // Pre-fill with the current diesel & cash components so pump operator sees exact split
+    setNewDieselAmt(String(req.dieselAmount ?? req.amount));
+    setNewCashAmt(String(req.cashAmount ?? 0));
+    setReason("");
     setPinEntry(""); setPinError(false); setStep("review");
   };
   const keyPress = (k) => {
@@ -11145,18 +11379,34 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
   const validatePin = async (pin) => {
     if(!selected) return;
     if(pin !== selected.pin) { setPinError(true); setPinEntry(""); return; }
-    const effAmt = newAmount && +newAmount > 0 ? +newAmount : selected.amount;
-    const changed = effAmt !== selected.amount;
+    // Resolve confirmed diesel and cash — fall back to original if operator left blank
+    const origDiesel = selected.dieselAmount ?? selected.amount;
+    const origCash   = selected.cashAmount   ?? 0;
+    const confDiesel = newDieselAmt && +newDieselAmt >= 0 ? +newDieselAmt : origDiesel;
+    const confCash   = newCashAmt   && +newCashAmt   >= 0 ? +newCashAmt   : origCash;
+    const confTotal  = confDiesel + confCash;
+    const dieselChanged = confDiesel !== origDiesel;
+    const cashChanged   = confCash   !== origCash;
+    const changed = dieselChanged || cashChanged;
     const updReq = {
-      ...selected, status:"confirmed",
-      confirmedAmount:effAmt,
+      ...selected,
+      status:          "confirmed",
+      dieselAmount:    confDiesel,   // confirmed HSD component
+      cashAmount:      confCash,     // confirmed cash component
+      amount:          confTotal,    // total = diesel + cash (always in sync)
+      confirmedAmount: confDiesel,   // diesel-only stored here for legacy compat
+      confirmedCash:   confCash,     // explicit cash confirmation field
       confirmedReason: changed ? (reason||"Changed at pump") : null,
-      confirmedAt:nowTs(), pin:"****",
+      confirmedAt:     nowTs(),
+      pin:             "****",
+      // Track originals for the "changed" display
+      originalDieselAmount: changed ? origDiesel  : selected.originalDieselAmount,
+      originalCashAmount:   changed ? origCash    : selected.originalCashAmount,
     };
     setDieselRequests(p=>p.map(r=>r.id===selected.id ? updReq : r));
     await DB.saveDieselRequest(updReq);
-    log("PUMP CONFIRM",`Indent #${selected.indentNo} · ${selected.truckNo} · ₹${effAmt}${changed?` (was ₹${selected.amount})`:""}`);
-    setConfirmed({...updReq, changed, originalAmount:selected.amount});
+    log("PUMP CONFIRM",`Indent #${selected.indentNo} · ${selected.truckNo} · Diesel ₹${confDiesel} Cash ₹${confCash} Total ₹${confTotal}${changed?` (was Diesel ₹${origDiesel} Cash ₹${origCash})`:""}`)
+    setConfirmed({...updReq, changed, dieselChanged, cashChanged, origDiesel, origCash});
     setStep("done");
   };
 
@@ -11168,7 +11418,7 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
     if(!rows.length){ alert("No history records in selected date range."); return; }
     const fromLabel = histFrom||"All";
     const toLabel   = histTo  ||"All";
-    const total = rows.reduce((s,r)=>s+(r.confirmedAmount??r.amount),0);
+    const total = rows.reduce((s,r)=>s+(r.amount||0),0);
     const pumpName = assignedPump ? assignedPump.name : "All Pumps";
     const html = `<!DOCTYPE html>
 <html>
@@ -11218,7 +11468,7 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
           <td><b>#${r.indentNo}</b></td>
           <td>${r.truckNo}</td>
           <td>${r.date}</td>
-          <td class="amount">&#8377;${amt.toLocaleString("en-IN")}</td>
+          <td class="amount">&#8377;${(r.amount||0).toLocaleString("en-IN")}</td>
           <td>${r.dieselAmount ? "&#8377;"+r.dieselAmount.toLocaleString("en-IN") : "&#8212;"}</td>
           <td>${r.cashAmount   ? "&#8377;"+r.cashAmount.toLocaleString("en-IN")   : "&#8212;"}</td>
           <td>${r.lrNo||"&#8212;"}</td>
@@ -11340,28 +11590,71 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
                 </div>
               ))}
             </div>
-            <div style={{background:C.orange+"11",border:`2px solid ${C.orange}`,borderRadius:12,padding:"16px",textAlign:"center"}}>
-              <div style={{color:C.orange,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Authorised Amount</div>
-              <div style={{fontWeight:800,fontSize:38,color:C.orange}}>{fmt(selected.amount)}</div>
-              <div style={{color:C.muted,fontSize:12,marginTop:4}}>Fill exactly this amount OR enter actual below if different</div>
-            </div>
-            <div style={{background:C.card,borderRadius:12,padding:"14px 16px",display:"flex",flexDirection:"column",gap:10}}>
-              <div style={{color:C.text,fontWeight:700,fontSize:13}}>⚠ Amount Different? Enter Actual</div>
-              <Field label="Actual Amount Filled (₹)" value={newAmount} onChange={setNewAmount} type="number" placeholder={String(selected.amount)}/>
-              <Field label="Reason for Change" value={reason} onChange={setReason}
-                opts={[
-                  {v:"",           l:"— select reason —"},
-                  {v:"no_cash",    l:"No cash available at pump"},
-                  {v:"partial",    l:"Partial fill only"},
-                  {v:"extra_fill", l:"Extra diesel filled"},
-                  {v:"driver_req", l:"Driver requested change"},
-                  {v:"other",      l:"Other"},
-                ]}/>
-              {newAmount && +newAmount !== selected.amount && !reason && (
-                <div style={{color:C.red,fontSize:12}}>⚠ Select a reason when amount is different</div>
-              )}
-            </div>
-            <Btn onClick={()=>{ if(newAmount && +newAmount !== selected.amount && !reason){alert("Select a reason for the amount change");return;} setStep("pin"); }} full color={C.teal}>
+            {(()=>{
+              const _origDiesel = selected.dieselAmount ?? selected.amount;
+              const _origCash   = selected.cashAmount   ?? 0;
+              const _actDiesel  = newDieselAmt !== "" ? +newDieselAmt : _origDiesel;
+              const _actCash    = newCashAmt   !== "" ? +newCashAmt   : _origCash;
+              const _actTotal   = _actDiesel + _actCash;
+              const _dChanged   = _actDiesel !== _origDiesel;
+              const _cChanged   = _actCash   !== _origCash;
+              const _anyChanged = _dChanged || _cChanged;
+              return (<>
+              {/* Authorised reference: two rows + computed total */}
+              <div style={{background:C.orange+"11",border:`2px solid ${C.orange}`,borderRadius:12,padding:"14px 16px"}}>
+                <div style={{color:C.orange,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Authorised Amount</div>
+                <div style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:`1px solid ${C.orange}22`,fontSize:14}}>
+                  <span style={{color:C.muted}}>⛽ Diesel</span>
+                  <span style={{fontWeight:800,color:C.orange}}>{fmt(_origDiesel)}</span>
+                </div>
+                <div style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:`1px solid ${C.orange}22`,fontSize:14}}>
+                  <span style={{color:C.muted}}>💵 Cash</span>
+                  <span style={{fontWeight:800,color:C.orange}}>{fmt(_origCash)}</span>
+                </div>
+                <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0 0 0",fontSize:15}}>
+                  <span style={{color:C.text,fontWeight:700}}>Total</span>
+                  <span style={{fontWeight:800,fontSize:18,color:C.orange}}>{fmt(_origDiesel+_origCash)}</span>
+                </div>
+                <div style={{color:C.muted,fontSize:11,marginTop:6}}>Fill exactly these amounts OR enter actual below if different</div>
+              </div>
+              {/* Edit fields: diesel + cash separately */}
+              <div style={{background:C.card,borderRadius:12,padding:"14px 16px",display:"flex",flexDirection:"column",gap:10}}>
+                <div style={{color:C.text,fontWeight:700,fontSize:13}}>⚠ Amounts Different? Enter Actual</div>
+                <div style={{display:"flex",gap:10}}>
+                  <div style={{flex:1}}>
+                    <Field label="⛽ Actual Diesel (₹)" value={newDieselAmt} onChange={setNewDieselAmt} type="number" placeholder={String(_origDiesel)}/>
+                  </div>
+                  <div style={{flex:1}}>
+                    <Field label="💵 Actual Cash (₹)" value={newCashAmt} onChange={setNewCashAmt} type="number" placeholder={String(_origCash)}/>
+                  </div>
+                </div>
+                {/* Non-editable computed total */}
+                <div style={{background:C.bg,borderRadius:8,padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <span style={{fontSize:12,color:C.muted,fontWeight:700}}>ACTUAL TOTAL</span>
+                  <span style={{fontSize:18,fontWeight:800,color:_anyChanged?C.orange:C.text}}>{fmt(_actTotal)}</span>
+                </div>
+                <Field label="Reason for Change" value={reason} onChange={setReason}
+                  opts={[
+                    {v:"",           l:"— select reason —"},
+                    {v:"no_cash",    l:"No cash available at pump"},
+                    {v:"partial",    l:"Partial fill only"},
+                    {v:"extra_fill", l:"Extra diesel filled"},
+                    {v:"driver_req", l:"Driver requested change"},
+                    {v:"other",      l:"Other"},
+                  ]}/>
+                {_anyChanged && !reason && (
+                  <div style={{color:C.red,fontSize:12}}>⚠ Select a reason when amount is different</div>
+                )}
+              </div>
+              </>);
+            })()}
+            <Btn onClick={()=>{
+              const _d = newDieselAmt !== "" ? +newDieselAmt : (selected.dieselAmount ?? selected.amount);
+              const _c = newCashAmt   !== "" ? +newCashAmt   : (selected.cashAmount   ?? 0);
+              const _changed = _d !== (selected.dieselAmount ?? selected.amount) || _c !== (selected.cashAmount ?? 0);
+              if(_changed && !reason){alert("Select a reason for the amount change");return;}
+              setStep("pin");
+            }} full color={C.teal}>
               Proceed to Driver PIN Verification →
             </Btn>
           </div>
@@ -11376,15 +11669,36 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
                 <span style={{color:C.muted}}>Indent</span>
                 <span style={{fontWeight:700}}>#{selected.indentNo} · {selected.truckNo}</span>
               </div>
-              <div style={{display:"flex",justifyContent:"space-between",fontSize:14}}>
-                <span style={{color:C.muted}}>Amount</span>
-                <div style={{textAlign:"right"}}>
-                  {newAmount && +newAmount !== selected.amount ? (
-                    <><span style={{color:C.muted,textDecoration:"line-through",fontSize:12,marginRight:6}}>{fmt(selected.amount)}</span>
-                    <span style={{fontWeight:800,color:C.orange,fontSize:16}}>{fmt(+newAmount)}</span></>
-                  ) : <span style={{fontWeight:800,fontSize:16}}>{fmt(selected.amount)}</span>}
-                </div>
-              </div>
+              {(()=>{
+                const _od = selected.dieselAmount ?? selected.amount;
+                const _oc = selected.cashAmount   ?? 0;
+                const _nd = newDieselAmt !== "" ? +newDieselAmt : _od;
+                const _nc = newCashAmt   !== "" ? +newCashAmt   : _oc;
+                const _dc = _nd !== _od;
+                const _cc = _nc !== _oc;
+                return (<>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:3}}>
+                    <span style={{color:C.muted}}>⛽ Diesel</span>
+                    <div style={{textAlign:"right"}}>
+                      {_dc
+                        ? <><span style={{color:C.muted,textDecoration:"line-through",fontSize:11,marginRight:5}}>{fmt(_od)}</span><span style={{fontWeight:800,color:C.orange}}>{fmt(_nd)}</span></>
+                        : <span style={{fontWeight:700}}>{fmt(_nd)}</span>}
+                    </div>
+                  </div>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:3}}>
+                    <span style={{color:C.muted}}>💵 Cash</span>
+                    <div style={{textAlign:"right"}}>
+                      {_cc
+                        ? <><span style={{color:C.muted,textDecoration:"line-through",fontSize:11,marginRight:5}}>{fmt(_oc)}</span><span style={{fontWeight:800,color:C.orange}}>{fmt(_nc)}</span></>
+                        : <span style={{fontWeight:700}}>{fmt(_nc)}</span>}
+                    </div>
+                  </div>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:14,borderTop:`1px solid ${C.border}`,paddingTop:6}}>
+                    <span style={{color:C.text,fontWeight:700}}>Total</span>
+                    <span style={{fontWeight:800,fontSize:16,color:(_dc||_cc)?C.orange:C.text}}>{fmt(_nd+_nc)}</span>
+                  </div>
+                </>);
+              })()}
             </div>
             <div style={{background:C.card,borderRadius:12,padding:"20px 16px",textAlign:"center"}}>
               <div style={{color:C.text,fontWeight:700,fontSize:14,marginBottom:4}}>Driver PIN Required</div>
@@ -11429,10 +11743,14 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
             <div style={{background:C.green+"11",border:`2px solid ${C.green}`,borderRadius:14,padding:"24px 20px",textAlign:"center"}}>
               <div style={{fontSize:44,marginBottom:8}}>✅</div>
               <div style={{fontWeight:800,fontSize:18,color:C.green,marginBottom:4}}>Confirmed & Locked</div>
-              <div style={{fontWeight:800,fontSize:32,color:C.text,marginBottom:8}}>{fmt(confirmed.confirmedAmount)}</div>
+              <div style={{display:"flex",flexDirection:"column",gap:4,marginBottom:8,alignItems:"center"}}>
+                <div style={{fontSize:13,color:C.muted}}>⛽ Diesel: <b style={{color:C.text}}>{fmt(confirmed.dieselAmount)}</b>  {" "}💵 Cash: <b style={{color:C.text}}>{fmt(confirmed.cashAmount)}</b></div>
+                <div style={{fontWeight:800,fontSize:32,color:C.text}}>Total: {fmt(confirmed.amount)}</div>
+              </div>
               {confirmed.changed && (
                 <div style={{color:C.orange,fontSize:13,marginBottom:8}}>
-                  Original: {fmt(confirmed.originalAmount)} → Changed to {fmt(confirmed.confirmedAmount)}
+                  {confirmed.dieselChanged && <div>⛽ Diesel: {fmt(confirmed.origDiesel)} → {fmt(confirmed.dieselAmount)}</div>}
+                  {confirmed.cashChanged   && <div>💵 Cash:   {fmt(confirmed.origCash)}   → {fmt(confirmed.cashAmount)}</div>}
                   {confirmed.confirmedReason && <div style={{color:C.muted,fontSize:12,marginTop:2}}>{confirmed.confirmedReason}</div>}
                 </div>
               )}
@@ -11487,8 +11805,13 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
           )}
 
           {historyRequests.map(req=>{
-            const effAmt = req.confirmedAmount??req.amount;
-            const changed = req.confirmedAmount!=null && req.confirmedAmount!==req.amount;
+            // amount is always diesel+cash total (kept in sync on every write)
+            const effAmt = req.amount || 0;
+            const origDsl = req.originalDieselAmount;
+            const origCsh = req.originalCashAmount;
+            const dslChanged = origDsl != null && origDsl !== req.dieselAmount;
+            const cshChanged = origCsh != null && origCsh !== req.cashAmount;
+            const changed = dslChanged || cshChanged;
             const statusColor = req.status==="attached"?C.green:req.status==="confirmed"?C.teal:C.orange;
             const p = pumps.find(x=>x.id===req.pumpId);
             return (
@@ -11505,7 +11828,12 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
                         {req.cashAmount   ? <span style={{fontSize:11,color:C.muted}}>💵 <b style={{color:C.text}}>₹{req.cashAmount.toLocaleString("en-IN")}</b></span>   : null}
                       </div>
                     ) : null}
-                    {changed && <div style={{color:C.orange,fontSize:11,marginTop:2}}>⚠ Changed: ₹{req.amount.toLocaleString("en-IN")} → ₹{effAmt.toLocaleString("en-IN")}</div>}
+                    {changed && (
+                      <div style={{color:C.orange,fontSize:11,marginTop:2}}>
+                        {dslChanged && <div>⛽ Diesel: ₹{(origDsl||0).toLocaleString("en-IN")} → ₹{(req.dieselAmount||0).toLocaleString("en-IN")}</div>}
+                        {cshChanged && <div>💵 Cash: ₹{(origCsh||0).toLocaleString("en-IN")} → ₹{(req.cashAmount||0).toLocaleString("en-IN")}</div>}
+                      </div>
+                    )}
                     {req.lrNo && <div style={{color:C.green,fontSize:11,marginTop:2}}>✓ LR {req.lrNo}</div>}
                   </div>
                   <div style={{textAlign:"right",flexShrink:0,marginLeft:10}}>
@@ -11609,6 +11937,16 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
   const [reconData,     setReconData]     = useState(null); // [{pumpIndent, date, vehicle, hsd, advance}]
   const [reconMatches,  setReconMatches]  = useState(null); // matched results
   const [reconProgress, setReconProgress] = useState("");
+  const [reconCardState, setReconCardState] = useState({}); // per-card UI state
+  const [reconSaved, setReconSaved]         = useState([]); // persisted save-for-later items
+  const [reconView,  setReconView]          = useState("new"); // "new" | "saved"
+  const [reconSavedCS,setReconSavedCS]      = useState({}); // per-saved-card UI state
+
+  // Load persisted save-for-later recon items from Supabase
+  useEffect(()=>{
+    supabase.from("diesel_recon_saved").select("*").order("created_at",{ascending:false})
+      .then(({data})=>{ if(data) setReconSaved(data); });
+  },[]);
 
   const blankP = {name:"", contact:"", address:"", accountNo:"", ifsc:""};
   const [pf, setPf] = useState(blankP);
@@ -12455,8 +12793,9 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
       {view==="requests" && (()=>{
         const usedNos = new Set((dieselRequests||[]).map(r=>r.indentNo).filter(Boolean));
         // Find lowest available number — continues from existing sequence, fills gaps on delete
-        let nextNo = usedNos.size > 0 ? Math.min(...usedNos) : 1;
-        while(usedNos.has(nextNo)) nextNo++;
+        // max+1 prevents gap-filling if reconcile changes indentNo
+        const _appNos=[...usedNos].filter(n=>Number.isFinite(+n)&&+n<10000);
+        let nextNo = _appNos.length>0 ? Math.max(..._appNos.map(Number))+1 : 1;
 
         // Generate a unique PIN per truck — different from any existing open PIN for that truck
         const genUniquePinForTruck = (truckNo) => {
@@ -12596,7 +12935,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                   const loanDeduct = loanBal>0 ? (veh.deductPerTrip||0) : 0;
                   const shortageDeduct = shortageBal>0 ? (veh.shortageDeductPerTrip||0) : 0;
                   if(loanBal<=0 && shortageBal<=0) return null;
-                  const tafalAmt = veh.tafalExempt ? 0 : (settings?.tafalPerTrip||300);
+                  const tafalAmt = veh.tafalExempt ? 0 : (veh.tafalOverride!=null ? veh.tafalOverride : (settings?.tafalPerTrip||300));
                   const perTripDeduct = loanDeduct + shortageDeduct + tafalAmt;
                   const totalReq = (+drDieselAmt||0) + (+drCashAmt||0);
                   return (
@@ -12807,6 +13146,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                 confirmed:             reqs.filter(r=>r.status==="confirmed").length,
                 attached:              reqs.filter(r=>r.status==="attached" && r.confirmedAmount!=null).length,
                 attached_unconfirmed:  reqs.filter(r=>r.status==="attached" && r.confirmedAmount==null).length,
+                reconciled:            reqs.filter(r=>r.status==="reconciled").length,
               };
               const chips = [
                 {id:"all",               label:"All",                color:C.muted},
@@ -12814,6 +13154,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                 {id:"confirmed",         label:"✓ Confirmed",         color:C.teal},
                 {id:"attached",          label:"✅ Attached",          color:C.green},
                 {id:"attached_unconfirmed", label:"⚠ No Pump Confirm", color:"#d97706"},
+                {id:"reconciled",        label:"🔍 Reconciled",       color:C.purple},
               ];
               return (
                 <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
@@ -12850,6 +13191,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
               if(drStatusFilter==="confirmed"          && r.status!=="confirmed") return false;
               if(drStatusFilter==="attached"           && !(r.status==="attached" && r.confirmedAmount!=null)) return false;
               if(drStatusFilter==="attached_unconfirmed" && !(r.status==="attached" && r.confirmedAmount==null)) return false;
+              if(drStatusFilter==="reconciled" && r.status!=="reconciled") return false;
               // Search filter
               if(drSearch) {
                 const q = drSearch.toLowerCase();
@@ -12866,8 +13208,13 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
             }).sort((a,b)=>b.indentNo-a.indentNo).map(req=>{
               const pump    = pumps.find(p=>p.id===req.pumpId);
               const statusColor = req.status==="attached"?(req.confirmedAmount!=null?C.green:"#d97706"):req.status==="confirmed"?C.teal:C.orange;
-              const effAmt  = req.confirmedAmount??req.amount;
-              const changed = req.confirmedAmount!=null && req.confirmedAmount!==req.amount;
+              // amount is always diesel+cash total
+              const effAmt  = req.amount || 0;
+              const _origDsl = req.originalDieselAmount;
+              const _origCsh = req.originalCashAmount;
+              const _dslChg = _origDsl != null && _origDsl !== req.dieselAmount;
+              const _cshChg = _origCsh != null && _origCsh !== req.cashAmount;
+              const changed = _dslChg || _cshChg;
               const isEditing = editReqId===req.id;
               const canEditReq = (user.role==="owner"||user.role==="fleet_manager"||user.role==="manager") && req.status==="open";
               return (
@@ -12899,16 +13246,32 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                       {req.status==="confirmed" && (
                         <div style={{color:C.teal,fontSize:11,marginTop:2}}>
                           ✓ Confirmed by pump — PIN invalidated
-                          {req.confirmedAmount!=null && req.confirmedAmount!==req.amount && (
-                            <span style={{color:C.orange,fontWeight:700,marginLeft:6}}>
-                              ⚠ Amount changed: ₹{req.amount.toLocaleString("en-IN")} → ₹{req.confirmedAmount.toLocaleString("en-IN")}
-                              {req.confirmedReason?` (${req.confirmedReason})`:""}
-                            </span>
+                          {(req.originalDieselAmount!=null||req.originalCashAmount!=null) && (
+                            <div style={{marginTop:2}}>
+                              {req.originalDieselAmount!=null && req.originalDieselAmount!==req.dieselAmount && (
+                                <span style={{color:C.orange,fontWeight:700,marginRight:8}}>
+                                  ⚠ Diesel: ₹{(req.originalDieselAmount||0).toLocaleString("en-IN")} → ₹{(req.dieselAmount||0).toLocaleString("en-IN")}
+                                </span>
+                              )}
+                              {req.originalCashAmount!=null && req.originalCashAmount!==req.cashAmount && (
+                                <span style={{color:C.orange,fontWeight:700}}>
+                                  💵 Cash: ₹{(req.originalCashAmount||0).toLocaleString("en-IN")} → ₹{(req.cashAmount||0).toLocaleString("en-IN")}
+                                </span>
+                              )}
+                              {req.confirmedReason && <span style={{color:C.muted,fontWeight:400,marginLeft:4}}>({req.confirmedReason})</span>}
+                            </div>
                           )}
                         </div>
                       )}
                       {req.lrNo && (
                         <div style={{color:C.green,fontSize:11,marginTop:2}}>✓ Attached to LR {req.lrNo}</div>
+                      )}
+                      {req.status==="reconciled" && (
+                        <div style={{color:C.purple,fontSize:11,marginTop:2,fontWeight:700}}>
+                          🔍 Reconciled via pump statement
+                          {req.reconciledAt&&<span style={{fontWeight:400,color:C.muted}}> � {req.reconciledAt.slice(0,10)}</span>}
+                          {req.amountNote&&<span style={{color:C.orange,fontWeight:400}}> � {req.amountNote}</span>}
+                        </div>
                       )}
                       {req.status==="attached" && req.confirmedAmount==null && (
                         <div style={{color:"#d97706",fontSize:10,marginTop:2,fontWeight:600,
@@ -12922,10 +13285,15 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                           )}
                         </div>
                       )}
-                      {changed && (
+                      {(changed||req.amountNote) && (
                         <div style={{color:C.orange,fontSize:11,marginTop:2}}>
-                          ⚠ Amount changed: ₹{req.amount.toLocaleString("en-IN")} → ₹{req.confirmedAmount.toLocaleString("en-IN")}
-                          {req.confirmedReason&&<span style={{color:C.muted}}> ({req.confirmedReason})</span>}
+                          {req.amountNote
+                            ? <span>⚠ {req.amountNote}</span>
+                            : <>
+                                {_dslChg && <div>⛽ Diesel: ₹{(_origDsl||0).toLocaleString("en-IN")} → ₹{(req.dieselAmount||0).toLocaleString("en-IN")}</div>}
+                                {_cshChg && <div>💵 Cash: ₹{(_origCsh||0).toLocaleString("en-IN")} → ₹{(req.cashAmount||0).toLocaleString("en-IN")}</div>}
+                              </>
+                          }
                         </div>
                       )}
                     </div>
@@ -13180,8 +13548,20 @@ This was already dispensed — only delete if it was recorded in error.`;
       )}
 
       {/* ── RECONCILIATION VIEW ── */}
-      {view==="reconcile" && (()=>{
-        // ── Scan pump images via AI ──
+      {view==="reconcile" && user.role==="owner" && (()=>{
+
+        const getReqCat = (req) => {
+          const confirmed = req.confirmed || req.status==="confirmed" || req.status==="attached";
+          const hasLR = Boolean((req.lrNo||"").trim()) || Boolean(req.tripId);
+          if (!confirmed && !hasLR) return 1;
+          if ( confirmed && !hasLR) return 2;
+          if ( confirmed &&  hasLR) return 3;
+          return 4;
+        };
+        const CAT_LABEL = {1:"No Confirmation / No LR",2:"Confirmed / No LR",3:"Confirmed + LR",4:"No Confirmation / Has LR"};
+        const CAT_COLOR = (cat) => ({1:C.red,2:C.orange,3:C.green,4:C.purple}[cat]||C.muted);
+
+        // FIX: Route through Netlify function (was calling Anthropic directly — CORS blocked)
         const scanPumpImages = async () => {
           if(!reconImages.length) return alert("Upload pump statement images first.");
           setReconScanning(true); setReconProgress("Starting scan...");
@@ -13193,337 +13573,909 @@ This was already dispensed — only delete if it was recorded in error.`;
               const b64 = await new Promise((res,rej)=>{
                 const r=new FileReader(); r.onload=()=>res(r.result.split(",")[1]); r.onerror=rej; r.readAsDataURL(file);
               });
-              const mediaType = file.type||"image/jpeg";
-              const resp = await fetch("https://api.anthropic.com/v1/messages",{method:"POST",
+              const resp = await fetch("/.netlify/functions/scan-di",{method:"POST",
                 headers:{"Content-Type":"application/json"},
-                body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:4000,
-                  messages:[{role:"user",content:[
-                    {type:"image",source:{type:"base64",media_type:mediaType,data:b64}},
-                    {type:"text",text:`Extract ALL diesel entries from this pump statement image. For each row extract:
-- indent_no: the pump indent number (5-digit number like 28712) or "MY" if no indent
-- date: in YYYY-MM-DD format
-- vehicle: full vehicle number
-- hsd: HSD/diesel amount in rupees (number only, no commas)
-- advance: advance/cash amount in rupees (number only)
-
-SKIP summary/total rows (yellow highlighted rows with totals).
-SKIP rows where indent_no is "MY" and vehicle is just a short number (these are payment entries, not diesel).
-
-Return ONLY a JSON array, no other text:
-[{"indent_no":"28712","date":"2026-05-01","vehicle":"KA34C7132","hsd":20000,"advance":1000}, ...]`}
-                  ]}]})
+                body:JSON.stringify({base64:b64,mediaType:file.type||"image/jpeg",
+                  promptType:"pump",anthropicKey:RC.anthropicKey})
               });
-              const data = await resp.json();
-              const text = (data.content||[]).map(c=>c.text||"").join("");
-              const clean = text.replace(/```json|```/g,"").trim();
+              const result = await resp.json();
+              if(result.error) throw new Error(result.error);
+              const clean = (result.text||"").replace(/```json|```/g,"").trim();
               const rows = JSON.parse(clean);
-              if(Array.isArray(rows)) allRows.push(...rows);
-            }catch(err){ console.error("Scan image "+(i+1)+":",err.message); alert("⚠ Scan failed for image "+(i+1)+": "+err.message); }
+              if(Array.isArray(rows)) allRows.push(...rows.map(r=>({
+                truckNo: String(r.truckNo||r.vehicle||"").replace(/\s+/g,"").toUpperCase(),
+                indentNo: String(r.indentNo||r.indent_no||"").trim(),
+                date: r.date||null, hsd: Number(r.hsd||0), advance: Number(r.advance||0),
+              })));
+            }catch(err){
+              console.error("Scan image "+(i+1)+":",err.message);
+              alert("Scan failed for image "+(i+1)+": "+err.message);
+            }
           }
-          setReconData(allRows);
-          if(allRows.length===0) {
-            alert("⚠ Scan completed but extracted 0 entries from the images.\n\nPlease check that the uploaded images are clear pump statement pages with diesel entries.");
-            setReconScanning(false);
-            setReconProgress("");
-            return;
-          }
+          if(!allRows.length){ alert("Extracted 0 entries. Check image quality."); setReconScanning(false); setReconProgress(""); return; }
           setReconProgress(`Extracted ${allRows.length} entries. Matching...`);
 
-          // ── Auto-match with app diesel requests ──
-          const normalize = v => (v||"").toUpperCase().replace(/[\s\-]/g,"");
-          const vMatch = (a,b) => {
-            const an=normalize(a), bn=normalize(b);
-            if(an===bn) return true;
-            if(an.length>=4 && bn.length>=4 && an.slice(-4)===bn.slice(-4)) return true;
-            if(an.length<=5 && bn.includes(an)) return true;
-            if(bn.length<=5 && an.includes(bn)) return true;
-            return false;
-          };
-          const appReqs = (dieselRequests||[]).filter(r=>r.status==="attached"||r.status==="confirmed"||r.status==="open");
+          const norm = v => (v||"").toUpperCase().replace(/[\s\-]/g,"");
+          const vMatch = (a,b) => { const an=norm(a),bn=norm(b); return an===bn||(an.length>=4&&bn.length>=4&&an.slice(-4)===bn.slice(-4)); };
+          const appReqs = (dieselRequests||[]).filter(r=>r.status==="open"||r.status==="confirmed"||r.status==="attached");
           const usedApp = new Set();
-          const matches = allRows.map((p,pi) => {
-            // Find best app match by vehicle
-            let best = null;
-            for(const [ai,a] of appReqs.entries()){
-              if(usedApp.has(ai)) continue;
-              if(vMatch(p.vehicle, a.truckNo)){
-                best = {ai, a}; break;
-              }
-            }
+          const matches = allRows.map(p=>{
+            let best=null;
+            if(p.indentNo){ const ai=appReqs.findIndex((a,i)=>!usedApp.has(i)&&String(a.indentNo).trim()===p.indentNo); if(ai>=0) best={ai,a:appReqs[ai]}; }
+            // Date tolerance: +-1 day
+            const dClose = (d1,d2) => { if(!d1||!d2) return true; const diff=Math.abs(new Date(d1)-new Date(d2)); return diff<=86400000; };
+            if(!best){ for(const [ai,a] of appReqs.entries()){ if(usedApp.has(ai)) continue; if(vMatch(p.truckNo,a.truckNo)&&dClose(p.date,a.date)){best={ai,a};break;} } }
             if(best){
-              usedApp.add(best.ai);
-              const a = best.a;
-              const hsdDiff = (p.hsd||0) - (a.confirmedAmount??a.amount??0);
-              // App stores diesel+cash separately; pump HSD = diesel portion
-              const appDiesel = a.dieselAmount??a.amount??0;
-              const appCash = a.cashAmount??0;
-              const hsdMatch = Math.abs((p.hsd||0) - appDiesel) <= 1;
-              const advMatch = Math.abs((p.advance||0) - appCash) <= 1;
-              const tripLinked = (trips||[]).find(t=>t.dieselIndentNo===String(a.indentNo));
-              return {
-                pump: p, app: a, trip: tripLinked||null,
-                status: hsdMatch&&advMatch ? "matched" : "mismatch",
-                hsdDiff: (p.hsd||0) - appDiesel,
-                advDiff: (p.advance||0) - appCash,
-                resolution: hsdMatch&&advMatch ? "ok" : "pending",
-              };
+              usedApp.add(best.ai); const a=best.a;
+              const cat=getReqCat(a);
+              // Use diesel-only field to avoid double-counting cash in total
+              const appAdv=Number(a.cashAmount||0);
+              const appHsd=Number(
+                a.dieselAmount!=null ? a.dieselAmount :
+                a.confirmedAmount!=null ? a.confirmedAmount-appAdv :
+                (a.amount||0)-appAdv
+              );
+              // Total-based matching: App(diesel+cash) must equal Pump(HSD+advance)
+              const pumpTotal=(p.hsd||0)+(p.advance||0);
+              const appTotal=appHsd+appAdv;
+              const hsdOk=Math.abs(p.hsd-appHsd)<=5;
+              const advOk=Math.abs(p.advance-appAdv)<=5;
+              const totalOk=Math.abs(pumpTotal-appTotal)<=10;
+              // Complete = total matches AND vehicle matches (individual components may differ)
+              const complete=cat===3&&totalOk&&vMatch(p.truckNo,a.truckNo);
+              const trip=(trips||[]).find(t=>t.dieselIndentNo===String(a.indentNo)||t.id===a.tripId);
+              return {pump:p,app:a,trip:trip||null,cat,complete,
+                hsdDiff:p.hsd-appHsd,advDiff:p.advance-appAdv,totalDiff:pumpTotal-appTotal,
+                pumpTotal,appTotal,
+                status:complete?"ok":"mismatch",resolution:"pending"};
             }
-            return { pump:p, app:null, trip:null, status:"not_in_app", hsdDiff:0, advDiff:0, resolution:"pending" };
-          });
-          // App requests not matched
-          appReqs.forEach((a,ai) => {
-            if(!usedApp.has(ai)){
-              matches.push({ pump:null, app:a, trip:(trips||[]).find(t=>t.dieselIndentNo===String(a.indentNo)), status:"not_in_pump", hsdDiff:0, advDiff:0, resolution:"pending" });
+            // Check if pump row already exists as a reconciled request
+            const alreadyRecon = (dieselRequests||[]).find(r => {
+              if(r.status!=="reconciled") return false;
+              if(p.indentNo && String(r.indentNo).trim()===p.indentNo) return true;
+              const dClose = (d1,d2)=>{ if(!d1||!d2) return true; return Math.abs(new Date(d1)-new Date(d2))<=86400000; };
+              return vMatch(p.truckNo,r.truckNo) && dClose(p.date,r.date);
+            });
+            if(alreadyRecon) {
+              const trip=(trips||[]).find(t=>t.dieselIndentNo===String(alreadyRecon.indentNo)||t.id===alreadyRecon.tripId);
+              return {pump:p,app:alreadyRecon,trip:trip||null,cat:3,complete:true,hsdDiff:0,advDiff:0,
+                status:"already_reconciled",resolution:"already_reconciled",
+                resolvedNote:"Already reconciled"};
             }
+            return {pump:p,app:null,trip:null,cat:0,complete:false,hsdDiff:p.hsd,advDiff:p.advance,status:"not_in_app",resolution:"pending"};
           });
+          // not_in_pump records are intentionally excluded from display
           setReconMatches(matches);
-          setReconScanning(false);
-          setReconProgress("");
+          saveSession(matches); // persist for reload without rescan
+          setReconScanning(false); setReconProgress("");
         };
 
-        // ── Resolution handlers ──
-        const resolveEntry = (idx, action) => {
-          setReconMatches(prev => {
-            const m = [...prev]; const entry = m[idx];
-            if(!entry) return prev;
-            const empWho = entry.app ? ((employees||[]).find(e=>e.id===entry.app.createdById)||{}).name || entry.app.createdBy || "Unknown" : "Unknown";
-            const totalDiff = (entry.hsdDiff||0) + (entry.advDiff||0);
-
-            if(action==="debit_employee"){
-              const empId = entry.app?.createdById;
-              if(empId && totalDiff > 0){
-                // Add to employee wallet as debit
-                const emp = (employees||[]).find(e=>e.id===empId);
-                if(emp){
-                  const walletTxn = {id:"W"+Date.now(), type:"debit", amount:totalDiff,
-                    note:`Diesel mismatch: Pump ₹${(entry.pump?.hsd||0)+(entry.pump?.advance||0)} vs App ₹${((entry.app?.confirmedAmount??entry.app?.amount)||0)}. Indent #${entry.app?.indentNo||"?"}`,
-                    date:new Date().toISOString(), category:"Diesel"};
-                  const updEmp = {...emp, wallet:[...(emp.wallet||[]), walletTxn]};
-                  setVehicles(p=>p); // trigger re-render
-                  DB.saveEmployee&&DB.saveEmployee(updEmp).catch(()=>{});
-                  log("DIESEL RECON","Debited ₹"+totalDiff+" from "+emp.name+" — Indent #"+(entry.app?.indentNo||"?"));
-                }
-              }
-              m[idx] = {...entry, resolution:"debit_employee", resolvedNote:`Debited ₹${totalDiff} from ${empWho}`};
-            }
-            else if(action==="adjust_trip"){
-              const trip = entry.trip;
-              if(trip && !trip.driverSettled){
-                const newDiesel = (entry.pump?.hsd||0) + (entry.pump?.advance||0);
-                const updTrip = {...trip, dieselEstimate:newDiesel};
-                setTrips(p=>p.map(t=>t.id===trip.id?updTrip:t));
+        const resolveEntry = (idx, action, extra={}) => {
+          setReconMatches(prev=>{
+            const m=[...prev]; const e=m[idx]; if(!e) return prev;
+            const totalDiff=(e.hsdDiff||0)+(e.advDiff||0);
+            if(action==="confirm_pin"){
+              // extra may carry {diesel, cash} from pump data; fall back to app values
+              const _confDiesel = extra.diesel != null ? Number(extra.diesel) : Number(e.app?.dieselAmount ?? e.app?.amount ?? 0);
+              const _confCash   = extra.cash   != null ? Number(extra.cash)   : Number(e.app?.cashAmount ?? 0);
+              const _confTotal  = _confDiesel + _confCash;
+              const _origDiesel = e.app?.dieselAmount ?? e.app?.amount ?? 0;
+              const _origCash   = e.app?.cashAmount   ?? 0;
+              const _anyChg     = _confDiesel !== _origDiesel || _confCash !== _origCash;
+              const upd={
+                ...e.app, status:"confirmed", confirmed:true,
+                dieselAmount:    _confDiesel,
+                cashAmount:      _confCash,
+                amount:          _confTotal,
+                confirmedAmount: _confDiesel,
+                confirmedCash:   _confCash,
+                confirmedAt:     nowTs(), pin:"****",
+                originalDieselAmount: _anyChg ? _origDiesel : e.app?.originalDieselAmount,
+                originalCashAmount:   _anyChg ? _origCash   : e.app?.originalCashAmount,
+              };
+              setDieselRequests(p=>p.map(r=>r.id===e.app.id?upd:r));
+              DB.saveDieselRequest(upd).catch(()=>{});
+              log("PUMP CONFIRM",`Recon: #${e.app.indentNo} Diesel ₹${_confDiesel} Cash ₹${_confCash} Total ₹${_confTotal}`);
+              m[idx]={...e,app:upd,cat:getReqCat(upd),resolution:"confirmed",resolvedNote:`Confirmed ₹${_confTotal}`};
+            } else if(action==="attach_lr"){
+              const trip=(trips||[]).find(t=>t.lrNo===extra.lrNo); if(!trip) return prev;
+              const upd={...e.app,lrNo:extra.lrNo,tripId:trip.id,status:"attached"};
+              setDieselRequests(p=>p.map(r=>r.id===e.app.id?upd:r));
+              DB.saveDieselRequest(upd).catch(()=>{});
+              // Use app's indentNo (not pump's), update dieselEstimate = diesel + cash
+              const _attDiesel = Number(upd.dieselAmount ?? upd.amount ?? 0);
+              const _attCash   = Number(upd.cashAmount   ?? 0);
+              const updTrip={...trip, dieselIndentNo:String(e.app.indentNo), dieselEstimate:_attDiesel+_attCash};
+              setTrips(p=>p.map(t=>t.id===trip.id?updTrip:t));
+              DB.saveTrip(updTrip).catch(()=>{});
+              log("RECON ATTACH",`#${e.app.indentNo} -> LR ${extra.lrNo} | dieselEst ₹${_attDiesel+_attCash}`);
+              m[idx]={...e,app:upd,trip:updTrip,cat:getReqCat(upd),resolution:"attached",resolvedNote:`LR ${extra.lrNo}`};
+            } else if(action==="update_amounts"){
+              const newH=extra.hsd||0; const newA=extra.advance||0;
+              const _oldDiesel = e.app?.dieselAmount ?? e.app?.amount ?? 0;
+              const _oldCash   = e.app?.cashAmount   ?? 0;
+              const _rcChanged = newH !== _oldDiesel || newA !== _oldCash;
+              const upd={
+                ...e.app,
+                amount:          newH+newA,
+                dieselAmount:    newH,
+                cashAmount:      newA,
+                confirmedAmount: newH,
+                confirmedCash:   newA,
+                originalDieselAmount: _rcChanged ? _oldDiesel : e.app?.originalDieselAmount,
+                originalCashAmount:   _rcChanged ? _oldCash   : e.app?.originalCashAmount,
+              };
+              setDieselRequests(p=>p.map(r=>r.id===e.app.id?upd:r));
+              DB.saveDieselRequest(upd).catch(()=>{});
+              // Also update linked trip's dieselEstimate
+              if(e.trip){
+                const updTrip={...e.trip, dieselEstimate:newH+newA};
+                setTrips(p=>p.map(t=>t.id===e.trip.id?updTrip:t));
                 DB.saveTrip(updTrip).catch(()=>{});
-                log("DIESEL RECON","Adjusted LR "+trip.lrNo+" diesel to ₹"+newDiesel+" (was ₹"+trip.dieselEstimate+")");
-                m[idx] = {...entry, resolution:"adjusted_trip", resolvedNote:`LR ${trip.lrNo} diesel updated to ₹${newDiesel}`};
-              } else {
-                alert(trip?"Trip already settled — use 'Recover from Next Trip' instead.":"No linked trip found.");
-                return prev;
               }
-            }
-            else if(action==="recover_next"){
-              const veh = (vehicles||[]).find(v=>v.truckNo===entry.pump?.vehicle || v.truckNo===entry.app?.truckNo);
-              if(veh && totalDiff > 0){
-                const loanTxn = {id:"DM"+Date.now(), type:"diesel_mismatch", amount:totalDiff,
-                  note:`Diesel mismatch: Pump ₹${(entry.pump?.hsd||0)+(entry.pump?.advance||0)} vs App ₹${((entry.app?.confirmedAmount??entry.app?.amount)||0)}. LR ${entry.trip?.lrNo||"?"}, Indent #${entry.app?.indentNo||"?"}`,
-                  date:new Date().toISOString()};
-                const updVeh = {...veh, loan:(veh.loan||0)+totalDiff,
-                  loanTxns:[...(veh.loanTxns||[]), loanTxn]};
-                setVehicles(p=>p.map(v=>v.id===veh.id?updVeh:v));
-                DB.saveVehicle(updVeh).catch(()=>{});
-                log("DIESEL RECON","Added ₹"+totalDiff+" to "+veh.truckNo+" loan — Indent #"+(entry.app?.indentNo||"?"));
-                m[idx] = {...entry, resolution:"recover_next", resolvedNote:`₹${totalDiff} added to ${veh.truckNo} vehicle loan`};
+              log("RECON UPDATE",`#${e.app.indentNo} Diesel ₹${newH} Cash ₹${newA} Total ₹${newH+newA}`);
+              m[idx]={...e,app:upd,hsdDiff:0,advDiff:0,resolution:"updated",resolvedNote:`₹${newH+newA} (HSD ${newH}+Adv ${newA})`};
+            } else if(action==="adjust_trip"){
+              const trip=e.trip; if(!trip||trip.driverSettled) return prev;
+              const newHSD=(e.pump?.hsd||0); const newAdv=(e.pump?.advance||0);
+              const newD=newHSD+newAdv;
+              if(e.app){
+                const _oldDsl = e.app.dieselAmount ?? e.app.amount ?? 0;
+                const _oldCsh = e.app.cashAmount   ?? 0;
+                const _adjChg = newHSD !== _oldDsl || newAdv !== _oldCsh;
+                const updReq={
+                  ...e.app,
+                  amount:          newD,
+                  dieselAmount:    newHSD,
+                  cashAmount:      newAdv,
+                  confirmedAmount: newHSD,
+                  confirmedCash:   newAdv,
+                  confirmedReason: "pump_reconciled",
+                  reconciledAt:    nowTs(),
+                  originalDieselAmount: _adjChg ? _oldDsl : e.app?.originalDieselAmount,
+                  originalCashAmount:   _adjChg ? _oldCsh : e.app?.originalCashAmount,
+                };
+                setDieselRequests(p=>p.map(r=>r.id===e.app.id?updReq:r));
+                DB.saveDieselRequest(updReq).catch(()=>{});
               }
-            }
-            else if(action==="write_off"){
-              log("DIESEL RECON","Write-off ₹"+(Math.abs(totalDiff))+" — Indent #"+(entry.app?.indentNo||entry.pump?.indent_no||"?"));
-              m[idx] = {...entry, resolution:"write_off", resolvedNote:`₹${Math.abs(totalDiff)} written off`};
-            }
-            else if(action==="flag"){
-              m[idx] = {...entry, resolution:"flagged", resolvedNote:"Flagged for investigation"};
+              // Sync trip dieselEstimate so calculations stay correct
+              const updTrip={...trip, dieselEstimate:newD};
+              setTrips(p=>p.map(t=>t.id===trip.id?updTrip:t)); DB.saveTrip(updTrip).catch(()=>{});
+              log("RECON ADJUST",`LR ${trip.lrNo} diesel Rs.${newD}`);
+              m[idx]={...e,trip:updTrip,resolution:"adjusted",resolvedNote:`Diesel Rs.${newD}`};
+            } else if(action==="attach_to_request"){
+              // Attach a pump-only row to an existing app request
+              const appReq=(dieselRequests||[]).find(r=>r.id===extra.reqId); if(!appReq) return prev;
+              const upd={...appReq,
+                amount:(e.pump?.hsd||0)+(e.pump?.advance||0),
+                dieselAmount:e.pump?.hsd||appReq.dieselAmount||appReq.amount,
+                cashAmount:e.pump?.advance||0};
+              setDieselRequests(p=>p.map(r=>r.id===appReq.id?upd:r));
+              DB.saveDieselRequest(upd).catch(()=>{});
+              log("RECON ATTACH_REQ",`Pump #${e.pump?.indentNo} -> Req #${appReq.indentNo} ${appReq.truckNo}`);
+              m[idx]={...e,app:upd,resolution:"attached_req",
+                resolvedNote:`Attached to request #${appReq.indentNo} ${appReq.truckNo}`};
+            } else if(action==="write_off"){
+              log("RECON WRITEOFF",`Rs.${Math.abs(totalDiff)} written off`);
+              m[idx]={...e,resolution:"write_off",resolvedNote:`Rs.${Math.abs(totalDiff)} written off`};
             }
             return m;
           });
         };
 
-        const fmt = n => "₹"+(n||0).toLocaleString("en-IN");
-        const matchedCount = (reconMatches||[]).filter(m=>m.status==="matched").length;
-        const mismatchCount = (reconMatches||[]).filter(m=>m.status==="mismatch").length;
-        const notInApp = (reconMatches||[]).filter(m=>m.status==="not_in_app").length;
-        const notInPump = (reconMatches||[]).filter(m=>m.status==="not_in_pump").length;
-        const resolved = (reconMatches||[]).filter(m=>m.resolution!=="pending"&&m.resolution!=="ok").length;
 
-        return (<div style={{display:"flex",flexDirection:"column",gap:12}}>
-          <div style={{fontSize:14,fontWeight:700,color:C.text}}>🔍 Diesel Reconciliation</div>
-          <div style={{fontSize:11,color:C.muted}}>Upload pump statement images → AI extracts data → auto-match with app requests → resolve mismatches</div>
+        // ── SAVE SESSION TO LOCALSTORAGE (avoid rescan) ──
+        const SESSION_KEY = "diesel_recon_" + (RC.clientId||"local");
+        const saveSession = (matches) => {
+          try { localStorage.setItem(SESSION_KEY, JSON.stringify({matches, savedAt:Date.now()})); } catch{}
+        };
+        const loadSession = () => {
+          try {
+            const s = JSON.parse(localStorage.getItem(SESSION_KEY)||"{}");
+            if(s.matches && (Date.now()-s.savedAt)<7*86400000) return s.matches; // valid for 7 days
+          } catch{}
+          return null;
+        };
+        const clearSession = () => { try{localStorage.removeItem(SESSION_KEY);}catch{} };
 
-          {/* Upload area */}
-          {!reconMatches && (<>
-            <div style={{background:C.bg,border:`2px dashed ${C.border}`,borderRadius:12,padding:20,textAlign:"center"}}>
-              <label style={{cursor:"pointer",color:C.accent,fontWeight:700,fontSize:13}}>
-                📷 Upload Pump Statement Images
-                <input type="file" accept="image/*" multiple style={{display:"none"}}
-                  onChange={e=>{setReconImages(Array.from(e.target.files||[]));}}/>
-              </label>
-              {reconImages.length>0 && (
-                <div style={{marginTop:8,fontSize:12,color:C.green,fontWeight:600}}>
-                  {reconImages.length} image{reconImages.length>1?"s":""} selected
-                </div>
-              )}
+        // ── CORE: apply one reconciled entry → update request + trip + loan if settled ──
+        const applyReconEntry = async (m) => {
+          if(!m.app || !m.pump) return;
+          const oldHsd  = Number(m.app.confirmedAmount ?? m.app.dieselAmount ?? m.app.amount ?? 0);
+          const newHsd  = m.pump.hsd || 0;
+          const newAdv  = m.pump.advance || 0;
+          const newTotal= newHsd + newAdv;
+          const oldTotal= oldHsd + Number(m.app.cashAmount||0);
+          const amountNote = oldTotal!==newTotal
+            ? `Amount changed: Rs.${oldTotal.toLocaleString("en-IN")} -> Rs.${newTotal.toLocaleString("en-IN")} (pump_reconciled)`
+            : null;
+
+          // 1. Update diesel request
+          const updReq = {
+            ...m.app,
+            status: "reconciled",
+            amount: newTotal,       // update to pump total
+            dieselAmount: newHsd,   // diesel-only component
+            confirmedAmount: newHsd,
+            cashAmount: newAdv,
+            reconciledAt: nowTs(),
+            amountNote: amountNote||m.app.amountNote||null,
+            confirmedReason: "pump_reconciled",
+          };
+          setDieselRequests(p=>p.map(r=>r.id===m.app.id?updReq:r));
+          DB.saveDieselRequest(updReq).catch(()=>{});
+
+          // 2. Update trip diesel estimate
+          const trip = m.trip || (trips||[]).find(t=>t.dieselIndentNo===String(m.app.indentNo)||t.id===m.app.tripId);
+          if(trip) {
+            const oldEst = trip.dieselEstimate||0;
+            const updTrip = {...trip, dieselEstimate: newTotal};
+            setTrips(p=>p.map(t=>t.id===trip.id?updTrip:t));
+            DB.saveTrip(updTrip).catch(()=>{});
+
+            // 3. If trip already settled and diesel increased → add to vehicle loan
+            if(trip.driverSettled && newTotal > oldEst) {
+              const deductAmt = newTotal - oldEst;
+              const vehicle = (vehicles||[]).find(v=>v.truckNo===trip.truckNo);
+              const loanTxn = {
+                id: uid(), type:"loan", date:today(),
+                amount: deductAmt, lrNo: trip.lrNo||"",
+                note: `Diesel recon adj: LR ${trip.lrNo||"--"} — Est Rs.${oldEst} -> Actual Rs.${newTotal}. Recover next trip.`
+              };
+              const updVeh = vehicle ? {
+                ...vehicle,
+                loan: (vehicle.loan||0) + deductAmt,
+                loanTxns: [...(vehicle.loanTxns||[]), loanTxn],
+              } : null;
+              if(updVeh) {
+                setVehicles(p=>p.map(v=>v.truckNo===trip.truckNo?updVeh:v));
+                DB.saveVehicle(updVeh).catch(()=>{});
+              }
+              // Add negative driver pay entry
+              const deduction = {
+                id: uid(), tripId:trip.id, truckNo:trip.truckNo, lrNo:trip.lrNo||"",
+                amount: -deductAmt, utr:`RECON-ADJ-${m.app.indentNo||""}`,
+                date: today(), notes:`Diesel recon: Rs.${oldEst}->Rs.${newTotal}`,
+                createdBy: user.username, createdAt: nowTs(),
+              };
+              setDriverPays(p=>[deduction,...(p||[])]);
+              await DB.saveDriverPay(deduction).catch(()=>{});
+              log("RECON LOAN ADJ",`${trip.truckNo} Rs.${deductAmt} added to loan — LR ${trip.lrNo}`);
+            }
+          }
+          log("RECON SAVE", `Indent #${m.app.indentNo} reconciled — HSD Rs.${newHsd} Adv Rs.${newAdv}${amountNote?" | "+amountNote:""}`);
+        };
+
+        // ── Save All Complete (Category 3) ──
+        const saveAllComplete = async () => {
+          if(!window.confirm(`Save ${complete.length} complete Category 3 entries?\nThis will update diesel requests to "reconciled" status, update trip diesel estimates, and handle loan adjustments for settled trips.`)) return;
+          for(const m of complete) await applyReconEntry(m);
+          // Mark as saved in reconMatches
+          setReconMatches(prev=>prev.map(m=>m.complete||m.status==="ok"
+            ? {...m, resolution:"saved", resolvedNote:"Reconciled & saved"}
+            : m));
+          saveSession(reconMatches);
+          alert(`Done! ${complete.length} diesel requests reconciled and saved.`);
+        };
+
+        // ── Save one resolved mismatch ──
+        const saveResolvedEntry = async (idx) => {
+          const m = (reconMatches||[])[idx];
+          if(!m||!m.app||!m.pump) return;
+          await applyReconEntry(m);
+          setReconMatches(prev=>{
+            const arr=[...prev];
+            arr[idx]={...arr[idx], resolution:"saved", resolvedNote:"Reconciled & saved"};
+            saveSession(arr);
+            return arr;
+          });
+        };
+
+
+        // Save for Later: persist to Supabase, remove from current scan
+        const saveForLater = async (idx) => {
+          const m = (reconMatches||[])[idx];
+          if(!m) return;
+          const item = {
+            pump_data: m.pump, app_data: m.app, trip_data: m.trip,
+            cat: m.cat, hsd_diff: m.hsdDiff, adv_diff: m.advDiff,
+            pump_total: m.pumpTotal||0, app_total: m.appTotal||0, status: m.status,
+          };
+          const {data, error} = await supabase.from("diesel_recon_saved").insert(item).select().single();
+          if(error){ alert("Save failed: "+error.message); return; }
+          setReconSaved(prev=>[data,...prev]);
+          setReconMatches(prev=>prev.filter((_,i)=>i!==idx));
+          setReconCardState(prev=>{ const n={...prev}; delete n[idx]; return n; });
+          saveSession((reconMatches||[]).filter((_,i)=>i!==idx));
+        };
+
+        // Saved tab card state helpers
+        const getSCS = i => reconSavedCS[i]||{showPin:false,showAttach:false,editAmts:false,lrSearch:"",editHsd:"",editAdv:"0",pinEntry:"",pinErr:false,showAttachReq:false,reqSearch:""};
+        const setSCS = (i,upd) => setReconSavedCS(p=>({...p,[i]:{...getSCS(i),...upd}}));
+
+        // Resolve from Saved tab: apply action + delete from Supabase
+        const resolveFromSaved = async (savedItem, si, action, extra={}) => {
+          const a = savedItem.app_data;
+          const p = savedItem.pump_data;
+          const trip = savedItem.trip_data;
+          if(action==="apply_all") {
+            const m = {app:a, pump:p, trip, cat:savedItem.cat,
+              hsdDiff:savedItem.hsd_diff, advDiff:savedItem.adv_diff,
+              pumpTotal:savedItem.pump_total, appTotal:savedItem.app_total, complete:true};
+            await applyReconEntry(m);
+          } else if(action==="confirm_pin") {
+            const _cD = extra.diesel != null ? Number(extra.diesel) : Number(a?.dieselAmount ?? a?.amount ?? 0);
+            const _cC = extra.cash   != null ? Number(extra.cash)   : Number(a?.cashAmount ?? 0);
+            const _cT = _cD + _cC;
+            const _odD = a?.dieselAmount ?? a?.amount ?? 0;
+            const _odC = a?.cashAmount   ?? 0;
+            const _sc  = _cD !== _odD || _cC !== _odC;
+            const upd={
+              ...a, status:"confirmed", confirmed:true,
+              dieselAmount:    _cD, cashAmount:_cC, amount:_cT,
+              confirmedAmount: _cD, confirmedCash:_cC,
+              confirmedAt:nowTs(), pin:"****",
+              originalDieselAmount: _sc ? _odD : a?.originalDieselAmount,
+              originalCashAmount:   _sc ? _odC : a?.originalCashAmount,
+            };
+            setDieselRequests(pp=>pp.map(r=>r.id===a.id?upd:r));
+            DB.saveDieselRequest(upd).catch(()=>{});
+            log("PUMP CONFIRM",`Saved recon #${a?.indentNo} Diesel ₹${_cD} Cash ₹${_cC} Total ₹${_cT}`);
+          } else if(action==="attach_lr") {
+            const t=(trips||[]).find(t=>t.lrNo===extra.lrNo); if(!t) return;
+            const upd={...a,lrNo:extra.lrNo,tripId:t.id,status:"attached"};
+            setDieselRequests(pp=>pp.map(r=>r.id===a.id?upd:r));
+            DB.saveDieselRequest(upd).catch(()=>{});
+            const _saDiesel = Number(upd.dieselAmount ?? upd.amount ?? 0);
+            const _saCash   = Number(upd.cashAmount   ?? 0);
+            const updTrip={...t, dieselIndentNo:String(a?.indentNo), dieselEstimate:_saDiesel+_saCash};
+            setTrips(pp=>pp.map(tt=>tt.id===t.id?updTrip:tt));
+            DB.saveTrip(updTrip).catch(()=>{});
+            log("RECON ATTACH",`Saved #${a?.indentNo} -> LR ${extra.lrNo} | dieselEst ₹${_saDiesel+_saCash}`);
+          } else if(action==="update_amounts") {
+            const _uH = extra.hsd  != null ? Number(extra.hsd)  : Number(a?.dieselAmount ?? a?.amount ?? 0);
+            const _uA = extra.cash != null ? Number(extra.cash) : Number(a?.cashAmount   ?? 0);
+            const _uT = _uH + _uA;
+            const _uOldD = a?.dieselAmount ?? a?.amount ?? 0;
+            const _uOldC = a?.cashAmount   ?? 0;
+            const _uChg  = _uH !== _uOldD || _uA !== _uOldC;
+            const upd={
+              ...a,
+              amount:          _uT,
+              dieselAmount:    _uH,
+              cashAmount:      _uA,
+              confirmedAmount: _uH,
+              confirmedCash:   _uA,
+              originalDieselAmount: _uChg ? _uOldD : a?.originalDieselAmount,
+              originalCashAmount:   _uChg ? _uOldC : a?.originalCashAmount,
+            };
+            setDieselRequests(pp=>pp.map(r=>r.id===a.id?upd:r));
+            DB.saveDieselRequest(upd).catch(()=>{});
+            // Backfill trip dieselEstimate
+            if(trip){
+              const updTrip={...trip, dieselEstimate:_uT};
+              setTrips(pp=>pp.map(tt=>tt.id===trip.id?updTrip:tt));
+              DB.saveTrip(updTrip).catch(()=>{});
+            }
+            log("RECON UPDATE",`Saved #${a?.indentNo} Diesel ₹${_uH} Cash ₹${_uA} Total ₹${_uT}`);
+          } else if(action==="adjust_trip") {
+            if(!trip||trip.driverSettled) return;
+            const newD=(p?.hsd||0)+(p?.advance||0);
+            const upd={...trip,dieselEstimate:newD};
+            setTrips(pp=>pp.map(tt=>tt.id===trip.id?upd:tt));
+            DB.saveTrip(upd).catch(()=>{});
+            log("RECON ADJUST",`Saved LR ${trip.lrNo} diesel Rs.${newD}`);
+          } else if(action==="write_off") {
+            log("RECON WRITEOFF",`Saved: written off`);
+          }
+          // Delete from Supabase + remove from local state
+          await supabase.from("diesel_recon_saved").delete().eq("id",savedItem.id);
+          setReconSaved(prev=>prev.filter(s=>s.id!==savedItem.id));
+        };
+
+        const fmt = n => "Rs."+(n||0).toLocaleString("en-IN");
+        const complete   = (reconMatches||[]).filter(m=>m.complete||m.status==="ok");
+        const alreadyReconList = (reconMatches||[]).filter(m=>m.status==="already_reconciled");
+        const actionable = (reconMatches||[]).filter(m=>!m.complete&&m.status!=="ok"&&m.status!=="already_reconciled");
+        const SUMMARY = [
+          {l:"Complete", v:complete.length, c:C.green},
+          {l:"Cat 1: No Confirm/No LR", v:actionable.filter(m=>m.cat===1).length, c:C.red},
+          {l:"Cat 2: Confirmed/No LR",  v:actionable.filter(m=>m.cat===2).length, c:C.orange},
+          {l:"Cat 3 Value Mismatch",    v:actionable.filter(m=>m.cat===3).length, c:C.blue},
+          {l:"Cat 4: No Confirm/LR",    v:actionable.filter(m=>m.cat===4).length, c:C.purple},
+          {l:"Not in App",              v:actionable.filter(m=>m.status==="not_in_app").length, c:C.red},
+          {l:"Already Reconciled",       v:alreadyReconList.length, c:C.green},
+        ];
+
+        return (
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <div style={{fontSize:14,fontWeight:700,color:C.text}}>Diesel Reconciliation</div>
+            {/* Tab switcher */}
+            <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+              {[{v:"new",l:"New Scan"},{v:"saved",l:`Saved for Later${reconSaved.length>0?" ("+reconSaved.length+")":""}`}].map(t=>(
+                <button key={t.v} onClick={()=>setReconView(t.v)}
+                  style={{fontSize:11,fontWeight:700,padding:"5px 12px",borderRadius:8,border:"none",cursor:"pointer",
+                    background:reconView===t.v?C.accent:"transparent",color:reconView===t.v?"#fff":C.muted}}>
+                  {t.l}
+                </button>
+              ))}
             </div>
-            <button onClick={scanPumpImages}
-              disabled={reconScanning||!reconImages.length}
-              style={{background:reconScanning?C.muted:C.accent,color:"#fff",border:"none",borderRadius:10,
-                padding:"12px 20px",fontSize:13,fontWeight:700,cursor:reconScanning?"wait":"pointer"}}>
-              {reconScanning ? reconProgress : "🔍 Scan & Match"}
-            </button>
-          </>)}
+            {reconView==="new"&&<div style={{fontSize:11,color:C.muted}}>Pump data is master. Scan statement, match with app requests, resolve mismatches.</div>}
 
-          {/* Results */}
-          {reconMatches && (<>
-            {/* Summary KPIs */}
-            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-              <div style={{background:C.green+"11",border:`1px solid ${C.green}33`,borderRadius:8,padding:"8px 14px",flex:1,minWidth:60,textAlign:"center"}}>
-                <div style={{fontSize:18,fontWeight:800,color:C.green}}>{matchedCount}</div>
-                <div style={{fontSize:9,color:C.green}}>Matched ✅</div>
-              </div>
-              <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,borderRadius:8,padding:"8px 14px",flex:1,minWidth:60,textAlign:"center"}}>
-                <div style={{fontSize:18,fontWeight:800,color:C.orange}}>{mismatchCount}</div>
-                <div style={{fontSize:9,color:C.orange}}>Mismatch ⚠</div>
-              </div>
-              <div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,padding:"8px 14px",flex:1,minWidth:60,textAlign:"center"}}>
-                <div style={{fontSize:18,fontWeight:800,color:C.red}}>{notInApp}</div>
-                <div style={{fontSize:9,color:C.red}}>Not in App</div>
-              </div>
-              <div style={{background:C.purple+"11",border:`1px solid ${C.purple}33`,borderRadius:8,padding:"8px 14px",flex:1,minWidth:60,textAlign:"center"}}>
-                <div style={{fontSize:18,fontWeight:800,color:C.purple}}>{notInPump}</div>
-                <div style={{fontSize:9,color:C.purple}}>Not in Pump ❓</div>
-              </div>
-              <div style={{background:C.teal+"11",border:`1px solid ${C.teal}33`,borderRadius:8,padding:"8px 14px",flex:1,minWidth:60,textAlign:"center"}}>
-                <div style={{fontSize:18,fontWeight:800,color:C.teal}}>{resolved}</div>
-                <div style={{fontSize:9,color:C.teal}}>Resolved</div>
-              </div>
-            </div>
-
-            {/* Reset button */}
-            <button onClick={()=>{setReconMatches(null);setReconData(null);setReconImages([]);}}
-              style={{background:C.dim,color:C.text,border:"none",borderRadius:8,padding:"6px 14px",
-                fontSize:11,fontWeight:600,cursor:"pointer",alignSelf:"flex-start"}}>
-              ↩ New Reconciliation
-            </button>
-
-            {/* Mismatch entries (show mismatches & unmatched first, then matched) */}
-            {reconMatches.filter(m=>m.status!=="matched").map((m,idx)=>{
-              const realIdx = reconMatches.indexOf(m);
-              const bg = m.status==="mismatch"?C.orange+"0a":m.status==="not_in_app"?C.red+"0a":C.purple+"0a";
-              const borderCol = m.status==="mismatch"?C.orange:m.status==="not_in_app"?C.red:C.purple;
-              const totalDiff = (m.hsdDiff||0)+(m.advDiff||0);
-              const isResolved = m.resolution!=="pending";
+            {reconView==="new"&&/* Load previous session */(<>
+            {!reconMatches && !reconScanning && (()=>{
+              const saved=loadSession();
+              if(!saved) return null;
               return (
-                <div key={idx} style={{background:bg,border:`1.5px solid ${borderCol}33`,borderRadius:10,padding:"12px 14px",
-                  opacity:isResolved?0.6:1}}>
-                  {/* Status badge */}
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-                    <span style={{fontSize:10,fontWeight:700,color:borderCol,background:borderCol+"22",
-                      padding:"2px 8px",borderRadius:10}}>
-                      {m.status==="mismatch"?"⚠ AMOUNT MISMATCH":m.status==="not_in_app"?"❌ NOT IN APP":"❓ NOT IN PUMP"}
-                    </span>
-                    {isResolved && (
-                      <span style={{fontSize:10,color:C.green,fontWeight:600}}>✅ {m.resolvedNote}</span>
-                    )}
+                <div style={{background:C.bg,borderRadius:8,padding:"8px 12px",fontSize:11,
+                  border:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <span style={{color:C.muted}}>Previous reconciliation session found</span>
+                  <div style={{display:"flex",gap:6}}>
+                    <button onClick={()=>setReconMatches(saved)}
+                      style={{background:C.accent,color:"#fff",border:"none",borderRadius:6,
+                        padding:"4px 10px",fontSize:11,fontWeight:700,cursor:"pointer"}}>Reload</button>
+                    <button onClick={()=>{clearSession();setReconMatches(null);}}
+                      style={{background:C.dim,color:C.muted,border:"none",borderRadius:6,
+                        padding:"4px 10px",fontSize:11,cursor:"pointer"}}>Clear</button>
                   </div>
-
-                  {/* Data comparison */}
-                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4,fontSize:11,marginBottom:8}}>
-                    <div style={{fontWeight:700,color:C.text}}>🏪 Pump</div>
-                    <div style={{fontWeight:700,color:C.text}}>📱 App</div>
-                    <div>{m.pump?.vehicle||"—"}</div>
-                    <div>{m.app?.truckNo||"—"}</div>
-                    <div>HSD: <b style={{color:m.hsdDiff?C.red:C.green}}>{fmt(m.pump?.hsd||0)}</b></div>
-                    <div>Diesel: <b style={{color:m.hsdDiff?C.red:C.green}}>{fmt(m.app?.dieselAmount??m.app?.amount??0)}</b></div>
-                    <div>Advance: <b style={{color:m.advDiff?C.red:C.green}}>{fmt(m.pump?.advance||0)}</b></div>
-                    <div>Cash: <b style={{color:m.advDiff?C.red:C.green}}>{fmt(m.app?.cashAmount??0)}</b></div>
-                    {totalDiff!==0 && (
-                      <div style={{gridColumn:"1/3",color:C.red,fontWeight:700,fontSize:12}}>
-                        Difference: {fmt(Math.abs(totalDiff))} {totalDiff>0?"(pump higher)":"(app higher)"}
-                        {m.trip && <span style={{color:C.muted,fontWeight:400}}> · LR: {m.trip.lrNo} · {m.trip.driverSettled?"⚠ Settled":"Unsettled"}</span>}
-                      </div>
-                    )}
-                    {m.app?.createdBy && (
-                      <div style={{gridColumn:"1/3",color:C.muted,fontSize:10}}>
-                        Created by: <b>{m.app.createdBy}</b> · Indent #{m.app.indentNo} · {m.app.date?.slice(0,10)}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Action buttons (only if not resolved) */}
-                  {!isResolved && m.status==="mismatch" && totalDiff>0 && (
-                    <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-                      <button onClick={()=>resolveEntry(realIdx,"debit_employee")}
-                        style={{fontSize:10,fontWeight:600,background:C.orange+"22",color:C.orange,border:`1px solid ${C.orange}44`,
-                          borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
-                        👤 Debit Employee
-                      </button>
-                      {m.trip && !m.trip.driverSettled && (
-                        <button onClick={()=>resolveEntry(realIdx,"adjust_trip")}
-                          style={{fontSize:10,fontWeight:600,background:C.blue+"22",color:C.blue,border:`1px solid ${C.blue}44`,
-                            borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
-                          📝 Adjust Trip
-                        </button>
-                      )}
-                      <button onClick={()=>resolveEntry(realIdx,"recover_next")}
-                        style={{fontSize:10,fontWeight:600,background:C.purple+"22",color:C.purple,border:`1px solid ${C.purple}44`,
-                          borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
-                        🚛 Recover from Next Trip
-                      </button>
-                      <button onClick={()=>resolveEntry(realIdx,"write_off")}
-                        style={{fontSize:10,fontWeight:600,background:C.muted+"22",color:C.muted,border:`1px solid ${C.muted}44`,
-                          borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
-                        ✖ Write Off
-                      </button>
-                      <button onClick={()=>resolveEntry(realIdx,"flag")}
-                        style={{fontSize:10,fontWeight:600,background:C.red+"22",color:C.red,border:`1px solid ${C.red}44`,
-                          borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
-                        🚩 Flag
-                      </button>
-                    </div>
-                  )}
-                  {!isResolved && m.status==="not_in_app" && (
-                    <div style={{display:"flex",gap:6}}>
-                      <button onClick={()=>resolveEntry(realIdx,"recover_next")}
-                        style={{fontSize:10,fontWeight:600,background:C.purple+"22",color:C.purple,border:`1px solid ${C.purple}44`,
-                          borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
-                        🚛 Add to Vehicle Loan
-                      </button>
-                      <button onClick={()=>resolveEntry(realIdx,"flag")}
-                        style={{fontSize:10,fontWeight:600,background:C.red+"22",color:C.red,border:`1px solid ${C.red}44`,
-                          borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
-                        🚩 Flag for Investigation
-                      </button>
-                    </div>
-                  )}
                 </div>
               );
-            })}
+            })()}
+            {!reconMatches && (<>
+              <div style={{background:C.bg,border:`2px dashed ${C.border}`,borderRadius:12,padding:20,textAlign:"center"}}>
+                <label style={{cursor:"pointer",color:C.accent,fontWeight:700,fontSize:13}}>
+                  Upload Pump Statement Images
+                  <input type="file" accept="image/*" multiple style={{display:"none"}} onChange={e=>setReconImages(Array.from(e.target.files||[]))}/>
+                </label>
+                {reconImages.length>0 && <div style={{marginTop:8,fontSize:12,color:C.green,fontWeight:600}}>{reconImages.length} image{reconImages.length!==1?"s":""} selected</div>}
+              </div>
+              <button onClick={scanPumpImages} disabled={reconScanning||!reconImages.length}
+                style={{background:reconScanning?C.muted:C.accent,color:"#fff",border:"none",borderRadius:10,padding:"12px 20px",fontSize:13,fontWeight:700,cursor:reconScanning?"wait":"pointer"}}>
+                {reconScanning?reconProgress:"Scan & Match"}
+              </button>
+            </>)}
 
-            {/* Matched entries (collapsed) */}
-            {matchedCount > 0 && (
-              <details style={{background:C.green+"08",border:`1px solid ${C.green}22`,borderRadius:10,padding:"10px 14px"}}>
-                <summary style={{fontSize:12,fontWeight:700,color:C.green,cursor:"pointer"}}>
-                  ✅ {matchedCount} Matched Entries (tap to expand)
-                </summary>
-                <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:4}}>
-                  {reconMatches.filter(m=>m.status==="matched").map((m,i)=>(
-                    <div key={i} style={{fontSize:10,color:C.muted,display:"flex",justifyContent:"space-between",
-                      padding:"4px 0",borderBottom:`1px solid ${C.border}`}}>
-                      <span>{m.pump?.vehicle} · #{m.app?.indentNo}</span>
-                      <span>HSD {fmt(m.pump?.hsd||0)} · Adv {fmt(m.pump?.advance||0)}</span>
+            {reconMatches && (<>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                {SUMMARY.filter(s=>s.v>0).map((s,i)=>(
+                  <div key={i} style={{background:s.c+"11",border:`1px solid ${s.c}33`,borderRadius:8,padding:"6px 10px",textAlign:"center",minWidth:70}}>
+                    <div style={{fontSize:16,fontWeight:800,color:s.c}}>{s.v}</div>
+                    <div style={{fontSize:8,color:s.c,lineHeight:1.3}}>{s.l}</div>
+                  </div>
+                ))}
+              </div>
+              <button onClick={()=>{setReconMatches(null);setReconData(null);setReconImages([]);}}
+                style={{background:C.dim,color:C.text,border:"none",borderRadius:8,padding:"6px 14px",fontSize:11,fontWeight:600,cursor:"pointer",alignSelf:"flex-start"}}>
+                New Reconciliation
+              </button>
+              {actionable.length===0 && complete.length>0 && (
+                <div style={{textAlign:"center",padding:24,color:C.green,fontWeight:700,fontSize:14}}>All entries matched and complete!</div>
+              )}
+              {(()=>{
+                // Per-card state helpers (avoids hooks in .map)
+                const getCS = i => reconCardState[i]||{showPin:false,showAttach:false,editAmts:false,lrSearch:"",editHsd:"",editAdv:"0",pinEntry:"",pinErr:false};
+                const setCS = (i,upd) => setReconCardState(p=>({...p,[i]:{...getCS(i),...upd}}));
+                return actionable.map((m,xi)=>{
+                const idx=(reconMatches||[]).indexOf(m);
+                const cs=getCS(idx);
+                const catCol=m.status==="not_in_app"?C.red:m.status==="not_in_pump"?C.muted:CAT_COLOR(m.cat);
+                const catLabel=m.status==="not_in_app"?"NOT IN APP"
+                  :m.status==="not_in_pump"?"NOT IN PUMP"
+                  :`CAT ${m.cat}: ${CAT_LABEL[m.cat]||""}`;
+                const isResolved=m.resolution!=="pending";
+                const lrMatches=(trips||[]).filter(t=>(t.lrNo||"").includes((cs.lrSearch||"").toUpperCase()));
+                return (<>
+                  <div key={idx} style={{background:C.card,border:`1.5px solid ${catCol}44`,borderRadius:12,padding:"12px 14px",opacity:isResolved?0.65:1}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                      <span style={{fontSize:10,fontWeight:800,color:catCol,background:catCol+"18",padding:"2px 8px",borderRadius:10}}>{catLabel}</span>
+                      {isResolved && m.resolution!=="saved" && m.app && m.pump && (
+                        <button onClick={()=>saveResolvedEntry(idx)}
+                          style={{background:C.purple,color:"#fff",border:"none",borderRadius:6,
+                            padding:"3px 10px",fontSize:10,fontWeight:700,cursor:"pointer"}}>
+                          Save & Apply
+                        </button>
+                      )}
+                      {isResolved && <span style={{fontSize:10,color:C.green,fontWeight:600}}>{m.resolvedNote}</span>}
                     </div>
-                  ))}
-                </div>
-              </details>
-            )}
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:8}}>
+                      <div style={{background:C.bg,borderRadius:8,padding:"8px 10px"}}>
+                        <div style={{fontSize:9,fontWeight:800,color:C.muted,marginBottom:3}}>PUMP (MASTER)</div>
+                        <div style={{fontSize:12,fontWeight:700}}>{m.pump?.truckNo||"--"}</div>
+                        <div style={{fontSize:10,color:C.muted}}>{m.pump?.date||"--"} / #{m.pump?.indentNo||"--"}</div>
+                        <div style={{fontSize:12,marginTop:3}}>HSD: <b>{fmt(m.pump?.hsd||0)}</b></div>
+                        <div style={{fontSize:12}}>Adv: <b>{fmt(m.pump?.advance||0)}</b></div>
+                        <div style={{fontSize:11,fontWeight:700,marginTop:3,borderTop:`1px solid ${C.border}`,paddingTop:3}}>Total: <b style={{color:m.totalDiff&&m.totalDiff!==0?C.red:C.green}}>{fmt(m.pumpTotal||0)}</b></div>
+                      </div>
+                      <div style={{background:C.bg,borderRadius:8,padding:"8px 10px"}}>
+                        <div style={{fontSize:9,fontWeight:800,color:C.muted,marginBottom:3}}>APP REQUEST</div>
+                        {m.app?(<>
+                          <div style={{fontSize:12,fontWeight:700}}>{m.app.truckNo||"--"}</div>
+                          <div style={{fontSize:10,color:C.muted}}>{m.app.date||"--"} / #{m.app.indentNo||"--"}</div>
+                          <div style={{fontSize:12,marginTop:3}}>Diesel: <b>{fmt(m.app.confirmedAmount??m.app.dieselAmount??m.app.amount??0)}</b></div>
+                          <div style={{fontSize:12}}>Cash: <b>{fmt(m.app.cashAmount??0)}</b></div>
+                          <div style={{fontSize:11,fontWeight:700,marginTop:3,borderTop:`1px solid ${C.border}`,paddingTop:3}}>Total: <b style={{color:m.totalDiff&&m.totalDiff!==0?C.red:C.green}}>{fmt(m.appTotal||0)}</b></div>
+                          {m.trip&&<div style={{fontSize:10,color:C.accent,marginTop:2}}>LR: {m.trip.lrNo}</div>}
+                          <div style={{fontSize:9,color:C.muted,marginTop:2}}>By: {m.app.createdBy||"--"}</div>
+                        </>):<div style={{fontSize:11,color:C.muted,paddingTop:8}}>No app record found</div>}
+                      </div>
+                    </div>
+                    {m.app&&(m.totalDiff!==0&&m.totalDiff!=null)&&(
+                      <div style={{fontSize:11,fontWeight:700,color:C.red,padding:"4px 8px",background:C.red+"11",borderRadius:6,marginBottom:8}}>
+                        Total diff: {m.totalDiff>0?"+":""}{fmt(m.totalDiff)}
+                        {m.hsdDiff!==0&&<span style={{fontWeight:400}}> (HSD {m.hsdDiff>0?"+":""}{fmt(m.hsdDiff)})</span>}
+                        {m.advDiff!==0&&<span style={{fontWeight:400}}> (Adv {m.advDiff>0?"+":""}{fmt(m.advDiff)})</span>}
+                        <span style={{fontWeight:400}}> {m.totalDiff>0?"pump higher":"app higher"}</span>
+                      </div>
+                    )}
+                    {m.app&&m.totalDiff===0&&(m.hsdDiff!==0||m.advDiff!==0)&&(
+                      <div style={{fontSize:11,color:C.orange,padding:"4px 8px",background:C.orange+"11",borderRadius:6,marginBottom:8}}>
+                        Total matches but components differ: HSD {m.hsdDiff>0?"+":""}{fmt(m.hsdDiff)} / Adv {m.advDiff>0?"+":""}{fmt(m.advDiff)}
+                      </div>
+                    )}
+                    {!isResolved&&(
+                      <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:cs.showPin||cs.showAttach||cs.editAmts?8:0}}>
+                        {m.app&&(m.cat===1||m.cat===4)&&!cs.showPin&&(
+                          <button onClick={()=>setCS(idx,{showPin:true,pinEntry:"",pinErr:false})}
+                            style={{fontSize:10,fontWeight:700,background:C.green+"22",color:C.green,border:`1px solid ${C.green}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                            Confirm with PIN
+                          </button>
+                        )}
+                        {m.app&&(m.cat===1||m.cat===2)&&!cs.showAttach&&(
+                          <button onClick={()=>setCS(idx,{showAttach:true,lrSearch:""})}
+                            style={{fontSize:10,fontWeight:700,background:C.blue+"22",color:C.blue,border:`1px solid ${C.blue}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                            Attach to LR
+                          </button>
+                        )}
+                        {m.app&&(m.hsdDiff!==0||m.advDiff!==0)&&!cs.editAmts&&(
+                          <button onClick={()=>setCS(idx,{editAmts:true,editHsd:String((m.app?.dieselAmount??m.app?.amount)||""),editAdv:String(m.app?.cashAmount||"0")})}
+                            style={{fontSize:10,fontWeight:700,background:C.orange+"22",color:C.orange,border:`1px solid ${C.orange}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                            Update Amounts
+                          </button>
+                        )}
+                        {m.trip&&!m.trip.driverSettled&&(m.hsdDiff!==0||m.advDiff!==0)&&(
+                          <button onClick={()=>resolveEntry(idx,"adjust_trip")}
+                            style={{fontSize:10,fontWeight:700,background:C.blue+"22",color:C.blue,border:`1px solid ${C.blue}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                            Adjust Trip Diesel
+                          </button>
+                        )}
+                        {(m.hsdDiff!==0||m.advDiff!==0||m.status==="not_in_app")&&(
+                          <button onClick={()=>resolveEntry(idx,"write_off")}
+                            style={{fontSize:10,fontWeight:700,background:C.muted+"22",color:C.muted,border:`1px solid ${C.muted}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                            Write Off
+                          </button>
+                        )}
+                        {m.status==="not_in_app"&&!cs.showAttachReq&&(
+                          <button onClick={()=>setCS(idx,{showAttachReq:true,reqSearch:m.pump?.truckNo||""})}
+                            style={{fontSize:10,fontWeight:700,background:C.purple+"22",color:C.purple,border:`1px solid ${C.purple}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                            Attach to Existing Request
+                          </button>
+                        )}
+                        <button onClick={()=>saveForLater(idx)}
+                          style={{fontSize:10,fontWeight:700,background:"#78716c22",color:"#78716c",border:"1px solid #78716c44",borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                          Save for Later
+                        </button>
+                      </div>
+                    )}
+                    {cs.showPin&&!isResolved&&(
+                      <div style={{background:C.bg,borderRadius:8,padding:"10px 12px",marginTop:4}}>
+                        <div style={{fontSize:11,fontWeight:700,marginBottom:6}}>Enter pump PIN to confirm Indent #{m.app?.indentNo}</div>
+                        <div style={{display:"flex",gap:6,marginBottom:6}}>
+                          {[0,1,2,3].map(j=>(
+                            <div key={j} style={{width:32,height:40,background:C.card,borderRadius:6,border:`1px solid ${cs.pinErr?C.red:C.border}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,fontWeight:700}}>
+                              {(cs.pinEntry||"")[j]?"*":""}
+                            </div>
+                          ))}
+                        </div>
+                        {cs.pinErr&&<div style={{color:C.red,fontSize:10,marginBottom:4}}>Wrong PIN - try again</div>}
+                        <div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:6}}>
+                          {[1,2,3,4,5,6,7,8,9,"DEL",0,"OK"].map(k=>(
+                            <button key={k} onClick={()=>{
+                              if(k==="DEL"){setCS(idx,{pinEntry:(cs.pinEntry||"").slice(0,-1),pinErr:false});}
+                              else if(k==="OK"){
+                                if(cs.pinEntry===m.app?.pin){resolveEntry(idx,"confirm_pin",{amount:Number(m.pump?.hsd||m.app?.amount)});setCS(idx,{showPin:false});}
+                                else{setCS(idx,{pinErr:true,pinEntry:""});}
+                              } else if((cs.pinEntry||"").length<4){
+                                const np=(cs.pinEntry||"")+String(k); setCS(idx,{pinEntry:np,pinErr:false});
+                                if(np.length===4){
+                                  if(np===m.app?.pin){resolveEntry(idx,"confirm_pin",{amount:Number(m.pump?.hsd||m.app?.amount)});setCS(idx,{showPin:false});}
+                                  else{setCS(idx,{pinErr:true,pinEntry:""});}
+                                }
+                              }
+                            }}
+                            style={{width:36,height:36,borderRadius:6,border:`1px solid ${C.border}`,background:k==="OK"?C.green:k==="DEL"?C.red+"22":C.card,color:k==="OK"?"#fff":k==="DEL"?C.red:C.text,fontWeight:700,fontSize:k==="DEL"||k==="OK"?10:14,cursor:"pointer"}}>
+                              {k}
+                            </button>
+                          ))}
+                        </div>
+                        <button onClick={()=>setCS(idx,{showPin:false})} style={{fontSize:10,color:C.muted,background:"none",border:"none",cursor:"pointer"}}>Cancel</button>
+                      </div>
+                    )}
+                    {cs.showAttach&&!isResolved&&(
+                      <div style={{background:C.bg,borderRadius:8,padding:"10px 12px",marginTop:4}}>
+                        <div style={{fontSize:11,fontWeight:700,marginBottom:6}}>Select LR to attach</div>
+                        <input value={cs.lrSearch||""} onChange={e=>setCS(idx,{lrSearch:e.target.value})} placeholder="Search LR / truck..."
+                          style={{width:"100%",background:C.card,border:`1px solid ${C.border}`,borderRadius:6,padding:"6px 8px",color:C.text,fontSize:12,marginBottom:6,boxSizing:"border-box"}}/>
+                        <div style={{maxHeight:150,overflowY:"auto",display:"flex",flexDirection:"column",gap:4}}>
+                          {lrMatches.slice(0,20).map(t=>(
+                            <button key={t.id} onClick={()=>{resolveEntry(idx,"attach_lr",{lrNo:t.lrNo});setCS(idx,{showAttach:false});}}
+                              style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:6,padding:"6px 10px",textAlign:"left",cursor:"pointer",fontSize:11}}>
+                              <b>{t.lrNo}</b> / {t.truckNo} / {t.date}
+                            </button>
+                          ))}
+                          {lrMatches.length===0&&<div style={{color:C.muted,fontSize:11}}>No matching trips found</div>}
+                        </div>
+                        <button onClick={()=>setCS(idx,{showAttach:false})} style={{fontSize:10,color:C.muted,background:"none",border:"none",cursor:"pointer",marginTop:4}}>Cancel</button>
+                      </div>
+                    )}
+                    {cs.editAmts&&!isResolved&&(
+                      <div style={{background:C.bg,borderRadius:8,padding:"10px 12px",marginTop:4}}>
+                        <div style={{fontSize:11,fontWeight:700,marginBottom:6}}>Update amounts to match pump data</div>
+                        <div style={{display:"flex",gap:8,marginBottom:8}}>
+                          <div style={{flex:1}}>
+                            <div style={{fontSize:9,color:C.muted,marginBottom:2}}>HSD Rs.</div>
+                            <input value={cs.editHsd||""} onChange={e=>setCS(idx,{editHsd:e.target.value})} type="number"
+                              style={{width:"100%",background:C.card,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 8px",color:C.text,fontSize:12,boxSizing:"border-box"}}/>
+                          </div>
+                          <div style={{flex:1}}>
+                            <div style={{fontSize:9,color:C.muted,marginBottom:2}}>Advance Rs.</div>
+                            <input value={cs.editAdv||"0"} onChange={e=>setCS(idx,{editAdv:e.target.value})} type="number"
+                              style={{width:"100%",background:C.card,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 8px",color:C.text,fontSize:12,boxSizing:"border-box"}}/>
+                          </div>
+                        </div>
+                        <div style={{display:"flex",gap:6}}>
+                          <button onClick={()=>{resolveEntry(idx,"update_amounts",{hsd:Number(cs.editHsd),advance:Number(cs.editAdv)});setCS(idx,{editAmts:false});}}
+                            style={{background:C.green,color:"#fff",border:"none",borderRadius:6,padding:"6px 14px",fontSize:11,fontWeight:700,cursor:"pointer"}}>Save</button>
+                          <button onClick={()=>setCS(idx,{editAmts:false})} style={{background:C.dim,color:C.text,border:"none",borderRadius:6,padding:"6px 14px",fontSize:11,cursor:"pointer"}}>Cancel</button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                    {!cs.showAttachReq||isResolved?null:(
+                    <div style={{background:C.bg,borderRadius:8,padding:"10px 12px",marginTop:4}}>
+                      <div style={{fontSize:11,fontWeight:700,marginBottom:4}}>Attach to existing app request</div>
+                      <div style={{fontSize:10,color:C.muted,marginBottom:6}}>Pump: {m.pump?.truckNo} / #{m.pump?.indentNo} / Rs.{m.pump?.hsd}</div>
+                      <input value={cs.reqSearch||""} onChange={e=>setCS(idx,{reqSearch:e.target.value})}
+                        placeholder="Search truck no or indent..."
+                        style={{width:"100%",background:C.card,border:`1px solid ${C.border}`,borderRadius:6,
+                          padding:"6px 8px",color:C.text,fontSize:12,marginBottom:6,boxSizing:"border-box"}}/>
+                      <div style={{maxHeight:180,overflowY:"auto",display:"flex",flexDirection:"column",gap:4}}>
+                        {(dieselRequests||[]).filter(r=>{
+                          const q=(cs.reqSearch||"").toUpperCase();
+                          if(!q) return r.status!=="reconciled"; // default: skip reconciled
+                          return (r.truckNo||"").toUpperCase().includes(q)||String(r.indentNo||"").includes(q);
+                        }).slice(0,15).map(r=>(
+                          <button key={r.id}
+                            onClick={()=>{ resolveEntry(idx,"attach_to_request",{reqId:r.id}); setCS(idx,{showAttachReq:false}); }}
+                            style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:6,
+                              padding:"7px 10px",textAlign:"left",cursor:"pointer",fontSize:11}}>
+                            <div style={{fontWeight:700}}>{r.truckNo} / #{r.indentNo} / {r.date||"--"}</div>
+                            <div style={{fontSize:9,color:r.status==="confirmed"?C.green:C.muted,marginTop:2}}>
+                              {r.status} / Rs.{r.amount} / By: {r.createdBy||"--"}
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                      <button onClick={()=>setCS(idx,{showAttachReq:false})}
+                        style={{fontSize:10,color:C.muted,background:"none",border:"none",cursor:"pointer",marginTop:6}}>Cancel</button>
+                    </div>
+                   )}
+                </>);
+              });
+              })()}
+              {alreadyReconList.length>0&&(
+                <details style={{background:C.green+"08",border:`1px solid ${C.green}22`,borderRadius:10,padding:"10px 14px"}}>
+                  <summary style={{fontSize:12,fontWeight:700,color:C.green,cursor:"pointer"}}>
+                    {alreadyReconList.length} Already Reconciled (skip rescan)
+                  </summary>
+                  <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:4}}>
+                    {alreadyReconList.map((m,i)=>(
+                      <div key={i} style={{fontSize:10,color:C.muted,display:"flex",justifyContent:"space-between",
+                        padding:"4px 0",borderBottom:`1px solid ${C.border}`}}>
+                        <span style={{color:C.green,fontWeight:600}}>                          {m.pump?.truckNo||m.app?.truckNo} / #{m.app?.indentNo||m.pump?.indentNo}</span>
+                        <span>HSD Rs.{m.pump?.hsd||0} / LR {m.trip?.lrNo||"--"}</span>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
+              {complete.length>0&&(
+                <details style={{background:C.green+"08",border:`1px solid ${C.green}22`,borderRadius:10,padding:"10px 14px"}}>
+                  <summary style={{fontSize:12,fontWeight:700,color:C.green,cursor:"pointer"}}>
+                    {complete.length} Complete & Matched (Category 3)
+                  </summary>
+                  {complete.some(m=>m.resolution!=="saved")&&(
+                    <button onClick={saveAllComplete}
+                      style={{margin:"8px 0",background:C.green,color:"#fff",border:"none",borderRadius:8,
+                        padding:"8px 16px",fontSize:12,fontWeight:700,cursor:"pointer",width:"100%"}}>
+                      Save & Apply All {complete.filter(m=>m.resolution!=="saved").length} Complete Records
+                    </button>
+                  )}
+                  <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:4}}>
+                    {complete.map((m,i)=>(
+                      <div key={i} style={{fontSize:10,color:C.muted,display:"flex",justifyContent:"space-between",padding:"4px 0",borderBottom:`1px solid ${C.border}`}}>
+                        <span>{m.pump?.truckNo||m.app?.truckNo} / #{m.app?.indentNo||m.pump?.indentNo}</span>
+                        <span>
+                          HSD {fmt(m.pump?.hsd||0)}
+                          {(m.pump?.advance||0)>0 && <> + Adv {fmt(m.pump?.advance)}</>}
+                          {" = "}{fmt(m.pumpTotal||m.pump?.hsd||0)}
+                          {m.trip && <> / LR {m.trip.lrNo}</>}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
+            </>)}
           </>)}
-        </div>);
+
+            {/* ── SAVED FOR LATER TAB ─────────────────────────────────────── */}
+            {reconView==="saved"&&(<>
+              {reconSaved.length===0?(
+                <div style={{textAlign:"center",padding:32,color:C.muted,fontSize:13}}>
+                  No items saved for later.
+                </div>
+              ):(
+                <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                  <div style={{fontSize:11,color:C.muted}}>
+                    {reconSaved.length} item{reconSaved.length!==1?"s":""} saved. Take action below — each item is deleted from this list once resolved.
+                  </div>
+                  {reconSaved.map((sv,si)=>{
+                    const scs=getSCS(si);
+                    const m={pump:sv.pump_data,app:sv.app_data,trip:sv.trip_data,
+                      cat:sv.cat,hsdDiff:sv.hsd_diff,advDiff:sv.adv_diff,
+                      pumpTotal:sv.pump_total,appTotal:sv.app_total,status:sv.status};
+                    const catCol=(m.cat===1?C.red:m.cat===2?C.orange:m.cat===3?C.blue:m.cat===4?C.purple:C.muted);
+                    const catLabel=m.status==="not_in_app"?"NOT IN APP":`CAT ${m.cat}: ${CAT_LABEL[m.cat]||""}`;
+                    const lrMatches=(trips||[]).filter(t=>(t.lrNo||"").includes((scs.lrSearch||"").toUpperCase()));
+                    return (
+                      <div key={sv.id} style={{background:C.card,border:`1.5px solid ${catCol}44`,borderRadius:12,padding:"12px 14px"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                          <span style={{fontSize:10,fontWeight:800,color:catCol,background:catCol+"18",padding:"2px 8px",borderRadius:10}}>{catLabel}</span>
+                          <span style={{fontSize:9,color:C.muted}}>{sv.created_at?new Date(sv.created_at).toLocaleDateString("en-IN"):""}</span>
+                        </div>
+                        {/* Pump vs App */}
+                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:8}}>
+                          <div style={{background:C.bg,borderRadius:8,padding:"8px 10px"}}>
+                            <div style={{fontSize:9,fontWeight:800,color:C.muted,marginBottom:3}}>PUMP (MASTER)</div>
+                            <div style={{fontSize:12,fontWeight:700}}>{m.pump?.truckNo||"--"}</div>
+                            <div style={{fontSize:10,color:C.muted}}>{m.pump?.date||"--"} / #{m.pump?.indentNo||"--"}</div>
+                            <div style={{fontSize:12,marginTop:3}}>HSD: <b>{fmt(m.pump?.hsd||0)}</b></div>
+                            <div style={{fontSize:12}}>Adv: <b>{fmt(m.pump?.advance||0)}</b></div>
+                            <div style={{fontSize:11,fontWeight:700,marginTop:3,borderTop:`1px solid ${C.border}`,paddingTop:3}}>Total: <b style={{color:C.green}}>{fmt(m.pumpTotal||0)}</b></div>
+                          </div>
+                          <div style={{background:C.bg,borderRadius:8,padding:"8px 10px"}}>
+                            <div style={{fontSize:9,fontWeight:800,color:C.muted,marginBottom:3}}>APP REQUEST</div>
+                            {m.app?(<>
+                              <div style={{fontSize:12,fontWeight:700}}>{m.app.truckNo||"--"}</div>
+                              <div style={{fontSize:10,color:C.muted}}>{m.app.date||"--"} / #{m.app.indentNo||"--"}</div>
+                              <div style={{fontSize:12,marginTop:3}}>Diesel: <b>{fmt(m.app.dieselAmount??m.app.amount??0)}</b></div>
+                              <div style={{fontSize:12}}>Cash: <b>{fmt(m.app.cashAmount??0)}</b></div>
+                              <div style={{fontSize:11,fontWeight:700,marginTop:3,borderTop:`1px solid ${C.border}`,paddingTop:3}}>Total: <b style={{color:m.appTotal!==m.pumpTotal?C.red:C.green}}>{fmt(m.appTotal||0)}</b></div>
+                              {m.trip&&<div style={{fontSize:10,color:C.accent,marginTop:2}}>LR: {m.trip.lrNo}</div>}
+                            </>):<div style={{fontSize:11,color:C.muted,paddingTop:8}}>No app record</div>}
+                          </div>
+                        </div>
+                        {(m.hsdDiff!==0||m.advDiff!==0)&&m.app&&(
+                          <div style={{fontSize:11,fontWeight:700,color:C.red,padding:"4px 8px",background:C.red+"11",borderRadius:6,marginBottom:8}}>
+                            Diff: HSD {m.hsdDiff>0?"+":""}{fmt(m.hsdDiff)}{m.advDiff!==0&&` / Adv ${m.advDiff>0?"+":""}${fmt(m.advDiff)}`} {(m.hsdDiff+m.advDiff)>0?"(pump higher)":"(app higher)"}
+                          </div>
+                        )}
+                        {/* ACTION BUTTONS */}
+                        <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                          {m.app&&(m.cat===1||m.cat===4)&&!scs.showPin&&(
+                            <button onClick={()=>setSCS(si,{showPin:true,pinEntry:"",pinErr:false})}
+                              style={{fontSize:10,fontWeight:700,background:C.green+"22",color:C.green,border:`1px solid ${C.green}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                              Confirm with PIN
+                            </button>
+                          )}
+                          {m.app&&(m.cat===1||m.cat===2)&&!scs.showAttach&&(
+                            <button onClick={()=>setSCS(si,{showAttach:true,lrSearch:""})}
+                              style={{fontSize:10,fontWeight:700,background:C.blue+"22",color:C.blue,border:`1px solid ${C.blue}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                              Attach to LR
+                            </button>
+                          )}
+                          {m.app&&(m.hsdDiff!==0||m.advDiff!==0)&&!scs.editAmts&&(
+                            <button onClick={()=>setSCS(si,{editAmts:true,editHsd:String(m.app?.amount||""),editAdv:String(m.app?.cashAmount||"0")})}
+                              style={{fontSize:10,fontWeight:700,background:C.orange+"22",color:C.orange,border:`1px solid ${C.orange}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                              Update Amounts
+                            </button>
+                          )}
+                          {m.app&&m.pumpTotal===m.appTotal&&(
+                            <button onClick={()=>resolveFromSaved(sv,si,"apply_all")}
+                              style={{fontSize:10,fontWeight:700,background:C.green+"22",color:C.green,border:`1px solid ${C.green}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                              Save & Apply
+                            </button>
+                          )}
+                          {m.trip&&!m.trip.driverSettled&&(m.hsdDiff!==0||m.advDiff!==0)&&(
+                            <button onClick={()=>resolveFromSaved(sv,si,"adjust_trip")}
+                              style={{fontSize:10,fontWeight:700,background:C.blue+"22",color:C.blue,border:`1px solid ${C.blue}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                              Adjust Trip Diesel
+                            </button>
+                          )}
+                          <button onClick={()=>resolveFromSaved(sv,si,"write_off")}
+                            style={{fontSize:10,fontWeight:700,background:C.muted+"22",color:C.muted,border:`1px solid ${C.muted}44`,borderRadius:6,padding:"5px 10px",cursor:"pointer"}}>
+                            Write Off
+                          </button>
+                        </div>
+                        {/* PIN PANEL */}
+                        {scs.showPin&&(
+                          <div style={{background:C.bg,borderRadius:8,padding:"10px 12px",marginTop:4}}>
+                            <div style={{fontSize:11,fontWeight:700,marginBottom:6}}>Enter pump PIN — Indent #{m.app?.indentNo}</div>
+                            <div style={{display:"flex",gap:6,marginBottom:6}}>
+                              {[0,1,2,3].map(j=>(<div key={j} style={{width:32,height:40,background:C.card,borderRadius:6,border:`1px solid ${scs.pinErr?C.red:C.border}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,fontWeight:700}}>{(scs.pinEntry||"")[j]?"*":""}</div>))}
+                            </div>
+                            {scs.pinErr&&<div style={{color:C.red,fontSize:10,marginBottom:4}}>Wrong PIN</div>}
+                            <div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:6}}>
+                              {[1,2,3,4,5,6,7,8,9,"DEL",0,"OK"].map(k=>(
+                                <button key={k} onClick={()=>{
+                                  if(k==="DEL"){setSCS(si,{pinEntry:(scs.pinEntry||"").slice(0,-1),pinErr:false});}
+                                  else if(k==="OK"){
+                                    if(scs.pinEntry===m.app?.pin){resolveFromSaved(sv,si,"confirm_pin",{amount:Number(m.pump?.hsd||m.app?.amount)});setSCS(si,{showPin:false});}
+                                    else{setSCS(si,{pinErr:true,pinEntry:""});}
+                                  } else if((scs.pinEntry||"").length<4){
+                                    const np=(scs.pinEntry||"")+String(k); setSCS(si,{pinEntry:np,pinErr:false});
+                                    if(np.length===4){
+                                      if(np===m.app?.pin){resolveFromSaved(sv,si,"confirm_pin",{amount:Number(m.pump?.hsd||m.app?.amount)});setSCS(si,{showPin:false});}
+                                      else{setSCS(si,{pinErr:true,pinEntry:""});}
+                                    }
+                                  }
+                                }}
+                                style={{width:36,height:36,borderRadius:6,border:`1px solid ${C.border}`,background:k==="OK"?C.green:k==="DEL"?C.red+"22":C.card,color:k==="OK"?"#fff":k==="DEL"?C.red:C.text,fontWeight:700,fontSize:k==="DEL"||k==="OK"?10:14,cursor:"pointer"}}>{k}</button>
+                              ))}
+                            </div>
+                            <button onClick={()=>setSCS(si,{showPin:false})} style={{fontSize:10,color:C.muted,background:"none",border:"none",cursor:"pointer"}}>Cancel</button>
+                          </div>
+                        )}
+                        {/* ATTACH TO LR PANEL */}
+                        {scs.showAttach&&(
+                          <div style={{background:C.bg,borderRadius:8,padding:"10px 12px",marginTop:4}}>
+                            <div style={{fontSize:11,fontWeight:700,marginBottom:6}}>Select LR to attach</div>
+                            <input value={scs.lrSearch||""} onChange={e=>setSCS(si,{lrSearch:e.target.value})} placeholder="Search LR / truck..."
+                              style={{width:"100%",background:C.card,border:`1px solid ${C.border}`,borderRadius:6,padding:"6px 8px",color:C.text,fontSize:12,marginBottom:6,boxSizing:"border-box"}}/>
+                            <div style={{maxHeight:150,overflowY:"auto",display:"flex",flexDirection:"column",gap:4}}>
+                              {lrMatches.slice(0,20).map(t=>(
+                                <button key={t.id} onClick={()=>{resolveFromSaved(sv,si,"attach_lr",{lrNo:t.lrNo});setSCS(si,{showAttach:false});}}
+                                  style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:6,padding:"6px 10px",textAlign:"left",cursor:"pointer",fontSize:11}}>
+                                  <b>{t.lrNo}</b> / {t.truckNo} / {t.date}
+                                </button>
+                              ))}
+                              {lrMatches.length===0&&<div style={{color:C.muted,fontSize:11}}>No matching trips</div>}
+                            </div>
+                            <button onClick={()=>setSCS(si,{showAttach:false})} style={{fontSize:10,color:C.muted,background:"none",border:"none",cursor:"pointer",marginTop:4}}>Cancel</button>
+                          </div>
+                        )}
+                        {/* EDIT AMOUNTS PANEL */}
+                        {scs.editAmts&&(
+                          <div style={{background:C.bg,borderRadius:8,padding:"10px 12px",marginTop:4}}>
+                            <div style={{fontSize:11,fontWeight:700,marginBottom:6}}>Update amounts to match pump</div>
+                            <div style={{display:"flex",gap:8,marginBottom:8}}>
+                              <div style={{flex:1}}>
+                                <div style={{fontSize:9,color:C.muted,marginBottom:2}}>HSD Rs.</div>
+                                <input value={scs.editHsd||""} onChange={e=>setSCS(si,{editHsd:e.target.value})} type="number"
+                                  style={{width:"100%",background:C.card,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 8px",color:C.text,fontSize:12,boxSizing:"border-box"}}/>
+                              </div>
+                              <div style={{flex:1}}>
+                                <div style={{fontSize:9,color:C.muted,marginBottom:2}}>Advance Rs.</div>
+                                <input value={scs.editAdv||"0"} onChange={e=>setSCS(si,{editAdv:e.target.value})} type="number"
+                                  style={{width:"100%",background:C.card,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 8px",color:C.text,fontSize:12,boxSizing:"border-box"}}/>
+                              </div>
+                            </div>
+                            <div style={{display:"flex",gap:6}}>
+                              <button onClick={()=>{resolveFromSaved(sv,si,"update_amounts",{hsd:Number(scs.editHsd),advance:Number(scs.editAdv)});setSCS(si,{editAmts:false});}}
+                                style={{background:C.green,color:"#fff",border:"none",borderRadius:6,padding:"6px 14px",fontSize:11,fontWeight:700,cursor:"pointer"}}>Save</button>
+                              <button onClick={()=>setSCS(si,{editAmts:false})} style={{background:C.dim,color:C.text,border:"none",borderRadius:6,padding:"6px 14px",fontSize:11,cursor:"pointer"}}>Cancel</button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>)}
+
+          </div>
+        );
       })()}
 
       {/* ── ALERT HISTORY VIEW ── */}
@@ -13898,6 +14850,9 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
   const [pdfTo,    setPdfTo]    = useState("");
   const [showDateFilter, setShowDateFilter] = useState(false);
   const [ownerReportSheet, setOwnerReportSheet] = useState(null);
+  // Multi-account form state (for vehicle add/edit sheet)
+  const [showAddAcc,  setShowAddAcc]  = useState(false);
+  const [newAccForm,  setNewAccForm]  = useState({name:"",accountNo:"",ifsc:""});
 
   // Loan txn form
   const [lAmt,  setLAmt]  = useState(""); const [lDate,  setLDate]  = useState(new Date().toISOString().slice(0,10));
@@ -13920,7 +14875,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
     truckNo:"", ownerName:"", phone:"",
     driverName:"", driverPhone:"", driverLicense:"",
     accountNo:"", ifsc:"",
-    loan:"0", loanRecovered:"0", deductPerTrip:"0", shortageDeductPerTrip:"0", tafalExempt:false,
+    loan:"0", loanRecovered:"0", deductPerTrip:"0", shortageDeductPerTrip:"0", tafalExempt:false, tafalOverride:"", pouchExempt:false, accounts:[],
   };
   const [f, setF] = useState(blank);
   const ff = k => v => setF(p => ({...p,[k]:v}));
@@ -14311,7 +15266,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
               🗑 Clear Phones
             </Btn>
           )}
-          {isOwner && <Btn onClick={()=>{setEditId(null);setF(blank);setSheet(true);}} sm>+ Add</Btn>}
+          {isOwner && <Btn onClick={()=>{setEditId(null);setF(blank);setSheet(true);setShowAddAcc(false);setNewAccForm({name:"",accountNo:"",ifsc:""});}} sm>+ Add</Btn>}
           {isOwner && <Btn sm outline color={C.blue} onClick={()=>setOwnerReportSheet("")}>📊 Owner Report</Btn>}
           {isOwner && (
             <Btn sm outline color={C.red} onClick={()=>{
@@ -14467,11 +15422,64 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
             </div>
             <Field label="Driver License No" value={f.driverLicense||""} onChange={ff("driverLicense")} placeholder="e.g. KA0320180012345" />
 
-            <div style={{color:C.green,fontSize:11,fontWeight:700,letterSpacing:1,marginTop:4}}>BANK DETAILS</div>
-            <div style={{display:"flex",gap:10}}>
-              <Field label="Bank A/C No" value={f.accountNo||""} onChange={ff("accountNo")} half />
-              <Field label="IFSC Code"   value={f.ifsc||""}      onChange={ff("ifsc")}      half />
+            <div style={{color:C.green,fontSize:11,fontWeight:700,letterSpacing:1,marginTop:4}}>BANK ACCOUNTS</div>
+            {/* Primary account — always shown */}
+            <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
+              <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:6}}>PRIMARY ACCOUNT</div>
+              <div style={{display:"flex",gap:10}}>
+                <Field label="Bank A/C No" value={f.accountNo||""} onChange={ff("accountNo")} half />
+                <Field label="IFSC Code"   value={f.ifsc||""}      onChange={ff("ifsc")}      half />
+              </div>
             </div>
+            {/* Additional accounts */}
+            {(f.accounts||[]).length>0 && (
+              <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                <div style={{color:C.muted,fontSize:11,fontWeight:700}}>ADDITIONAL ACCOUNTS</div>
+                {(f.accounts||[]).map((acc,ai)=>(
+                  <div key={acc.id||ai} style={{background:C.bg,borderRadius:8,padding:"8px 10px",display:"flex",gap:8,alignItems:"flex-start"}}>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:12,fontWeight:700,color:C.text}}>{acc.name||"Account "+(ai+2)}</div>
+                      <div style={{fontSize:11,color:C.blue,fontFamily:"monospace"}}>{acc.accountNo}</div>
+                      {acc.ifsc&&<div style={{fontSize:10,color:C.muted}}>IFSC: {acc.ifsc}</div>}
+                    </div>
+                    <button onClick={()=>setF(p=>({...p,accounts:(p.accounts||[]).filter((_,i)=>i!==ai)}))}
+                      style={{background:"none",border:`1px solid ${C.red}44`,borderRadius:5,
+                        color:C.red,fontSize:10,padding:"2px 6px",cursor:"pointer",flexShrink:0}}>🗑</button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {/* Add account button */}
+            {!showAddAcc ? (
+              <button onClick={()=>{setShowAddAcc(true);setNewAccForm({name:"",accountNo:"",ifsc:""}); }}
+                style={{background:C.green+"11",border:`1px dashed ${C.green}66`,borderRadius:8,
+                  color:C.green,fontSize:12,fontWeight:700,padding:"8px 14px",cursor:"pointer",textAlign:"left"}}>
+                + Add Another Bank Account
+              </button>
+            ) : (
+              <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
+                <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:8}}>NEW ACCOUNT</div>
+                <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                  <Field label="Account Holder Name" value={newAccForm.name} onChange={v=>setNewAccForm(p=>({...p,name:v}))} />
+                  <div style={{display:"flex",gap:8}}>
+                    <Field label="A/C No" value={newAccForm.accountNo} onChange={v=>setNewAccForm(p=>({...p,accountNo:v}))} half />
+                    <Field label="IFSC"   value={newAccForm.ifsc}      onChange={v=>setNewAccForm(p=>({...p,ifsc:v}))}      half />
+                  </div>
+                  <div style={{display:"flex",gap:8}}>
+                    <Btn onClick={()=>{
+                      if(!newAccForm.name.trim()||!newAccForm.accountNo.trim()||!newAccForm.ifsc.trim()){
+                        alert("Name, Account No, and IFSC are all required.");return;
+                      }
+                      const newAccEntry={id:"ACC"+uid(),name:newAccForm.name.trim(),
+                        accountNo:newAccForm.accountNo.trim(),ifsc:newAccForm.ifsc.trim(),isPrimary:false};
+                      setF(p=>({...p,accounts:[...(p.accounts||[]),newAccEntry]}));
+                      setNewAccForm({name:"",accountNo:"",ifsc:""});setShowAddAcc(false);
+                    }} sm color={C.green}>Save Account</Btn>
+                    <Btn onClick={()=>{setShowAddAcc(false);setNewAccForm({name:"",accountNo:"",ifsc:""});}} sm outline color={C.muted}>Cancel</Btn>
+                  </div>
+                </div>
+              </div>
+            )}
 
             <div style={{color:C.red,fontSize:11,fontWeight:700,letterSpacing:1,marginTop:4}}>LOAN / DEDUCTIONS</div>
             <div style={{display:"flex",gap:10}}>
@@ -14481,9 +15489,43 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
             <Field label="Deduct Per Trip ₹ (Loan)" value={f.deductPerTrip} onChange={ff("deductPerTrip")} type="number" />
             <Field label="Shortage Deduct Per Trip ₹" value={f.shortageDeductPerTrip||"0"} onChange={ff("shortageDeductPerTrip")} type="number"
               note="0 = deduct full balance in one trip" />
-            <div style={{display:"flex",gap:10,alignItems:"center",padding:"4px 0"}}>
-              <input type="checkbox" checked={f.tafalExempt} onChange={e=>setF(p=>({...p,tafalExempt:e.target.checked}))} style={{width:20,height:20}} />
-              <span style={{color:C.text,fontSize:15}}>TAFAL Exempt</span>
+            {/* TAFAL override — owner only */}
+            <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
+              <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:8,textTransform:"uppercase",letterSpacing:1}}>TAFAL Setting (Owner)</div>
+              <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                <button onClick={()=>setF(p=>({...p,tafalExempt:!p.tafalExempt,tafalOverride:""}))}
+                  style={{padding:"6px 14px",borderRadius:8,border:`1.5px solid ${f.tafalExempt?C.red:C.border}`,
+                    background:f.tafalExempt?C.red+"22":"transparent",color:f.tafalExempt?C.red:C.muted,
+                    fontWeight:700,fontSize:12,cursor:"pointer"}}>
+                  {f.tafalExempt?"✓ Exempt":"Exempt"}
+                </button>
+                <span style={{color:C.muted,fontSize:12}}>or override amount:</span>
+                <input type="number" value={f.tafalOverride||""} onChange={e=>setF(p=>({...p,tafalOverride:e.target.value,tafalExempt:false}))}
+                  placeholder="e.g. 200 (blank = global)"
+                  disabled={f.tafalExempt}
+                  style={{width:130,background:C.card,border:`1.5px solid ${f.tafalOverride&&!f.tafalExempt?C.purple:C.border}`,
+                    borderRadius:8,padding:"6px 10px",fontSize:12,color:C.text,outline:"none",opacity:f.tafalExempt?0.4:1}}/>
+              </div>
+              <div style={{fontSize:11,color:C.muted,marginTop:6}}>
+                {f.tafalExempt?"Exempt — no TAFAL deducted"
+                 :f.tafalOverride?`₹${f.tafalOverride}/trip (custom override)`
+                 :"Using global rate (set in TAFAL tab)"}
+              </div>
+            </div>
+            {/* Pouch Deduction Exemption — owner only */}
+            <div style={{background:C.bg,borderRadius:10,padding:"10px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div>
+                <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Party Pouch Deduction (Owner)</div>
+                <div style={{color:C.muted,fontSize:11,marginTop:2}}>
+                  {f.pouchExempt?"Exempt — ₹0 deducted on party orders":"₹700 deducted on party orders (default)"}
+                </div>
+              </div>
+              <button onClick={()=>setF(p=>({...p,pouchExempt:!p.pouchExempt}))}
+                style={{padding:"6px 14px",borderRadius:8,border:`1.5px solid ${f.pouchExempt?C.muted:C.teal}`,
+                  background:f.pouchExempt?C.dim:C.teal+"22",color:f.pouchExempt?C.muted:C.teal,
+                  fontWeight:700,fontSize:12,cursor:"pointer",flexShrink:0,marginLeft:8}}>
+                {f.pouchExempt?"Un-Exempt":"Exempt"}
+              </button>
             </div>
 
             {(!f.driverName.trim() || !f.driverPhone.trim() || (f.driverPhone.replace(/\\D/g,"").length!==10)) && (
@@ -14509,6 +15551,8 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                 setVehicles(p=>p.map(v=>v.id===editId?{...v,...f,
                   loan:+f.loan,loanRecovered:+f.loanRecovered,deductPerTrip:+f.deductPerTrip,
                   shortageDeductPerTrip:+f.shortageDeductPerTrip||0,
+                  tafalOverride: f.tafalOverride!=='' ? +f.tafalOverride : null,
+                  pouchExempt: !!f.pouchExempt,
                   truckNo:f.truckNo.toUpperCase().trim()}:v));
                 log("EDIT VEHICLE",`${f.truckNo} updated`);
               } else {
@@ -14516,6 +15560,8 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                   truckNo:f.truckNo.toUpperCase().trim(),
                   loan:+f.loan,loanRecovered:+f.loanRecovered,deductPerTrip:+f.deductPerTrip,
                   shortageDeductPerTrip:+f.shortageDeductPerTrip||0,
+                  tafalOverride: f.tafalOverride!=='' ? +f.tafalOverride : null,
+                  pouchExempt: !!f.pouchExempt,
                   loanTxns:[],shortageTxns:[],createdBy:user.username};
                 setVehicles(p=>[...(p||[]),v]);
                 log("ADD VEHICLE",`${v.truckNo} driver:${v.driverPhone}`);
@@ -15017,7 +16063,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                   loan:String(v.loan||0),loanRecovered:String(v.loanRecovered||0),
                   deductPerTrip:String(v.deductPerTrip||0),
                   shortageDeductPerTrip:String(v.shortageDeductPerTrip||0),
-                  tafalExempt:v.tafalExempt||false,
+                  tafalExempt:v.tafalExempt||false, tafalOverride:v.tafalOverride!=null?String(v.tafalOverride):"", pouchExempt:v.pouchExempt||false, accounts:v.accounts||[],
                 });setEditId(v.id);setSheet(true);}}
                   style={{background:"none",border:`1px solid ${C.muted}44`,borderRadius:6,
                     padding:"3px 8px",color:C.muted,cursor:"pointer",fontSize:11}}>✏ Edit</button>
@@ -15405,7 +16451,10 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
   // wallet PDF date filter
   const [wFrom,  setWFrom]  = useState("");
   const [wTo,    setWTo]    = useState("");
-  const blank = {name:"",phone:"",role:"Fleet Agent",loan:"0",loanRecovered:"0",linkedTrucks:""};
+  // Multi-account form state (for employee add sheet)
+  const [showEmpAcc,  setShowEmpAcc]  = useState(false);
+  const [newEmpAcc,   setNewEmpAcc]   = useState({name:"",accountNo:"",ifsc:""});
+  const blank = {name:"",phone:"",role:"Fleet Agent",loan:"0",loanRecovered:"0",linkedTrucks:"",accounts:[]};
   const [f,setF] = useState(blank);
   const ff = k => v => setF(p=>({...p,[k]:v}));
   const isOwner = user?.role==="owner";
@@ -15549,13 +16598,53 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
         <Btn onClick={()=>setSheet(true)} sm>+ Add</Btn>
       </div>
 
-      {sheet&&<Sheet title="Add Employee" onClose={()=>{setSheet(false);setF(blank);}}>
+      {sheet&&<Sheet title="Add Employee" onClose={()=>{setSheet(false);setF(blank);setShowEmpAcc(false);setNewEmpAcc({name:"",accountNo:"",ifsc:""});}}>
         <div style={{display:"flex",flexDirection:"column",gap:13}}>
           <div style={{display:"flex",gap:10}}><Field label="Name" value={f.name} onChange={ff("name")} half /><Field label="Phone" value={f.phone} onChange={ff("phone")} type="tel" half /></div>
           <Field label="Role" value={f.role} onChange={ff("role")} opts={["Fleet Agent","Driver Liaison","Field Staff","Accountant"].map(x=>({v:x,l:x}))} />
           <div style={{display:"flex",gap:10}}><Field label="Loan ₹" value={f.loan} onChange={ff("loan")} type="number" half /><Field label="Recovered ₹" value={f.loanRecovered} onChange={ff("loanRecovered")} type="number" half /></div>
           <Field label="Linked Trucks (comma sep)" value={f.linkedTrucks} onChange={ff("linkedTrucks")} placeholder="KA34C4617, AP29V8469" />
-          <Btn onClick={()=>{const e={...f,id:uid(),loan:+f.loan,loanRecovered:+f.loanRecovered,linkedTrucks:f.linkedTrucks.split(",").map(s=>s.trim()).filter(Boolean),createdBy:user.username}; setEmployees(p=>[...(p||[]),e]); log("ADD EMPLOYEE",e.name); setF(blank); setSheet(false);}} full>Save</Btn>
+          {/* Bank accounts for this employee */}
+          <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
+            <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:6}}>BANK ACCOUNTS</div>
+            {(f.accounts||[]).length===0 && <div style={{color:C.muted,fontSize:11,marginBottom:6}}>No accounts added yet</div>}
+            {(f.accounts||[]).map((acc,ai)=>(
+              <div key={acc.id||ai} style={{background:C.card,borderRadius:8,padding:"7px 10px",marginBottom:6,display:"flex",gap:8,alignItems:"center"}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:12,fontWeight:700}}>{acc.name}</div>
+                  <div style={{fontSize:11,color:C.blue,fontFamily:"monospace"}}>{acc.accountNo}</div>
+                  {acc.ifsc&&<div style={{fontSize:10,color:C.muted}}>IFSC: {acc.ifsc}</div>}
+                </div>
+                <button onClick={()=>setF(p=>({...p,accounts:(p.accounts||[]).filter((_,i)=>i!==ai)}))}
+                  style={{background:"none",border:`1px solid ${C.red}44`,borderRadius:5,color:C.red,fontSize:10,padding:"2px 6px",cursor:"pointer"}}>🗑</button>
+              </div>
+            ))}
+            {!showEmpAcc ? (
+              <button onClick={()=>{setShowEmpAcc(true);setNewEmpAcc({name:"",accountNo:"",ifsc:""}); }}
+                style={{background:C.green+"11",border:`1px dashed ${C.green}66`,borderRadius:7,
+                  color:C.green,fontSize:11,fontWeight:700,padding:"6px 12px",cursor:"pointer",width:"100%"}}>
+                + Add Bank Account
+              </button>
+            ) : (
+              <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                <Field label="Account Holder Name" value={newEmpAcc.name} onChange={v=>setNewEmpAcc(p=>({...p,name:v}))} />
+                <div style={{display:"flex",gap:8}}>
+                  <Field label="A/C No" value={newEmpAcc.accountNo} onChange={v=>setNewEmpAcc(p=>({...p,accountNo:v}))} half />
+                  <Field label="IFSC"   value={newEmpAcc.ifsc}      onChange={v=>setNewEmpAcc(p=>({...p,ifsc:v}))}      half />
+                </div>
+                <div style={{display:"flex",gap:8}}>
+                  <Btn onClick={()=>{
+                    if(!newEmpAcc.name.trim()||!newEmpAcc.accountNo.trim()||!newEmpAcc.ifsc.trim()){alert("All fields required.");return;}
+                    const na={id:"ACC"+uid(),name:newEmpAcc.name.trim(),accountNo:newEmpAcc.accountNo.trim(),ifsc:newEmpAcc.ifsc.trim()};
+                    setF(p=>({...p,accounts:[...(p.accounts||[]),na]}));
+                    setNewEmpAcc({name:"",accountNo:"",ifsc:""});setShowEmpAcc(false);
+                  }} sm color={C.green}>Save</Btn>
+                  <Btn onClick={()=>{setShowEmpAcc(false);setNewEmpAcc({name:"",accountNo:"",ifsc:""});}} sm outline color={C.muted}>Cancel</Btn>
+                </div>
+              </div>
+            )}
+          </div>
+          <Btn onClick={()=>{const e={...f,id:uid(),loan:+f.loan,loanRecovered:+f.loanRecovered,linkedTrucks:f.linkedTrucks.split(",").map(s=>s.trim()).filter(Boolean),accounts:f.accounts||[],createdBy:user.username}; setEmployees(p=>[...(p||[]),e]); log("ADD EMPLOYEE",e.name); setF(blank); setSheet(false);}} full>Save</Btn>
         </div>
       </Sheet>}
 
@@ -16222,6 +17311,13 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
   const [scanError,   setScanError]   = useState(null);
   const [showAlert,   setShowAlert]   = useState(true);
   const [newExp,      setNewExp]      = useState({tripId:"", label:"", amount:""});
+  // Clinker Bill state
+  const [showClinkerBill, setShowClinkerBill] = useState(false);
+  const [clinkerBill, setClinkerBill] = useState({
+    invoiceNo:"", invoiceDate:"", rate:"", tons:"", gstPct:"5", isPrevFY:false,
+  });
+  const [manualClinkerSelect, setManualClinkerSelect] = useState(false);
+  const [manualClinkerIds,    setManualClinkerIds]    = useState([]);
   const [searchInv,   setSearchInv]   = useState("");
   const [searchAdv,   setSearchAdv]   = useState("");
   const [searchShort, setSearchShort] = useState("");
@@ -16314,9 +17410,16 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     const map = {};
     const isValidDate = d => /^\d{4}-\d{2}-\d{2}$/.test(d);
     payTrips.filter(t=>t.billedToShree&&t.invoiceNo).forEach(t => {
-      if(!map[t.invoiceNo]) map[t.invoiceNo] = {
-        invoiceNo:t.invoiceNo, invoiceDate:parseDD(t.invoiceDate||""), totalAmt:0, trips:[], status:"billed"
-      };
+      if(!map[t.invoiceNo]) {
+        const isClinkerPrev = (t.batchId||"").startsWith("CLINKER-PREVFY-");
+        const clinkerPrevFYNum = isClinkerPrev ? parseInt((t.batchId||"").split("CLINKER-PREVFY-")[1]||"0") : null;
+        map[t.invoiceNo] = {
+          invoiceNo:t.invoiceNo, invoiceDate:parseDD(t.invoiceDate||""), totalAmt:0, trips:[], status:"billed",
+          prevFY: isClinkerPrev || t.prevFY || t.grParticulars?.prevFY || false,
+          prevFYLabel: isClinkerPrev ? FY_LABEL(clinkerPrevFYNum) : (t.prevFYLabel||t.grParticulars?.prevFYLabel||""),
+          clinkerInvoice: isClinkerPrev || t.grParticulars?.clinkerPlaceholder || false,
+        };
+      }
       map[t.invoiceNo].trips.push(t);
       map[t.invoiceNo].totalAmt += Number(t.billedToShree||0);
       if(t.paymentDate) map[t.invoiceNo].status = "paid";
@@ -16442,13 +17545,51 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         r.onerror = ()=>rej(new Error("File read failed"));
         r.readAsDataURL(file);
       });
-      const resp = await fetch("/.netlify/functions/scan-shree",{
+            // \u2500\u2500 Background function approach: no timeout for any invoice size \u2500\u2500
+      // 1. Kick off background scan (returns immediately with 202)
+      const jobId = (typeof crypto!=="undefined"&&crypto.randomUUID)?crypto.randomUUID():Date.now().toString(36)+Math.random().toString(36).slice(2);
+      const bgResp = await fetch("/.netlify/functions/scan-shree-background",{
         method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({ base64, anthropicKey: RC.anthropicKey, mediaType:file.type||"application/pdf", scanType}),
+        body:JSON.stringify({
+          jobId, base64, anthropicKey:RC.anthropicKey,
+          mediaType:file.type||"application/pdf", scanType,
+          clientId: RC.clientId,
+          adminSupabaseUrl: RC.adminSupabaseUrl,
+          adminSupabaseAnonKey: RC.adminSupabaseAnonKey,
+        }),
       });
-      const data = await resp.json();
-      if(data.error) { setScanError(data.error); logScan("shree_scan", false, 0); }
-      else { setScanResult({...data, type:scanType}); logScan("shree_scan", true, data._costInr||0); }
+      if(!bgResp.ok && bgResp.status!==202) throw new Error("Could not start background scan (status "+bgResp.status+")");
+
+      // 2. Poll admin DB via REST (no createClient needed)
+      const _aUrl = RC.adminSupabaseUrl;
+      const _aKey = RC.adminSupabaseAnonKey;
+      const _hdrs = { "apikey": _aKey, "Authorization": "Bearer "+_aKey };
+      let elapsed = 0;
+      const maxWait = 180000; // 3 minutes
+      const pollMs = 3000;
+      let scanDone = false;
+      while(elapsed < maxWait) {
+        await new Promise(r=>setTimeout(r,pollMs));
+        elapsed += pollMs;
+        try {
+          const pr = await fetch(`${_aUrl}/rest/v1/scan_results?id=eq.${jobId}&select=status,result_json`,{headers:_hdrs});
+          const rows = await pr.json();
+          // Detect missing table (Supabase returns {code:"42P01"} or similar error)
+          if(rows?.code==="42P01"||rows?.message?.includes("does not exist")) {
+            throw new Error("Run MIGRATION_scan_results.sql in Admin Supabase first (scan_results table missing).");
+          }
+          const job = Array.isArray(rows)?rows[0]:null;
+          if(job?.status==="done"||job?.status==="error") {
+            const result = JSON.parse(job.result_json||"{}");
+            // Cleanup
+            fetch(`${_aUrl}/rest/v1/scan_results?id=eq.${jobId}`,{method:"DELETE",headers:_hdrs}).catch(()=>{});
+            if(job.status==="error"||result.error) { setScanError(result.error||"Scan failed"); logScan("shree_scan",false,0); }
+            else { setScanResult({...result,type:scanType}); logScan("shree_scan",true,result._costInr||0); }
+            scanDone=true; break;
+          }
+        } catch(_) {}
+      }
+      if(!scanDone) throw new Error("Scan timed out after 3 minutes. Invoice may be too complex.");
     } catch(e) { setScanError(e.message); logScan("shree_scan", false); }
     finally { setScanning(false); }
   };
@@ -16547,6 +17688,12 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
   const applyInvoiceScan = () => {
     if(!scanResult || scanResult.type!=="invoice") return;
     const invNo = scanResult.invoiceNo;
+    const invDate = parseDD(scanResult.invoiceDate);
+    const chosenClient   = scanClient   || "";
+    const chosenMaterial = scanMaterial || "";
+    const typeOverride = chosenMaterial==="Cement" ? "outbound"
+                       : chosenMaterial==="Raw Material" ? "inbound"
+                       : null;
 
     // Block if invoice already saved
     if((trips||[]).some(t=>t.invoiceNo===invNo)) {
@@ -16557,18 +17704,52 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     const scTrips = scanResult.trips||[];
     const allTrips = trips||[];
 
-    // ALL lines must match a trip — block if any are unmatched
+    // Separate unmatched into prevFY vs current FY (check TRIP dates only, not invoice date)
     const unmatched = scTrips.filter(st => !matchInvoiceLine(st, allTrips));
-    if(unmatched.length > 0) {
-      const details = unmatched.map(st =>
-        "DI: "+(st.diNo||"—")+" · GR: "+(st.grNo||"—")+" · ₹"+Number(st.frtAmt||0).toLocaleString("en-IN")
+    const prevFYUnmatched = unmatched.filter(st => {
+      const d = parseDD(st.date || "");
+      return d && getFY(d) < currentFY();
+    });
+    const currentFYUnmatched = unmatched.filter(st => !prevFYUnmatched.includes(st));
+
+    // Block if any current FY trips are missing in DB
+    if(currentFYUnmatched.length > 0) {
+      const details = currentFYUnmatched.map(st =>
+        "DI: "+(st.diNo||"---")+" / GR: "+(st.grNo||"---")+" / Rs."+Number(st.frtAmt||0).toLocaleString("en-IN")
       ).join("\n");
       setScanError(
-        unmatched.length+" trip"+(unmatched.length>1?"s":"")+" in this invoice not found in your Trips:\n\n"+
-        details+
-        "\n\nGo to Trips tab, add all missing trips first, then scan invoice again."
+        currentFYUnmatched.length+" trip"+(currentFYUnmatched.length>1?"s":"")+" not found in your Trips:\n\n"+
+        details+"\n\nAdd these trips first, then scan invoice again."
       );
       return;
+    }
+
+    // Save prevFY placeholder records (if any) then continue to process matched trips
+    if(prevFYUnmatched.length > 0) {
+      const parsedInvDate = parseDD(scanResult.invoiceDate || "");
+      // Safe FY label from trip date (avoid NaN if invoice date is missing)
+      const firstTripDate = parseDD(prevFYUnmatched[0].date||"");
+      const sampleFY = firstTripDate ? getFY(firstTripDate) : null;
+      const fyLabel = sampleFY ? FY_LABEL(sampleFY) : "Previous FY";
+      const ts = nowTs();
+      const prevFYTrips = prevFYUnmatched.map(st => ({
+        id: (typeof crypto!=="undefined"&&crypto.randomUUID)?crypto.randomUUID():"prevfy_"+(st.diNo||Date.now())+"_"+Math.random().toString(36).slice(2,8),
+        prevFY: true, prevFYLabel: fyLabel,
+        invoiceNo: invNo, invoiceDate: parsedInvDate,
+        diNo: st.diNo||"", grNo: st.grNo||"",
+        truckNo: String(st.truckNo||"").replace(/\s+/g,"").toUpperCase(),
+        consignee: st.consigneeName||"", to: st.to||"",
+        qty: st.qty||0, frRate: st.frRate||0,
+        billedToShree: Number(st.frtAmt||0),
+        status: "Billed", billedBy: "scan", billedAt: ts, shreeStatus: "billed",
+        date: invDate||parsedInvDate||ts.slice(0,10), // invoice date (current FY) so it shows in billing tab
+        tripDate: parseDD(st.date||""), // original DI trip date preserved for reference
+        lrNo: "", orderType: "outbound", client: chosenClient||"", type: "outbound",
+      }));
+      setTrips(prev => [...prev, ...prevFYTrips]);
+      Promise.all(prevFYTrips.map(t => DB.saveTrip(t).catch(e => console.error("saveTrip prevFY:",e))));
+      log && log("PrevFY "+prevFYTrips.length+" DIs saved under "+invNo+" ("+fyLabel+")");
+      // Do NOT return here - fall through to process any matched current-year trips
     }
 
     // Check amount mismatches — distinguish hard mismatches from unverifiable multi-DI lines
@@ -16605,12 +17786,6 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     }
 
     // All matched and amounts OK — apply
-    const invDate = parseDD(scanResult.invoiceDate);
-    const chosenClient   = scanClient   || "";
-    const chosenMaterial = scanMaterial || "";
-    const typeOverride = chosenMaterial==="Cement" ? "outbound"
-                       : chosenMaterial==="Raw Material" ? "inbound"
-                       : null;
     let matched = 0;
     const updatedTrips = [];
     setTrips(prev=>prev.map(t=>{
@@ -17019,6 +18194,350 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
       <div style={{padding:14}}>
 
         {/* ══ OVERVIEW ══════════════════════════════════════════════ */}
+        {/* ══ CLINKER BILL SHEET ══════════════════════════════════════════════ */}
+        {showClinkerBill && isOwner && (()=>{
+          const cb = clinkerBill;
+          const rate   = Number(cb.rate||0);
+          const tons   = Number(cb.tons||0);
+          const gstPct = Number(cb.gstPct||0);
+          const prevFYNum   = currentFY() - 1;
+          const prevFYLabel = FY_LABEL(prevFYNum); // e.g. "FY 2024–25"
+
+          // Clinker trips: to contains "patas" AND grParticulars.goods contains "clinker"
+          const allClinkerTrips = (trips||[]).filter(t => {
+            const toMatch    = (t.to||"").toLowerCase().includes("patas");
+            const goodsMatch = (t.grParticulars?.goods||"").toLowerCase().includes("clinker");
+            const notBilled  = !t.invoiceNo;
+            return toMatch && goodsMatch && notBilled;
+          }).sort((a,b) => (a.date||"").localeCompare(b.date||"")); // oldest first
+
+          // Auto-select: pick oldest trips until qty matches tons
+          let running = 0;
+          const autoSelected = [];
+          for(const t of allClinkerTrips) {
+            if(running >= tons) break;
+            autoSelected.push(t.id);
+            running += Number(t.qty||0);
+          }
+
+          // In manual mode use manualClinkerIds, otherwise use autoSelected
+          const selectedIds   = manualClinkerSelect ? manualClinkerIds : autoSelected;
+          const selectedTrips = allClinkerTrips.filter(t => selectedIds.includes(t.id));
+          const selectedTons  = selectedTrips.reduce((s,t) => s + Number(t.qty||0), 0);
+
+          // Compute amounts based on SELECTED tons (not entered tons)
+          const taxable = rate * selectedTons;
+          const cgst    = taxable * gstPct / 200;
+          const sgst    = taxable * gstPct / 200;
+          const total   = taxable + cgst + sgst;
+
+          const autoTonsMatch = tons > 0 && Math.abs(
+            (allClinkerTrips.filter(t=>autoSelected.includes(t.id)).reduce((s,t)=>s+Number(t.qty||0),0)) - tons
+          ) < 0.01;
+
+          // Allow ±0.5 MT tolerance
+          const tonsMatch = tons > 0 && Math.abs(selectedTons - tons) <= 0.5;
+          // For prevFY bills: skip tons matching — just need invoice no, date, rate, and at least one trip
+          const canSave   = cb.invoiceNo.trim() && cb.invoiceDate && rate > 0 && (tonsMatch || cb.isPrevFY);
+
+          const handleSaveClinkerBill = () => {
+            if(!canSave) return;
+            const invNo   = cb.invoiceNo.trim();
+            const invDate = cb.invoiceDate;
+            const updatedTrips = [];
+
+            if(selectedTrips.length === 0 && cb.isPrevFY) {
+              // No trips selected — create one synthetic placeholder trip to anchor the invoice
+              const enteredTons  = tons;
+              const enteredTotal = rate * enteredTons; // billedToShree = taxable amount
+              const _plId = uid();
+              const placeholder = mkTrip({
+                id:            _plId,
+                lrNo:          "CLK-" + _plId.slice(0,8).toUpperCase(),
+                truckNo:       "CLINKER-BILL",
+                invoiceNo:     invNo,
+                invoiceDate:   invDate,
+                billedToShree: enteredTotal,
+                qty:           enteredTons,
+                frRate:        rate,
+                givenRate:     rate,
+                to:            "Patas",
+                grade:         "Clinker",
+                status:        "Billed",
+                billedBy:      user.username,
+                billedAt:      nowTs(),
+                shreeStatus:   "billed",
+                client:        "Shree Cement Kodla",
+                type:          "outbound",
+                date:          invDate,
+                batchId:       "CLINKER-PREVFY-" + prevFYNum,
+                grParticulars: { goods:"Clinker", prevFY:true, prevFYLabel, clinkerPlaceholder:true,
+                                 gstPct, taxable:enteredTotal, total:enteredTotal*(1+gstPct/100) },
+              });
+              // Save to DB first, then reload trips so placeholder enters state via normal load path
+              // (avoids race condition where dbSetTrips delete-logic removes placeholder)
+              DB.saveTrip(placeholder).then(r => {
+                if(r && r.success === false) {
+                  alert("⚠ Clinker bill DB save failed: " + (r.error || JSON.stringify(r)));
+                  return;
+                }
+                // Add to in-memory state using functional updater to get latest prev
+                setTrips(prev => {
+                  if(prev.find(t=>t.id===placeholder.id)) return prev; // already added
+                  return [...prev, placeholder];
+                });
+                log && log("CLINKER BILL (prevFY placeholder) " + invNo + " · " + enteredTons + " MT · ₹" + enteredTotal.toLocaleString("en-IN"));
+              }).catch(e => alert("⚠ Clinker bill DB save failed: " + e.message));
+            } else {
+              setTrips(prev => prev.map(t => {
+                if(!selectedIds.includes(t.id)) return t;
+                const billedAmt = Number(t.qty||0) * rate;
+                const updated = {
+                  ...t,
+                  invoiceNo:   invNo,
+                  invoiceDate: invDate,
+                  billedToShree: billedAmt,
+                  status:      "Billed",
+                  billedBy:    user.username,
+                  billedAt:    nowTs(),
+                  shreeStatus: "billed",
+                  client:      t.client || "Shree Cement Kodla",
+                  ...(cb.isPrevFY ? {prevFY:true, prevFYLabel} : {}),
+                };
+                updatedTrips.push(updated);
+                return updated;
+              }));
+              Promise.all(updatedTrips.map(t => DB.saveTrip(t).catch(e => console.error("saveTrip clinker bill:", e))));
+              log && log("CLINKER BILL " + invNo + " · " + selectedTrips.length + " trips · " + selectedTons.toFixed(2) + " MT · ₹" + total.toLocaleString("en-IN"));
+            }
+            setShowClinkerBill(false);
+            setClinkerBill({invoiceNo:"", invoiceDate:"", rate:"", tons:"", gstPct:"5", isPrevFY:false});
+            setManualClinkerSelect(false);
+            setManualClinkerIds([]);
+            setActiveTab("invoices");
+          };
+
+          return (
+            <Sheet title="Add Clinker Bill Manually" onClose={()=>setShowClinkerBill(false)}>
+              <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                {/* Bill To — fixed */}
+                <div style={{background:C.bg,borderRadius:10,padding:"10px 14px"}}>
+                  <div style={{fontSize:10,color:C.muted,fontWeight:700,letterSpacing:1,marginBottom:6}}>BILL TO (FIXED)</div>
+                  <div style={{fontSize:12,color:C.text,fontWeight:700}}>Shree Cement Limited</div>
+                  <div style={{fontSize:11,color:C.muted,marginTop:2}}>Patas, Maharashtra · State Code 27</div>
+                  <div style={{fontSize:11,color:C.muted}}>GSTIN: 27AACCS8796G2ZQ</div>
+                </div>
+
+                {/* Previous FY toggle */}
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                  background:cb.isPrevFY?C.orange+"11":C.bg,
+                  border:`1.5px solid ${cb.isPrevFY?C.orange:C.border}`,
+                  borderRadius:10,padding:"10px 14px"}}>
+                  <div>
+                    <div style={{fontWeight:700,fontSize:12,color:cb.isPrevFY?C.orange:C.text}}>
+                      {cb.isPrevFY ? `📅 Saving as ${prevFYLabel}` : "📅 Financial Year"}
+                    </div>
+                    <div style={{fontSize:11,color:C.muted,marginTop:2}}>
+                      {cb.isPrevFY
+                        ? `Invoice will be tagged as ${prevFYLabel} — trips get prevFY flag`
+                        : `Current FY: ${FY_LABEL(currentFY())}`}
+                    </div>
+                  </div>
+                  <button onClick={()=>setClinkerBill(p=>({...p,isPrevFY:!p.isPrevFY}))}
+                    style={{flexShrink:0,marginLeft:12,padding:"6px 14px",borderRadius:8,fontWeight:700,
+                      fontSize:11,cursor:"pointer",
+                      border:`1.5px solid ${cb.isPrevFY?C.orange:C.border}`,
+                      background:cb.isPrevFY?C.orange:C.dim,
+                      color:cb.isPrevFY?"#fff":C.muted}}>
+                    {cb.isPrevFY ? `${prevFYLabel} ✓` : "Save as Prev FY"}
+                  </button>
+                </div>
+
+                {/* Invoice details */}
+                <div style={{display:"flex",gap:10}}>
+                  <div style={{flex:1}}>
+                    <Field label="Invoice No" value={cb.invoiceNo}
+                      onChange={v=>setClinkerBill(p=>({...p,invoiceNo:v}))} placeholder="e.g. MYE/CLK/2026/01" />
+                  </div>
+                  <div style={{flex:1}}>
+                    <Field label="Invoice Date" value={cb.invoiceDate} type="date"
+                      onChange={v=>setClinkerBill(p=>({...p,invoiceDate:v}))} />
+                  </div>
+                </div>
+
+                {/* Rate and Tons */}
+                <div style={{display:"flex",gap:10}}>
+                  <div style={{flex:1}}>
+                    <Field label="Rate ₹/MT" value={cb.rate} type="number"
+                      onChange={v=>setClinkerBill(p=>({...p,rate:v}))} placeholder="e.g. 450" />
+                  </div>
+                  <div style={{flex:1}}>
+                    <Field label="Total Tons (MT)" value={cb.tons} type="number"
+                      onChange={v=>setClinkerBill(p=>({...p,tons:v}))} placeholder="e.g. 1200" />
+                  </div>
+                </div>
+
+                {/* GST % */}
+                <Field label="GST %" value={cb.gstPct}
+                  onChange={v=>setClinkerBill(p=>({...p,gstPct:v}))}
+                  opts={[
+                    {v:"5",l:"5%"},{v:"12",l:"12%"},{v:"18",l:"18%"},{v:"28",l:"28%"},
+                  ]} />
+
+                {/* Auto-computed amounts */}
+                {taxable > 0 && (
+                  <div style={{background:C.bg,borderRadius:10,padding:"10px 14px"}}>
+                    <div style={{fontSize:10,color:C.muted,fontWeight:700,letterSpacing:1,marginBottom:8}}>AMOUNT BREAKDOWN</div>
+                    {[
+                      {label:"Taxable Amount",       val:taxable, color:C.text},
+                      {label:`CGST @ ${gstPct/2}%`,  val:cgst,    color:C.muted},
+                      {label:`SGST @ ${gstPct/2}%`,  val:sgst,    color:C.muted},
+                      {label:"Total Invoice Amount",  val:total,   color:C.green, bold:true},
+                    ].map(r=>(
+                      <div key={r.label} style={{display:"flex",justifyContent:"space-between",
+                        padding:"4px 0",borderBottom:`1px solid ${C.border}`,fontSize:12}}>
+                        <span style={{color:r.color,fontWeight:r.bold?700:400}}>{r.label}</span>
+                        <span style={{color:r.color,fontWeight:r.bold?800:600,fontFamily:"monospace"}}>
+                          ₹{r.val.toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2})}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Trip selector */}
+                <div style={{background:C.bg,borderRadius:10,padding:"10px 14px"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                    <div style={{fontSize:10,color:C.muted,fontWeight:700,letterSpacing:1}}>
+                      CLINKER TRIPS (To: Patas · Goods: Clinker · Unbilled)
+                    </div>
+                    {/* Manual select toggle — only shown when auto fails */}
+                    {allClinkerTrips.length>0 && !autoTonsMatch && tons>0 && (
+                      <button onClick={()=>{
+                        if(manualClinkerSelect){
+                          setManualClinkerSelect(false);
+                          setManualClinkerIds([]);
+                        } else {
+                          setManualClinkerSelect(true);
+                          setManualClinkerIds([...autoSelected]); // start with auto as base
+                        }
+                      }} style={{fontSize:10,fontWeight:700,padding:"3px 10px",borderRadius:6,
+                        cursor:"pointer",border:`1.5px solid ${manualClinkerSelect?C.orange:C.blue}`,
+                        background:manualClinkerSelect?C.orange+"22":C.blue+"11",
+                        color:manualClinkerSelect?C.orange:C.blue}}>
+                        {manualClinkerSelect?"✕ Exit Manual":"✎ Select Manually"}
+                      </button>
+                    )}
+                  </div>
+                  {allClinkerTrips.length === 0 ? (
+                    <div style={{color:C.muted,fontSize:12,fontStyle:"italic",padding:"8px 0"}}>
+                      No unbilled clinker trips to Patas found.
+                    </div>
+                  ) : (
+                    <>
+                      <div style={{fontSize:11,color:C.muted,marginBottom:8}}>
+                        {allClinkerTrips.length} eligible trip{allClinkerTrips.length!==1?"s":""} · Sorted oldest first
+                        {manualClinkerSelect
+                          ? <span style={{color:C.orange,fontWeight:700}}> · Manual selection mode — tap to toggle</span>
+                          : <span> · Auto-selected to match tons</span>}
+                      </div>
+                      {/* Tons match indicator */}
+                      <div style={{
+                        background: tonsMatch ? C.green+"11" : tons>0 ? C.orange+"11" : C.bg,
+                        border: `1px solid ${tonsMatch ? C.green : tons>0 ? C.orange : C.border}`,
+                        borderRadius:8, padding:"8px 12px", marginBottom:8,
+                        display:"flex", justifyContent:"space-between", alignItems:"center",
+                      }}>
+                        <span style={{fontSize:12,color:tonsMatch?C.green:C.orange,fontWeight:700}}>
+                          {!tons>0 ? "Enter tons to auto-select trips"
+                            : tonsMatch
+                              ? `✓ Tons within ±0.5 MT (selected ${selectedTons.toFixed(2)} MT)`
+                              : `⚠ Selected ${selectedTons.toFixed(2)} MT — need ${tons} MT (±0.5 MT)`}
+                        </span>
+                        <span style={{fontSize:12,fontWeight:800,color:tonsMatch?C.green:C.text}}>
+                          {selectedTrips.length} trip{selectedTrips.length!==1?"s":""} · {selectedTons.toFixed(2)} MT
+                        </span>
+                      </div>
+                      {/* Trip list */}
+                      <div style={{maxHeight:280,overflowY:"auto",display:"flex",flexDirection:"column",gap:4}}>
+                        {allClinkerTrips.map((t,idx)=>{
+                          const isSel = selectedIds.includes(t.id);
+                          const manualToggle = () => {
+                            if(!manualClinkerSelect) return;
+                            setManualClinkerIds(prev =>
+                              prev.includes(t.id) ? prev.filter(id=>id!==t.id) : [...prev, t.id]
+                            );
+                          };
+                          return (
+                            <div key={t.id}
+                              onClick={manualClinkerSelect ? manualToggle : undefined}
+                              style={{
+                                background: isSel ? C.green+"11" : C.card,
+                                border: `1.5px solid ${isSel ? C.green : C.border}`,
+                                borderRadius:7, padding:"7px 10px",
+                                cursor: manualClinkerSelect ? "pointer" : "default",
+                                transition:"border-color 0.1s,background 0.1s",
+                              }}>
+                              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                                <div>
+                                  <span style={{fontFamily:"monospace",fontSize:11,color:C.blue,fontWeight:700}}>
+                                    {t.lrNo||"—"}
+                                  </span>
+                                  <span style={{fontSize:10,color:C.muted,marginLeft:8}}>{t.date}</span>
+                                  <span style={{fontSize:10,color:C.muted,marginLeft:8}}>{t.truckNo}</span>
+                                </div>
+                                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                                  <span style={{fontSize:12,fontWeight:700,color:C.text}}>{t.qty} MT</span>
+                                  <span style={{
+                                    fontSize:9,fontWeight:800,padding:"2px 6px",borderRadius:4,
+                                    background: isSel ? C.green+"22" : C.dim,
+                                    color: isSel ? C.green : C.muted,
+                                  }}>{isSel ? "✓" : manualClinkerSelect ? "TAP" : `#${idx+1}`}</span>
+                                </div>
+                              </div>
+                              <div style={{fontSize:10,color:C.muted,marginTop:2}}>
+                                {t.grParticulars?.goods||t.grade||"—"}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      {!tonsMatch && tons > 0 && (
+                        <div style={{marginTop:6,fontSize:11,
+                          color: Math.abs(selectedTons-tons)<=0.5 ? C.green : C.red,
+                          fontWeight:700}}>
+                          {Math.abs(selectedTons-tons)<=0.5
+                            ? `✓ Within tolerance (diff: ${Math.abs(selectedTons-tons).toFixed(2)} MT)`
+                            : selectedTons < tons
+                              ? `⚠ ${(tons-selectedTons).toFixed(2)} MT short — ${manualClinkerSelect?"select more trips":"use Manual Select"}`
+                              : `⚠ ${(selectedTons-tons).toFixed(2)} MT over — ${manualClinkerSelect?"deselect some trips":"use Manual Select"}`}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+
+                {/* Save */}
+                {!canSave && tons>0 && rate>0 && cb.invoiceNo && cb.invoiceDate && (
+                  <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:8,
+                    padding:"8px 12px",fontSize:11,color:C.orange,fontWeight:700}}>
+                    {!tonsMatch ? `⚠ Selected ${selectedTons} MT does not match ${tons} MT. Adjust tons or check available trips.` : ""}
+                    {!cb.invoiceNo.trim() ? "Enter Invoice No." : ""}
+                    {!cb.invoiceDate ? " Enter Invoice Date." : ""}
+                  </div>
+                )}
+                <Btn onClick={handleSaveClinkerBill}
+                  full color={canSave ? C.green : C.muted}
+                  style={{opacity: canSave ? 1 : 0.5, cursor: canSave ? "pointer" : "not-allowed"}}>
+                  {canSave
+                    ? `✓ Save Bill — ${selectedTrips.length} trip${selectedTrips.length!==1?"s":""} · ${selectedTons.toFixed(2)} MT · ₹${total.toLocaleString("en-IN",{maximumFractionDigits:0})}`
+                    : "Fill all fields and match tons (±0.5 MT) to save"}
+                </Btn>
+              </div>
+            </Sheet>
+          );
+        })()}
+
         {activeTab==="overview"&&(
           <div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:10,marginBottom:16}}>
@@ -17053,6 +18572,19 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   </div>
                 ))}
               </div>
+
+              {/* Manual clinker bill button — owner only */}
+              {isOwner && (
+                <div style={{marginTop:4}}>
+                  <button onClick={()=>setShowClinkerBill(true)}
+                    style={{width:"100%",background:C.purple+"11",border:`1.5px dashed ${C.purple}88`,
+                      borderRadius:8,padding:"12px 14px",cursor:"pointer",textAlign:"center"}}>
+                    <div style={{fontSize:20,marginBottom:4}}>📋</div>
+                    <div style={{color:C.purple,fontWeight:700,fontSize:13}}>Add Clinker Bill Manually</div>
+                    <div style={{fontSize:11,color:C.muted,marginTop:3}}>Rate × Tons + GST · Auto-selects Patas clinker trips</div>
+                  </button>
+                </div>
+              )}
 
               {scanning&&(
                 <div style={{marginTop:14,textAlign:"center",color:"#1565c0",fontSize:13}}>
@@ -17183,6 +18715,10 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                         const noTrip      = lines.length - identityOk;
                         const amtMismatch = identityOk - amtOk;
                         const allOk       = noTrip===0 && amtMismatch===0 && identityOk===lines.length;
+                        const allUnmatched = noTrip===lines.length && lines.length>0;
+                        // Mixed: some matched + some unmatched all from prevFY
+                        const prevFYCount = lines.filter(st=>{ const d=parseDD(st.date||""); return d&&getFY(d)<currentFY()&&!matchInvoiceLine(st,trips||[]); }).length;
+                        const mixedPrevFY = noTrip>0 && noTrip<lines.length && prevFYCount===noTrip;
                         const alreadySaved = (trips||[]).some(t=>t.invoiceNo===scanResult.invoiceNo);
                         return (<>
                           <div style={{marginTop:8,padding:"8px 0",display:"flex",gap:12,flexWrap:"wrap",
@@ -17228,12 +18764,20 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                             </div>
                           )}
                           <div style={{display:"flex",gap:8,marginTop:8}}>
-                            <button onClick={applyInvoiceScan} disabled={!allOk||alreadySaved||!scanClient||!scanMaterial}
-                              style={{flex:1,background:allOk&&!alreadySaved&&scanClient&&scanMaterial?C.green:C.dim,
-                                color:allOk&&!alreadySaved&&scanClient&&scanMaterial?"#000":"#666",border:"none",borderRadius:6,
-                                padding:"10px",fontWeight:700,
-                                cursor:allOk&&!alreadySaved&&scanClient&&scanMaterial?"pointer":"not-allowed",fontSize:13}}>
-                              {alreadySaved ? "Already Saved" : !scanClient||!scanMaterial ? "Select client & material first" : allOk ? "✓ Apply — Mark Billed" : "Fix issues above first"}
+                            <button onClick={applyInvoiceScan}
+                              disabled={(!allOk&&!allUnmatched&&!mixedPrevFY)||alreadySaved||!scanClient||!scanMaterial}
+                              style={{flex:1,
+                                background:(allOk||allUnmatched||mixedPrevFY)&&!alreadySaved&&scanClient&&scanMaterial
+                                  ?(allUnmatched||mixedPrevFY)?C.orange:C.green:C.dim,
+                                color:(allOk||allUnmatched||mixedPrevFY)&&!alreadySaved&&scanClient&&scanMaterial?"#000":"#666",
+                                border:"none",borderRadius:6,padding:"10px",fontWeight:700,
+                                cursor:(allOk||allUnmatched||mixedPrevFY)&&!alreadySaved&&scanClient&&scanMaterial?"pointer":"not-allowed",fontSize:13}}>
+                              {alreadySaved ? "Already Saved"
+                                : !scanClient||!scanMaterial ? "Select client & material first"
+                                : allOk ? "✓ Apply — Mark Billed"
+                                : allUnmatched ? "📅 Save as Previous FY Invoice"
+                                : mixedPrevFY ? "📅 Apply (includes Prev FY trips)"
+                                : "Fix issues above first"}
                             </button>
                             <button onClick={()=>setScanResult(null)}
                               style={{background:"#e8f0fa",color:C.muted,border:"1px solid #ccddf0",borderRadius:6,
@@ -17642,7 +19186,14 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                           <div key={t.id} style={{padding:"9px 14px",borderBottom:`1px solid ${C.border}`,
                             background:t.shreeShortage?"#fef2f2":C.card2}}>
                             <div style={{display:"flex",justifyContent:"space-between",fontSize:12}}>
-                              <span style={{fontFamily:"monospace",color:C.muted}}>{t.lr||t.lrNo}</span>
+                              {t.prevFY
+                                ? <span style={{fontFamily:"monospace",color:C.muted,display:"flex",alignItems:"center",gap:5}}>
+                                    {t.diNo||"---"}
+                                    <span style={{fontSize:9,fontWeight:700,background:"#7c3aed",color:"#fff",
+                                      borderRadius:3,padding:"1px 4px"}}>{t.prevFYLabel||"Prev FY"}</span>
+                                  </span>
+                                : <span style={{fontFamily:"monospace",color:C.muted}}>{t.lr||t.lrNo}</span>
+                              }
                               <span style={{fontFamily:"monospace",color:"#ccc",fontWeight:700}}>
                                 ₹{fmtINR(t.billedToShree)}
                               </span>
@@ -18469,7 +20020,7 @@ function ShortageRecoverBtn({v, setVehicles, log}) {
 }
 
 // ─── REQUEST PAYMENT SHEET ───────────────────────────────────────────────────
-function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentRequests, setPaymentRequests, driverPays=[], user, log, onClose}) {
+function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentRequests, setPaymentRequests, driverPays=[], dieselRequests=[], user, log, onClose}) {
   const t = trip;
   const veh = (vehicles||[]).find(v=>v.truckNo===t.truckNo);
   // Compute actual balance (trip may not have .balance if coming from raw trips array)
@@ -18649,6 +20200,28 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
             Balance: ₹{_balance.toLocaleString("en-IN")}
           </div>
         </div>
+
+        {/* Diesel unconfirmed warning */}
+        {(()=>{
+          if(!t.dieselEstimate || +t.dieselEstimate<=0) return null;
+          const dreq = (dieselRequests||[]).find(r=>r.tripId===t.id || (t.dieselIndentNo && String(r.indentNo)===String(t.dieselIndentNo).trim()));
+          if(!dreq) return null;
+          const isUnconf = dreq.status==="open" || (dreq.status==="attached" && dreq.confirmedAmount==null);
+          if(!isUnconf) return null;
+          return (
+            <div style={{background:C.orange+"11",border:`1.5px solid ${C.orange}44`,borderRadius:10,
+              padding:"10px 14px",display:"flex",gap:10,alignItems:"flex-start"}}>
+              <span style={{fontSize:16,flexShrink:0}}>⚠️</span>
+              <div>
+                <div style={{fontWeight:700,color:C.orange,fontSize:13}}>Diesel Not Yet Confirmed</div>
+                <div style={{color:C.muted,fontSize:11,marginTop:2}}>
+                  Indent #{dreq.indentNo} · ₹{(+t.dieselEstimate).toLocaleString("en-IN")} is attached but the pump has not confirmed it yet.
+                  The diesel deduction may change once confirmed.
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
         {hasPending && (()=>{
           const pendingReq = (paymentRequests||[]).find(r=>r.tripId===t.id&&r.status==="pending");
@@ -19618,9 +21191,11 @@ This will auto-recover in the next trip.`);
               {/* Diesel confirmation status */}
               {(()=>{
                 if(!t.dieselEstimate || +t.dieselEstimate<=0) return null;
-                const req = (dieselRequests||[]).find(r=>r.tripId===t.id || r.lrNo===t.lrNo);
+                const req = (dieselRequests||[]).find(r=>r.tripId===t.id || (t.dieselIndentNo && String(r.indentNo)===String(t.dieselIndentNo).trim()));
                 if(!req) return <div style={{fontSize:10,color:C.orange,fontWeight:700,marginTop:3}}>⛽ Diesel ₹{(+t.dieselEstimate).toLocaleString("en-IN")} — no indent linked</div>;
-                if(req.status==="open") return (
+                // Unconfirmed = attached but pump hasn't confirmed yet
+                const isUnconfirmed = req.status==="open" || (req.status==="attached" && req.confirmedAmount==null);
+                if(isUnconfirmed) return (
                   <div style={{fontSize:10,color:C.red,fontWeight:700,marginTop:3,background:C.red+"11",padding:"3px 8px",borderRadius:4,display:"inline-block"}}>
                     ⛽ Diesel NOT CONFIRMED — Indent #{req.indentNo} · ₹{(+t.dieselEstimate).toLocaleString("en-IN")}
                   </div>
@@ -19655,20 +21230,65 @@ This will auto-recover in the next trip.`);
               <span style={{color:t.balance>0?C.accent:C.green,fontWeight:900,fontSize:14}}>{fmt(t.balance)}</span>
             </div>
           </div>
+          {/* Payment requests for this trip */}
+          {(()=>{
+            const tripReqs = (paymentRequests||[]).filter(r=>r.tripId===t.id||r.lrNo===t.lrNo);
+            if(!tripReqs.length) return null;
+            return (
+              <div style={{display:"flex",flexDirection:"column",gap:4,marginBottom:8}}>
+                {tripReqs.map(pr=>(
+                  <div key={pr.id} style={{background:pr.status==="done"?C.green+"11":C.purple+"11",
+                    border:`1px solid ${pr.status==="done"?C.green:C.purple}33`,
+                    borderRadius:6,padding:"8px 10px",fontSize:11}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                      <span style={{fontWeight:700,color:pr.status==="done"?C.green:C.purple}}>
+                        {pr.status==="done"?"✓ Request Fulfilled":"⏳ Payment Requested"}
+                      </span>
+                      <span style={{color:C.muted,fontSize:10}}>{(pr.createdAt||"").slice(0,10)}</span>
+                    </div>
+                    <div style={{color:C.muted}}>
+                      {"Requested by: "}<b style={{color:C.text}}>{pr.createdBy||"—"}</b>
+                    </div>
+                    <div style={{color:C.muted}}>
+                      {"Recipient: "}<b style={{color:C.text}}>{pr.recipientName||"—"}</b>
+                      {pr.accountNo&&<span style={{fontFamily:"monospace",marginLeft:6,color:C.blue}}>{pr.accountNo}</span>}
+                    </div>
+                    {pr.status==="done"&&(
+                      <div style={{color:C.green,marginTop:3}}>
+                        {"Resolved by: "}<b>{pr.paidBy||"—"}</b>{" on "}{pr.paidAt||"—"}
+                      </div>
+                    )}
+                    {pr.notes&&<div style={{color:C.muted,marginTop:2,fontStyle:"italic"}}>{pr.notes}</div>}
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
           {/* Previous payments */}
           {(driverPays||[]).filter(p=>p.tripId===t.id).map(p=>(
-            <div key={p.id} style={{background:C.green+"11",borderRadius:6,padding:"6px 10px",marginBottom:4,
-              display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:12}}>
-              <span style={{color:C.muted}}>{p.date} · UTR: {p.utr}</span>
-              <div style={{display:"flex",alignItems:"center",gap:8}}>
-                <span style={{color:C.green,fontWeight:700}}>{fmt(p.amount)}</span>
-                {user.role==="owner" && (
-                  <button onClick={()=>{if(window.confirm(`Delete payment of ${fmt(p.amount)}?\nBalance will be restored. If this was the final payment, the trip will be un-settled.`)) deleteDriverPay(p.id);}}
-                    style={{background:"none",border:`1px solid ${C.red}44`,borderRadius:4,
-                      color:C.red,fontSize:10,padding:"1px 6px",cursor:"pointer"}}>
-                    🗑
-                  </button>
-                )}
+            <div key={p.id} style={{background:C.green+"11",borderRadius:6,padding:"8px 10px",marginBottom:4,fontSize:12}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{color:C.muted}}>
+                    {p.date}
+                    {" · UTR: "}<b style={{color:p.utr?C.text:C.red,fontFamily:"monospace"}}>{p.utr||"NOT RECORDED"}</b>
+                  </div>
+                  <div style={{color:C.muted,marginTop:2}}>
+                    {"Paid to: "}<b style={{color:p.paidTo?C.text:C.orange}}>{p.paidTo||"—"}</b>
+                    {" · Recorded by: "}<b style={{color:C.accent}}>{p.createdBy||"—"}</b>
+                  </div>
+                  {p.notes&&<div style={{color:C.muted,fontSize:10,marginTop:1}}>{p.notes}</div>}
+                </div>
+                <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0,marginLeft:8}}>
+                  <span style={{color:C.green,fontWeight:700}}>{fmt(p.amount)}</span>
+                  {user.role==="owner"&&(
+                    <button onClick={()=>{if(window.confirm(`Delete payment of ${fmt(p.amount)}?\nBalance will be restored. If this was the final payment, the trip will be un-settled.`)) deleteDriverPay(p.id);}}
+                      style={{background:"none",border:`1px solid ${C.red}44`,borderRadius:4,
+                        color:C.red,fontSize:10,padding:"1px 6px",cursor:"pointer"}}>
+                      🗑
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           ))}
@@ -19768,14 +21388,19 @@ This will auto-recover in the next trip.`);
                     {/* Diesel confirmation warning */}
                     {(()=>{
                       if(!trip || !trip.dieselEstimate || +trip.dieselEstimate<=0) return null;
-                      const dreq = (dieselRequests||[]).find(r=>r.tripId===trip.id || r.lrNo===trip.lrNo);
-                      if(!dreq) return <div style={{fontSize:10,color:C.orange,fontWeight:700,marginTop:3}}>⛽ Diesel ₹{(+trip.dieselEstimate).toLocaleString("en-IN")} — no indent linked</div>;
-                      if(dreq.status==="open") return (
-                        <div style={{fontSize:10,color:"#fff",fontWeight:700,marginTop:3,background:"#dc2626",padding:"3px 8px",borderRadius:4,display:"inline-block"}}>
-                          ⛽ DIESEL NOT CONFIRMED — Indent #{dreq.indentNo}
+                      const dreq = (dieselRequests||[]).find(r=>
+                        r.tripId===trip.id ||
+                        (trip.dieselIndentNo && String(r.indentNo)===String(trip.dieselIndentNo).trim())
+                      );
+                      if(!dreq) return null;
+                      const isUnconf = dreq.status==="open" || (dreq.status==="attached" && dreq.confirmedAmount==null);
+                      if(!isUnconf) return null;
+                      return (
+                        <div style={{fontSize:10,color:"#fff",fontWeight:700,marginTop:4,background:"#dc2626",
+                          padding:"3px 8px",borderRadius:4,display:"inline-block"}}>
+                          ⛽ Diesel NOT confirmed — Indent #{dreq.indentNo} · ₹{(+trip.dieselEstimate).toLocaleString("en-IN")}
                         </div>
                       );
-                      return null;
                     })()}
                   </div>
                   <div style={{textAlign:"right"}}>
@@ -19881,6 +21506,7 @@ This will auto-recover in the next trip.`);
           paymentRequests={paymentRequests||[]}
           setPaymentRequests={setPaymentRequests}
           driverPays={driverPays||[]}
+          dieselRequests={dieselRequests||[]}
           user={user}
           log={log}
           onClose={()=>setPayReqSheet(null)}
