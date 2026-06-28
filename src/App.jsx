@@ -15958,7 +15958,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                           const _updVehL = vehicles.find(x=>x.id===tx._vehicleId);
                           const _newVehL = _updVehL ? {..._updVehL,loan:Math.max(0,(_updVehL.loan||0)-tx.amount),loanTxns:(_updVehL.loanTxns||[]).filter(t=>t.id!==tx.id)} : null;
                           if(_newVehL){setVehicles(p=>p.map(x=>x.id===tx._vehicleId?_newVehL:x));DB.saveVehicle(_newVehL).catch(()=>{});}
-                      }} style={{background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:16}}>🗑</button>}
+                        }}} style={{background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:16}}>🗑</button>}
                     </div>
                   ))}
                 </>
