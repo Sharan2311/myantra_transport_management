@@ -17181,7 +17181,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                 <div style={{marginTop:10}}>
                   <Btn onClick={()=>{
                     if(!txAmt||+txAmt<=0){alert("Enter transfer amount.\nವರ್ಗಾವಣೆ ಮೊತ್ತ ನಮೂದಿಸಿ.");return;}
-                    if(!txAmt||+txAmt<=0){alert("Enter amount.");return;}
+
                     const _isExpense = txType==="expense";
                     const _amt = _isExpense ? -(+txAmt) : +txAmt;
                     const tx={id:uid(),empId:wSheet,amount:_amt,date:txDate,lrNo:"",
@@ -17192,6 +17192,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                     log(_isExpense?"WALLET EXPENSE":txType==="tafal"?"TAFAL PAYMENT":"CASH TRANSFER",`${e.name} ₹${fmt(+txAmt)}`);
                     setTxAmt("");setTxNote("");setTxDate(today());setTxType("transfer");
                   }} full color={txType==="expense"?C.red:C.green}>{txType==="expense"?"💸 Record Expense":"Save Transfer"}</Btn>
+                </div>
               {/* Date filter + PDF */}
               <div style={{background:C.card,borderRadius:10,padding:"12px 14px"}}>
                 <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>📅 Filter & Export</div>
@@ -17247,6 +17248,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                 <div style={{textAlign:"center",color:C.muted,padding:"20px 0",fontSize:13}}>No transactions in this period</div>
               )}
             </div>
+          </div>
           </Sheet>
         );
       })()}
