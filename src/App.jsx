@@ -1556,6 +1556,41 @@ function AppMain() {
     });
   };
 
+  // ── Self-heal: recompute loanRecovered / shortageRecovered from txns on boot ─────────────
+  // loanRecovered must equal sum(loanTxns where type==="recovery").
+  // If they diverge (caused by old bug where delete did not save to DB),
+  // recompute from the txns array (ground truth) and persist the fix.
+  useEffect(() => {
+    if (!rV || !vehicles.length) return; // wait until vehicles are loaded
+    const toFix = vehicles.filter(v => {
+      const loanTxnSum = (v.loanTxns||[]).filter(x=>x.type==="recovery").reduce((s,x)=>s+(x.amount||0),0);
+      const shortageTxnSum = (v.shortageTxns||[]).filter(x=>x.type==="recovery").reduce((s,x)=>s+(x.amount||0),0);
+      return Math.round(loanTxnSum) !== Math.round(v.loanRecovered||-1)
+          || Math.round(shortageTxnSum) !== Math.round(v.shortageRecovered||-1);
+    });
+    if (!toFix.length) return;
+    console.warn(`[LoanHeal] Found ${toFix.length} vehicle(s) with mismatched loan/shortage totals. Auto-fixing...`);
+    const healed = vehicles.map(v => {
+      const loanTxnSum = (v.loanTxns||[]).filter(x=>x.type==="recovery").reduce((s,x)=>s+(x.amount||0),0);
+      const shortageTxnSum = (v.shortageTxns||[]).filter(x=>x.type==="recovery").reduce((s,x)=>s+(x.amount||0),0);
+      const loanMismatch = Math.round(loanTxnSum) !== Math.round(v.loanRecovered||-1);
+      const shortageMismatch = Math.round(shortageTxnSum) !== Math.round(v.shortageRecovered||-1);
+      if (!loanMismatch && !shortageMismatch) return v;
+      const fixed = {
+        ...v,
+        ...(loanMismatch    ? { loanRecovered:    loanTxnSum    } : {}),
+        ...(shortageMismatch? { shortageRecovered: shortageTxnSum } : {}),
+      };
+      if (loanMismatch)     console.warn(`[LoanHeal] ${v.truckNo}: loanRecovered ${v.loanRecovered} → ${loanTxnSum}`);
+      if (shortageMismatch) console.warn(`[LoanHeal] ${v.truckNo}: shortageRecovered ${v.shortageRecovered} → ${shortageTxnSum}`);
+      DB.saveVehicle(fixed).catch(e => console.error("[LoanHeal] DB save failed for", v.truckNo, e.message));
+      return fixed;
+    });
+    setVehicles(healed);
+    console.log(`[LoanHeal] Done. Fixed ${toFix.map(v=>v.truckNo).join(", ")}`);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rV]); // run once when vehicles finish loading
+
   const fyRange = getFYRange(selectedFY);
   const fyTrips = trips.filter(t => t.date >= fyRange.from && t.date <= fyRange.to);
   // Role-filtered trips — non-owners only see trips for their assigned clients
@@ -6219,60 +6254,62 @@ function ReceiptUploadSheet({ trip, onMerge, onClose }) {
 // For party trips that receive a physically sealed/stamped invoice instead of email
 // Merges: Sealed Invoice → GR Copy → Original Invoice into one final PDF
 function SealedInvoiceSheet({ trip, onMerge, onClose, embedded=false }) {
-  const [files,   setFiles]   = useState([]);
+  const partyDIs = (trip.diLines||[]).filter(d=>d.orderType==="party");
+  const isMultiDI = partyDIs.length > 1;
+
+  // For multi-DI: track one file-list per DI index; for single: just one list
+  const [diFiles, setDiFiles] = useState(() => {
+    if(isMultiDI) return partyDIs.map(()=>[]);
+    return [[]]; // single slot
+  });
   const [merging, setMerging] = useState(false);
   const [error,   setError]   = useState("");
 
-  const addFile = f => { setFiles(prev=>[...prev, f]); setError(""); };
-  const removeFile = i => setFiles(prev=>prev.filter((_,idx)=>idx!==i));
+  const addFileToDI = (diIdx, f) => setDiFiles(prev=>prev.map((arr,i)=>i===diIdx?[...arr,f]:arr));
+  const removeFileFromDI = (diIdx, fileIdx) => setDiFiles(prev=>prev.map((arr,i)=>i===diIdx?arr.filter((_,fi)=>fi!==fileIdx):arr));
+
+  const allDIsHaveFiles = diFiles.every(arr=>arr.length>0);
+  const singleFiles = diFiles[0]||[];
 
   const handleMerge = async () => {
-    if(files.length===0){setError("Please upload at least one sealed invoice file.");return;}
-    const partyDIs=(trip.diLines||[]).filter(d=>d.orderType==="party");
-    if(partyDIs.length>1){const missingInv=partyDIs.filter(d=>!d.invoiceFilePath);if(missingInv.length>0){setError("This trip has "+partyDIs.length+" party DIs. All must have invoices uploaded before merging. Missing: DI "+missingInv.map(d=>d.diNo||"?").join(", ")+".");return;}}
+    if(!allDIsHaveFiles){setError(isMultiDI?"Please upload a sealed invoice for each DI.":"Please upload at least one sealed invoice file.");return;}
+    if(isMultiDI){
+      const missingInv=partyDIs.filter(d=>!d.invoiceFilePath);
+      if(missingInv.length>0){setError("All DIs must have invoices uploaded before merging. Missing: DI "+missingInv.map(d=>d.diNo||"?").join(", ")+".");return;}
+    }
     const anyGR  = trip.grFilePath || (trip.diLines||[]).find(d=>d.grFilePath)?.grFilePath;
     const anyInv = trip.invoiceFilePath || (trip.diLines||[]).find(d=>d.invoiceFilePath)?.invoiceFilePath;
-    if(!anyGR||!anyInv){
-      setError("GR Copy or Invoice missing on this trip. Please upload via Edit Trip first.");return;
-    }
+    if(!anyGR||!anyInv){setError("GR Copy or Invoice missing on this trip. Please upload via Edit Trip first.");return;}
     setMerging(true); setError("");
     try {
-      // Upload sealed invoice(s) — merge if multiple
       const { PDFDocument } = await import("pdf-lib");
+      // Merge all sealed invoice pages (all DIs together)
       const sealedMerged = await PDFDocument.create();
-      for(const f of files) {
-        const buf = await f.arrayBuffer();
-        try {
-          if(f.type==="application/pdf"||f.name?.endsWith(".pdf")) {
-            const doc = await PDFDocument.load(buf, {ignoreEncryption:true});
-            const pages = await sealedMerged.copyPages(doc, doc.getPageIndices());
-            pages.forEach(p=>sealedMerged.addPage(p));
-          } else {
-            const img = f.type==="image/png" ? await sealedMerged.embedPng(buf) : await sealedMerged.embedJpg(buf);
-            const page = sealedMerged.addPage([img.width, img.height]);
-            page.drawImage(img, {x:0,y:0,width:img.width,height:img.height});
-          }
-        } catch(e){ console.warn("Could not add file:", f.name, e.message); }
+      for(const fileArr of diFiles){
+        for(const f of fileArr){
+          const buf=await f.arrayBuffer();
+          try{
+            if(f.type==="application/pdf"||f.name?.endsWith(".pdf")){
+              const doc=await PDFDocument.load(buf,{ignoreEncryption:true});
+              const pages=await sealedMerged.copyPages(doc,doc.getPageIndices());
+              pages.forEach(p=>sealedMerged.addPage(p));
+            } else {
+              const img=f.type==="image/png"?await sealedMerged.embedPng(buf):await sealedMerged.embedJpg(buf);
+              const page=sealedMerged.addPage([img.width,img.height]);
+              page.drawImage(img,{x:0,y:0,width:img.width,height:img.height});
+            }
+          } catch(e){console.warn("Could not add file:",f.name,e.message);}
+        }
       }
       const sealedBytes = await sealedMerged.save();
       const sealedFile  = new File([sealedBytes], "sealed_invoice.pdf", {type:"application/pdf"});
-
-      // Upload sealed invoice PDF
       const sealedResult = await uploadPartyFile(trip.id, "sealed_invoice", sealedFile);
-
-      // Fetch GR + original invoice — check diLines for multi-DI trips
       const grPath  = trip.grFilePath  || (trip.diLines||[]).find(d=>d.grFilePath)?.grFilePath;
       const invPath = trip.invoiceFilePath || (trip.diLines||[]).find(d=>d.invoiceFilePath)?.invoiceFilePath;
-      const [grBuf, invBuf] = await Promise.all([
-        fetchStorageFile(grPath),
-        fetchStorageFile(invPath),
-      ]);
-
-      // Final merge: Sealed Invoice → GR Copy → Original Invoice
+      const [grBuf, invBuf] = await Promise.all([fetchStorageFile(grPath), fetchStorageFile(invPath)]);
       const finalBytes = await mergePDFs([sealedBytes, grBuf, invBuf]);
       const finalFile  = new File([finalBytes], "merged_confirmation.pdf", {type:"application/pdf"});
       const mergedResult = await uploadPartyFile(trip.id, "merged_confirmation", finalFile);
-
       onMerge(trip.id, sealedResult.path, mergedResult.path);
     } catch(e) {
       setError("Merge failed: " + e.message);
@@ -6283,58 +6320,93 @@ function SealedInvoiceSheet({ trip, onMerge, onClose, embedded=false }) {
 
   return (
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
-      {embedded && (
-        <button onClick={onClose}
-          style={{background:"none",border:"none",color:C.blue,fontSize:12,
-            cursor:"pointer",textAlign:"left",padding:"0 0 4px"}}>
-          ← Back to trip list
-        </button>
-      )}
-      {/* Trip summary */}
-      <div style={{background:C.bg,borderRadius:10,padding:"12px 14px"}}>
-        <div style={{color:C.accent,fontWeight:800,fontSize:13,marginBottom:4}}>🤝 {trip.consignee||"—"}</div>
-        <div style={{color:C.muted,fontSize:12}}>LR: <b style={{color:C.text}}>{trip.lrNo||"—"}</b> · {trip.truckNo} · {trip.date}</div>
-        <div style={{color:C.muted,fontSize:12,marginTop:2}}>DI: {trip.diNo||"—"} · {trip.qty}MT → {trip.to}</div>
-      </div>
-
-      {/* Info */}
-      <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,borderRadius:10,
-        padding:"10px 14px",color:C.orange,fontSize:12}}>
-        <div style={{fontWeight:700,marginBottom:4}}>🏷️ Upload Sealed / Stamped Invoice</div>
-        <div style={{color:C.muted}}>Upload the party's physically sealed invoice (image or PDF). The app will merge: <b style={{color:C.text}}>Sealed Invoice → GR Copy → Original Invoice</b> into one PDF.</div>
-      </div>
-
-      {/* File list */}
-      <div style={{background:C.bg,borderRadius:12,padding:14,
-        border:`2px dashed ${files.length>0?C.orange:C.border}`}}>
-        <div style={{color:C.orange,fontWeight:700,fontSize:12,marginBottom:8}}>
-          Sealed Invoice {files.length>0&&`(${files.length} file${files.length>1?"s":""})`}
+      {!embedded && (
+        <div>
+          <div style={{fontWeight:700,fontSize:14,marginBottom:2}}>{trip.truckNo} <span style={{color:C.blue,fontSize:12}}>LR:{trip.lrNo||"\u2014"}</span></div>
+          <div style={{color:C.muted,fontSize:12}}>LR: <b style={{color:C.text}}>{trip.lrNo||"\u2014"}</b></div>
+          <div style={{color:C.muted,fontSize:12,marginTop:2}}>DI: {trip.diNo||"\u2014"} · {trip.qty}MT · {trip.consignee||"\u2014"}</div>
         </div>
-        {files.map((f,i)=>(
-          <div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",
-            background:C.card,borderRadius:8,padding:"8px 10px",marginBottom:6}}>
-            <span style={{color:C.text,fontSize:12,overflow:"hidden",textOverflow:"ellipsis",
-              whiteSpace:"nowrap",flex:1}}>{f.name}</span>
-            <button onClick={()=>removeFile(i)}
-              style={{background:"none",border:"none",color:C.red,fontSize:16,cursor:"pointer",marginLeft:8}}>×</button>
-          </div>
-        ))}
-        <FileSourcePicker onFile={addFile} accept="image/*,application/pdf"
-          label={files.length>0?"+ Add another page":"Upload sealed invoice"}
-          color={C.orange} icon="🏷️" />
+      )}
+
+      <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,borderRadius:10,padding:"10px 14px",color:C.orange,fontSize:12}}>
+        <div style={{fontWeight:700,marginBottom:4}}>🏷️ Upload Sealed / Stamped Invoice{isMultiDI?" (one per DI)":""}</div>
+        <div style={{color:C.muted}}>Upload the party\u2019s physically sealed invoice. {isMultiDI?"Upload one sealed invoice per DI below. ":""}The app will merge: <b style={{color:C.text}}>Sealed Invoice \u2192 GR Copy \u2192 Original Invoice</b> into one PDF.</div>
       </div>
 
-      {/* Merge order preview */}
-      {files.length>0 && (
+      {isMultiDI ? (
+        // Multi-DI: one upload slot per DI
+        partyDIs.map((di,diIdx)=>(
+          <div key={di.id||diIdx} style={{background:C.bg,borderRadius:12,padding:14,
+            border:`2px dashed ${diFiles[diIdx]?.length>0?C.orange:C.border}`}}>
+            <div style={{color:C.orange,fontWeight:700,fontSize:12,marginBottom:6}}>
+              DI #{diIdx+1} \u2014 {di.diNo||"?"} ({di.qty||"?"}MT)
+              {diFiles[diIdx]?.length>0 && <span style={{color:C.green,marginLeft:8}}>✓ {diFiles[diIdx].length} file{diFiles[diIdx].length>1?"s":""}</span>}
+            </div>
+            {(diFiles[diIdx]||[]).map((f,fi)=>(
+              <div key={fi} style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+                background:C.card,borderRadius:8,padding:"7px 10px",marginBottom:6}}>
+                <span style={{color:C.text,fontSize:12,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{f.name}</span>
+                <button onClick={()=>removeFileFromDI(diIdx,fi)}
+                  style={{background:"none",border:"none",color:C.red,fontSize:16,cursor:"pointer",marginLeft:6}}>�</button>
+              </div>
+            ))}
+            <FileSourcePicker onFile={f=>addFileToDI(diIdx,f)} accept="image/*,application/pdf"
+              label={diFiles[diIdx]?.length>0?"+ Add page":"Upload sealed invoice for this DI"}
+              color={C.orange} icon="🏷️" />
+          </div>
+        ))
+      ) : (
+        // Single DI: original single upload slot
+        <div style={{background:C.bg,borderRadius:12,padding:14,
+          border:`2px dashed ${singleFiles.length>0?C.orange:C.border}`}}>
+          <div style={{color:C.orange,fontWeight:700,fontSize:12,marginBottom:8}}>
+            Sealed Invoice {singleFiles.length>0&&`(${singleFiles.length} file${singleFiles.length>1?"s":""})`}
+          </div>
+          {singleFiles.map((f,i)=>(
+            <div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+              background:C.card,borderRadius:8,padding:"8px 10px",marginBottom:6}}>
+              <span style={{color:C.text,fontSize:12,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{f.name}</span>
+              <button onClick={()=>removeFileFromDI(0,i)}
+                style={{background:"none",border:"none",color:C.red,fontSize:16,cursor:"pointer",marginLeft:6}}>�</button>
+            </div>
+          ))}
+          <FileSourcePicker onFile={f=>addFileToDI(0,f)} accept="image/*,application/pdf"
+            label={singleFiles.length>0?"+ Add another page":"Upload sealed invoice"}
+            color={C.orange} icon="🏷️" />
+        </div>
+      )}
+
+      {/* Progress indicator for multi-DI */}
+      {isMultiDI && (
+        <div style={{background:C.bg,borderRadius:10,padding:"10px 14px"}}>
+          <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:8}}>UPLOAD PROGRESS</div>
+          {partyDIs.map((di,diIdx)=>(
+            <div key={diIdx} style={{display:"flex",alignItems:"center",gap:8,padding:"4px 0",borderBottom:`1px solid ${C.border}22`}}>
+              <span style={{color:diFiles[diIdx]?.length>0?C.green:C.muted,fontSize:14}}>{diFiles[diIdx]?.length>0?"✓":"○"}</span>
+              <span style={{color:diFiles[diIdx]?.length>0?C.text:C.muted,fontSize:12}}>DI #{diIdx+1} Sealed Invoice ({di.diNo||"?"})</span>
+            </div>
+          ))}
+          {[{n:"GR Copy",ok:!!trip.grFilePath||(trip.diLines||[]).some(d=>d.grFilePath)},
+            {n:"Original Invoice",ok:!!trip.invoiceFilePath||(trip.diLines||[]).some(d=>d.invoiceFilePath)}
+          ].map(x=>(
+            <div key={x.n} style={{display:"flex",alignItems:"center",gap:8,padding:"4px 0",borderBottom:`1px solid ${C.border}22`}}>
+              <span style={{color:x.ok?C.teal:C.red,fontSize:14}}>{x.ok?"✓":"✗"}</span>
+              <span style={{color:x.ok?C.text:C.red,fontSize:12}}>{x.n}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Merge order preview for single DI */}
+      {!isMultiDI && singleFiles.length>0 && (
         <div style={{background:C.bg,borderRadius:10,padding:"12px 14px"}}>
           <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:8}}>FINAL PDF ORDER</div>
           {[
-            {n:`1. Sealed Invoice (${files.length} page${files.length>1?"s":""})`, c:C.orange, ok:true},
-            {n:"2. GR Copy",             c:C.teal,  ok:!!trip.grFilePath},
-            {n:"3. Original Invoice",    c:C.blue,  ok:!!trip.invoiceFilePath},
+            {n:`1. Sealed Invoice (${singleFiles.length} page${singleFiles.length>1?"s":""})`, c:C.orange, ok:true},
+            {n:"2. GR Copy",          c:C.teal, ok:!!trip.grFilePath},
+            {n:"3. Original Invoice", c:C.blue, ok:!!trip.invoiceFilePath},
           ].map(x=>(
-            <div key={x.n} style={{display:"flex",alignItems:"center",gap:8,padding:"4px 0",
-              borderBottom:`1px solid ${C.border}22`}}>
+            <div key={x.n} style={{display:"flex",alignItems:"center",gap:8,padding:"4px 0",borderBottom:`1px solid ${C.border}22`}}>
               <span style={{color:x.ok?x.c:C.red,fontSize:14}}>{x.ok?"✓":"✗"}</span>
               <span style={{color:x.ok?C.text:C.red,fontSize:12}}>{x.n}</span>
             </div>
@@ -6342,19 +6414,26 @@ function SealedInvoiceSheet({ trip, onMerge, onClose, embedded=false }) {
         </div>
       )}
 
+      {/* Multi-DI not all uploaded warning */}
+      {isMultiDI && !allDIsHaveFiles && (
+        <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:8,padding:"9px 12px",color:C.orange,fontSize:12,fontWeight:600}}>
+          \u26a0 Upload sealed invoices for all {partyDIs.length} DIs before merging.
+        </div>
+      )}
+
       {error && (
-        <div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,
-          padding:"9px 12px",color:C.red,fontSize:12}}>{error}</div>
+        <div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,padding:"9px 12px",color:C.red,fontSize:12}}>{error}</div>
       )}
 
       <Btn onClick={handleMerge} full color={C.orange}
-        disabled={files.length===0||merging}>
-        {merging ? "Merging PDFs…" : "🔀 Merge & Store PDF"}
+        disabled={!allDIsHaveFiles||merging}>
+        {merging ? "Merging PDFs\u2026" : isMultiDI&&!allDIsHaveFiles ? `Upload all ${partyDIs.length} DI invoices first` : "🔀 Merge & Store PDF"}
       </Btn>
       <Btn onClick={onClose} full outline color={C.muted}>Cancel</Btn>
     </div>
   );
 }
+
 
 // ─── TRIPS ────────────────────────────────────────────────────────────────────
 function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles, indents, setIndents, settings, tripType, user, log, driverPays, setDriverPays, employees, cashTransfers, setCashTransfers, allTripsLoaded, loadingAllTrips, loadAllTrips, dieselRequests=[], setDieselRequests}) {
@@ -6367,6 +6446,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
   const [orderTypeFilter, setOrderTypeFilter] = useState("All"); // "All"|"godown"|"party"
   const [search,      setSearch]      = useState("");
   const [clientFilter, setClientFilter] = useState(""); // "" = All clients
+  const [filterEmpTrip, setFilterEmpTrip] = useState(""); // "" = All employees
   const [diConflict,  setDiConflict]  = useState(null);
   const [wasScanned,  setWasScanned]  = useState(false);
   const [confirmDel,  setConfirmDel]  = useState(null);
@@ -6467,10 +6547,17 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     if((t.grade||"").toLowerCase().includes(q)) return true;
     return false;
   }) : dlist;
-  const shown  = filter==="All" ? slist
+  const elist  = filterEmpTrip
+    ? slist.filter(t =>
+        (t.assignedEmpId && t.assignedEmpId===filterEmpTrip) ||
+        (t.cashEmpId && t.cashEmpId===filterEmpTrip) ||
+        (() => { const emp=(employees||[]).find(e=>e.id===filterEmpTrip); const tr=(emp?.linkedTrucks||[]).map(x=>x.toUpperCase()); return tr.length>0&&tr.includes((t.truckNo||"").toUpperCase()); })()
+      )
+    : slist;
+  const shown  = filter==="All" ? elist
     : filter==="Confirmation Email Received"
-      ? slist.filter(t=>t.status==="Confirmation Email Received"&&t.orderType==="party")
-      : slist.filter(t => t.status===filter);
+      ? elist.filter(t=>t.status==="Confirmation Email Received"&&t.orderType==="party")
+      : elist.filter(t => t.status===filter);
 
   // When truck number changes, check if tafalExempt
   const onTruckChange = v => {
@@ -6971,23 +7058,22 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
           }
           upd={...upd,shortageRecovered:Math.max(0,(upd.shortageRecovered||0)+deltaSR)};
         }
-        if(deltaLR>0){
-          const txn={id:uid(),type:"recovery",date:editSheet.date||today(),amount:deltaLR,lrNo:editSheet.lrNo,note:"From trip edit"};
-          upd={...upd,loanRecovered:(upd.loanRecovered||0)+deltaLR,loanTxns:[...(upd.loanTxns||[]),txn]};
-        } else if(deltaLR<0){
-          // Remove or reduce the loan txn for this LR
-          const existingTxn = (upd.loanTxns||[]).find(tx=>tx.lrNo===editSheet.lrNo && tx.type==="recovery");
-          if(existingTxn) {
-            const newAmt = (existingTxn.amount||0) + deltaLR; // deltaLR is negative
-            if(newAmt <= 0) {
-              // Remove the txn entirely
-              upd={...upd,loanTxns:(upd.loanTxns||[]).filter(tx=>tx!==existingTxn)};
-            } else {
-              // Reduce the txn amount
-              upd={...upd,loanTxns:(upd.loanTxns||[]).map(tx=>tx===existingTxn?{...tx,amount:newAmt}:tx)};
+        if(deltaLR!==0){
+          // Upsert: override existing txn for this LR with new full amount
+          const existingLRTxn = (upd.loanTxns||[]).find(tx=>tx.lrNo===editSheet.lrNo && tx.type==="recovery");
+          if(newLR<=0){
+            if(existingLRTxn){
+              upd={...upd,loanTxns:(upd.loanTxns||[]).filter(tx=>tx!==existingLRTxn),
+                loanRecovered:Math.max(0,(upd.loanRecovered||0)-(existingLRTxn.amount||0))};
             }
+          } else if(existingLRTxn){
+            const diff2 = newLR - (existingLRTxn.amount||0);
+            upd={...upd,loanTxns:(upd.loanTxns||[]).map(tx=>tx===existingLRTxn?{...tx,amount:newLR,note:"From trip edit"}:tx),
+              loanRecovered:Math.max(0,(upd.loanRecovered||0)+diff2)};
+          } else if(newLR>0){
+            const txn={id:uid(),type:"recovery",date:editSheet.date||today(),amount:newLR,lrNo:editSheet.lrNo,note:"From trip edit"};
+            upd={...upd,loanRecovered:(upd.loanRecovered||0)+newLR,loanTxns:[...(upd.loanTxns||[]),txn]};
           }
-          upd={...upd,loanRecovered:Math.max(0,(upd.loanRecovered||0)+deltaLR)};
         }
         return upd;
       }));
@@ -7405,6 +7491,30 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         </div>
       )}
 
+      {/* Employee filter — shows when employees exist */}
+      {(employees||[]).length>0 && (
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+          <span style={{color:C.muted,fontSize:11,fontWeight:700,flexShrink:0}}>Employee:</span>
+          <button onClick={()=>setFilterEmpTrip("")}
+            style={{padding:"4px 10px",borderRadius:16,fontSize:11,fontWeight:700,cursor:"pointer",
+              border:`1.5px solid ${!filterEmpTrip?C.teal:C.border}`,
+              background:!filterEmpTrip?C.teal+"22":"transparent",
+              color:!filterEmpTrip?C.teal:C.muted}}>All</button>
+          {(employees||[]).map(e=>(
+            <button key={e.id} onClick={()=>setFilterEmpTrip(filterEmpTrip===e.id?"":e.id)}
+              style={{padding:"4px 10px",borderRadius:16,fontSize:11,fontWeight:700,cursor:"pointer",
+                border:`1.5px solid ${filterEmpTrip===e.id?C.teal:C.border}`,
+                background:filterEmpTrip===e.id?C.teal+"22":"transparent",
+                color:filterEmpTrip===e.id?C.teal:C.muted,whiteSpace:"nowrap"}}>{e.name}</button>
+          ))}
+          {filterEmpTrip && (
+            <span style={{color:C.muted,fontSize:11}}>
+              {shown.length} trip{shown.length!==1?"s":""}
+            </span>
+          )}
+        </div>
+      )}
+
       {/* Client / Plant filter — only shows when multiple clients present */}
       {(()=>{
         const cc={};
@@ -7761,9 +7871,10 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                         </div>
                       )}
                       {t.orderType==="party" && t.emailSentAt && !t.receiptFilePath && !t.mergedPdfPath && <Badge label="📧 Awaiting Reply" color={C.blue} />}
-                      {t.receiptFilePath && !t.mergedPdfPath && <Badge label="🔄 Receipt uploaded" color={C.teal} />}
-                      {t.sealedInvoicePath && !t.mergedPdfPath && <Badge label="🏷️ Sealed uploaded" color={C.orange} />}
+                      {t.receiptFilePath && !t.mergedPdfPath && !t.confirmPdfPath && <Badge label="🔄 Receipt uploaded" color={C.teal} />}
+                      {t.sealedInvoicePath && !t.mergedPdfPath && <Badge label="🏷️ Sealed Invoice Uploaded" color={C.orange} />}
                       {t.mergedPdfPath && <Badge label="✅ Merged PDF ready" color={C.green} />}
+                      {t.confirmPdfPath && !t.mergedPdfPath && <Badge label="✅ Confirmation Received" color={C.green} />}
                       {t.emailSentAt && t.batchId && !t.mergedPdfPath && (
                         <button onClick={()=>setBatchReceiptSheet(t.batchId)}
                           style={{background:C.green+"22",color:C.green,border:"1px solid "+C.green+"44",borderRadius:20,
@@ -9430,8 +9541,9 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
             {l:"(−) Diesel (estimate)",       v:fmt(liveDieselEst),                      c:C.orange},
             {l:"(−) Shortage Recovery",       v:fmt(+f.shortageRecovery||0),            c:(+f.shortageRecovery||0)>0?C.red:C.muted},
             {l:"(−) Loan Recovery",           v:fmt(+f.loanRecovery||0),               c:(+f.loanRecovery||0)>0?C.red:C.muted},
+            ...(+f.pouchBalance>0?[{l:"(−) Return Pouch Deduction",v:fmt(+f.pouchBalance||0),c:C.teal}]:[]),
             {l:marginOk?"My Margin ✓":"⚠ Margin", v:`${fmt(margin)} (₹${perMTMargin.toFixed(0)}/MT)`, c:marginOk?C.green:C.red},
-            {l:"Est. Net to Driver",          v:fmt(net-(+f.shortageRecovery||0)-(+f.loanRecovery||0)),  c:(net-(+f.shortageRecovery||0)-(+f.loanRecovery||0))>=0?C.green:C.red},
+            {l:"Est. Net to Driver",          v:fmt(net-(+f.shortageRecovery||0)-(+f.loanRecovery||0)-(+f.pouchBalance||0)),  c:(net-(+f.shortageRecovery||0)-(+f.loanRecovery||0)-(+f.pouchBalance||0))>=0?C.green:C.red},
           ].map(x => (
             <div key={x.l} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:`1px solid ${C.border}22`}}>
               <span style={{color:C.muted,fontSize:13}}>{x.l}</span>
@@ -9825,6 +9937,7 @@ function Settlement({trips, setTrips, vehicles, setVehicles, settlements, setSet
                 {l:`(−) Diesel ${usingConfirmed?"(confirmed indents)":"(estimate)"}`,      v:calc.diesel,  c:C.orange, s:"−"},
                 {l:"(−) Shortage Recovery (Shree deduction)",   v:calc.shortageRecovery,   c:calc.shortageRecovery>0?C.red:C.muted, s:"−"},
                 {l:"(−) Loan Recovery (trip deduction)",        v:calc.loanRecovery,       c:calc.loanRecovery>0?C.red:C.muted, s:"−"},
+                ...(calc.pouchBalance>0?[{l:"(−) Return Pouch Deduction",v:calc.pouchBalance,c:C.teal,s:"−"}]:[]),
               ].map(r => (
                 <div key={r.l} style={{display:"flex",justifyContent:"space-between",padding:"9px 0",borderBottom:`1px solid ${C.border}`}}>
                   <span style={{color:C.muted,fontSize:13}}>{r.l}</span>
@@ -9894,6 +10007,8 @@ function Settlement({trips, setTrips, vehicles, setVehicles, settlements, setSet
 // ─── TAFAL MODULE ─────────────────────────────────────────────────────────────
 function TafalMod({trips, vehicles, setVehicles, employees, settings, setSettings, cashTransfers=[], user, dieselRequests=[]}) {
   const [month, setMonth] = useState(today().slice(0,7));
+  const [filterEmpId, setFilterEmpId] = useState("");
+  const [collapsedTrips, setCollapsedTrips] = useState(false);
   const tafalRate = settings?.tafalPerTrip || 300;
 
   const monthTrips  = trips.filter(t => t.date.startsWith(month) && t.tafal>0);
@@ -9903,7 +10018,36 @@ function TafalMod({trips, vehicles, setVehicles, employees, settings, setSetting
   const activeEmps  = employees.length || 1;
   const perEmployee = activeEmps>0 ? remaining/activeEmps : 0;
 
-  // Indent book range — local state so saves only on button press
+  // Per-employee tafal + tonnage aggregation
+  const empStats = employees.map(e => {
+    const linkedTrucks = (e.linkedTrucks||[]).map(t=>t.toUpperCase());
+    const empTrips = monthTrips.filter(t =>
+      (t.assignedEmpId && t.assignedEmpId===e.id) ||
+      (t.cashEmpId && t.cashEmpId===e.id) ||
+      (linkedTrucks.length>0 && linkedTrucks.includes((t.truckNo||"").toUpperCase()))
+    );
+    return {
+      ...e,
+      tafal: empTrips.reduce((s,t)=>s+(t.tafal||0),0),
+      tonnage: empTrips.reduce((s,t)=>s+(t.qty||0),0),
+      tripCount: empTrips.length,
+    };
+  });
+
+  // Filtered trip list (by employee, via linked trucks)
+  const filteredTrips = filterEmpId
+    ? (() => {
+        const emp = employees.find(e=>e.id===filterEmpId);
+        const trucks = (emp?.linkedTrucks||[]).map(t=>t.toUpperCase());
+        return monthTrips.filter(t =>
+          (t.assignedEmpId && t.assignedEmpId===filterEmpId) ||
+          (t.cashEmpId && t.cashEmpId===filterEmpId) ||
+          (trucks.length>0 && trucks.includes((t.truckNo||"").toUpperCase()))
+        );
+      })()
+    : monthTrips;
+
+  // Indent book range
   const usedNosSet = new Set((dieselRequests||[]).map(r=>r.indentNo).filter(Boolean));
 
   return (
@@ -9926,8 +10070,6 @@ function TafalMod({trips, vehicles, setVehicles, employees, settings, setSetting
         </div>
       </div>
 
-
-
       <Field label="Select Month" value={month} onChange={setMonth} type="month" />
 
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
@@ -9942,21 +10084,85 @@ function TafalMod({trips, vehicles, setVehicles, employees, settings, setSetting
         </div>
       )}
 
-      {/* Trip breakdown */}
-      <div>
-        <div style={{color:C.muted,fontSize:12,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>TAFAL Collected — {month}</div>
-        {monthTrips.length===0
-          ? <div style={{textAlign:"center",color:C.muted,padding:24}}>No TAFAL collected this month</div>
-          : monthTrips.map(t => (
-            <div key={t.id} style={{background:C.card,borderRadius:12,padding:"10px 14px",marginBottom:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <div>
-                <div style={{fontWeight:700}}>{t.truckNo}</div>
-                <div style={{color:C.blue,fontSize:12}}>LR: {t.lrNo||"—"} · {t.date}</div>
+      {/* Employee filter + per-employee stats */}
+      <div style={{background:C.card,borderRadius:12,padding:"14px 16px"}}>
+        <div style={{color:C.muted,fontSize:12,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Filter by Employee</div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:10}}>
+          <button onClick={()=>setFilterEmpId("")}
+            style={{padding:"5px 12px",borderRadius:20,border:`1.5px solid ${!filterEmpId?C.purple:C.border}`,
+              background:!filterEmpId?C.purple+"22":"transparent",color:!filterEmpId?C.purple:C.muted,
+              fontSize:12,fontWeight:700,cursor:"pointer"}}>All</button>
+          {employees.map(e=>(
+            <button key={e.id} onClick={()=>setFilterEmpId(filterEmpId===e.id?"":e.id)}
+              style={{padding:"5px 12px",borderRadius:20,border:`1.5px solid ${filterEmpId===e.id?C.purple:C.border}`,
+                background:filterEmpId===e.id?C.purple+"22":"transparent",color:filterEmpId===e.id?C.purple:C.muted,
+                fontSize:12,fontWeight:700,cursor:"pointer"}}>{e.name}</button>
+          ))}
+        </div>
+        {filterEmpId && (()=>{
+          const st = empStats.find(e=>e.id===filterEmpId);
+          if(!st) return null;
+          return (
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+              <div style={{background:C.bg,borderRadius:8,padding:10,textAlign:"center"}}>
+                <div style={{color:C.purple,fontWeight:800,fontSize:15}}>{fmt(st.tafal)}</div>
+                <div style={{color:C.muted,fontSize:10,marginTop:2}}>TAFAL</div>
               </div>
-              <div style={{color:C.purple,fontWeight:800}}>{fmt(t.tafal)}</div>
+              <div style={{background:C.bg,borderRadius:8,padding:10,textAlign:"center"}}>
+                <div style={{color:C.teal,fontWeight:800,fontSize:15}}>{st.tonnage} MT</div>
+                <div style={{color:C.muted,fontSize:10,marginTop:2}}>TONNAGE</div>
+              </div>
+              <div style={{background:C.bg,borderRadius:8,padding:10,textAlign:"center"}}>
+                <div style={{color:C.blue,fontWeight:800,fontSize:15}}>{st.tripCount}</div>
+                <div style={{color:C.muted,fontSize:10,marginTop:2}}>TRIPS</div>
+              </div>
             </div>
-          ))
-        }
+          );
+        })()}
+      </div>
+
+      {/* Per-employee summary table (shown when no specific filter) */}
+      {!filterEmpId && employees.length>0 && (
+        <div style={{background:C.card,borderRadius:12,padding:"14px 16px"}}>
+          <div style={{color:C.muted,fontSize:12,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Employee Summary — {month}</div>
+          {empStats.map(e=>(
+            <div key={e.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:`1px solid ${C.border}22`}}>
+              <div>
+                <div style={{fontWeight:700}}>{e.name}</div>
+                <div style={{color:C.muted,fontSize:11}}>{e.tripCount} trips · {e.tonnage} MT</div>
+              </div>
+              <div style={{textAlign:"right"}}>
+                <div style={{color:C.purple,fontWeight:800}}>{fmt(e.tafal)}</div>
+                <div style={{color:C.green,fontSize:11}}>≈ {fmt(perEmployee)} share</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Collapsible trip breakdown */}
+      <div>
+        <button onClick={()=>setCollapsedTrips(p=>!p)}
+          style={{display:"flex",justifyContent:"space-between",alignItems:"center",width:"100%",
+            background:C.card,borderRadius:12,padding:"12px 14px",border:"none",cursor:"pointer",marginBottom:collapsedTrips?0:8}}>
+          <div style={{color:C.muted,fontSize:12,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>
+            TAFAL Collected — {month}{filterEmpId?" (filtered)":""} ({filteredTrips.length} trips)
+          </div>
+          <span style={{color:C.purple,fontSize:16,fontWeight:700}}>{collapsedTrips?"▼":"▲"}</span>
+        </button>
+        {!collapsedTrips && (
+          filteredTrips.length===0
+            ? <div style={{textAlign:"center",color:C.muted,padding:24}}>No TAFAL collected{filterEmpId?" for this employee":""} this month</div>
+            : filteredTrips.map(t => (
+              <div key={t.id} style={{background:C.card,borderRadius:12,padding:"10px 14px",marginBottom:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div>
+                  <div style={{fontWeight:700}}>{t.truckNo}</div>
+                  <div style={{color:C.blue,fontSize:12}}>LR: {t.lrNo||"—"} · {t.date} · {t.qty||0}MT</div>
+                </div>
+                <div style={{color:C.purple,fontWeight:800}}>{fmt(t.tafal)}</div>
+              </div>
+            ))
+        )}
       </div>
 
       {/* Distribution table */}
@@ -10005,7 +10211,6 @@ function TafalMod({trips, vehicles, setVehicles, employees, settings, setSetting
   );
 }
 
-// ─── PUMP ROW (extracted to allow useState) ───────────────────────────────────
 function PumpRow({p, paid, onPayAll}) {
   const [showRef, setShowRef] = useState(false);
   const [ref, setRef] = useState("");
@@ -15778,20 +15983,22 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                             ? `Delete ₹${fmt(tx.amount)} recovery?\nLinked LR: ${tx.lrNo} — trip loanRecovery will be reduced.`
                             : `Delete ₹${fmt(tx.amount)} recovery?\nOwner loan balance will increase by ₹${fmt(tx.amount)}.`;
                           if(!window.confirm(warn)) return;
-                          setVehicles(p=>p.map(x=>x.id===tx._vehicleId?{...x,
-                            loanRecovered:Math.max(0,(x.loanRecovered||0)-tx.amount),
-                            loanTxns:(x.loanTxns||[]).filter(t=>t.id!==tx.id)}:x));
+                          const _updVehLR = vehicles.find(x=>x.id===tx._vehicleId);
+                          const _newVehLR = _updVehLR ? {..._updVehLR,
+                            loanRecovered:Math.max(0,(_updVehLR.loanRecovered||0)-tx.amount),
+                            loanTxns:(_updVehLR.loanTxns||[]).filter(t=>t.id!==tx.id)} : null;
+                          if(_newVehLR){setVehicles(p=>p.map(x=>x.id===tx._vehicleId?_newVehLR:x));DB.saveVehicle(_newVehLR).catch(()=>{});}
                           if(linkedTrip){
-                            setTrips(p=>p.map(t=>t.id!==linkedTrip.id?t:
-                              {...t,loanRecovery:Math.max(0,(t.loanRecovery||0)-tx.amount)}));
+                            const _updTripLR={...linkedTrip,loanRecovery:Math.max(0,(linkedTrip.loanRecovery||0)-tx.amount)};
+                            setTrips(p=>p.map(t=>t.id!==linkedTrip.id?t:_updTripLR));
+                            DB.saveTrip(_updTripLR).catch(()=>{});
                           }
                         } else {
                           if(!window.confirm(`Delete ₹${fmt(tx.amount)} loan entry?\nOwner loan total will decrease by ₹${fmt(tx.amount)}.`)) return;
-                          setVehicles(p=>p.map(x=>x.id===tx._vehicleId?{...x,
-                            loan:Math.max(0,(x.loan||0)-tx.amount),
-                            loanTxns:(x.loanTxns||[]).filter(t=>t.id!==tx.id)}:x));
-                        }
-                      }} style={{background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:16}}>🗑</button>}
+                          const _updVehL = vehicles.find(x=>x.id===tx._vehicleId);
+                          const _newVehL = _updVehL ? {..._updVehL,loan:Math.max(0,(_updVehL.loan||0)-tx.amount),loanTxns:(_updVehL.loanTxns||[]).filter(t=>t.id!==tx.id)} : null;
+                          if(_newVehL){setVehicles(p=>p.map(x=>x.id===tx._vehicleId?_newVehL:x));DB.saveVehicle(_newVehL).catch(()=>{});}
+                        }}} style={{background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:16}}>🗑</button>}
                     </div>
                   ))}
                 </>
@@ -16994,36 +17201,38 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
 
               {/* Record new transfer */}
               <div style={{background:C.card,borderRadius:10,padding:"12px 14px"}}>
-                <div style={{color:C.green,fontWeight:700,fontSize:12,marginBottom:10}}>➕ Record Cash Transfer to {e.name}</div>
+                <div style={{color:txType==="expense"?C.red:C.green,fontWeight:700,fontSize:12,marginBottom:10}}>{txType==="expense"?"💸 Record Expense for "+e.name:"➕ Record Cash Transfer to "+e.name}</div>
                 <div style={{display:"flex",gap:8,marginBottom:8}}>
                   <Field label="Amount ₹" value={txAmt} onChange={setTxAmt} type="number" half />
                   <Field label="Date"     value={txDate} onChange={setTxDate} type="date" half />
                 </div>
                 <div style={{display:"flex",gap:8,marginBottom:8}}>
-                  <Field label="Note (optional)" value={txNote} onChange={setTxNote} placeholder="UPI / NEFT / Cash" />
+                  <Field label={txType==="expense"?"Description (e.g. BSNL Recharge)":"Note (optional)"} value={txNote} onChange={setTxNote} placeholder={txType==="expense"?"BSNL Recharge, Medical, etc.":"UPI / NEFT / Cash"} />
                   <div style={{flex:1}}>
                     <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>TYPE</div>
                     <select value={txType||"transfer"} onChange={e=>setTxType(e.target.value)}
                       style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,color:C.text,padding:"9px 8px",fontSize:13,outline:"none"}}>
-                      <option value="transfer">Cash Transfer</option>
+                      <option value="transfer">Cash Transfer (credit)</option>
                       <option value="tafal">TAFAL Payment</option>
+                      <option value="expense">💸 Expense (debit from wallet)</option>
                     </select>
                   </div>
                 </div>
                 <div style={{marginTop:10}}>
                   <Btn onClick={()=>{
                     if(!txAmt||+txAmt<=0){alert("Enter transfer amount.\nವರ್ಗಾವಣೆ ಮೊತ್ತ ನಮೂದಿಸಿ.");return;}
-                    const tx={id:uid(),empId:wSheet,amount:+txAmt,date:txDate,lrNo:"",
+
+                    const _isExpense = txType==="expense";
+                    const _amt = _isExpense ? -(+txAmt) : +txAmt;
+                    const tx={id:uid(),empId:wSheet,amount:_amt,date:txDate,lrNo:"",
                       type:txType||"transfer",
-                      note:(txNote.trim()||(txType==="tafal"?"TAFAL Payment":"")),
+                      note:(txNote.trim()||(_isExpense?"Expense":txType==="tafal"?"TAFAL Payment":"")),
                       createdBy:user.username,createdAt:nowTs()};
                     setCashTransfers(prev=>[tx,...(Array.isArray(prev)?prev:[])]);
-                    log(txType==="tafal"?"TAFAL PAYMENT":"CASH TRANSFER",`${e.name} ₹${fmt(+txAmt)}`);
+                    log(_isExpense?"WALLET EXPENSE":txType==="tafal"?"TAFAL PAYMENT":"CASH TRANSFER",`${e.name} ₹${fmt(+txAmt)}`);
                     setTxAmt("");setTxNote("");setTxDate(today());setTxType("transfer");
-                  }} full color={C.green}>Save Transfer</Btn>
+                  }} full color={txType==="expense"?C.red:C.green}>{txType==="expense"?"💸 Record Expense":"Save Transfer"}</Btn>
                 </div>
-              </div>
-
               {/* Date filter + PDF */}
               <div style={{background:C.card,borderRadius:10,padding:"12px 14px"}}>
                 <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>📅 Filter & Export</div>
@@ -17053,17 +17262,18 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                     return (
                       <div key={tx.id} style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",
                         padding:"10px 0",borderBottom:"1px solid "+C.border+"55",
-                        ...(tx.type==="excess_diesel"?{background:"#fef2f2",margin:"0 -10px",padding:"10px",borderRadius:6}:{})}}>
+                        ...(tx.type==="excess_diesel"?{background:"#fef2f2",margin:"0 -10px",padding:"10px",borderRadius:6}:tx.type==="expense"?{background:"#fff7ed",margin:"0 -10px",padding:"10px",borderRadius:6}:{})}}>
                         <div style={{flex:1}}>
                           {tx.type==="excess_diesel" && <div style={{fontSize:9,fontWeight:800,color:"#dc2626",
                             background:"#fecaca",borderRadius:4,padding:"2px 6px",display:"inline-block",marginBottom:3,
                             textTransform:"uppercase",letterSpacing:1}}>⛽ Excess Diesel</div>}
+                          {tx.type==="expense" && <div style={{fontSize:9,fontWeight:800,color:C.orange,background:C.orange+"22",borderRadius:4,padding:"2px 6px",display:"inline-block",marginBottom:3,textTransform:"uppercase",letterSpacing:1}}>💸 Expense</div>}
                           <div style={{color:C.text,fontSize:13,fontWeight:600}}>{tx.note||"Transfer"}</div>
                           <div style={{color:C.muted,fontSize:11}}>{tx.date||"—"}{tx.lrNo?" · LR "+tx.lrNo:""} · by {tx.createdBy}</div>
                         </div>
                         <div style={{display:"flex",alignItems:"center",gap:8}}>
-                          <div style={{color:tx.type==="excess_diesel"?C.red:(isCredit?C.green:C.red),fontWeight:800,fontSize:14,minWidth:80,textAlign:"right"}}>
-                            {tx.type==="excess_diesel"?"⛽ +":(isCredit?"+":"-")}{fmt(Math.abs(amt))}
+                          <div style={{color:tx.type==="excess_diesel"?C.red:tx.type==="expense"?C.orange:(isCredit?C.green:C.red),fontWeight:800,fontSize:14,minWidth:80,textAlign:"right"}}>
+                            {tx.type==="excess_diesel"?"⛽ +":tx.type==="expense"?"💸 -":(isCredit?"+":"-")}{fmt(Math.abs(amt))}
                           </div>
                           {isOwner && (
                             <button onClick={()=>deleteTx(tx.id)}
@@ -17078,6 +17288,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                 <div style={{textAlign:"center",color:C.muted,padding:"20px 0",fontSize:13}}>No transactions in this period</div>
               )}
             </div>
+          </div>
           </Sheet>
         );
       })()}
@@ -17143,7 +17354,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
             <div style={{background:"#f0fdf4",border:"1px solid #2ea04333",borderRadius:10,padding:"10px 12px",marginBottom:10}}>
               <div style={{color:C.green,fontWeight:700,fontSize:10,textTransform:"uppercase",letterSpacing:1,marginBottom:7}}>💵 Cash Wallet</div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
-                {[{l:"Transferred",v:fmt(totalTransferred(e.id)),c:C.green},{l:"Advances",v:fmt(totalAdvanceGiven(e.id)),c:C.red},{l:"Balance",v:fmt(walBal),c:walBal>=0?C.accent:C.red}].map(x=>(
+                {[{l:"Transferred",v:fmt(totalTransferred(e.id)),c:C.green},{l:"Adv/Expense",v:fmt(totalAdvanceGiven(e.id)),c:C.red},{l:"Balance",v:fmt(walBal),c:walBal>=0?C.accent:C.red}].map(x=>(
                   <div key={x.l} style={{background:C.bg,borderRadius:6,padding:"7px",textAlign:"center"}}>
                     <div style={{color:x.c,fontWeight:700,fontSize:11}}>{x.v}</div>
                     <div style={{color:C.muted,fontSize:9,textTransform:"uppercase"}}>{x.l}</div>
