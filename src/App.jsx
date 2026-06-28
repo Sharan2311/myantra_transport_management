@@ -6446,6 +6446,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
   const [orderTypeFilter, setOrderTypeFilter] = useState("All"); // "All"|"godown"|"party"
   const [search,      setSearch]      = useState("");
   const [clientFilter, setClientFilter] = useState(""); // "" = All clients
+  const [filterEmpTrip, setFilterEmpTrip] = useState(""); // "" = All employees
   const [diConflict,  setDiConflict]  = useState(null);
   const [wasScanned,  setWasScanned]  = useState(false);
   const [confirmDel,  setConfirmDel]  = useState(null);
@@ -6546,10 +6547,17 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     if((t.grade||"").toLowerCase().includes(q)) return true;
     return false;
   }) : dlist;
-  const shown  = filter==="All" ? slist
+  const elist  = filterEmpTrip
+    ? slist.filter(t =>
+        (t.assignedEmpId && t.assignedEmpId===filterEmpTrip) ||
+        (t.cashEmpId && t.cashEmpId===filterEmpTrip) ||
+        (() => { const emp=(employees||[]).find(e=>e.id===filterEmpTrip); const tr=(emp?.linkedTrucks||[]).map(x=>x.toUpperCase()); return tr.length>0&&tr.includes((t.truckNo||"").toUpperCase()); })()
+      )
+    : slist;
+  const shown  = filter==="All" ? elist
     : filter==="Confirmation Email Received"
-      ? slist.filter(t=>t.status==="Confirmation Email Received"&&t.orderType==="party")
-      : slist.filter(t => t.status===filter);
+      ? elist.filter(t=>t.status==="Confirmation Email Received"&&t.orderType==="party")
+      : elist.filter(t => t.status===filter);
 
   // When truck number changes, check if tafalExempt
   const onTruckChange = v => {
@@ -7480,6 +7488,30 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
               {o.icon} {o.label}
             </button>
           ))}
+        </div>
+      )}
+
+      {/* Employee filter — shows when employees exist */}
+      {(employees||[]).length>0 && (
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+          <span style={{color:C.muted,fontSize:11,fontWeight:700,flexShrink:0}}>Employee:</span>
+          <button onClick={()=>setFilterEmpTrip("")}
+            style={{padding:"4px 10px",borderRadius:16,fontSize:11,fontWeight:700,cursor:"pointer",
+              border:`1.5px solid ${!filterEmpTrip?C.teal:C.border}`,
+              background:!filterEmpTrip?C.teal+"22":"transparent",
+              color:!filterEmpTrip?C.teal:C.muted}}>All</button>
+          {(employees||[]).map(e=>(
+            <button key={e.id} onClick={()=>setFilterEmpTrip(filterEmpTrip===e.id?"":e.id)}
+              style={{padding:"4px 10px",borderRadius:16,fontSize:11,fontWeight:700,cursor:"pointer",
+                border:`1.5px solid ${filterEmpTrip===e.id?C.teal:C.border}`,
+                background:filterEmpTrip===e.id?C.teal+"22":"transparent",
+                color:filterEmpTrip===e.id?C.teal:C.muted,whiteSpace:"nowrap"}}>{e.name}</button>
+          ))}
+          {filterEmpTrip && (
+            <span style={{color:C.muted,fontSize:11}}>
+              {shown.length} trip{shown.length!==1?"s":""}
+            </span>
+          )}
         </div>
       )}
 
@@ -9989,7 +10021,11 @@ function TafalMod({trips, vehicles, setVehicles, employees, settings, setSetting
   // Per-employee tafal + tonnage aggregation
   const empStats = employees.map(e => {
     const linkedTrucks = (e.linkedTrucks||[]).map(t=>t.toUpperCase());
-    const empTrips = monthTrips.filter(t => linkedTrucks.length>0 ? linkedTrucks.includes((t.truckNo||"").toUpperCase()) : false);
+    const empTrips = monthTrips.filter(t =>
+      (t.assignedEmpId && t.assignedEmpId===e.id) ||
+      (t.cashEmpId && t.cashEmpId===e.id) ||
+      (linkedTrucks.length>0 && linkedTrucks.includes((t.truckNo||"").toUpperCase()))
+    );
     return {
       ...e,
       tafal: empTrips.reduce((s,t)=>s+(t.tafal||0),0),
@@ -10003,7 +10039,11 @@ function TafalMod({trips, vehicles, setVehicles, employees, settings, setSetting
     ? (() => {
         const emp = employees.find(e=>e.id===filterEmpId);
         const trucks = (emp?.linkedTrucks||[]).map(t=>t.toUpperCase());
-        return trucks.length>0 ? monthTrips.filter(t=>trucks.includes((t.truckNo||"").toUpperCase())) : monthTrips;
+        return monthTrips.filter(t =>
+          (t.assignedEmpId && t.assignedEmpId===filterEmpId) ||
+          (t.cashEmpId && t.cashEmpId===filterEmpId) ||
+          (trucks.length>0 && trucks.includes((t.truckNo||"").toUpperCase()))
+        );
       })()
     : monthTrips;
 
