@@ -13277,6 +13277,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                         +"<td>"+r.date+"</td>"
                         +"<td><b>#"+r.indentNo+"</b></td>"
                         +"<td>"+r.truckNo+"</td>"
+                        +"<td>"+(r.lrNo||"—")+"</td>"
                         +"<td>"+(pumpMap[r.pumpId]||"—")+"</td>"
                         +"<td style='text-align:right'>₹"+(r.dieselAmount||eff||0).toLocaleString("en-IN")+"</td>"
                         +"<td style='text-align:right'>₹"+(r.cashAmount||0).toLocaleString("en-IN")+"</td>"
@@ -13303,7 +13304,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                       +"<div class='kpi'><div class='label'>Diesel</div><div class='value'>₹"+totalDiesel.toLocaleString("en-IN")+"</div></div>"
                       +"<div class='kpi'><div class='label'>Cash</div><div class='value'>₹"+totalCash.toLocaleString("en-IN")+"</div></div>"
                       +"</div>"
-                      +"<table><thead><tr><th>Date</th><th>Indent</th><th>Truck</th><th>Pump</th><th>Diesel ₹</th><th>Cash ₹</th><th>Total ₹</th><th>Status</th><th>By</th></tr></thead>"
+                      +"<table><thead><tr><th>Date</th><th>Indent</th><th>Truck</th><th>LR</th><th>Pump</th><th>Diesel ₹</th><th>Cash ₹</th><th>Total ₹</th><th>Status</th><th>By</th></tr></thead>"
                       +"<tbody>"+rows+"</tbody></table>"
                       +`<div style='margin-top:16px;font-size:9px;color:#999;border-top:1px solid #ddd;padding-top:6px'>${RC.companyName} · PAN: ${RC.pan} · GSTN: 29${RC.pan}1ZR</div>`
                       +"</body></html>";
