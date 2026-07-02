@@ -46,6 +46,7 @@ const tripFromDB = r => ({
   partyName: r.party_name || '',
   pouchBalance: +(r.pouch_balance || 0),
   grParticulars: r.gr_particulars || null,
+  transporterName: r.transporter_name || '',
 })
 const tripToDB = t => ({
   id: t.id, type: t.type, lr_no: t.lrNo, di_no: t.diNo, truck_no: t.truckNo,
@@ -92,6 +93,7 @@ const tripToDB = t => ({
   party_name: t.partyName || '',
   pouch_balance: t.pouchBalance || 0,
   gr_particulars: t.grParticulars || null,
+  transporter_name: t.transporterName || '',
 })
 
 const vehicleFromDB = r => ({
@@ -272,11 +274,13 @@ const userFromDB = r => ({
   id: r.id, name: r.name, username: r.username, pin: r.pin,
   role: r.role, active: r.active, createdAt: r.created_at,
   assignedClients: r.assigned_clients || [],
+  assignedEmployeeId: r.assigned_employee_id || '',
 })
 const userToDB = u => ({
   id: u.id, name: u.name, username: u.username, pin: u.pin,
   role: u.role, active: u.active, created_at: u.createdAt,
   assigned_clients: u.assignedClients || [],
+  assigned_employee_id: u.assignedEmployeeId || '',
 })
 
 const pumpPaymentFromDB = r => ({

@@ -12,16 +12,17 @@ FIELDS TO EXTRACT — find each label and copy the value next to it verbatim:
 3. Truck/Vehicle registration number → uppercase no spaces (e.g. KA28AA4790)
 4. Consignee name → full name as printed
 5. Consignor / Plant name → e.g. "Shree Cement Limited KODLA" or "KARNATAKA CEMENT PROJECT"
-6. Loading point / From → city/location where cement is loaded
-7. Destination / To → city/location where cement is delivered
-8. Material grade → use exactly "Cement Packed" or "Cement Bulk" — look for "PACKED" or "BULK" near the material description
-9. Destination district → district name from consignee address
-10. Destination state → state name from consignee address or pincode
+6. Transporter / Carrier Name → the transport company named as carrier on the document (look for "Transporter Name", "Transporter", or "Carrier Name") — this is NOT the consignor (cement plant) and NOT the consignee (buyer)
+7. Loading point / From → city/location where cement is loaded
+8. Destination / To → city/location where cement is delivered
+9. Material grade → use exactly "Cement Packed" or "Cement Bulk" — look for "PACKED" or "BULK" near the material description
+10. Destination district → district name from consignee address
+11. Destination state → state name from consignee address or pincode
     (pincode clues: 585xxx=Karnataka, 5xxxxx starting 50/51=Telangana, 4xxxxx=Maharashtra)
-11. Quantity in MT → number only from "Qty" or "Quantity" or "Net Wt" column (e.g. 36.00)
-12. Number of bags → number only, 0 if not shown
-13. Freight rate per MT → number from "Rate PMT" or "Rate/MT" column — THIS document's rate only, do not reuse from memory
-14. Date → in YYYY-MM-DD format
+12. Quantity in MT → number only from "Qty" or "Quantity" or "Net Wt" column (e.g. 36.00)
+13. Number of bags → number only, 0 if not shown
+14. Freight rate per MT → number from "Rate PMT" or "Rate/MT" column — THIS document's rate only, do not reuse from memory
+15. Date → in YYYY-MM-DD format
 
 STRICT RULES:
 - diNo: must be exactly 10 digits. Count the digits — if wrapped across lines in the PDF, join them.
@@ -45,6 +46,7 @@ Return ONLY this JSON, no markdown, no explanation:
   "truckNo": "<uppercase no spaces or null>",
   "consignee": "<full name or null>",
   "consignor": "<plant name or null>",
+  "transporterName": "<transporter/carrier company name or null>",
   "from": "<loading location or null>",
   "to": "<destination or null>",
   "grade": "<'Cement Packed' or 'Cement Bulk' or null>",
@@ -84,7 +86,7 @@ exports.handler = async (event) => {
 
   try {
     const body_parsed = JSON.parse(event.body);
-    const { base64, mediaType, promptType, expectedDI } = body_parsed;
+    const { base64, mediaType, promptType, expectedDI, expectedTransporter } = body_parsed;
     const apiKey = body_parsed.anthropicKey || process.env.ANTHROPIC_API_KEY;
     if (!apiKey) {
       return { statusCode: 500, body: JSON.stringify({ error: "ANTHROPIC_API_KEY not set" }) };
@@ -180,6 +182,20 @@ exports.handler = async (event) => {
       // Normalise truckNo
       if (parsed.truckNo) {
         parsed.truckNo = String(parsed.truckNo).replace(/\s+/g, "").toUpperCase();
+      }
+
+      // Flag transporter mismatch — caller passes expectedTransporter (own company name)
+      // to validate the DI/GR actually belongs to this transporter, not someone else's
+      if (expectedTransporter && parsed.transporterName) {
+        const norm = s => String(s||"").toLowerCase().replace(/[^a-z0-9]/g, "");
+        const scanned = norm(parsed.transporterName);
+        const expected = norm(expectedTransporter);
+        // Substring match either direction — handles "M Yantra Enterprises" vs "M YANTRA ENT."
+        const matches = scanned && expected && (scanned.includes(expected) || expected.includes(scanned));
+        if (!matches) {
+          parsed._transporterMismatch = true;
+          parsed._transporterMismatchMsg = `Document shows transporter "${parsed.transporterName}", expected "${expectedTransporter}"`;
+        }
       }
 
       // Check we got at least diNo or grNo — otherwise likely wrong document
