@@ -44,6 +44,28 @@ const today = () => new Date().toISOString().split("T")[0];
 const nowTs = () => new Date().toLocaleString("en-IN",{dateStyle:"short",timeStyle:"short"});
 const uid   = () => Math.random().toString(36).slice(2,9).toUpperCase();
 
+// Sentinel value for "advance given, but deliberately no wallet linked" — distinct
+// from "" (nothing selected yet, which is invalid/required). hasWalletEmp() treats
+// only a real employee id as usable for wallet debits; resolveWalletEmpId() falls
+// back to assignedEmpId only when cashEmpId is blank or the explicit "none" choice.
+const hasWalletEmp = id => !!id && id !== "__none__";
+const resolveWalletEmpId = (cashEmpId, fallbackEmpId) => hasWalletEmp(cashEmpId) ? cashEmpId : (fallbackEmpId||"");
+
+// ─── TRANSPORTER MISMATCH GUARD ───────────────────────────────────────────────
+// Compares a "transporterName" extracted from a scanned DI/GR document against
+// this company's own name (RC.companyName / RC.companyShort). Used to block
+// uploading DI/GR documents that actually belong to a different transporter.
+const normTransporter = s => String(s||"").toLowerCase().replace(/[^a-z0-9]/g,"");
+const isOwnTransporter = (scannedName) => {
+  const scanned = normTransporter(scannedName);
+  if(!scanned) return true; // nothing extracted — can't tell, don't block
+  const ownFull  = normTransporter(RC.companyName);
+  const ownShort = normTransporter(RC.companyShort);
+  if(!ownFull && !ownShort) return true; // no company name configured to compare
+  return (ownFull  && (scanned.includes(ownFull)  || ownFull.includes(scanned)))
+      || (ownShort && (scanned.includes(ownShort) || ownShort.includes(scanned)));
+};
+
 // ─── FINANCIAL YEAR HELPERS ───────────────────────────────────────────────────
 // Indian FY: April 1 → March 31. FY2025 = Apr 2024–Mar 2025, FY2026 = Apr 2025–Mar 2026
 const getFY = (dateStr) => {
@@ -139,6 +161,7 @@ const ROLES = {
   party_manager: {label:"Party Bill Manager",  color:"#7c3aed", perms:["party_portal"]},
   email_followup:{label:"Email Followup",      color:"#0369a1", perms:["party_portal"]},
   viewer:        {label:"Viewer",              color:C.muted,   perms:["reports"]},
+  employee_self: {label:"Employee (Self Wallet)",color:"#0d9488", perms:["employees_view"], selfWalletOnly:true},
 };
 const can = (user, p) => {
   if(!user) return false;
@@ -149,6 +172,7 @@ const can = (user, p) => {
   // diesel_view grants access to diesel tab (read-only); driverPay_view grants driverPay tab (read-only)
   if(p==="diesel"    && perms.includes("diesel_view"))    return true;
   if(p==="driverPay" && perms.includes("driverPay_view")) return true;
+  if(p==="employees" && perms.includes("employees_view")) return true;
   return false;
 };
 const canEdit = (user, p) => {
@@ -643,9 +667,12 @@ function BottomNav({tab, setTab, user, trips, driverPays, vehicles, dieselReques
   const roles = (user?.role||"").split(",").map(r=>r.trim());
   const isFleet = roles.includes("fleet_manager") || roles.includes("cement_fleet_mgr");
   const isPump  = roles.includes("pump_operator");
+  const isEmployeeSelf = roles.includes("employee_self");
   const isPartyOnly = roles.every(r=>["party_manager","email_followup"].includes(r));
   const hasPartyRole = roles.some(r=>["party_manager","email_followup"].includes(r));
-  const items = isPump ? [
+  const items = isEmployeeSelf ? [
+    {id:"employees", icon:"💵", label:"My Wallet", perm:"employees"},
+  ] : isPump ? [
     {id:"pump_portal", icon:"⛽", label:"Indents", perm:"pump_portal"},
   ] : isPartyOnly ? [
     {id:"party_portal", icon:"📋", label:"Party", perm:"party_portal"},
@@ -1733,6 +1760,7 @@ function AppMain() {
       try { sessionStorage.setItem("mye_user", JSON.stringify(u)); } catch{}
       setUser(u);
       if(u.role==="pump_operator") setTab("pump_portal");
+      if(u.role==="employee_self") setTab("employees");
       if((u.role||"").split(",").every(r=>["party_manager","email_followup"].includes(r.trim()))) setTab("party_portal");
       log("LOGIN",`${u.name} signed in`);
     }} />;
@@ -1829,7 +1857,7 @@ function AppMain() {
 
       <div style={{padding:"14px 16px 8px"}}>
         <ErrorBoundary>
-        {tab==="dashboard"  && user?.role!=="pump_operator" && !isParty && <Dashboard {...sp} setTab={setTab} />}
+        {tab==="dashboard"  && user?.role!=="pump_operator" && user?.role!=="employee_self" && !isParty && <Dashboard {...sp} setTab={setTab} />}
         {tab==="trips"      && can(user,"trips")      && <Trips      {...sp} tripType="outbound" />}
         {tab==="inbound"    && can(user,"inbound")    && <Trips      {...sp} tripType="inbound" />}
         {tab==="billing"    && can(user,"billing")    && <Billing    {...sp} />}
@@ -1849,7 +1877,7 @@ function AppMain() {
         {tab==="my_billing" && can(user,"reports")    && <MyBilling />}
         {tab==="daily_ops"  && can(user,"reports")    && <DailyOps {...sp} />}
         {tab==="feature_admin" && can(user,"admin") && <FeatureAdmin settings={settings} setSettings={dbSetSettings} />}
-        {tab==="admin"      && can(user,"admin")      && <UserAdmin  users={users} setUsers={dbSetUsers} user={user} log={log} pumps={pumps||[]} />}
+        {tab==="admin"      && can(user,"admin")      && <UserAdmin  users={users} setUsers={dbSetUsers} user={user} log={log} pumps={pumps||[]} employees={employees||[]} />}
         {tab==="more"       && <MoreMenu user={user} setTab={setTab} trips={roleTrips} driverPays={driverPays} vehicles={vehicles} />}
         </ErrorBoundary>
       </div>
@@ -2611,6 +2639,7 @@ Extract ALL the following fields. Return ONLY a JSON object, no markdown.
   "consignee": "FULL consignee name + complete address as printed — include ALL lines",
   "consigneePhone": "Phone number from consignee section — 10 digits or empty string",
   "consignor": "Consignor/plant name",
+  "transporterName": "Transporter / Carrier / Transporter Name field on the document — the trucking/transport company named as carrier, NOT the consignor (cement plant) or consignee (buyer). Empty string if not shown.",
   "from": "Loading location / city",
   "to": "Destination city or town",
   "grade": "'Cement Packed' or 'Cement Bulk'",
@@ -2662,11 +2691,19 @@ Rules:
           mediaType: isImage ? file.type : "application/pdf",
           promptType: "di",
           expectedDI: (expectedDI||"").replace(/\D/g,"") || undefined,
+          expectedTransporter: RC.companyName,
         }),
       });
       const data = await resp.json();
       if(!resp.ok || data.error) {
         updateItem(itemId, fileType+"DiCheck", {status:"warn", msg:"Could not verify DI — " + (data.error||"scan failed")});
+        return;
+      }
+      if(data._transporterMismatch) {
+        updateItem(itemId, fileType+"DiCheck", {
+          status: "error",
+          msg: data._transporterMismatchMsg || "This file belongs to a different transporter",
+        });
         return;
       }
       const extractedDI = (data.diNo||"").replace(/\D/g,"");
@@ -2721,6 +2758,12 @@ Rules:
       const data = await resp.json();
       if(!resp.ok||data.error) throw new Error(data.error||`Server returned ${resp.status}`);
       const extracted = JSON.parse(data.text.replace(/```json|```/g,"").trim());
+
+      // Block documents that belong to a different transporter than us
+      if(extracted.transporterName && !isOwnTransporter(extracted.transporterName)) {
+        throw new Error(`This document is for transporter "${extracted.transporterName}", not ${RC.companyName}. Upload rejected — please check you selected the right file.`);
+      }
+
       const client = detectClient(extracted);
 
       // ── Auto-detect orderType: godown vs party ────────────────────────────
@@ -3024,6 +3067,8 @@ Rules:
     const readyVeh = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
     if((!readyVeh || !(readyVeh.ownerName||"").trim()) && !(g.ownerName||"").trim()) return false;
     if(!manualDiesel && +g.diesel > 0 && !g.dieselIndentNo.trim()) return false;
+    // Advance given — must explicitly pick an employee wallet or explicit "None"
+    if(+g.advance > 0 && !g.cashEmpId) return false;
     // Note: open (unconfirmed) requests are allowed with a warning — not blocked
     // Employee assignment is mandatory
     if(!g.assignedEmpId) return false;
@@ -3067,6 +3112,12 @@ Rules:
           alert(`Truck ${g.truckNo} · DI ${item.extracted?.diNo||"?"}: Margin ₹${margin}/MT is below ₹30 minimum.`);
           return;
         }
+      }
+
+      // Advance given — must explicitly pick an employee wallet, or explicit "None"
+      if(+g.advance > 0 && !g.cashEmpId) {
+        alert(`Truck ${g.truckNo}: An advance is entered — please select which employee's wallet it comes from (or choose "None" if it shouldn't deduct from any wallet).`);
+        return;
       }
 
       // Owner name mandatory for new/unknown vehicles
@@ -3132,7 +3183,7 @@ Rules:
                  - (+g.shortageRecovery||0) - (+g.loanRecovery||0);
       if(_net < 0) {
         const dieselAmt = +g.diesel||0;
-        const empId = g.cashEmpId || g.assignedEmpId;
+        const empId = resolveWalletEmpId(g.cashEmpId, g.assignedEmpId);
         const empName = empId ? (employees.find(e=>e.id===empId)?.name||"assigned employee") : null;
         if(dieselAmt > 0 && empName) {
           const excess = Math.abs(_net);
@@ -3274,6 +3325,7 @@ Rules:
             return _pVeh2?.pouchExempt ? 0 : (item.pouchBalance||700);
           })(),
           grParticulars: item.extracted?._grParticulars || null,
+          transporterName: ex.transporterName || "",
           createdBy:user.username, createdAt:nowTs(),
         };
         // Atomic DB save — checks for duplicate DI before inserting
@@ -3380,7 +3432,7 @@ Rules:
           }
         }
         // Wallet advance
-        if(trip.cashEmpId && trip.advance>0 && setCashTransfers) {
+        if(hasWalletEmp(trip.cashEmpId) && trip.advance>0 && setCashTransfers) {
           const empName = employees.find(e=>e.id===trip.cashEmpId)?.name||trip.cashEmpId;
           const wxn={id:"WX-"+trip.id,empId:trip.cashEmpId,amount:-trip.advance,
             date:trip.date||today(),
@@ -3402,7 +3454,7 @@ Rules:
         }
         log("BATCH TRIP",`LR:${lrNo} DI:${ex.diNo} ${truckNo} ${ex.qty}MT [${item.orderType}]`);
         // ── Excess diesel tracking — if net goes negative, debit employee wallet ──
-        {const _empId = trip.cashEmpId || trip.assignedEmpId;
+        {const _empId = resolveWalletEmpId(trip.cashEmpId, trip.assignedEmpId);
         if(_empId && +trip.dieselEstimate>0 && setCashTransfers) {
           const _gross = (+trip.qty||0)*(+trip.givenRate||0);
           const _net = _gross - (+trip.tafal||0) - (+trip.advance||0) - (+trip.dieselEstimate||0)
@@ -3488,6 +3540,7 @@ Rules:
             return (groupItems.find(x=>x.orderType==="party")?.pouchBalance)??700;
           })(),
           grParticulars: primary.extracted?._grParticulars || null,
+          transporterName: ex0.transporterName || "",
           createdBy:user.username, createdAt:nowTs(),
         };
         // Atomic DB save — checks for duplicate DI before inserting
@@ -3557,7 +3610,7 @@ Rules:
           }
         }
         // Wallet advance
-        if(trip.cashEmpId && trip.advance>0 && setCashTransfers) {
+        if(hasWalletEmp(trip.cashEmpId) && trip.advance>0 && setCashTransfers) {
           const empName = employees.find(e=>e.id===trip.cashEmpId)?.name||trip.cashEmpId;
           const wxn={id:"WX-"+trip.id,empId:trip.cashEmpId,amount:-trip.advance,
             date:trip.date||today(),
@@ -3579,7 +3632,7 @@ Rules:
         }
         log("BATCH MULTI-DI",`LR:${lrNo} ${allDiNos} ${truckNo} ${totalQty}MT`);
         // ── Excess diesel tracking — multi-DI ──
-        {const _empId = trip.cashEmpId || trip.assignedEmpId;
+        {const _empId = resolveWalletEmpId(trip.cashEmpId, trip.assignedEmpId);
         if(_empId && +trip.dieselEstimate>0 && setCashTransfers) {
           const _gross = (+trip.qty||0)*(+trip.givenRate||0);
           const _net = _gross - (+trip.tafal||0) - (+trip.advance||0) - (+trip.dieselEstimate||0)
@@ -4405,12 +4458,15 @@ Rules:
                 </div>
                 {+g.advance>0&&employees.length>0&&(
                   <div style={{flex:1}}>
-                    <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>DEDUCT FROM WALLET</div>
+                    <div style={{fontSize:10,color:g.cashEmpId?C.muted:C.red,fontWeight:700,marginBottom:3}}>
+                      DEDUCT FROM WALLET {!g.cashEmpId&&<span>*required</span>}
+                    </div>
                     <select value={g.cashEmpId||""}
                       onChange={e=>updateGroup(g.id,"cashEmpId",e.target.value)}
-                      style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,
+                      style={{width:"100%",background:C.bg,border:`1.5px solid ${g.cashEmpId?C.border:C.red}`,
                         borderRadius:8,color:g.cashEmpId?C.text:C.muted,padding:"7px 8px",fontSize:13,outline:"none"}}>
-                      <option value="">— None —</option>
+                      <option value="">— Select employee (required) —</option>
+                      <option value="__none__">🚫 None — don't deduct from any wallet</option>
                       {employees.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
                     </select>
                   </div>
@@ -5110,6 +5166,7 @@ Extract the following fields from this document image and return ONLY a JSON obj
   "truckNo": "Vehicle/Truck registration number",
   "consignee": "Consignee name / destination party",
   "consignor": "Consignor name — the cement company/plant name e.g. the cement company plant name",
+  "transporterName": "Transporter / Carrier / Transporter Name field on the document — the trucking/transport company named as carrier, NOT the consignor (cement plant) or consignee (buyer). Empty string if not shown.",
   "from": "Source/loading location",
   "to": "Destination/unloading location",
   "grade": "Material grade - use exactly 'Cement Packed' or 'Cement Bulk' for cement, else actual material name",
@@ -5169,6 +5226,11 @@ Rules:
       const clean = text.replace(/```json|```/g, "").trim();
       const extracted = JSON.parse(clean);
 
+      // Block documents that belong to a different transporter than us
+      if (extracted.transporterName && !isOwnTransporter(extracted.transporterName)) {
+        throw new Error(`This document is for transporter "${extracted.transporterName}", not ${RC.companyName}. Upload rejected — please check you selected the right file.`);
+      }
+
       // Check if same LR already exists
       const lrNo = (extracted.lrNo || "").trim();
       const existingTrip = lrNo ? trips.find(t => t.lrNo === lrNo) : null;
@@ -5189,7 +5251,11 @@ Rules:
 
     } catch(e) {
       console.error("DI scan error:", e);
-      setError("Could not read document. Try a clearer photo. (" + e.message + ")");
+      if (String(e.message||"").startsWith("This document is for transporter")) {
+        setError(e.message);
+      } else {
+        setError("Could not read document. Try a clearer photo. (" + e.message + ")");
+      }
       setState("error");
       logScan("di_scan", false);
     }
@@ -5453,8 +5519,43 @@ function PartyDocUpload({ tripId, grFileRef, invoiceFileRef, onDone, onBack }) {
   // grFileRef.current and invoiceFileRef.current are now arrays of File objects
   const [grFiles,  setGrFiles]  = useState(Array.isArray(grFileRef.current) ? grFileRef.current : []);
   const [invFiles, setInvFiles] = useState(Array.isArray(invoiceFileRef.current) ? invoiceFileRef.current : []);
+  const [grChecking,   setGrChecking]   = useState(false);
+  const [grCheckError, setGrCheckError] = useState("");
 
-  const addGR  = f => { const next=[...grFiles,f];  grFileRef.current=next;  setGrFiles(next); };
+  const fileToBase64 = f => new Promise((res,rej)=>{
+    const r = new FileReader();
+    r.onload = () => res(r.result.split(",")[1]);
+    r.onerror = rej;
+    r.readAsDataURL(f);
+  });
+
+  // Verify the GR actually belongs to our own transporter before accepting it —
+  // blocks uploading a GR copy that belongs to some other transport company.
+  const addGR = async (f) => {
+    setGrCheckError(""); setGrChecking(true);
+    try {
+      const base64 = await fileToBase64(f);
+      const isImage = f.type.startsWith("image/");
+      const resp = await fetch("/.netlify/functions/scan-di", {
+        method: "POST", headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ base64, anthropicKey: RC.anthropicKey,
+          mediaType: isImage ? f.type : "application/pdf",
+          promptType: "di", expectedTransporter: RC.companyName,
+        }),
+      });
+      const data = await resp.json();
+      if (resp.ok && data._transporterMismatch) {
+        setGrCheckError(data._transporterMismatchMsg || `This GR belongs to a different transporter, not ${RC.companyName}. Upload rejected.`);
+        setGrChecking(false);
+        return; // reject — do not add the file
+      }
+    } catch(e) {
+      console.warn("GR transporter check failed — allowing upload:", e.message);
+      // Scan/network failure — don't block a legitimate upload, just skip the check
+    }
+    setGrChecking(false);
+    const next=[...grFiles,f];  grFileRef.current=next;  setGrFiles(next);
+  };
   const addInv = f => { const next=[...invFiles,f]; invoiceFileRef.current=next; setInvFiles(next); };
   const removeGR  = i => { const next=grFiles.filter((_,idx)=>idx!==i);  grFileRef.current=next;  setGrFiles(next); };
   const removeInv = i => { const next=invFiles.filter((_,idx)=>idx!==i); invoiceFileRef.current=next; setInvFiles(next); };
@@ -5493,6 +5594,14 @@ function PartyDocUpload({ tripId, grFileRef, invoiceFileRef, onDone, onBack }) {
       </div>
       <FileList files={grFiles}  onAdd={addGR}  onRemove={removeGR}
         label="GR Copy *" color={C.green} />
+      {grChecking && (
+        <div style={{background:C.blue+"11",border:`1px solid ${C.blue}33`,borderRadius:8,
+          padding:"9px 12px",color:C.blue,fontSize:12,fontWeight:600}}>⏳ Verifying transporter on GR…</div>
+      )}
+      {grCheckError && (
+        <div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,
+          padding:"9px 12px",color:C.red,fontSize:12,fontWeight:600}}>⚠ {grCheckError}</div>
+      )}
       <FileList files={invFiles} onAdd={addInv} onRemove={removeInv}
         label="Invoice *" color={C.blue} />
       {canProceed && (
@@ -6790,13 +6899,18 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         return;
       }
     }
+    // Advance given — must explicitly pick an employee wallet, or explicit "None"
+    if((+f.advance||0) > 0 && !f.cashEmpId) {
+      alert("An advance is entered — please select which employee's wallet it comes from (or choose \"None\" if it shouldn't deduct from any wallet).");
+      return;
+    }
     // Validate: Est. Net to Driver — allow with excess diesel debit if employee assigned
     {
       const _gross = (+f.qty||0)*(+f.givenRate||0);
       const _net = _gross - (+f.advance||0) - (+f.tafal||0) - (+f.dieselEstimate||0) - (+f.shortageRecovery||0) - (+f.loanRecovery||0);
       if(_net < 0){
         const dieselAmt = +f.dieselEstimate||0;
-        const _empId = f.cashEmpId || f.assignedEmpId;
+        const _empId = resolveWalletEmpId(f.cashEmpId, f.assignedEmpId);
         const empName = _empId ? (employees.find(e=>e.id===_empId)?.name||"assigned employee") : null;
         if(dieselAmt > 0 && empName) {
           const excess = Math.abs(_net);
@@ -6846,7 +6960,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     } catch(e) { console.error("Loan backfill error:", e); }
     // If advance linked to an employee wallet, record the deduction
     // Use t.advance (numeric, from the built trip) not f.advance (string from form state)
-    if(t.cashEmpId && t.advance>0) {
+    if(hasWalletEmp(t.cashEmpId) && t.advance>0) {
       const empName = (employees||[]).find(e=>e.id===t.cashEmpId)?.name||t.cashEmpId;
       const wxn={id:"WX-"+t.id, empId:t.cashEmpId, amount:-t.advance, date:t.date||today(),
         note:`Advance — LR ${t.lrNo||"—"} · ${t.truckNo}`, lrNo:t.lrNo||"", tripId:t.id,
@@ -6856,7 +6970,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       log("WALLET ADVANCE",`${empName} −₹${fmt(t.advance)} LR:${t.lrNo}`);
     }
     // ── Excess diesel tracking — single DI trip ──
-    {const _empId = t.cashEmpId || t.assignedEmpId;
+    {const _empId = resolveWalletEmpId(t.cashEmpId, t.assignedEmpId);
     if(_empId && +t.dieselEstimate>0) {
       const _gross = (+t.qty||0)*(+t.givenRate||0);
       const _net = _gross - (+t.tafal||0) - (+t.advance||0) - (+t.dieselEstimate||0)
@@ -6956,6 +7070,11 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         return;
       }
     }
+    // Advance given — must explicitly pick an employee wallet, or explicit "None"
+    if((+editSheet.advance||0) > 0 && !editSheet.cashEmpId) {
+      alert("An advance is entered — please select which employee's wallet it comes from (or choose \"None\" if it shouldn't deduct from any wallet).");
+      return;
+    }
     {
       const _diLines = editSheet.diLines||[];
       const _isMulti = _diLines.length > 1;
@@ -6965,7 +7084,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       const _net = _gross - (+editSheet.advance||0) - (+editSheet.tafal||0) - (+editSheet.dieselEstimate||0) - (+editSheet.shortageRecovery||0) - (+editSheet.loanRecovery||0);
       if(_net < 0){
         const dieselAmt = +editSheet.dieselEstimate||0;
-        const _empId = editSheet.cashEmpId || editSheet.assignedEmpId;
+        const _empId = resolveWalletEmpId(editSheet.cashEmpId, editSheet.assignedEmpId);
         const empName = _empId ? (employees.find(e=>e.id===_empId)?.name||"assigned employee") : null;
         if(dieselAmt > 0 && empName) {
           const excess = Math.abs(_net);
@@ -7091,7 +7210,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     // Wallet advance: upsert a single record per trip using stable id "WX-"+tripId
     // This prevents duplicate entries — editing just overwrites the same record
     const newAdv   = +editSheet.advance||0;
-    const newEmpId = editSheet.cashEmpId||"";
+    const newEmpId = hasWalletEmp(editSheet.cashEmpId) ? editSheet.cashEmpId : "";
     const stableId = "WX-"+editSheet.id;
     if(newEmpId && newAdv>0) {
       // Upsert: replace existing wallet record for this trip
@@ -7109,7 +7228,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     }
     // ── Excess diesel tracking on edit — upsert XD entry ──
     {const xdId = "XD-"+editSheet.id;
-    const _empId = editSheet.cashEmpId || editSheet.assignedEmpId;
+    const _empId = resolveWalletEmpId(editSheet.cashEmpId, editSheet.assignedEmpId);
     const dieselAmt = +editSheet.dieselEstimate||0;
     if(_empId && dieselAmt > 0) {
       const _gross = (+editSheet.qty||0)*(+editSheet.givenRate||0);
@@ -9167,16 +9286,23 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
       </div>
       {+f.advance>0 && (employees||[]).length>0 && (
         <div>
-          <label style={{color:C.green,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,display:"block",marginBottom:4}}>💵 Deduct Advance from Employee Wallet</label>
+          <label style={{color:f.cashEmpId?C.green:C.red,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,display:"block",marginBottom:4}}>
+            💵 Deduct Advance from Employee Wallet {!f.cashEmpId&&<span>*required</span>}
+          </label>
           <select value={f.cashEmpId||""} onChange={e=>ff("cashEmpId")(e.target.value)}
-            style={{width:"100%",background:C.bg,border:`1.5px solid ${f.cashEmpId?C.green:C.border}`,
+            style={{width:"100%",background:C.bg,border:`1.5px solid ${f.cashEmpId?C.green:C.red}`,
               borderRadius:10,color:f.cashEmpId?C.text:C.muted,padding:"10px 12px",fontSize:13,outline:"none"}}>
-            <option value="">— None (no wallet effect) —</option>
+            <option value="">— Select employee (required) —</option>
+            <option value="__none__">🚫 None — don't deduct from any wallet</option>
             {(employees||[]).map(e => (
               <option key={e.id} value={e.id}>{e.name}</option>
             ))}
           </select>
-          {f.cashEmpId && <div style={{color:C.green,fontSize:11,marginTop:4}}>✓ ₹{(+f.advance||0).toLocaleString("en-IN")} will be deducted from {(employees||[]).find(e=>e.id===f.cashEmpId)?.name}'s wallet on save</div>}
+          {f.cashEmpId==="__none__"
+            ? <div style={{color:C.orange,fontSize:11,marginTop:4}}>🚫 No wallet will be debited for this advance</div>
+            : f.cashEmpId
+            ? <div style={{color:C.green,fontSize:11,marginTop:4}}>✓ ₹{(+f.advance||0).toLocaleString("en-IN")} will be deducted from {(employees||[]).find(e=>e.id===f.cashEmpId)?.name}'s wallet on save</div>
+            : <div style={{color:C.red,fontSize:11,marginTop:4}}>⚠ Select which employee's wallet this advance comes from</div>}
         </div>
       )}
       <div style={{display:"flex",gap:10}}>
@@ -16659,6 +16785,13 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
   // wallet PDF date filter
   const [wFrom,  setWFrom]  = useState("");
   const [wTo,    setWTo]    = useState("");
+  // Inter-employee wallet transfer — owner only
+  const [xferSheet, setXferSheet] = useState(false);
+  const [xferFrom,  setXferFrom]  = useState("");
+  const [xferTo,    setXferTo]    = useState("");
+  const [xferAmt,   setXferAmt]   = useState("");
+  const [xferDate,  setXferDate]  = useState(today());
+  const [xferNote,  setXferNote]  = useState("");
   // Multi-account form state (for employee add sheet)
   const [showEmpAcc,  setShowEmpAcc]  = useState(false);
   const [newEmpAcc,   setNewEmpAcc]   = useState({name:"",accountNo:"",ifsc:""});
@@ -16666,6 +16799,8 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
   const [f,setF] = useState(blank);
   const ff = k => v => setF(p=>({...p,[k]:v}));
   const isOwner = user?.role==="owner";
+  const isSelfWallet = user?.role==="employee_self";
+  const selfEmpId = user?.assignedEmployeeId||"";
   const fmtD = d => { if(!d) return "—"; try { const [y,m,dy]=d.split("-"); return `${dy}-${m}-${y}`; } catch { return d; } };
 
   // ── Wallet calculations (exclude salary & tafal — those are separate ledgers) ──
@@ -16802,9 +16937,48 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
   return (
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-        <div style={{color:C.purple,fontWeight:800,fontSize:16}}>👥 Employees</div>
-        <Btn onClick={()=>setSheet(true)} sm>+ Add</Btn>
+        <div style={{color:C.purple,fontWeight:800,fontSize:16}}>{isSelfWallet?"💵 My Wallet":"👥 Employees"}</div>
+        <div style={{display:"flex",gap:8}}>
+          {isOwner && (employees||[]).length>=2 && <Btn onClick={()=>{setXferSheet(true);setXferFrom("");setXferTo("");setXferAmt("");setXferNote("");setXferDate(today());}} sm outline color={C.teal}>🔁 Transfer</Btn>}
+          {isOwner && <Btn onClick={()=>setSheet(true)} sm>+ Add</Btn>}
+        </div>
       </div>
+
+      {/* Inter-employee wallet transfer — owner only. Moves wallet balance from
+          one employee to another (e.g. driver hands cash advance to a colleague). */}
+      {xferSheet && isOwner && (
+        <Sheet title="🔁 Transfer Between Employee Wallets" onClose={()=>setXferSheet(false)}>
+          <div style={{display:"flex",flexDirection:"column",gap:13}}>
+            <div style={{background:C.teal+"11",border:`1px solid ${C.teal}33`,borderRadius:10,padding:"10px 14px",color:C.teal,fontSize:12}}>
+              Moves wallet balance from one employee to another. Only the owner can do this.
+            </div>
+            <Field label="From Employee" value={xferFrom} onChange={setXferFrom} opts={employees.map(e=>({v:e.id,l:`${e.name} (Bal: ${fmt(walletBalance(e.id))})`}))} />
+            <Field label="To Employee" value={xferTo} onChange={setXferTo} opts={employees.filter(e=>e.id!==xferFrom).map(e=>({v:e.id,l:e.name}))} />
+            <div style={{display:"flex",gap:10}}>
+              <Field label="Amount ₹" value={xferAmt} onChange={setXferAmt} type="number" half />
+              <Field label="Date" value={xferDate} onChange={setXferDate} type="date" half />
+            </div>
+            <Field label="Note (optional)" value={xferNote} onChange={setXferNote} placeholder="Reason for transfer" />
+            <Btn onClick={()=>{
+              if(!xferFrom||!xferTo){alert("Select both employees.");return;}
+              if(xferFrom===xferTo){alert("From and To must be different employees.");return;}
+              if(!xferAmt||+xferAmt<=0){alert("Enter transfer amount.");return;}
+              const fromName = employees.find(e=>e.id===xferFrom)?.name||xferFrom;
+              const toName   = employees.find(e=>e.id===xferTo)?.name||xferTo;
+              const note = xferNote.trim() || `Wallet transfer: ${fromName} → ${toName}`;
+              const debit  = {id:uid(), empId:xferFrom, amount:-(+xferAmt), date:xferDate, type:"transfer",
+                note:`To ${toName} — ${note}`, createdBy:user.username, createdAt:nowTs()};
+              const credit = {id:uid(), empId:xferTo, amount:+xferAmt, date:xferDate, type:"transfer",
+                note:`From ${fromName} — ${note}`, createdBy:user.username, createdAt:nowTs()};
+              setCashTransfers(prev=>[credit,debit,...(Array.isArray(prev)?prev:[])]);
+              DB.saveCashTransfer(debit).catch(e=>console.error("saveCashTransfer xfer debit:",e));
+              DB.saveCashTransfer(credit).catch(e=>console.error("saveCashTransfer xfer credit:",e));
+              log("WALLET TRANSFER", `${fromName} → ${toName} ₹${xferAmt}`);
+              setXferSheet(false); setXferFrom(""); setXferTo(""); setXferAmt(""); setXferNote("");
+            }} full color={C.teal}>Transfer</Btn>
+          </div>
+        </Sheet>
+      )}
 
       {sheet&&<Sheet title="Add Employee" onClose={()=>{setSheet(false);setF(blank);setShowEmpAcc(false);setNewEmpAcc({name:"",accountNo:"",ifsc:""});}}>
         <div style={{display:"flex",flexDirection:"column",gap:13}}>
@@ -17200,7 +17374,8 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
               </div>
               {bal<0&&<div style={{background:"#2a0a0a",border:"1px solid "+C.red,borderRadius:8,padding:"8px 12px",color:C.red,fontSize:12,fontWeight:600}}>⚠️ Advance exceeds transfers by {fmt(Math.abs(bal))}</div>}
 
-              {/* Record new transfer */}
+              {/* Record new transfer — owner only, employee_self is read-only */}
+              {isOwner && (
               <div style={{background:C.card,borderRadius:10,padding:"12px 14px"}}>
                 <div style={{color:txType==="expense"?C.red:C.green,fontWeight:700,fontSize:12,marginBottom:10}}>{txType==="expense"?"💸 Record Expense for "+e.name:"➕ Record Cash Transfer to "+e.name}</div>
                 <div style={{display:"flex",gap:8,marginBottom:8}}>
@@ -17253,6 +17428,13 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                   </button>
                 </div>
               </div>
+              </div>
+              )}
+              {isSelfWallet && (
+                <div style={{background:C.card,borderRadius:10,padding:"12px 14px"}}>
+                  <Btn onClick={()=>printWalletPDF(e)} full outline color={C.blue}>🖨️ Print / Save PDF</Btn>
+                </div>
+              )}
 
               {/* Transaction history */}
               {filtHist.length>0 ? (
@@ -17289,7 +17471,6 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                 <div style={{textAlign:"center",color:C.muted,padding:"20px 0",fontSize:13}}>No transactions in this period</div>
               )}
             </div>
-          </div>
           </Sheet>
         );
       })()}
@@ -17323,12 +17504,15 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
       })()}
 
       {/* Search */}
-      <input value={empSearch} onChange={e=>setEmpSearch(e.target.value)}
-        placeholder="🔍 Search employee..."
-        style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,
-          color:C.text,padding:"10px 12px",fontSize:14,outline:"none",width:"100%",boxSizing:"border-box"}} />
+      {!isSelfWallet && (
+        <input value={empSearch} onChange={e=>setEmpSearch(e.target.value)}
+          placeholder="🔍 Search employee..."
+          style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,
+            color:C.text,padding:"10px 12px",fontSize:14,outline:"none",width:"100%",boxSizing:"border-box"}} />
+      )}
 
       {employees.filter(e=>{
+        if(isSelfWallet) return e.id===selfEmpId;
         if(empSearch && !e.name.toLowerCase().includes(empSearch.toLowerCase())) return false;
         if(empMonth) {
           // Only show employees who have wallet transactions in selected month
@@ -17366,10 +17550,10 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
             {e.linkedTrucks.length>0&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>{e.linkedTrucks.map(t=><Badge key={t} label={t} color={C.blue} />)}</div>}
             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
               <Btn onClick={()=>setWSheet(e.id)} sm color={C.green}>💵 Wallet</Btn>
-              <Btn onClick={()=>setLSheet(e.id)} sm outline color={C.purple}>Manage Loan</Btn>
-              <Btn onClick={()=>setSalSheet(e.id)} sm outline color={C.blue}>💼 Salary</Btn>
+              {isOwner && <Btn onClick={()=>setLSheet(e.id)} sm outline color={C.purple}>Manage Loan</Btn>}
+              {isOwner && <Btn onClick={()=>setSalSheet(e.id)} sm outline color={C.blue}>💼 Salary</Btn>}
               <Btn onClick={()=>generateEmpPDF(e)} sm outline color={C.orange}>📄 PDF</Btn>
-              <Btn onClick={()=>window.open(`https://wa.me/91${e.phone.replace(/\D/g,"")}?text=${encodeURIComponent(`Dear ${e.name}, wallet balance ${fmt(walBal)}. - M.Yantra`)}`,`_blank`)} sm outline color={C.teal}>📲</Btn>
+              {isOwner && <Btn onClick={()=>window.open(`https://wa.me/91${e.phone.replace(/\D/g,"")}?text=${encodeURIComponent(`Dear ${e.name}, wallet balance ${fmt(walBal)}. - M.Yantra`)}`,`_blank`)} sm outline color={C.teal}>📲</Btn>}
             </div>
           </div>
         );
@@ -20686,10 +20870,12 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
 // Record bank transfers against a trip. "Balance due" auto-updates.
 // ─── EMPLOYEE TRIP GROUP ─────────────────────────────────────────────────────
 // Groups all unpaid trips for one employee — can request payment for each or all together
-function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPayReqSheet, vehicles, fmt }) {
+function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPayReqSheet, vehicles, fmt,
+  setDriverPays, setTrips, setEmployees, setCashTransfers, cashTransfers, user, log }) {
   const [open, setOpen] = useState(true);
   const [selected, setSelected] = useState(new Set(empTrips.map(t=>t.id)));
   const C = window._MY_COLORS || {};
+  const isOwner = user?.role==="owner";
 
   const selectedTrips = empTrips.filter(t=>selected.has(t.id));
   const selectedTotal = selectedTrips.reduce((s,t)=>s+t.balance,0);
@@ -20700,6 +20886,72 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPayR
   const toggleAll = () => {
     if(selected.size>0) setSelected(new Set());
     else setSelected(new Set(empTrips.slice(0,MAX_GROUP).map(t=>t.id)));
+  };
+
+  // ── Recover employee loan/wallet against vehicle balances due ──────────────
+  // Owner picks any number of this employee's pending trip balances; the total
+  // due on those trips is applied to reduce the employee's loan or wallet debt,
+  // and each selected trip's balance is zeroed out with a "paid against
+  // employee loan/wallet" note instead of a normal driver payment.
+  const [recoverMode, setRecoverMode] = useState(false);
+  const [recoverSelected, setRecoverSelected] = useState(new Set());
+  const [recoverTarget, setRecoverTarget] = useState("loan"); // "loan" | "wallet"
+  const [recoverConfirm, setRecoverConfirm] = useState(false);
+
+  const loanBal = emp ? Math.max(0, (emp.loan||0)-(emp.loanRecovered||0)) : 0;
+  const empTx = (cashTransfers||[]).filter(t=>t.empId===empId && t.type!=="salary" && t.type!=="tafal");
+  const walletBal = empTx.reduce((s,t)=>s+Number(t.amount||0),0); // negative = employee owes company
+  const walletOwed = Math.max(0, -walletBal);
+
+  const recoverTrips = empTrips.filter(t=>recoverSelected.has(t.id));
+  const recoverTotal = recoverTrips.reduce((s,t)=>s+t.balance,0);
+  const recoverCap = recoverTarget==="loan" ? loanBal : walletOwed;
+
+  const toggleRecover = (tripId) => setRecoverSelected(p=>{
+    const n=new Set(p);
+    if(n.has(tripId)) n.delete(tripId); else n.add(tripId);
+    return n;
+  });
+
+  const runRecovery = () => {
+    if(recoverTrips.length===0 || recoverTotal<=0) return;
+    const note = `Paid against employee loan/wallet — ${emp?.name||"employee"}`;
+    // 1) Zero out each selected trip's balance via a driverPays record
+    const newPays = recoverTrips.map(t => ({
+      id: uid(), tripId: t.id, truckNo: t.truckNo, lrNo: t.lrNo,
+      amount: t.balance, utr: "", date: today(),
+      paidTo: emp?.name||"", notes: note,
+      createdBy: user.username, createdAt: nowTs(),
+    }));
+    setDriverPays(prev => [...newPays, ...(Array.isArray(prev)?prev:[])]);
+    newPays.forEach(p => DB.saveDriverPay(p).catch(e=>console.error("saveDriverPay loan recovery:",e)));
+    // 2) Mark those trips settled (balance fully recovered, just not via bank transfer)
+    setTrips(prev => prev.map(t => {
+      const rt = recoverTrips.find(x=>x.id===t.id);
+      if(!rt) return t;
+      const updated = {...t, driverSettled:true, settledBy:user.username, netPaid:rt.netDue};
+      DB.saveTrip(updated).catch(e=>console.error("saveTrip loan recovery settle:",e));
+      return updated;
+    }));
+    // 3) Apply the recovered total to the employee's loan or wallet ledger
+    if(recoverTarget==="loan" && setEmployees) {
+      setEmployees(prev => prev.map(e => {
+        if(e.id!==empId) return e;
+        const txn = {id:uid(), type:"recovery", date:today(), amount:recoverTotal,
+          note:`Recovered from vehicle balance(s): ${recoverTrips.map(t=>t.truckNo).join(", ")}`};
+        const upd = {...e, loanRecovered:(e.loanRecovered||0)+recoverTotal, loanTxns:[...(e.loanTxns||[]),txn]};
+        DB.saveEmployee(upd).catch(err=>console.error("saveEmployee loan recovery:",err));
+        return upd;
+      }));
+    } else if(recoverTarget==="wallet" && setCashTransfers) {
+      const wxn = {id:uid(), empId, amount:recoverTotal, date:today(), type:"transfer",
+        note:`Recovered from vehicle balance(s): ${recoverTrips.map(t=>t.truckNo).join(", ")}`,
+        createdBy:user.username, createdAt:nowTs()};
+      setCashTransfers(prev => [wxn, ...(Array.isArray(prev)?prev:[])]);
+      DB.saveCashTransfer(wxn).catch(e=>console.error("saveCashTransfer loan recovery:",e));
+    }
+    log("LOAN/WALLET RECOVERY", `${emp?.name||empId} ₹${recoverTotal} from ${recoverTrips.map(t=>t.truckNo).join(", ")}`);
+    setRecoverSelected(new Set()); setRecoverMode(false); setRecoverConfirm(false);
   };
 
   return (
@@ -20795,13 +21047,84 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPayR
               </div>
             )}
           </div>
+
+          {/* ── Recover employee loan/wallet against these vehicle balances ── */}
+          {isOwner && empId!=="unassigned" && (loanBal>0 || walletOwed>0) && (
+            <div style={{marginTop:6,borderTop:"1px dashed #cbd5e1",paddingTop:10}}>
+              {!recoverMode ? (
+                <button onClick={()=>{setRecoverMode(true);setRecoverSelected(new Set());}}
+                  style={{width:"100%",background:"#f59e0b22",border:"1.5px solid #f59e0b55",borderRadius:10,
+                    color:"#b45309",padding:"9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+                  💰 Recover Against {emp?.name}'s Loan/Wallet {loanBal>0?`(Loan due ${fmt(loanBal)})`:`(Wallet owed ${fmt(walletOwed)})`}
+                </button>
+              ) : (
+                <div style={{background:"#fffbeb",border:"1px solid #f59e0b44",borderRadius:10,padding:"10px 12px",display:"flex",flexDirection:"column",gap:8}}>
+                  <div style={{fontWeight:800,fontSize:12,color:"#b45309"}}>💰 Recover Against Loan/Wallet</div>
+                  <div style={{display:"flex",gap:8}}>
+                    {loanBal>0 && (
+                      <label style={{display:"flex",alignItems:"center",gap:5,fontSize:12}}>
+                        <input type="radio" checked={recoverTarget==="loan"} onChange={()=>setRecoverTarget("loan")} />
+                        Loan (due {fmt(loanBal)})
+                      </label>
+                    )}
+                    {walletOwed>0 && (
+                      <label style={{display:"flex",alignItems:"center",gap:5,fontSize:12}}>
+                        <input type="radio" checked={recoverTarget==="wallet"} onChange={()=>setRecoverTarget("wallet")} />
+                        Wallet (owed {fmt(walletOwed)})
+                      </label>
+                    )}
+                  </div>
+                  <div style={{fontSize:11,color:"#666"}}>Pick vehicle balances below to apply toward this — manually select as many as needed:</div>
+                  {empTrips.map(t=>(
+                    <label key={t.id} style={{display:"flex",alignItems:"center",gap:8,
+                      background:"#fff",borderRadius:8,padding:"7px 9px",border:"1px solid #eee",cursor:"pointer"}}>
+                      <input type="checkbox" checked={recoverSelected.has(t.id)} onChange={()=>toggleRecover(t.id)} style={{width:14,height:14,flexShrink:0}} />
+                      <span style={{flex:1,fontSize:12}}>{t.truckNo} · {t.lrNo} <span style={{color:"#888"}}>({t.date})</span></span>
+                      <span style={{fontWeight:700,fontSize:12,color:"#dc2626"}}>{fmt(t.balance)}</span>
+                    </label>
+                  ))}
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:12,fontWeight:700,marginTop:2}}>
+                    <span>Selected total</span>
+                    <span style={{color:recoverTotal>recoverCap?"#dc2626":"#16a34a"}}>{fmt(recoverTotal)} / {fmt(recoverCap)} due</span>
+                  </div>
+                  {recoverTotal>recoverCap && (
+                    <div style={{fontSize:11,color:"#dc2626"}}>⚠ Selected total exceeds the outstanding {recoverTarget} balance — deselect some vehicles.</div>
+                  )}
+                  <div style={{display:"flex",gap:8,marginTop:4}}>
+                    <button onClick={()=>{setRecoverMode(false);setRecoverSelected(new Set());}}
+                      style={{flex:1,background:"none",border:"1px solid #ccc",borderRadius:8,color:"#666",padding:"8px",fontSize:12,cursor:"pointer"}}>Cancel</button>
+                    <button onClick={()=>setRecoverConfirm(true)} disabled={recoverTotal<=0 || recoverTotal>recoverCap}
+                      style={{flex:1,background:recoverTotal<=0||recoverTotal>recoverCap?"#ccc":"#f59e0b",border:"none",borderRadius:8,color:"#fff",padding:"8px",fontSize:12,fontWeight:700,
+                        cursor:recoverTotal<=0||recoverTotal>recoverCap?"not-allowed":"pointer"}}>
+                      Recover {fmt(recoverTotal)} →
+                    </button>
+                  </div>
+                  {recoverConfirm && (
+                    <div style={{background:"#fef2f2",border:"1px solid #dc2626",borderRadius:8,padding:"10px",marginTop:4}}>
+                      <div style={{fontSize:12,color:"#7f1d1d",marginBottom:8}}>
+                        Confirm: {fmt(recoverTotal)} from {recoverTrips.map(t=>t.truckNo).join(", ")} will be marked "paid against employee {recoverTarget}" (zeroing their balance due), and {emp?.name}'s {recoverTarget} balance will be reduced by the same amount. This cannot be easily undone.
+                      </div>
+                      <div style={{display:"flex",gap:8}}>
+                        <button onClick={()=>setRecoverConfirm(false)}
+                          style={{flex:1,background:"none",border:"1px solid #ccc",borderRadius:8,color:"#666",padding:"8px",fontSize:12,cursor:"pointer"}}>Back</button>
+                        <button onClick={runRecovery}
+                          style={{flex:1,background:"#dc2626",border:"none",borderRadius:8,color:"#fff",padding:"8px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+                          ✓ Confirm Recovery
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>
   );
 }
 
-function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, vehicles, setVehicles, employees, cashTransfers, setCashTransfers, paymentRequests=[], setPaymentRequests, indents=[], dieselRequests=[], setDieselRequests, user, log, viewOnly=false}) {
+function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, vehicles, setVehicles, employees, setEmployees, cashTransfers, setCashTransfers, paymentRequests=[], setPaymentRequests, indents=[], dieselRequests=[], setDieselRequests, user, log, viewOnly=false}) {
   const [filter,    setFilter]    = useState("unpaid");
   const [paySheet,  setPaySheet]  = useState(null);
   const [payReqSheet,   setPayReqSheet]   = useState(null); // trip for request payment
@@ -21373,6 +21696,9 @@ This will auto-recover in the next trip.`);
                   paymentRequests={paymentRequests||[]}
                   setPayReqSheet={setPayReqSheet}
                   vehicles={vehicles} fmt={fmt}
+                  setDriverPays={setDriverPays} setTrips={setTrips} setEmployees={setEmployees}
+                  setCashTransfers={setCashTransfers} cashTransfers={cashTransfers}
+                  user={user} log={log}
                 />
               );
             })}
@@ -23423,15 +23749,16 @@ function ActivityLog({activity}) {
 }
 
 // ─── USER ADMIN ───────────────────────────────────────────────────────────────
-function UserAdmin({users, setUsers, user, log, pumps=[]}) {
+function UserAdmin({users, setUsers, user, log, pumps=[], employees=[]}) {
   const [sheet,setSheet]=useState(false); const [edit,setEdit]=useState(null);
-  const blank={name:"",username:"",pin:"",role:"operator",active:true,assignedClients:[],assignedPumpId:""};
+  const blank={name:"",username:"",pin:"",role:"operator",active:true,assignedClients:[],assignedPumpId:"",assignedEmployeeId:""};
   const [f,setF]=useState(blank); const ff=k=>v=>setF(p=>({...p,[k]:v}));
   const toggleClient = c => setF(p=>{
     const cur = p.assignedClients||[];
     return {...p, assignedClients: cur.includes(c)?cur.filter(x=>x!==c):[...cur,c]};
   });
   const save=()=>{
+    if(f.role==="employee_self" && !f.assignedEmployeeId) { alert("Please select which employee this login belongs to."); return; }
     if(edit){setUsers(p=>p.map(u=>u.id===edit.id?{...u,...f}:u));log("EDIT USER",`${f.name}`);}
     else{const u={...f,id:"U"+uid(),createdAt:today()};setUsers(p=>[...(p||[]),u]);log("ADD USER",`${u.name} as ${u.role}`);}
     setF(blank);setSheet(false);setEdit(null);
@@ -23510,6 +23837,20 @@ function UserAdmin({users, setUsers, user, log, pumps=[]}) {
                   borderRadius:8,color:f.assignedPumpId?C.text:C.muted,padding:"9px 12px",fontSize:13,outline:"none"}}>
                 <option value="">— No pump assigned (sees all) —</option>
                 {pumps.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </div>
+          )}
+          {/* Assigned Employee — only shown for employee_self role; links login to their wallet */}
+          {f.role==="employee_self" && (
+            <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
+              <div style={{color:f.assignedEmployeeId?C.muted:C.red,fontSize:11,fontWeight:700,marginBottom:6}}>
+                ASSIGNED EMPLOYEE {!f.assignedEmployeeId&&<span>*required</span>} <span style={{color:"#0d9488",fontWeight:400}}>(this login will only see this employee's own wallet)</span>
+              </div>
+              <select value={f.assignedEmployeeId||""} onChange={e=>setF(p=>({...p,assignedEmployeeId:e.target.value}))}
+                style={{width:"100%",background:C.card,border:`1.5px solid ${f.assignedEmployeeId?"#0d9488":C.red}`,
+                  borderRadius:8,color:f.assignedEmployeeId?C.text:C.muted,padding:"9px 12px",fontSize:13,outline:"none"}}>
+                <option value="">— Select employee (required) —</option>
+                {employees.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
               </select>
             </div>
           )}
