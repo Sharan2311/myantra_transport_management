@@ -23980,7 +23980,7 @@ function UserAdmin({users, setUsers, user, log, pumps=[], employees=[]}) {
             <Badge label={u.active?"Active":"Off"} color={u.active?C.green:C.muted} />
           </div>
           {!isMe&&<div style={{display:"flex",gap:8}}>
-            <Btn onClick={()=>{setF({name:u.name,username:u.username,pin:u.pin,role:u.role,active:u.active,assignedClients:u.assignedClients||[],assignedPumpId:u.assignedPumpId||""});setEdit(u);setSheet(true);}} sm outline color={C.blue}>Edit</Btn>
+            <Btn onClick={()=>{setF({name:u.name,username:u.username,pin:u.pin,role:u.role,active:u.active,assignedClients:u.assignedClients||[],assignedPumpId:u.assignedPumpId||"",assignedEmployeeId:u.assignedEmployeeId||""});setEdit(u);setSheet(true);}} sm outline color={C.blue}>Edit</Btn>
             <Btn onClick={()=>{setUsers(p=>p.map(x=>x.id===u.id?{...x,active:!x.active}:x));log("TOGGLE USER",`${u.name} ${u.active?"disabled":"enabled"}`);}} sm outline color={u.active?C.red:C.green}>{u.active?"Disable":"Enable"}</Btn>
           </div>}
         </div>
