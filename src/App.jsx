@@ -23819,15 +23819,30 @@ function UserAdmin({users, setUsers, user, log, pumps=[], employees=[]}) {
   const [sheet,setSheet]=useState(false); const [edit,setEdit]=useState(null);
   const blank={name:"",username:"",pin:"",role:"operator",active:true,assignedClients:[],assignedPumpId:"",assignedEmployeeId:""};
   const [f,setF]=useState(blank); const ff=k=>v=>setF(p=>({...p,[k]:v}));
+  const [saving,setSaving]=useState(false);
+  const [saveError,setSaveError]=useState("");
   const toggleClient = c => setF(p=>{
     const cur = p.assignedClients||[];
     return {...p, assignedClients: cur.includes(c)?cur.filter(x=>x!==c):[...cur,c]};
   });
-  const save=()=>{
+  const save=async ()=>{
     if((f.role||"").split(",").map(r=>r.trim()).includes("employee_self") && !f.assignedEmployeeId) { alert("Please select which employee this login belongs to."); return; }
-    if(edit){setUsers(p=>p.map(u=>u.id===edit.id?{...u,...f}:u));log("EDIT USER",`${f.name}`);}
-    else{const u={...f,id:"U"+uid(),createdAt:today()};setUsers(p=>[...(p||[]),u]);log("ADD USER",`${u.name} as ${u.role}`);}
-    setF(blank);setSheet(false);setEdit(null);
+    setSaveError(""); setSaving(true);
+    const fullUser = edit ? {...edit, ...f} : {...f, id:"U"+uid(), createdAt:today()};
+    try {
+      // Await the actual DB write BEFORE closing the sheet or touching local state,
+      // so a failure (e.g. missing column) surfaces right here instead of silently
+      // vanishing behind the modal when the sheet auto-closes.
+      await DB.saveUser(fullUser);
+      if(edit) { setUsers(p=>p.map(u=>u.id===edit.id?fullUser:u)); log("EDIT USER",`${f.name}`); }
+      else { setUsers(p=>[...(p||[]),fullUser]); log("ADD USER",`${fullUser.name} as ${fullUser.role}`); }
+      setF(blank); setSheet(false); setEdit(null);
+    } catch(e) {
+      console.error("saveUser failed:", e);
+      setSaveError(e.message || "Save failed — please try again.");
+    } finally {
+      setSaving(false);
+    }
   };
   return (
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
@@ -23935,7 +23950,12 @@ function UserAdmin({users, setUsers, user, log, pumps=[], employees=[]}) {
             </div>
           )}
           <div style={{display:"flex",alignItems:"center",gap:10}}><input type="checkbox" checked={f.active} onChange={e=>setF(p=>({...p,active:e.target.checked}))} style={{width:20,height:20}} /><span style={{color:C.text,fontSize:15}}>Active</span></div>
-          <Btn onClick={save} full>{edit?"Update":"Add User"}</Btn>
+          {saveError && (
+            <div style={{background:C.red+"11",border:`1px solid ${C.red}44`,borderRadius:10,padding:"10px 14px",color:C.red,fontSize:12,fontWeight:600}}>
+              ⚠ Save failed: {saveError}
+            </div>
+          )}
+          <Btn onClick={save} full disabled={saving}>{saving?"Saving…":edit?"Update":"Add User"}</Btn>
         </div>
       </Sheet>}
       {(users||[]).map(u=>{const r=ROLES[u.role]; const isMe=u.id===user.id; return (
