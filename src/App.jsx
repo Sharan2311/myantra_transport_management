@@ -165,23 +165,31 @@ const ROLES = {
 };
 const can = (user, p) => {
   if(!user) return false;
-  const perms = ROLES[user.role]?.perms || [];
-  if(perms.includes(p)) return true;
+  const roleList = (user.role||"").split(",").map(r=>r.trim()).filter(Boolean);
+  // selfWalletOnly is a hard restriction — if ANY assigned role is self-wallet-only,
+  // the whole login is locked to just the wallet, no matter what else is granted.
+  if(roleList.some(r=>ROLES[r]?.selfWalletOnly)) return p==="employees";
+  const perms = new Set();
+  roleList.forEach(r => (ROLES[r]?.perms||[]).forEach(pp=>perms.add(pp)));
+  if(perms.has(p)) return true;
   // cement_trips grants access to "trips" (outbound only) but NOT "inbound"
-  if(p==="trips" && perms.includes("cement_trips")) return true;
+  if(p==="trips" && perms.has("cement_trips")) return true;
   // diesel_view grants access to diesel tab (read-only); driverPay_view grants driverPay tab (read-only)
-  if(p==="diesel"    && perms.includes("diesel_view"))    return true;
-  if(p==="driverPay" && perms.includes("driverPay_view")) return true;
-  if(p==="employees" && perms.includes("employees_view")) return true;
+  if(p==="diesel"    && perms.has("diesel_view"))    return true;
+  if(p==="driverPay" && perms.has("driverPay_view")) return true;
+  if(p==="employees" && perms.has("employees_view")) return true;
   return false;
 };
 const canEdit = (user, p) => {
   // Returns false for view-only perms — fleet_manager cannot add/edit diesel or driver pay
   if(!user) return false;
-  const perms = ROLES[user.role]?.perms || [];
-  if(p==="diesel"    && perms.includes("diesel_view")    && !perms.includes("diesel"))    return false;
-  if(p==="driverPay" && perms.includes("driverPay_view") && !perms.includes("driverPay")) return false;
-  return perms.includes(p);
+  const roleList = (user.role||"").split(",").map(r=>r.trim()).filter(Boolean);
+  if(roleList.some(r=>ROLES[r]?.selfWalletOnly)) return false; // self-wallet is always read-only
+  const perms = new Set();
+  roleList.forEach(r => (ROLES[r]?.perms||[]).forEach(pp=>perms.add(pp)));
+  if(p==="diesel"    && perms.has("diesel_view")    && !perms.has("diesel"))    return false;
+  if(p==="driverPay" && perms.has("driverPay_view") && !perms.has("driverPay")) return false;
+  return perms.has(p);
 };
 
 // ─── SUPABASE DATA HOOK ────────────────────────────────────────────────────────
@@ -1346,7 +1354,7 @@ function AppMain() {
       const saved = sessionStorage.getItem("mye_user");
       const u = saved ? JSON.parse(saved) : null;
       if(u?.role==="pump_operator") return "pump_portal";
-      if(u?.role==="employee_self") return "employees";
+      if((u?.role||"").split(",").map(r=>r.trim()).includes("employee_self")) return "employees";
       const roles = (u?.role||"").split(",").map(r=>r.trim());
       if(roles.length && roles.every(r=>["party_manager","email_followup"].includes(r))) return "party_portal";
     } catch {}
@@ -1773,7 +1781,7 @@ function AppMain() {
       try { sessionStorage.setItem("mye_user", JSON.stringify(u)); } catch{}
       setUser(u);
       if(u.role==="pump_operator") setTab("pump_portal");
-      if(u.role==="employee_self") setTab("employees");
+      if((u.role||"").split(",").map(r=>r.trim()).includes("employee_self")) setTab("employees");
       if((u.role||"").split(",").every(r=>["party_manager","email_followup"].includes(r.trim()))) setTab("party_portal");
       log("LOGIN",`${u.name} signed in`);
     }} />;
@@ -1870,7 +1878,7 @@ function AppMain() {
 
       <div style={{padding:"14px 16px 8px"}}>
         <ErrorBoundary>
-        {tab==="dashboard"  && user?.role!=="pump_operator" && user?.role!=="employee_self" && !isParty && <Dashboard {...sp} setTab={setTab} />}
+        {tab==="dashboard"  && user?.role!=="pump_operator" && !(user?.role||"").split(",").map(r=>r.trim()).includes("employee_self") && !isParty && <Dashboard {...sp} setTab={setTab} />}
         {tab==="trips"      && can(user,"trips")      && <Trips      {...sp} tripType="outbound" />}
         {tab==="inbound"    && can(user,"inbound")    && <Trips      {...sp} tripType="inbound" />}
         {tab==="billing"    && can(user,"billing")    && <Billing    {...sp} />}
@@ -2617,6 +2625,9 @@ const lookupPincode = async (pincode) => {
 };
 
 function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user, log, onClose, employees=[], cashTransfers=[], setCashTransfers, dieselRequests=[], setDieselRequests, manualDiesel=false }) {
+  // Party pouch deduction for a vehicle: exempt → 0, per-vehicle override → that,
+  // else the owner's global rate (settings.pouchPerTrip), else ₹700 fallback.
+  const pouchAmt = (veh) => veh?.pouchExempt ? 0 : (veh?.pouchOverride!=null ? veh.pouchOverride : (settings?.pouchPerTrip ?? 700));
 
   // ── Raw scanned items (one per uploaded file) ────────────────────────────────
   // item: { id, file, status, extracted, error }
@@ -2862,7 +2873,7 @@ Rules:
               pouchBalance: (() => {
                 if(extracted._autoOrderType !== "party") return 0;
                 const _pVeh = (vehicles||[]).find(v=>v.truckNo===(extracted.truckNo||"").toUpperCase().trim());
-                return _pVeh?.pouchExempt ? 0 : 700;
+                return pouchAmt(_pVeh);
               })(),
               partyDriverPhone: "",  // driver phone is manual entry
               partyName: extracted._partyName || "",
@@ -3335,7 +3346,7 @@ Rules:
           pouchBalance: (() => {
             if(item.orderType!=="party") return 0;
             const _pVeh2 = (vehicles||[]).find(v=>v.truckNo===truckNo);
-            return _pVeh2?.pouchExempt ? 0 : (item.pouchBalance||700);
+            return _pVeh2?.pouchExempt ? 0 : (item.pouchBalance || pouchAmt(_pVeh2));
           })(),
           grParticulars: item.extracted?._grParticulars || null,
           transporterName: ex.transporterName || "",
@@ -3550,7 +3561,7 @@ Rules:
             if(!diLines.some(d=>d.orderType==="party")) return 0;
             const _pVeh3 = (vehicles||[]).find(v=>v.truckNo===truckNo);
             if(_pVeh3?.pouchExempt) return 0;
-            return (groupItems.find(x=>x.orderType==="party")?.pouchBalance)??700;
+            return (groupItems.find(x=>x.orderType==="party")?.pouchBalance) ?? pouchAmt(_pVeh3);
           })(),
           grParticulars: primary.extracted?._grParticulars || null,
           transporterName: ex0.transporterName || "",
@@ -3937,7 +3948,7 @@ Rules:
                                 updateItem(item.id,"orderType",e.target.value);
                                 if(e.target.value==="party") {
                                   const _pv = (vehicles||[]).find(v=>v.truckNo===(g.truckNo||"").toUpperCase().trim());
-                                  updateItem(item.id,"pouchBalance",_pv?.pouchExempt?0:700);
+                                  updateItem(item.id,"pouchBalance",pouchAmt(_pv));
                                 } else updateItem(item.id,"pouchBalance",0);
                               }}
                               style={{width:"100%",background:C.card,border:`1.5px solid ${C.border}`,
@@ -4005,7 +4016,7 @@ Rules:
                               <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
                                 💰 POUCH BALANCE ₹ {user.role!=="owner"&&<span style={{fontSize:9,color:C.orange}}>🔒</span>}
                               </div>
-                              <input type="number" value={item.pouchBalance??700}
+                              <input type="number" value={item.pouchBalance ?? (settings?.pouchPerTrip ?? 700)}
                                 onChange={e=>updateItem(item.id,"pouchBalance",+e.target.value||0)}
                                 readOnly={user.role!=="owner"}
                                 style={{width:"100%",background:user.role==="owner"?C.bg:C.dim,
@@ -15183,7 +15194,7 @@ function DeductPerTripField({ownerVehs, ownerTruckNos, ownerDeductPerTrip, setVe
 }
 
 // ─── VEHICLES ─────────────────────────────────────────────────────────────────
-function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log}) {
+function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log, settings, setSettings}) {
   const isOwner = user.role === "owner";
   const [sheet,    setSheet]    = useState(false);
   const [editId,   setEditId]   = useState(null);
@@ -15220,7 +15231,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
     truckNo:"", ownerName:"", phone:"",
     driverName:"", driverPhone:"", driverLicense:"",
     accountNo:"", ifsc:"",
-    loan:"0", loanRecovered:"0", deductPerTrip:"0", shortageDeductPerTrip:"0", tafalExempt:false, tafalOverride:"", pouchExempt:false, accounts:[],
+    loan:"0", loanRecovered:"0", deductPerTrip:"0", shortageDeductPerTrip:"0", tafalExempt:false, tafalOverride:"", pouchExempt:false, pouchOverride:"", accounts:[],
   };
   const [f, setF] = useState(blank);
   const ff = k => v => setF(p => ({...p,[k]:v}));
@@ -15857,20 +15868,41 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                  :"Using global rate (set in TAFAL tab)"}
               </div>
             </div>
-            {/* Pouch Deduction Exemption — owner only */}
-            <div style={{background:C.bg,borderRadius:10,padding:"10px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <div>
-                <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Party Pouch Deduction (Owner)</div>
-                <div style={{color:C.muted,fontSize:11,marginTop:2}}>
-                  {f.pouchExempt?"Exempt — ₹0 deducted on party orders":"₹700 deducted on party orders (default)"}
-                </div>
+            {/* Pouch Deduction — owner only. Global rate + per-vehicle exempt/override */}
+            <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
+              <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:8,textTransform:"uppercase",letterSpacing:1}}>Party Pouch Deduction (Owner)</div>
+              <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:8}}>
+                <span style={{color:C.muted,fontSize:12,flexShrink:0}}>Global rate ₹</span>
+                <input type="number" value={settings?.pouchPerTrip ?? 700} onChange={e=>{
+                  const v = e.target.value;
+                  setSettings(p=>{
+                    const updated={...(p||{}),pouchPerTrip: v===""?"":+v};
+                    DB.saveSettings(updated).catch(err=>console.error("saveSettings pouchPerTrip:",err));
+                    return updated;
+                  });
+                }} style={{width:100,background:C.card,border:`1.5px solid ${C.border}`,
+                  borderRadius:8,padding:"6px 10px",fontSize:12,color:C.text,outline:"none"}}/>
+                <span style={{color:C.muted,fontSize:11}}>applies to all vehicles unless overridden below</span>
               </div>
-              <button onClick={()=>setF(p=>({...p,pouchExempt:!p.pouchExempt}))}
-                style={{padding:"6px 14px",borderRadius:8,border:`1.5px solid ${f.pouchExempt?C.muted:C.teal}`,
-                  background:f.pouchExempt?C.dim:C.teal+"22",color:f.pouchExempt?C.muted:C.teal,
-                  fontWeight:700,fontSize:12,cursor:"pointer",flexShrink:0,marginLeft:8}}>
-                {f.pouchExempt?"Un-Exempt":"Exempt"}
-              </button>
+              <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                <button onClick={()=>setF(p=>({...p,pouchExempt:!p.pouchExempt,pouchOverride:""}))}
+                  style={{padding:"6px 14px",borderRadius:8,border:`1.5px solid ${f.pouchExempt?C.red:C.border}`,
+                    background:f.pouchExempt?C.red+"22":"transparent",color:f.pouchExempt?C.red:C.muted,
+                    fontWeight:700,fontSize:12,cursor:"pointer"}}>
+                  {f.pouchExempt?"✓ Exempt":"Exempt"}
+                </button>
+                <span style={{color:C.muted,fontSize:12}}>or override amount:</span>
+                <input type="number" value={f.pouchOverride||""} onChange={e=>setF(p=>({...p,pouchOverride:e.target.value,pouchExempt:false}))}
+                  placeholder={`e.g. 500 (blank = ₹${settings?.pouchPerTrip ?? 700} global)`}
+                  disabled={f.pouchExempt}
+                  style={{width:170,background:C.card,border:`1.5px solid ${f.pouchOverride&&!f.pouchExempt?C.purple:C.border}`,
+                    borderRadius:8,padding:"6px 10px",fontSize:12,color:C.text,outline:"none",opacity:f.pouchExempt?0.4:1}}/>
+              </div>
+              <div style={{fontSize:11,color:C.muted,marginTop:6}}>
+                {f.pouchExempt?"Exempt — ₹0 deducted on party orders"
+                 :f.pouchOverride?`₹${f.pouchOverride}/trip (custom override for this vehicle)`
+                 :`₹${settings?.pouchPerTrip ?? 700}/trip (global rate)`}
+              </div>
             </div>
 
             {(!f.driverName.trim() || !f.driverPhone.trim() || (f.driverPhone.replace(/\\D/g,"").length!==10)) && (
@@ -15898,6 +15930,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                   shortageDeductPerTrip:+f.shortageDeductPerTrip||0,
                   tafalOverride: f.tafalOverride!=='' ? +f.tafalOverride : null,
                   pouchExempt: !!f.pouchExempt,
+                  pouchOverride: f.pouchOverride!=='' ? +f.pouchOverride : null,
                   truckNo:f.truckNo.toUpperCase().trim()}:v));
                 log("EDIT VEHICLE",`${f.truckNo} updated`);
               } else {
@@ -15907,6 +15940,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                   shortageDeductPerTrip:+f.shortageDeductPerTrip||0,
                   tafalOverride: f.tafalOverride!=='' ? +f.tafalOverride : null,
                   pouchExempt: !!f.pouchExempt,
+                  pouchOverride: f.pouchOverride!=='' ? +f.pouchOverride : null,
                   loanTxns:[],shortageTxns:[],createdBy:user.username};
                 setVehicles(p=>[...(p||[]),v]);
                 log("ADD VEHICLE",`${v.truckNo} driver:${v.driverPhone}`);
@@ -16410,7 +16444,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                   loan:String(v.loan||0),loanRecovered:String(v.loanRecovered||0),
                   deductPerTrip:String(v.deductPerTrip||0),
                   shortageDeductPerTrip:String(v.shortageDeductPerTrip||0),
-                  tafalExempt:v.tafalExempt||false, tafalOverride:v.tafalOverride!=null?String(v.tafalOverride):"", pouchExempt:v.pouchExempt||false, accounts:v.accounts||[],
+                  tafalExempt:v.tafalExempt||false, tafalOverride:v.tafalOverride!=null?String(v.tafalOverride):"", pouchExempt:v.pouchExempt||false, pouchOverride:v.pouchOverride!=null?String(v.pouchOverride):"", accounts:v.accounts||[],
                 });setEditId(v.id);setSheet(true);}}
                   style={{background:"none",border:`1px solid ${C.muted}44`,borderRadius:6,
                     padding:"3px 8px",color:C.muted,cursor:"pointer",fontSize:11}}>✏ Edit</button>
@@ -16812,7 +16846,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
   const [f,setF] = useState(blank);
   const ff = k => v => setF(p=>({...p,[k]:v}));
   const isOwner = user?.role==="owner";
-  const isSelfWallet = user?.role==="employee_self";
+  const isSelfWallet = (user?.role||"").split(",").map(r=>r.trim()).includes("employee_self");
   const selfEmpId = user?.assignedEmployeeId||"";
   const fmtD = d => { if(!d) return "—"; try { const [y,m,dy]=d.split("-"); return `${dy}-${m}-${y}`; } catch { return d; } };
 
@@ -23771,7 +23805,7 @@ function UserAdmin({users, setUsers, user, log, pumps=[], employees=[]}) {
     return {...p, assignedClients: cur.includes(c)?cur.filter(x=>x!==c):[...cur,c]};
   });
   const save=()=>{
-    if(f.role==="employee_self" && !f.assignedEmployeeId) { alert("Please select which employee this login belongs to."); return; }
+    if((f.role||"").split(",").map(r=>r.trim()).includes("employee_self") && !f.assignedEmployeeId) { alert("Please select which employee this login belongs to."); return; }
     if(edit){setUsers(p=>p.map(u=>u.id===edit.id?{...u,...f}:u));log("EDIT USER",`${f.name}`);}
     else{const u={...f,id:"U"+uid(),createdAt:today()};setUsers(p=>[...(p||[]),u]);log("ADD USER",`${u.name} as ${u.role}`);}
     setF(blank);setSheet(false);setEdit(null);
@@ -23792,7 +23826,7 @@ function UserAdmin({users, setUsers, user, log, pumps=[], employees=[]}) {
           <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
             <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:6}}>ADDITIONAL ROLE <span style={{color:C.teal,fontWeight:400}}>(optional — gives dual permissions)</span></div>
             <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-              {Object.entries(ROLES).filter(([k])=>k!==f.role&&k!=="owner").map(([k,v])=>{
+              {Object.entries(ROLES).filter(([k])=>k!==f.role&&k!=="owner"&&k!=="employee_self").map(([k,v])=>{
                 const currentRoles = (f.role||"").split(",").map(r=>r.trim());
                 const hasRole = currentRoles.includes(k);
                 return (
@@ -23854,7 +23888,7 @@ function UserAdmin({users, setUsers, user, log, pumps=[], employees=[]}) {
             </div>
           )}
           {/* Assigned Employee — only shown for employee_self role; links login to their wallet */}
-          {f.role==="employee_self" && (
+          {(f.role||"").split(",").map(r=>r.trim()).includes("employee_self") && (
             <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
               <div style={{color:f.assignedEmployeeId?C.muted:C.red,fontSize:11,fontWeight:700,marginBottom:6}}>
                 ASSIGNED EMPLOYEE {!f.assignedEmployeeId&&<span>*required</span>} <span style={{color:"#0d9488",fontWeight:400}}>(this login will only see this employee's own wallet)</span>
