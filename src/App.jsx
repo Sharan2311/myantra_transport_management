@@ -50,6 +50,14 @@ const uid   = () => Math.random().toString(36).slice(2,9).toUpperCase();
 // back to assignedEmpId only when cashEmpId is blank or the explicit "none" choice.
 const hasWalletEmp = id => !!id && id !== "__none__";
 const resolveWalletEmpId = (cashEmpId, fallbackEmpId) => hasWalletEmp(cashEmpId) ? cashEmpId : (fallbackEmpId||"");
+// True only when employee_self is the user's ONLY role — used to decide whether to
+// force-land on the wallet tab / hide dashboard. A combined role (e.g. a fleet
+// manager who is also a driver) keeps their normal landing tab and other tabs,
+// with the wallet available as an extra tab rather than the only one.
+const isPureSelfWalletRole = (roleStr) => {
+  const roles = (roleStr||"").split(",").map(r=>r.trim()).filter(Boolean);
+  return roles.length>0 && roles.every(r=>r==="employee_self");
+};
 
 // ─── TRANSPORTER MISMATCH GUARD ───────────────────────────────────────────────
 // Compares a "transporterName" extracted from a scanned DI/GR document against
@@ -166,9 +174,6 @@ const ROLES = {
 const can = (user, p) => {
   if(!user) return false;
   const roleList = (user.role||"").split(",").map(r=>r.trim()).filter(Boolean);
-  // selfWalletOnly is a hard restriction — if ANY assigned role is self-wallet-only,
-  // the whole login is locked to just the wallet, no matter what else is granted.
-  if(roleList.some(r=>ROLES[r]?.selfWalletOnly)) return p==="employees";
   const perms = new Set();
   roleList.forEach(r => (ROLES[r]?.perms||[]).forEach(pp=>perms.add(pp)));
   if(perms.has(p)) return true;
@@ -177,6 +182,9 @@ const can = (user, p) => {
   // diesel_view grants access to diesel tab (read-only); driverPay_view grants driverPay tab (read-only)
   if(p==="diesel"    && perms.has("diesel_view"))    return true;
   if(p==="driverPay" && perms.has("driverPay_view")) return true;
+  // employees_view (employee_self role) grants read-only access to just their own wallet —
+  // enforced inside the Employees component itself, not here, so this can safely combine
+  // with any other role's permissions (e.g. a fleet manager who is also a driver).
   if(p==="employees" && perms.has("employees_view")) return true;
   return false;
 };
@@ -184,7 +192,6 @@ const canEdit = (user, p) => {
   // Returns false for view-only perms — fleet_manager cannot add/edit diesel or driver pay
   if(!user) return false;
   const roleList = (user.role||"").split(",").map(r=>r.trim()).filter(Boolean);
-  if(roleList.some(r=>ROLES[r]?.selfWalletOnly)) return false; // self-wallet is always read-only
   const perms = new Set();
   roleList.forEach(r => (ROLES[r]?.perms||[]).forEach(pp=>perms.add(pp)));
   if(p==="diesel"    && perms.has("diesel_view")    && !perms.has("diesel"))    return false;
@@ -678,9 +685,7 @@ function BottomNav({tab, setTab, user, trips, driverPays, vehicles, dieselReques
   const isEmployeeSelf = roles.includes("employee_self");
   const isPartyOnly = roles.every(r=>["party_manager","email_followup"].includes(r));
   const hasPartyRole = roles.some(r=>["party_manager","email_followup"].includes(r));
-  const items = isEmployeeSelf ? [
-    {id:"employees", icon:"💵", label:"My Wallet", perm:"employees"},
-  ] : isPump ? [
+  const items = isPump ? [
     {id:"pump_portal", icon:"⛽", label:"Indents", perm:"pump_portal"},
   ] : isPartyOnly ? [
     {id:"party_portal", icon:"📋", label:"Party", perm:"party_portal"},
@@ -704,6 +709,14 @@ function BottomNav({tab, setTab, user, trips, driverPays, vehicles, dieselReques
     {id:"diesel",   icon:"⛽",label:"Diesel",  perm:"diesel",   feat:"diesel_tab"},
     {id:"more",     icon:"⋯", label:"More",    perm:null},
   ];
+  // employee_self layers a read-only "My Wallet" tab on top of whatever else the
+  // login can already do — it doesn't replace their other tabs (e.g. a fleet
+  // manager who is also a driver keeps Trips/Billing/Diesel AND gets their wallet).
+  if(isEmployeeSelf && !items.some(n=>n.id==="employees")) {
+    const moreIdx = items.findIndex(n=>n.id==="more");
+    const walletItem = {id:"employees", icon:"💵", label:"My Wallet", perm:"employees"};
+    if(moreIdx>=0) items.splice(moreIdx, 0, walletItem); else items.push(walletItem);
+  }
   const visibleItems = items.filter(n => (!n.perm || can(user, n.perm)) && canFeature(n.feat));
 
   // Badge counts
@@ -1354,7 +1367,7 @@ function AppMain() {
       const saved = sessionStorage.getItem("mye_user");
       const u = saved ? JSON.parse(saved) : null;
       if(u?.role==="pump_operator") return "pump_portal";
-      if((u?.role||"").split(",").map(r=>r.trim()).includes("employee_self")) return "employees";
+      if(isPureSelfWalletRole(u?.role)) return "employees";
       const roles = (u?.role||"").split(",").map(r=>r.trim());
       if(roles.length && roles.every(r=>["party_manager","email_followup"].includes(r))) return "party_portal";
     } catch {}
@@ -1781,7 +1794,7 @@ function AppMain() {
       try { sessionStorage.setItem("mye_user", JSON.stringify(u)); } catch{}
       setUser(u);
       if(u.role==="pump_operator") setTab("pump_portal");
-      if((u.role||"").split(",").map(r=>r.trim()).includes("employee_self")) setTab("employees");
+      if(isPureSelfWalletRole(u.role)) setTab("employees");
       if((u.role||"").split(",").every(r=>["party_manager","email_followup"].includes(r.trim()))) setTab("party_portal");
       log("LOGIN",`${u.name} signed in`);
     }} />;
@@ -1878,7 +1891,7 @@ function AppMain() {
 
       <div style={{padding:"14px 16px 8px"}}>
         <ErrorBoundary>
-        {tab==="dashboard"  && user?.role!=="pump_operator" && !(user?.role||"").split(",").map(r=>r.trim()).includes("employee_self") && !isParty && <Dashboard {...sp} setTab={setTab} />}
+        {tab==="dashboard"  && user?.role!=="pump_operator" && !isPureSelfWalletRole(user?.role) && !isParty && <Dashboard {...sp} setTab={setTab} />}
         {tab==="trips"      && can(user,"trips")      && <Trips      {...sp} tripType="outbound" />}
         {tab==="inbound"    && can(user,"inbound")    && <Trips      {...sp} tripType="inbound" />}
         {tab==="billing"    && can(user,"billing")    && <Billing    {...sp} />}
@@ -2663,7 +2676,7 @@ Extract ALL the following fields. Return ONLY a JSON object, no markdown.
   "consignee": "FULL consignee name + complete address as printed — include ALL lines",
   "consigneePhone": "Phone number from consignee section — 10 digits or empty string",
   "consignor": "Consignor/plant name",
-  "transporterName": "Transporter / Carrier / Transporter Name field on the document — the trucking/transport company named as carrier, NOT the consignor (cement plant) or consignee (buyer). Empty string if not shown.",
+  "transporterName": "Company letterhead name at the very TOP-LEFT of the document (e.g. 'KORI ENTERPRISES'), usually followed by an address and PAN/GSTN line — this is who printed/issued the GR, i.e. the transporter. There is usually NO field literally labeled 'Transporter Name'. Do not confuse with the Consignor (cement plant) or Consignee (buyer). Leave empty if not clearly visible — do not guess.",
   "from": "Loading location / city",
   "to": "Destination city or town",
   "grade": "'Cement Packed' or 'Cement Bulk'",
@@ -5190,7 +5203,7 @@ Extract the following fields from this document image and return ONLY a JSON obj
   "truckNo": "Vehicle/Truck registration number",
   "consignee": "Consignee name / destination party",
   "consignor": "Consignor name — the cement company/plant name e.g. the cement company plant name",
-  "transporterName": "Transporter / Carrier / Transporter Name field on the document — the trucking/transport company named as carrier, NOT the consignor (cement plant) or consignee (buyer). Empty string if not shown.",
+  "transporterName": "Company letterhead name at the very TOP-LEFT of the document (e.g. 'KORI ENTERPRISES'), usually followed by an address and PAN/GSTN line — this is who printed/issued the GR, i.e. the transporter. There is usually NO field literally labeled 'Transporter Name'. Do not confuse with the Consignor (cement plant) or Consignee (buyer). Leave empty if not clearly visible — do not guess.",
   "from": "Source/loading location",
   "to": "Destination/unloading location",
   "grade": "Material grade - use exactly 'Cement Packed' or 'Cement Bulk' for cement, else actual material name",
@@ -17556,6 +17569,12 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
           placeholder="🔍 Search employee..."
           style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,
             color:C.text,padding:"10px 12px",fontSize:14,outline:"none",width:"100%",boxSizing:"border-box"}} />
+      )}
+
+      {isSelfWallet && !employees.some(e=>e.id===selfEmpId) && (
+        <div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:10,padding:"14px 16px",color:C.red,fontSize:13}}>
+          ⚠ Your login isn't linked to an employee record yet. Ask the owner to open <b>More → User Admin</b>, edit your user, and set <b>Assigned Employee</b> to your name.
+        </div>
       )}
 
       {employees.filter(e=>{
