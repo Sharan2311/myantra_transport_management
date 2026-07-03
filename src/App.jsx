@@ -893,6 +893,8 @@ function Login({onLogin}) {
           pin: data.pin, role: data.role, active: data.active,
           createdAt: data.created_at,
           assignedClients: data.assigned_clients || [],
+          assignedEmployeeId: data.assigned_employee_id || "",
+          assignedPumpId: data.assigned_pump_id || "",
         };
         onLogin(u);
       }
