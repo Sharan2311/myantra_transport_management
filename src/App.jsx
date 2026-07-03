@@ -23840,30 +23840,36 @@ function UserAdmin({users, setUsers, user, log, pumps=[], employees=[]}) {
         <div style={{display:"flex",flexDirection:"column",gap:13}}>
           <div style={{display:"flex",gap:10}}><Field label="Full Name" value={f.name} onChange={ff("name")} half /><Field label="Username" value={f.username} onChange={ff("username")} half /></div>
           <Field label="PIN (4 digits)" value={f.pin} onChange={ff("pin")} placeholder="1234" />
-          <Field label="Role" value={f.role} onChange={ff("role")} opts={Object.entries(ROLES).map(([k,v])=>({v:k,l:`${v.label} — ${v.perms.slice(0,3).join(", ")}…`}))} />
+          <Field label="Role" value={(f.role||"").split(",")[0]||""} onChange={val=>{
+            const rest = (f.role||"").split(",").map(r=>r.trim()).filter(Boolean).slice(1);
+            setF(p=>({...p, role:[val,...rest].filter(Boolean).join(",")}));
+          }} opts={Object.entries(ROLES).map(([k,v])=>({v:k,l:`${v.label} — ${v.perms.slice(0,3).join(", ")}…`}))} />
           {/* Multi-role: add a second role */}
           <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
             <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:6}}>ADDITIONAL ROLE <span style={{color:C.teal,fontWeight:400}}>(optional — gives dual permissions)</span></div>
             <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-              {Object.entries(ROLES).filter(([k])=>k!==f.role&&k!=="owner"&&k!=="employee_self").map(([k,v])=>{
-                const currentRoles = (f.role||"").split(",").map(r=>r.trim());
-                const hasRole = currentRoles.includes(k);
-                return (
-                  <button key={k} onClick={()=>{
-                    if(hasRole) {
-                      ff("role")(currentRoles.filter(r=>r!==k).join(","));
-                    } else {
-                      const baseRole = currentRoles[0]||"operator";
-                      ff("role")([baseRole,k].join(","));
-                    }
-                  }} style={{padding:"5px 10px",borderRadius:8,fontSize:11,fontWeight:700,cursor:"pointer",
-                    background:hasRole?v.color+"22":"transparent",
-                    border:`1.5px solid ${hasRole?v.color:C.border}`,
-                    color:hasRole?v.color:C.muted}}>
-                    {hasRole?"✓ ":""}{v.label}
-                  </button>
-                );
-              })}
+              {(()=>{
+                const currentRoles = (f.role||"").split(",").map(r=>r.trim()).filter(Boolean);
+                const primaryRole = currentRoles[0]||"";
+                return Object.entries(ROLES).filter(([k])=>k!==primaryRole&&k!=="owner").map(([k,v])=>{
+                  const hasRole = currentRoles.includes(k);
+                  return (
+                    <button key={k} onClick={()=>{
+                      if(hasRole) {
+                        ff("role")(currentRoles.filter(r=>r!==k).join(","));
+                      } else {
+                        const baseRole = primaryRole||"operator";
+                        ff("role")([baseRole,...currentRoles.slice(1),k].join(","));
+                      }
+                    }} style={{padding:"5px 10px",borderRadius:8,fontSize:11,fontWeight:700,cursor:"pointer",
+                      background:hasRole?v.color+"22":"transparent",
+                      border:`1.5px solid ${hasRole?v.color:C.border}`,
+                      color:hasRole?v.color:C.muted}}>
+                      {hasRole?"✓ ":""}{v.label}
+                    </button>
+                  );
+                });
+              })()}
             </div>
             {(f.role||"").includes(",") && (
               <div style={{fontSize:11,color:C.green,marginTop:6}}>✓ Dual role: {(f.role||"").split(",").map(r=>ROLES[r.trim()]?.label||r).join(" + ")}</div>
@@ -23871,7 +23877,15 @@ function UserAdmin({users, setUsers, user, log, pumps=[], employees=[]}) {
           </div>
           <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
             <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:6}}>PERMISSIONS</div>
-            <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>{(ROLES[f.role]?.perms||[]).map(p=><Badge key={p} label={p} color={ROLES[f.role].color} />)}</div>
+            <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+              {(()=>{
+                const roleList = (f.role||"").split(",").map(r=>r.trim()).filter(Boolean);
+                const seen = new Set();
+                return roleList.flatMap(r => (ROLES[r]?.perms||[]).filter(p=>!seen.has(p)&&seen.add(p)).map(p=>
+                  <Badge key={r+"-"+p} label={p} color={ROLES[r]?.color||C.muted} />
+                ));
+              })()}
+            </div>
           </div>
           {/* Assigned Clients — owner sees all, non-owner restricted to assigned */}
           <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
@@ -23893,7 +23907,7 @@ function UserAdmin({users, setUsers, user, log, pumps=[], employees=[]}) {
             )}
           </div>
           {/* Assigned Pump — only shown for pump_operator role */}
-          {f.role==="pump_operator" && (
+          {(f.role||"").split(",").map(r=>r.trim()).includes("pump_operator") && (
             <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
               <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:6}}>
                 ASSIGNED PUMP <span style={{color:C.orange,fontWeight:400}}>(pump operator will only see this pump's data)</span>
