@@ -275,12 +275,14 @@ const userFromDB = r => ({
   role: r.role, active: r.active, createdAt: r.created_at,
   assignedClients: r.assigned_clients || [],
   assignedEmployeeId: r.assigned_employee_id || '',
+  assignedPumpId: r.assigned_pump_id || '',
 })
 const userToDB = u => ({
   id: u.id, name: u.name, username: u.username, pin: u.pin,
   role: u.role, active: u.active, created_at: u.createdAt,
   assigned_clients: u.assignedClients || [],
   assigned_employee_id: u.assignedEmployeeId || '',
+  assigned_pump_id: u.assignedPumpId || '',
 })
 
 const pumpPaymentFromDB = r => ({
