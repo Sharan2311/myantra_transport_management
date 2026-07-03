@@ -1338,7 +1338,20 @@ function AppMain() {
       return saved ? JSON.parse(saved) : null;
     } catch { return null; }
   });
-  const [tab,  setTab]  = useState("dashboard");
+  const [tab,  setTab]  = useState(() => {
+    // Mirrors the user-restore logic above — a restored session (page reload,
+    // reopened PWA) must land on the right tab immediately, since restricted
+    // roles (pump_operator, employee_self, party-only) don't render "dashboard".
+    try {
+      const saved = sessionStorage.getItem("mye_user");
+      const u = saved ? JSON.parse(saved) : null;
+      if(u?.role==="pump_operator") return "pump_portal";
+      if(u?.role==="employee_self") return "employees";
+      const roles = (u?.role||"").split(",").map(r=>r.trim());
+      if(roles.length && roles.every(r=>["party_manager","email_followup"].includes(r))) return "party_portal";
+    } catch {}
+    return "dashboard";
+  });
   const [saving, setSaving] = useState(false);
   const [saveErr, setSaveErr] = useState("");
   const [selectedFY, setSelectedFY] = useState(currentFY()); // Financial year filter
