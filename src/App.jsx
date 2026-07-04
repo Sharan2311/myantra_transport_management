@@ -1926,7 +1926,7 @@ function AppMain() {
         {tab==="vehicles"   && can(user,"vehicles")   && <Vehicles   {...sp} />}
         {tab==="employees"  && can(user,"employees")  && <Employees  {...sp} />}
         {tab==="payments"   && can(user,"payments")   && <Payments   {...sp} />}
-        {tab==="driverPay"  && can(user,"driverPay") && <DriverPayments {...sp} viewOnly={!canEdit(user,"driverPay")} />}
+        {tab==="driverPay"  && can(user,"driverPay") && <DriverPayments {...sp} viewOnly={!canEdit(user,"driverPay")} setTab={setTab} />}
         {tab==="expenses"   && can(user,"payments")   && <ExpensesLedger {...sp} />}
         {tab==="reports"    && can(user,"reports")    && <Reports    {...sp} />}
         {tab==="reminders"  && can(user,"reminders")  && <Reminders  {...sp} />}
@@ -21027,7 +21027,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
 // Record bank transfers against a trip. "Balance due" auto-updates.
 // ─── EMPLOYEE TRIP GROUP ─────────────────────────────────────────────────────
 // Groups all unpaid trips for one employee — can request payment for each or all together
-function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPayReqSheet, vehicles, fmt,
+function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPayReqSheet, requestPaymentGuarded, vehicles, fmt,
   setDriverPays, setTrips, setEmployees, setCashTransfers, cashTransfers, user, log }) {
   const [open, setOpen] = useState(true);
   const [selected, setSelected] = useState(new Set(empTrips.map(t=>t.id)));
@@ -21172,7 +21172,7 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPayR
           {/* Action buttons */}
           <div style={{display:"flex",gap:8,marginTop:4,flexWrap:"wrap"}}>
             {selectedTrips.length===1 && !hasPendingReq(selectedTrips[0].id) && (
-              <button onClick={()=>setPayReqSheet(selectedTrips[0])}
+              <button onClick={()=>requestPaymentGuarded(selectedTrips[0], selectedTrips[0])}
                 style={{flex:1,background:"#7c3aed22",border:"1.5px solid #7c3aed44",borderRadius:10,
                   color:"#7c3aed",padding:"9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
                 📋 Request Payment — LR {selectedTrips[0].lrNo}
@@ -21185,7 +21185,7 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPayR
                   _groupedLRs: selectedTrips.map(t=>t.lrNo).join(" + "),
                   _groupedTotal: selectedTotal,
                 };
-                setPayReqSheet(combined);
+                requestPaymentGuarded(selectedTrips, combined);
               }}
                 style={{flex:1,background:"#7c3aed22",border:"1.5px solid #7c3aed44",borderRadius:10,
                   color:"#7c3aed",padding:"9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
@@ -21281,10 +21281,64 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPayR
   );
 }
 
-function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, vehicles, setVehicles, employees, setEmployees, cashTransfers, setCashTransfers, paymentRequests=[], setPaymentRequests, indents=[], dieselRequests=[], setDieselRequests, user, log, viewOnly=false}) {
+function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, vehicles, setVehicles, employees, setEmployees, cashTransfers, setCashTransfers, paymentRequests=[], setPaymentRequests, indents=[], dieselRequests=[], setDieselRequests, user, log, viewOnly=false, setTab}) {
   const [filter,    setFilter]    = useState("unpaid");
   const [paySheet,  setPaySheet]  = useState(null);
   const [payReqSheet,   setPayReqSheet]   = useState(null); // trip for request payment
+  // ── Diesel-confirmation gate ────────────────────────────────────────────────
+  // Before a payment request goes out for a trip with NO diesel indent attached,
+  // force an explicit Yes/No accountability check. "Yes" sends them to raise a
+  // diesel request instead (payment request is cancelled). "No" requires a strong
+  // named declaration, records it permanently against the trip, then proceeds.
+  const [dieselGateQueue,  setDieselGateQueue]  = useState([]);   // trips still needing a check, processed one at a time
+  const [dieselGateStep,   setDieselGateStep]   = useState(null); // "ask" | "declare" | null
+  const [dieselGateAction, setDieselGateAction] = useState(null); // () => void, runs once the whole queue clears
+
+  const requestPaymentGuarded = (checkTrips, openWith) => {
+    const list = Array.isArray(checkTrips) ? checkTrips : [checkTrips];
+    const needsCheck = list.filter(t => !((t.dieselIndentNo||"").trim()) && !t.noDieselConfirmed);
+    if (needsCheck.length === 0) { setPayReqSheet(openWith); return; }
+    setDieselGateQueue(needsCheck);
+    setDieselGateAction(() => () => setPayReqSheet(openWith));
+    setDieselGateStep("ask");
+  };
+
+  const dieselGateTrip = dieselGateQueue[0] || null;
+  const dieselGateEmp = dieselGateTrip ? (employees||[]).find(e=>e.id===dieselGateTrip.assignedEmpId) : null;
+  const dieselGateIsSelf = dieselGateEmp && user?.assignedEmployeeId && dieselGateEmp.id===user.assignedEmployeeId;
+
+  const dieselGateAdvance = () => {
+    const rest = dieselGateQueue.slice(1);
+    if (rest.length === 0) {
+      setDieselGateQueue([]); setDieselGateStep(null);
+      if (dieselGateAction) dieselGateAction();
+      setDieselGateAction(null);
+    } else {
+      setDieselGateQueue(rest);
+      setDieselGateStep("ask");
+    }
+  };
+
+  const dieselGateConfirmNo = () => {
+    const t = dieselGateTrip;
+    if (!t) return;
+    const updated = {...t,
+      noDieselConfirmed: true,
+      noDieselConfirmedBy: user.username,
+      noDieselConfirmedByName: user.name||user.username,
+      noDieselFor: t.assignedEmpId||"",
+      noDieselAt: nowTs(),
+    };
+    setTrips(prev => prev.map(x=>x.id===t.id?updated:x));
+    DB.saveTrip(updated).catch(e=>console.error("saveTrip noDieselConfirmed:",e));
+    log("NO DIESEL CONFIRMED", `LR:${t.lrNo} ${t.truckNo} — for ${dieselGateEmp?.name||"unassigned"}, by ${user.name||user.username}`);
+    dieselGateAdvance();
+  };
+
+  const dieselGateGoToDiesel = () => {
+    setDieselGateQueue([]); setDieselGateStep(null); setDieselGateAction(null);
+    if (setTab) setTab("diesel");
+  };
   const [reqSubFilter,  setReqSubFilter]  = useState("pending"); // pending|done|all
   const [reqSearch,     setReqSearch]     = useState("");
   const [splitSheet, setSplitSheet] = useState(null); // scanned multi-LR data
@@ -21852,6 +21906,7 @@ This will auto-recover in the next trip.`);
                   empId={empId} emp={emp} empTrips={empTrips} totalBal={totalBal}
                   paymentRequests={paymentRequests||[]}
                   setPayReqSheet={setPayReqSheet}
+                  requestPaymentGuarded={requestPaymentGuarded}
                   vehicles={vehicles} fmt={fmt}
                   setDriverPays={setDriverPays} setTrips={setTrips} setEmployees={setEmployees}
                   setCashTransfers={setCashTransfers} cashTransfers={cashTransfers}
@@ -21987,12 +22042,17 @@ This will auto-recover in the next trip.`);
               </div>
             </div>
           ))}
+          {t.noDieselConfirmed && (
+            <div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,padding:"8px 10px",fontSize:11,color:C.red,marginBottom:2}}>
+              ⛽🚫 No diesel confirmed — for <b>{(employees||[]).find(e=>e.id===t.noDieselFor)?.name||"unassigned driver"}</b>, by <b>{t.noDieselConfirmedByName||t.noDieselConfirmedBy}</b>{t.noDieselAt && ` · ${t.noDieselAt}`}
+            </div>
+          )}
           <div style={{display:"flex",gap:8,marginTop:4}}>
             {t.balance>0&&!viewOnly&&(
               <Btn onClick={()=>{setPaySheet(t);setPf({amount:String(t.balance),utr:"",date:today(),paidTo:"",notes:""});}} full sm color={C.green}>+ Record Payment</Btn>
             )}
             {t.balance>0&&(
-              <Btn onClick={()=>setPayReqSheet(t)} sm outline color={C.purple}>📋 Request Payment</Btn>
+              <Btn onClick={()=>requestPaymentGuarded(t, t)} sm outline color={C.purple}>📋 Request Payment</Btn>
             )}
           </div>
         </div>
@@ -22189,6 +22249,72 @@ This will auto-recover in the next trip.`);
             );
           })}
         </div>
+      )}
+
+      {/* ── DIESEL CONFIRMATION GATE — blocks payment request until answered ── */}
+      {dieselGateStep && dieselGateTrip && (
+        <Sheet title="⛽ Diesel Confirmation Required" onClose={()=>{setDieselGateQueue([]);setDieselGateStep(null);setDieselGateAction(null);}} noBackdropClose>
+          <div style={{display:"flex",flexDirection:"column",gap:14}}>
+            <div style={{background:C.bg,borderRadius:10,padding:"12px 14px"}}>
+              <div style={{fontWeight:800,fontSize:14}}>{dieselGateTrip.truckNo}</div>
+              <div style={{color:C.muted,fontSize:12}}>LR {dieselGateTrip.lrNo||"—"} · Trip {dieselGateTrip.date}</div>
+            </div>
+
+            {dieselGateStep==="ask" && (
+              <>
+                <div style={{fontSize:14,fontWeight:700}}>Did you take diesel for this trip?</div>
+                <div style={{display:"flex",gap:10}}>
+                  <button onClick={()=>setDieselGateStep("declare_yes")}
+                    style={{flex:1,background:C.green+"22",border:`1.5px solid ${C.green}`,borderRadius:10,
+                      color:C.green,padding:"12px",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+                    Yes, I took diesel
+                  </button>
+                  <button onClick={()=>setDieselGateStep("declare")}
+                    style={{flex:1,background:C.red+"22",border:`1.5px solid ${C.red}`,borderRadius:10,
+                      color:C.red,padding:"12px",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+                    No, I did not take diesel
+                  </button>
+                </div>
+              </>
+            )}
+
+            {dieselGateStep==="declare_yes" && (
+              <>
+                <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:10,padding:"14px 16px",color:C.text,fontSize:13,lineHeight:1.5}}>
+                  Raise a diesel request and confirm the request with Sandeep Patil and make sure it is attached to LR <b>{dieselGateTrip.lrNo||"—"}</b> and come back and request for payment.
+                </div>
+                <Btn onClick={dieselGateGoToDiesel} full color={C.orange}>Go to Diesel Requests →</Btn>
+                <Btn onClick={()=>setDieselGateStep("ask")} full outline color={C.muted}>← Back</Btn>
+              </>
+            )}
+
+            {dieselGateStep==="declare" && (
+              <>
+                <div style={{background:C.red+"11",border:`1.5px solid ${C.red}`,borderRadius:10,padding:"14px 16px"}}>
+                  <div style={{color:C.red,fontWeight:800,fontSize:13,marginBottom:8}}>⚠️ You are about to declare:</div>
+                  <div style={{fontSize:13,lineHeight:1.6,color:C.text}}>
+                    {dieselGateIsSelf ? (
+                      <>"I, <b>{user.name||user.username}</b>, confirm that there was <b>NO diesel</b> taken for this trip — Truck <b>{dieselGateTrip.truckNo}</b>, Trip dated <b>{dieselGateTrip.date}</b>, LR <b>{dieselGateTrip.lrNo||"—"}</b>."</>
+                    ) : (
+                      <>"I, <b>{user.name||user.username}</b>, confirm on behalf of <b>{dieselGateEmp?.name||"the driver on this trip"}</b> that there was <b>NO diesel</b> taken for this trip — Truck <b>{dieselGateTrip.truckNo}</b>, Trip dated <b>{dieselGateTrip.date}</b>, LR <b>{dieselGateTrip.lrNo||"—"}</b>."</>
+                    )}
+                  </div>
+                  <div style={{fontSize:12,color:C.red,marginTop:10,fontWeight:600}}>
+                    This will be checked against the pump's records tomorrow. If diesel is later found for this trip that was not requested, the amount will be recovered from {dieselGateIsSelf ? "you" : (dieselGateEmp?.name||"the linked employee")}.
+                  </div>
+                </div>
+                <div style={{display:"flex",gap:10}}>
+                  <Btn onClick={()=>setDieselGateStep("ask")} full outline color={C.muted}>Go Back</Btn>
+                  <Btn onClick={dieselGateConfirmNo} full color={C.red}>I Confirm — Submit</Btn>
+                </div>
+              </>
+            )}
+
+            {dieselGateQueue.length>1 && (
+              <div style={{textAlign:"center",color:C.muted,fontSize:11}}>{dieselGateQueue.length-1} more trip{dieselGateQueue.length>2?"s":""} to check after this</div>
+            )}
+          </div>
+        </Sheet>
       )}
 
       {/* ── REQUEST PAYMENT SHEET ── */}

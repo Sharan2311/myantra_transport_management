@@ -47,6 +47,11 @@ const tripFromDB = r => ({
   pouchBalance: +(r.pouch_balance || 0),
   grParticulars: r.gr_particulars || null,
   transporterName: r.transporter_name || '',
+  noDieselConfirmed: r.no_diesel_confirmed || false,
+  noDieselConfirmedBy: r.no_diesel_confirmed_by || '',
+  noDieselConfirmedByName: r.no_diesel_confirmed_by_name || '',
+  noDieselFor: r.no_diesel_for || '',
+  noDieselAt: r.no_diesel_at || '',
 })
 const tripToDB = t => ({
   id: t.id, type: t.type, lr_no: t.lrNo, di_no: t.diNo, truck_no: t.truckNo,
@@ -94,6 +99,11 @@ const tripToDB = t => ({
   pouch_balance: t.pouchBalance || 0,
   gr_particulars: t.grParticulars || null,
   transporter_name: t.transporterName || '',
+  no_diesel_confirmed: t.noDieselConfirmed || false,
+  no_diesel_confirmed_by: t.noDieselConfirmedBy || '',
+  no_diesel_confirmed_by_name: t.noDieselConfirmedByName || '',
+  no_diesel_for: t.noDieselFor || '',
+  no_diesel_at: t.noDieselAt || '',
 })
 
 const vehicleFromDB = r => ({
