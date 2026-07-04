@@ -21281,6 +21281,82 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPayR
   );
 }
 
+// ─── Diesel Confirmation Gate — translations ──────────────────────────────────
+const DIESEL_GATE_TXT = {
+  en: {
+    langLabel: "English",
+    title: "⛽ Diesel Confirmation Required",
+    question: "Did you take diesel for this trip?",
+    yesBtn: "Yes, I took diesel",
+    noBtn: "No, I did not take diesel",
+    yesMsg: (lr) => <>Raise a diesel request and confirm the request with Sandeep Patil and make sure it is attached to LR <b>{lr}</b> and come back and request for payment.</>,
+    goToDiesel: "Go to Diesel Requests →",
+    back: "← Back",
+    declareHeading: "⚠️ You are about to declare:",
+    declareSelf: (name, truck, date, lr) => <>"I, <b>{name}</b>, confirm that there was <b>NO diesel</b> taken for this trip — Truck <b>{truck}</b>, Trip dated <b>{date}</b>, LR <b>{lr}</b>."</>,
+    declareFor: (name, empName, truck, date, lr) => <>"I, <b>{name}</b>, confirm on behalf of <b>{empName}</b> that there was <b>NO diesel</b> taken for this trip — Truck <b>{truck}</b>, Trip dated <b>{date}</b>, LR <b>{lr}</b>."</>,
+    warning: (who) => <>This will be checked against the pump's records tomorrow. If diesel is later found for this trip that was not requested, the amount will be recovered from {who}.</>,
+    you: "you",
+    goBack: "Go Back",
+    confirmSubmit: "I Confirm — Submit",
+    moreTrips: (n) => `${n} more trip${n>1?"s":""} to check after this`,
+  },
+  kn: {
+    langLabel: "ಕನ್ನಡ",
+    title: "⛽ ಡೀಸೆಲ್ ದೃಢೀಕರಣ ಅಗತ್ಯ",
+    question: "ಈ ಟ್ರಿಪ್‌ಗೆ ನೀವು ಡೀಸೆಲ್ ತೆಗೆದುಕೊಂಡಿದ್ದೀರಾ?",
+    yesBtn: "ಹೌದು, ಡೀಸೆಲ್ ತೆಗೆದುಕೊಂಡಿದ್ದೇನೆ",
+    noBtn: "ಇಲ್ಲ, ಡೀಸೆಲ್ ತೆಗೆದುಕೊಂಡಿಲ್ಲ",
+    yesMsg: (lr) => <>ಡೀಸೆಲ್ ವಿನಂತಿ ಸಲ್ಲಿಸಿ ಮತ್ತು ಸಂದೀಪ್ ಪಾಟೀಲ್ ಅವರೊಂದಿಗೆ ವಿನಂತಿಯನ್ನು ಖಚಿತಪಡಿಸಿ ಮತ್ತು ಅದನ್ನು LR <b>{lr}</b> ಗೆ ಲಗತ್ತಿಸಲಾಗಿದೆ ಎಂದು ಖಚಿತಪಡಿಸಿಕೊಳ್ಳಿ, ನಂತರ ವಾಪಸ್ ಬಂದು ಪಾವತಿಗಾಗಿ ವಿನಂತಿಸಿ.</>,
+    goToDiesel: "ಡೀಸೆಲ್ ವಿನಂತಿಗಳಿಗೆ ಹೋಗಿ →",
+    back: "← ಹಿಂದೆ",
+    declareHeading: "⚠️ ನೀವು ಈ ಘೋಷಣೆ ಮಾಡುತ್ತಿದ್ದೀರಿ:",
+    declareSelf: (name, truck, date, lr) => <>"ನಾನು, <b>{name}</b>, ಈ ಟ್ರಿಪ್‌ಗೆ (ಟ್ರಕ್ <b>{truck}</b>, ದಿನಾಂಕ <b>{date}</b>, LR <b>{lr}</b>) ಡೀಸೆಲ್ ತೆಗೆದುಕೊಂಡಿಲ್ಲ ಎಂದು ದೃಢಪಡಿಸುತ್ತೇನೆ."</>,
+    declareFor: (name, empName, truck, date, lr) => <>"ನಾನು, <b>{name}</b>, <b>{empName}</b> ಪರವಾಗಿ ಈ ಟ್ರಿಪ್‌ಗೆ (ಟ್ರಕ್ <b>{truck}</b>, ದಿನಾಂಕ <b>{date}</b>, LR <b>{lr}</b>) ಡೀಸೆಲ್ ತೆಗೆದುಕೊಂಡಿಲ್ಲ ಎಂದು ದೃಢಪಡಿಸುತ್ತೇನೆ."</>,
+    warning: (who) => <>ಇದನ್ನು ನಾಳೆ ಪಂಪ್‌ನ ದಾಖಲೆಗಳೊಂದಿಗೆ ಪರಿಶೀಲಿಸಲಾಗುವುದು. ವಿನಂತಿಸದ ಡೀಸೆಲ್ ನಂತರ ಕಂಡುಬಂದರೆ, ಆ ಮೊತ್ತವನ್ನು {who} ರಿಂದ ವಸೂಲಿ ಮಾಡಲಾಗುತ್ತದೆ.</>,
+    you: "ನಿಮ್ಮಿಂದ",
+    goBack: "ಹಿಂದೆ ಹೋಗಿ",
+    confirmSubmit: "ದೃಢೀಕರಿಸಿ — ಸಲ್ಲಿಸಿ",
+    moreTrips: (n) => `ಇನ್ನೂ ${n} ಟ್ರಿಪ್(ಗಳು) ಪರಿಶೀಲಿಸಬೇಕಿದೆ`,
+  },
+  te: {
+    langLabel: "తెలుగు",
+    title: "⛽ డీజిల్ నిర్ధారణ అవసరం",
+    question: "ఈ ట్రిప్ కోసం మీరు డీజిల్ తీసుకున్నారా?",
+    yesBtn: "అవును, డీజిల్ తీసుకున్నాను",
+    noBtn: "లేదు, డీజిల్ తీసుకోలేదు",
+    yesMsg: (lr) => <>డీజిల్ అభ్యర్థనను లేవనెత్తండి మరియు సందీప్ పాటిల్‌తో అభ్యర్థనను నిర్ధారించండి, అది LR <b>{lr}</b>కి జోడించబడిందని నిర్ధారించుకోండి, తర్వాత తిరిగి వచ్చి చెల్లింపు కోసం అభ్యర్థించండి.</>,
+    goToDiesel: "డీజిల్ అభ్యర్థనలకు వెళ్లండి →",
+    back: "← వెనుకకు",
+    declareHeading: "⚠️ మీరు ఈ ప్రకటన చేయబోతున్నారు:",
+    declareSelf: (name, truck, date, lr) => <>"నేను, <b>{name}</b>, ఈ ట్రిప్ కోసం (ట్రక్ <b>{truck}</b>, తేదీ <b>{date}</b>, LR <b>{lr}</b>) డీజిల్ తీసుకోలేదని నిర్ధారిస్తున్నాను."</>,
+    declareFor: (name, empName, truck, date, lr) => <>"నేను, <b>{name}</b>, <b>{empName}</b> తరపున ఈ ట్రిప్ కోసం (ట్రక్ <b>{truck}</b>, తేదీ <b>{date}</b>, LR <b>{lr}</b>) డీజిల్ తీసుకోలేదని నిర్ధారిస్తున్నాను."</>,
+    warning: (who) => <>దీనిని రేపు పంప్ రికార్డులతో పరిశీలిస్తారు. అభ్యర్థించని డీజిల్ తర్వాత కనుగొనబడితే, ఆ మొత్తం {who} నుండి రికవరీ చేయబడుతుంది.</>,
+    you: "మీ నుండి",
+    goBack: "వెనక్కి వెళ్ళు",
+    confirmSubmit: "నిర్ధారించండి — సమర్పించండి",
+    moreTrips: (n) => `ఇంకా ${n} ట్రిప్(లు) తనిఖీ చేయాలి`,
+  },
+  mr: {
+    langLabel: "मराठी",
+    title: "⛽ डिझेल पुष्टीकरण आवश्यक",
+    question: "या ट्रिपसाठी तुम्ही डिझेल घेतले का?",
+    yesBtn: "होय, मी डिझेल घेतले",
+    noBtn: "नाही, मी डिझेल घेतले नाही",
+    yesMsg: (lr) => <>डिझेल विनंती करा आणि संदीप पाटील यांच्याकडे विनंतीची खात्री करा आणि ती LR <b>{lr}</b> ला जोडलेली असल्याची खात्री करा, नंतर परत येऊन पेमेंटसाठी विनंती करा.</>,
+    goToDiesel: "डिझेल विनंत्यांकडे जा →",
+    back: "← मागे",
+    declareHeading: "⚠️ तुम्ही ही घोषणा करणार आहात:",
+    declareSelf: (name, truck, date, lr) => <>"मी, <b>{name}</b>, या ट्रिपसाठी (ट्रक <b>{truck}</b>, तारीख <b>{date}</b>, LR <b>{lr}</b>) डिझेल घेतले नाही याची पुष्टी करतो."</>,
+    declareFor: (name, empName, truck, date, lr) => <>"मी, <b>{name}</b>, <b>{empName}</b> च्या वतीने या ट्रिपसाठी (ट्रक <b>{truck}</b>, तारीख <b>{date}</b>, LR <b>{lr}</b>) डिझेल घेतले नाही याची पुष्टी करतो."</>,
+    warning: (who) => <>याची उद्या पंपाच्या नोंदींशी पडताळणी केली जाईल. विनंती न केलेले डिझेल नंतर आढळल्यास, ती रक्कम {who} कडून वसूल केली जाईल.</>,
+    you: "तुमच्याकडून",
+    goBack: "मागे जा",
+    confirmSubmit: "पुष्टी करा — सबमिट करा",
+    moreTrips: (n) => `आणखी ${n} ट्रिप(चेक करायच्या आहेत)`,
+  },
+};
+
 function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, vehicles, setVehicles, employees, setEmployees, cashTransfers, setCashTransfers, paymentRequests=[], setPaymentRequests, indents=[], dieselRequests=[], setDieselRequests, user, log, viewOnly=false, setTab}) {
   const [filter,    setFilter]    = useState("unpaid");
   const [paySheet,  setPaySheet]  = useState(null);
@@ -21293,6 +21369,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
   const [dieselGateQueue,  setDieselGateQueue]  = useState([]);   // trips still needing a check, processed one at a time
   const [dieselGateStep,   setDieselGateStep]   = useState(null); // "ask" | "declare" | null
   const [dieselGateAction, setDieselGateAction] = useState(null); // () => void, runs once the whole queue clears
+  const [dieselGateLang,   setDieselGateLang]   = useState("en"); // en | kn | te | mr
 
   const requestPaymentGuarded = (checkTrips, openWith) => {
     const list = Array.isArray(checkTrips) ? checkTrips : [checkTrips];
@@ -22252,9 +22329,23 @@ This will auto-recover in the next trip.`);
       )}
 
       {/* ── DIESEL CONFIRMATION GATE — blocks payment request until answered ── */}
-      {dieselGateStep && dieselGateTrip && (
-        <Sheet title="⛽ Diesel Confirmation Required" onClose={()=>{setDieselGateQueue([]);setDieselGateStep(null);setDieselGateAction(null);}} noBackdropClose>
+      {dieselGateStep && dieselGateTrip && (()=>{
+        const dt = DIESEL_GATE_TXT[dieselGateLang] || DIESEL_GATE_TXT.en;
+        return (
+        <Sheet title={dt.title} onClose={()=>{setDieselGateQueue([]);setDieselGateStep(null);setDieselGateAction(null);}} noBackdropClose>
           <div style={{display:"flex",flexDirection:"column",gap:14}}>
+            {/* Language toggle */}
+            <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+              {Object.entries(DIESEL_GATE_TXT).map(([code,txt])=>(
+                <button key={code} onClick={()=>setDieselGateLang(code)}
+                  style={{padding:"5px 12px",borderRadius:8,fontSize:11,fontWeight:700,cursor:"pointer",
+                    background:dieselGateLang===code?C.blue+"22":"transparent",
+                    border:`1.5px solid ${dieselGateLang===code?C.blue:C.border}`,
+                    color:dieselGateLang===code?C.blue:C.muted}}>
+                  {txt.langLabel}
+                </button>
+              ))}
+            </div>
             <div style={{background:C.bg,borderRadius:10,padding:"12px 14px"}}>
               <div style={{fontWeight:800,fontSize:14}}>{dieselGateTrip.truckNo}</div>
               <div style={{color:C.muted,fontSize:12}}>LR {dieselGateTrip.lrNo||"—"} · Trip {dieselGateTrip.date}</div>
@@ -22262,17 +22353,17 @@ This will auto-recover in the next trip.`);
 
             {dieselGateStep==="ask" && (
               <>
-                <div style={{fontSize:14,fontWeight:700}}>Did you take diesel for this trip?</div>
+                <div style={{fontSize:14,fontWeight:700}}>{dt.question}</div>
                 <div style={{display:"flex",gap:10}}>
                   <button onClick={()=>setDieselGateStep("declare_yes")}
                     style={{flex:1,background:C.green+"22",border:`1.5px solid ${C.green}`,borderRadius:10,
                       color:C.green,padding:"12px",fontSize:13,fontWeight:700,cursor:"pointer"}}>
-                    Yes, I took diesel
+                    {dt.yesBtn}
                   </button>
                   <button onClick={()=>setDieselGateStep("declare")}
                     style={{flex:1,background:C.red+"22",border:`1.5px solid ${C.red}`,borderRadius:10,
                       color:C.red,padding:"12px",fontSize:13,fontWeight:700,cursor:"pointer"}}>
-                    No, I did not take diesel
+                    {dt.noBtn}
                   </button>
                 </div>
               </>
@@ -22281,41 +22372,40 @@ This will auto-recover in the next trip.`);
             {dieselGateStep==="declare_yes" && (
               <>
                 <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:10,padding:"14px 16px",color:C.text,fontSize:13,lineHeight:1.5}}>
-                  Raise a diesel request and confirm the request with Sandeep Patil and make sure it is attached to LR <b>{dieselGateTrip.lrNo||"—"}</b> and come back and request for payment.
+                  {dt.yesMsg(dieselGateTrip.lrNo||"—")}
                 </div>
-                <Btn onClick={dieselGateGoToDiesel} full color={C.orange}>Go to Diesel Requests →</Btn>
-                <Btn onClick={()=>setDieselGateStep("ask")} full outline color={C.muted}>← Back</Btn>
+                <Btn onClick={dieselGateGoToDiesel} full color={C.orange}>{dt.goToDiesel}</Btn>
+                <Btn onClick={()=>setDieselGateStep("ask")} full outline color={C.muted}>{dt.back}</Btn>
               </>
             )}
 
             {dieselGateStep==="declare" && (
               <>
                 <div style={{background:C.red+"11",border:`1.5px solid ${C.red}`,borderRadius:10,padding:"14px 16px"}}>
-                  <div style={{color:C.red,fontWeight:800,fontSize:13,marginBottom:8}}>⚠️ You are about to declare:</div>
+                  <div style={{color:C.red,fontWeight:800,fontSize:13,marginBottom:8}}>{dt.declareHeading}</div>
                   <div style={{fontSize:13,lineHeight:1.6,color:C.text}}>
-                    {dieselGateIsSelf ? (
-                      <>"I, <b>{user.name||user.username}</b>, confirm that there was <b>NO diesel</b> taken for this trip — Truck <b>{dieselGateTrip.truckNo}</b>, Trip dated <b>{dieselGateTrip.date}</b>, LR <b>{dieselGateTrip.lrNo||"—"}</b>."</>
-                    ) : (
-                      <>"I, <b>{user.name||user.username}</b>, confirm on behalf of <b>{dieselGateEmp?.name||"the driver on this trip"}</b> that there was <b>NO diesel</b> taken for this trip — Truck <b>{dieselGateTrip.truckNo}</b>, Trip dated <b>{dieselGateTrip.date}</b>, LR <b>{dieselGateTrip.lrNo||"—"}</b>."</>
-                    )}
+                    {dieselGateIsSelf
+                      ? dt.declareSelf(user.name||user.username, dieselGateTrip.truckNo, dieselGateTrip.date, dieselGateTrip.lrNo||"—")
+                      : dt.declareFor(user.name||user.username, dieselGateEmp?.name||"the driver on this trip", dieselGateTrip.truckNo, dieselGateTrip.date, dieselGateTrip.lrNo||"—")}
                   </div>
                   <div style={{fontSize:12,color:C.red,marginTop:10,fontWeight:600}}>
-                    This will be checked against the pump's records tomorrow. If diesel is later found for this trip that was not requested, the amount will be recovered from {dieselGateIsSelf ? "you" : (dieselGateEmp?.name||"the linked employee")}.
+                    {dt.warning(dieselGateIsSelf ? dt.you : (dieselGateEmp?.name||"the linked employee"))}
                   </div>
                 </div>
                 <div style={{display:"flex",gap:10}}>
-                  <Btn onClick={()=>setDieselGateStep("ask")} full outline color={C.muted}>Go Back</Btn>
-                  <Btn onClick={dieselGateConfirmNo} full color={C.red}>I Confirm — Submit</Btn>
+                  <Btn onClick={()=>setDieselGateStep("ask")} full outline color={C.muted}>{dt.goBack}</Btn>
+                  <Btn onClick={dieselGateConfirmNo} full color={C.red}>{dt.confirmSubmit}</Btn>
                 </div>
               </>
             )}
 
             {dieselGateQueue.length>1 && (
-              <div style={{textAlign:"center",color:C.muted,fontSize:11}}>{dieselGateQueue.length-1} more trip{dieselGateQueue.length>2?"s":""} to check after this</div>
+              <div style={{textAlign:"center",color:C.muted,fontSize:11}}>{dt.moreTrips(dieselGateQueue.length-1)}</div>
             )}
           </div>
         </Sheet>
-      )}
+        );
+      })()}
 
       {/* ── REQUEST PAYMENT SHEET ── */}
       {payReqSheet && (
