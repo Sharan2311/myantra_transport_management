@@ -12,7 +12,10 @@ FIELDS TO EXTRACT — find each label and copy the value next to it verbatim:
 3. Truck/Vehicle registration number → uppercase no spaces (e.g. KA28AA4790)
 4. Consignee name → full name as printed
 5. Consignor / Plant name → e.g. "Shree Cement Limited KODLA" or "KARNATAKA CEMENT PROJECT"
-6. Transporter name → this document is PRINTED/ISSUED BY the transporter, so their name is the company letterhead at the very TOP-LEFT of the page (above the Consignor/Consignee table) — usually followed by an address line and "PAN No / GSTN" on the next line. It also repeats at the bottom near "For [Company Name] / Authorized Signatory". This is NOT a field literally labeled "Transporter Name" — there usually isn't one. Do not confuse it with the Consignor (the cement plant, e.g. "Shree Cement Limited") or the Consignee (the buyer). If you cannot clearly read a letterhead company name at the top, leave this empty rather than guessing.
+6. Transporter name → this document is one of two formats, check in this order:
+   a) INVOICE format: look for an explicitly labeled field such as "Transported By", "Transporter", or "Carrier" — usually near "Transportation Mode/Type", "Delivery Term", "E-way Bill No". Use the exact company name from that field.
+   b) GR/RECEIPT format: has NO such labeled field. Instead the document is PRINTED/ISSUED BY the transporter, so their name is the company letterhead at the very TOP-LEFT of the page (above the Consignor/Consignee table) — usually followed by an address line and "PAN No / GSTN" on the next line, and it repeats near "For [Company Name] / Authorized Signatory" at the bottom.
+   In both cases, do not confuse it with the Consignor (the cement plant, e.g. "Shree Cement Limited"), the Consignee/Bill To/Ship To (the buyer), or any bank/logistics-software branding. If neither pattern is clearly present, leave this empty rather than guessing.
 7. Loading point / From → city/location where cement is loaded
 8. Destination / To → city/location where cement is delivered
 9. Material grade → use exactly "Cement Packed" or "Cement Bulk" — look for "PACKED" or "BULK" near the material description
@@ -46,7 +49,7 @@ Return ONLY this JSON, no markdown, no explanation:
   "truckNo": "<uppercase no spaces or null>",
   "consignee": "<full name or null>",
   "consignor": "<plant name or null>",
-  "transporterName": "<company letterhead name at the very top-left of the document, e.g. 'KORI ENTERPRISES' — this identifies who issued/printed the GR, not a labeled field. null if not clearly visible>",
+  "transporterName": "<transporter company name — from an explicit 'Transported By'/'Transporter' field if the document has one (common on invoices), otherwise the company letterhead at the very top-left of the document (common on GRs). null if genuinely unclear>",
   "from": "<loading location or null>",
   "to": "<destination or null>",
   "grade": "<'Cement Packed' or 'Cement Bulk' or null>",
