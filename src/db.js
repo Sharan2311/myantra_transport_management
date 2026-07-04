@@ -127,6 +127,7 @@ const employeeFromDB = r => ({
   linkedTrucks: r.linked_trucks||[], createdBy: r.created_by,
   accounts: r.accounts||[],
   loanTxns: r.loan_txns||[],
+  tafalExempt: r.tafal_exempt||false,
 })
 const employeeToDB = e => ({
   id: e.id, name: e.name, phone: e.phone, role: e.role,
@@ -134,6 +135,7 @@ const employeeToDB = e => ({
   linked_trucks: e.linkedTrucks||[], created_by: e.createdBy,
   accounts: e.accounts||[],
   loan_txns: e.loanTxns||[],
+  tafal_exempt: e.tafalExempt||false,
 })
 
 const paymentFromDB = r => ({
