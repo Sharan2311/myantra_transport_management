@@ -3505,8 +3505,8 @@ Rules:
           setVehicles(prev=>prev.map(veh=>{
             if(veh.truckNo!==truckNo) return veh;
             let upd={...veh};
-            if(+g.shortageRecovery>0){const txn={id:uid(),type:"recovery",date:trip.date||today(),qty:0,amount:+g.shortageRecovery,lrNo,note:"Batch DI"};upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+(+g.shortageRecovery),shortageTxns:[...(upd.shortageTxns||[]),txn]};}
-            if(+g.loanRecovery>0){const txn={id:uid(),type:"recovery",date:trip.date||today(),amount:+g.loanRecovery,lrNo,note:"Batch DI"};upd={...upd,loanRecovered:(upd.loanRecovered||0)+(+g.loanRecovery),loanTxns:[...(upd.loanTxns||[]),txn]};}
+            if(+g.shortageRecovery>0){const txn={id:uid(),type:"recovery",date:trip.date||today(),qty:0,amount:+g.shortageRecovery,lrNo,tripId:trip.id,note:"Batch DI"};upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+(+g.shortageRecovery),shortageTxns:[...(upd.shortageTxns||[]),txn]};}
+            if(+g.loanRecovery>0){const txn={id:uid(),type:"recovery",date:trip.date||today(),amount:+g.loanRecovery,lrNo,tripId:trip.id,note:"Batch DI"};upd={...upd,loanRecovered:(upd.loanRecovered||0)+(+g.loanRecovery),loanTxns:[...(upd.loanTxns||[]),txn]};}
             DB.saveVehicle(upd).catch(e=>console.error("saveVehicle batch DI recovery:",e));
             return upd;
           }));
@@ -3683,8 +3683,8 @@ Rules:
           setVehicles(prev=>prev.map(veh=>{
             if(veh.truckNo!==truckNo) return veh;
             let upd={...veh};
-            if(+g.shortageRecovery>0){const txn={id:uid(),type:"recovery",date:trip.date||today(),qty:0,amount:+g.shortageRecovery,lrNo,note:"Batch multi-DI"};upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+(+g.shortageRecovery),shortageTxns:[...(upd.shortageTxns||[]),txn]};}
-            if(+g.loanRecovery>0){const txn={id:uid(),type:"recovery",date:trip.date||today(),amount:+g.loanRecovery,lrNo,note:"Batch multi-DI"};upd={...upd,loanRecovered:(upd.loanRecovered||0)+(+g.loanRecovery),loanTxns:[...(upd.loanTxns||[]),txn]};}
+            if(+g.shortageRecovery>0){const txn={id:uid(),type:"recovery",date:trip.date||today(),qty:0,amount:+g.shortageRecovery,lrNo,tripId:trip.id,note:"Batch multi-DI"};upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+(+g.shortageRecovery),shortageTxns:[...(upd.shortageTxns||[]),txn]};}
+            if(+g.loanRecovery>0){const txn={id:uid(),type:"recovery",date:trip.date||today(),amount:+g.loanRecovery,lrNo,tripId:trip.id,note:"Batch multi-DI"};upd={...upd,loanRecovered:(upd.loanRecovered||0)+(+g.loanRecovery),loanTxns:[...(upd.loanTxns||[]),txn]};}
             DB.saveVehicle(upd).catch(e=>console.error("saveVehicle batch multi-DI recovery:",e));
             return upd;
           }));
@@ -7075,11 +7075,11 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         if(veh.truckNo!==tn2) return veh;
         let upd={...veh};
         if(t.shortageRecovery>0){
-          const txn={id:uid(),type:"recovery",date:t.date||today(),qty:0,amount:t.shortageRecovery,lrNo:t.lrNo,note:"From trip form"};
+          const txn={id:uid(),type:"recovery",date:t.date||today(),qty:0,amount:t.shortageRecovery,lrNo:t.lrNo,tripId:t.id,note:"From trip form"};
           upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+t.shortageRecovery,shortageTxns:[...(upd.shortageTxns||[]),txn]};
         }
         if(t.loanRecovery>0){
-          const txn={id:uid(),type:"recovery",date:t.date||today(),amount:t.loanRecovery,lrNo:t.lrNo,note:"From trip form"};
+          const txn={id:uid(),type:"recovery",date:t.date||today(),amount:t.loanRecovery,lrNo:t.lrNo,tripId:t.id,note:"From trip form"};
           upd={...upd,loanRecovered:(upd.loanRecovered||0)+t.loanRecovery,loanTxns:[...(upd.loanTxns||[]),txn]};
         }
         return upd;
@@ -7219,29 +7219,39 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     const deltaSR = newSR - prevSR;
     const deltaLR = newLR - prevLR;
     const tn3 = (editSheet.truckNo||"").toUpperCase().trim();
+    // Match by tripId first (stable, immune to LR renumbering) — only fall back to
+    // matching on lrNo for older entries created before tripId was tracked.
+    const findTripTxn = (txns) => (txns||[]).find(tx=>tx.type==="recovery" && tx.tripId===editSheet.id)
+      || (txns||[]).find(tx=>tx.type==="recovery" && !tx.tripId && tx.lrNo===editSheet.lrNo);
     if(tn3 && (deltaSR!==0||deltaLR!==0)){
       setVehicles(prev=>prev.map(veh=>{
         if(veh.truckNo!==tn3) return veh;
         let upd={...veh};
         if(deltaSR>0){
-          const txn={id:uid(),type:"recovery",date:editSheet.date||today(),qty:0,amount:deltaSR,lrNo:editSheet.lrNo,note:"From trip edit"};
-          upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+deltaSR,shortageTxns:[...(upd.shortageTxns||[]),txn]};
+          const existingSRTxn = findTripTxn(upd.shortageTxns);
+          if(existingSRTxn){
+            upd={...upd,shortageTxns:(upd.shortageTxns||[]).map(tx=>tx===existingSRTxn?{...tx,amount:newSR,tripId:editSheet.id}:tx),
+              shortageRecovered:(upd.shortageRecovered||0)+deltaSR};
+          } else {
+            const txn={id:uid(),type:"recovery",date:editSheet.date||today(),qty:0,amount:deltaSR,lrNo:editSheet.lrNo,tripId:editSheet.id,note:"From trip edit"};
+            upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+deltaSR,shortageTxns:[...(upd.shortageTxns||[]),txn]};
+          }
         } else if(deltaSR<0){
-          // Remove or reduce the shortage txn for this LR
-          const existingTxn = (upd.shortageTxns||[]).find(tx=>tx.lrNo===editSheet.lrNo && tx.type==="recovery");
+          // Remove or reduce the shortage txn for this trip
+          const existingTxn = findTripTxn(upd.shortageTxns);
           if(existingTxn) {
-            const newAmt = (existingTxn.amount||0) + deltaSR; // deltaSR is negative
+            const newAmt = newSR; // set to the new total directly rather than adding a signed delta to stale amount
             if(newAmt <= 0) {
               upd={...upd,shortageTxns:(upd.shortageTxns||[]).filter(tx=>tx!==existingTxn)};
             } else {
-              upd={...upd,shortageTxns:(upd.shortageTxns||[]).map(tx=>tx===existingTxn?{...tx,amount:newAmt}:tx)};
+              upd={...upd,shortageTxns:(upd.shortageTxns||[]).map(tx=>tx===existingTxn?{...tx,amount:newAmt,tripId:editSheet.id}:tx)};
             }
           }
           upd={...upd,shortageRecovered:Math.max(0,(upd.shortageRecovered||0)+deltaSR)};
         }
         if(deltaLR!==0){
-          // Upsert: override existing txn for this LR with new full amount
-          const existingLRTxn = (upd.loanTxns||[]).find(tx=>tx.lrNo===editSheet.lrNo && tx.type==="recovery");
+          // Upsert: override existing txn for this trip with new full amount
+          const existingLRTxn = findTripTxn(upd.loanTxns);
           if(newLR<=0){
             if(existingLRTxn){
               upd={...upd,loanTxns:(upd.loanTxns||[]).filter(tx=>tx!==existingLRTxn),
@@ -7249,10 +7259,10 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
             }
           } else if(existingLRTxn){
             const diff2 = newLR - (existingLRTxn.amount||0);
-            upd={...upd,loanTxns:(upd.loanTxns||[]).map(tx=>tx===existingLRTxn?{...tx,amount:newLR,note:"From trip edit"}:tx),
+            upd={...upd,loanTxns:(upd.loanTxns||[]).map(tx=>tx===existingLRTxn?{...tx,amount:newLR,tripId:editSheet.id,note:"From trip edit"}:tx),
               loanRecovered:Math.max(0,(upd.loanRecovered||0)+diff2)};
           } else if(newLR>0){
-            const txn={id:uid(),type:"recovery",date:editSheet.date||today(),amount:newLR,lrNo:editSheet.lrNo,note:"From trip edit"};
+            const txn={id:uid(),type:"recovery",date:editSheet.date||today(),amount:newLR,lrNo:editSheet.lrNo,tripId:editSheet.id,note:"From trip edit"};
             upd={...upd,loanRecovered:(upd.loanRecovered||0)+newLR,loanTxns:[...(upd.loanTxns||[]),txn]};
           }
         }
@@ -8626,8 +8636,8 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                             setVehicles(prev=>prev.map(veh=>{
                               if(veh.truckNo!==tn2) return veh;
                               let upd={...veh};
-                              if(t.loanRecovery>0){const txn={id:uid(),type:"recovery",date:t.date,amount:t.loanRecovery,lrNo:t.lrNo,note:"Party trip"};upd={...upd,loanRecovered:(upd.loanRecovered||0)+t.loanRecovery,loanTxns:[...(upd.loanTxns||[]),txn]};}
-                              if(t.shortageRecovery>0){const txn={id:uid(),type:"recovery",date:t.date,qty:0,amount:t.shortageRecovery,lrNo:t.lrNo,note:"Party trip"};upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+t.shortageRecovery,shortageTxns:[...(upd.shortageTxns||[]),txn]};}
+                              if(t.loanRecovery>0){const txn={id:uid(),type:"recovery",date:t.date,amount:t.loanRecovery,lrNo:t.lrNo,tripId:t.id,note:"Party trip"};upd={...upd,loanRecovered:(upd.loanRecovered||0)+t.loanRecovery,loanTxns:[...(upd.loanTxns||[]),txn]};}
+                              if(t.shortageRecovery>0){const txn={id:uid(),type:"recovery",date:t.date,qty:0,amount:t.shortageRecovery,lrNo:t.lrNo,tripId:t.id,note:"Party trip"};upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+t.shortageRecovery,shortageTxns:[...(upd.shortageTxns||[]),txn]};}
                               return upd;
                             }));
                           }
@@ -10075,17 +10085,17 @@ function Settlement({trips, setTrips, vehicles, setVehicles, settlements, setSet
       const settleDate = today();
       // Loan deduct per trip
       if (calc.loanDeduct>0) {
-        const txn = {id:uid(),type:"recovery",date:settleDate,amount:calc.loanDeduct,lrNo:t.lrNo,note:"Auto — deduct/trip at settlement"};
+        const txn = {id:uid(),type:"recovery",date:settleDate,amount:calc.loanDeduct,lrNo:t.lrNo,tripId:t.id,note:"Auto — deduct/trip at settlement"};
         updated = {...updated, loanRecovered:(updated.loanRecovered||0)+calc.loanDeduct, loanTxns:[...(updated.loanTxns||[]),txn]};
       }
       // Explicit shortage recovery on this trip
       if (calc.shortageRecovery>0) {
-        const txn = {id:uid(),type:"recovery",date:settleDate,mt:0,amount:calc.shortageRecovery,lrNo:t.lrNo,note:"Shortage recovery at settlement"};
+        const txn = {id:uid(),type:"recovery",date:settleDate,mt:0,amount:calc.shortageRecovery,lrNo:t.lrNo,tripId:t.id,note:"Shortage recovery at settlement"};
         updated = {...updated, shortageRecovered:(updated.shortageRecovered||0)+calc.shortageRecovery, shortageTxns:[...(updated.shortageTxns||[]),txn]};
       }
       // Explicit loan recovery on this trip
       if (calc.loanRecovery>0) {
-        const txn = {id:uid(),type:"recovery",date:settleDate,amount:calc.loanRecovery,lrNo:t.lrNo,note:"Loan recovery at settlement"};
+        const txn = {id:uid(),type:"recovery",date:settleDate,amount:calc.loanRecovery,lrNo:t.lrNo,tripId:t.id,note:"Loan recovery at settlement"};
         updated = {...updated, loanRecovered:(updated.loanRecovered||0)+calc.loanRecovery, loanTxns:[...(updated.loanTxns||[]),txn]};
       }
       return updated;
@@ -15710,6 +15720,64 @@ Proceed?`)) return;
 The loan recovery will auto-fill on the next trip for each affected vehicle.`);
             }}>
               🔄 Backfill Loans
+            </Btn>
+          )}
+          {isOwner && (
+            <Btn sm outline color={C.purple} onClick={()=>{
+              // Scan every trip with a loan/shortage recovery amount and check whether
+              // a matching ledger entry actually exists on that vehicle. Purely additive —
+              // never touches or removes anything already in loanTxns/shortageTxns, only
+              // adds entries that are provably missing (fixes drift from old LR-based
+              // matching, e.g. when an LR number got corrected after the entry was made).
+              const missing = []; // {truckNo, lrNo, date, kind, amount}
+              (trips||[]).forEach(t => {
+                const tn = (t.truckNo||"").toUpperCase().trim();
+                const veh = (vehicles||[]).find(v=>v.truckNo===tn);
+                if(!veh) return;
+                if(+t.loanRecovery>0) {
+                  const found = (veh.loanTxns||[]).some(tx=>tx.type==="recovery" &&
+                    (tx.tripId===t.id || (!tx.tripId && tx.lrNo===t.lrNo && +tx.amount===+t.loanRecovery)));
+                  if(!found) missing.push({truckNo:tn, lrNo:t.lrNo, date:t.date, kind:"loan", amount:+t.loanRecovery, tripId:t.id});
+                }
+                if(+t.shortageRecovery>0) {
+                  const found = (veh.shortageTxns||[]).some(tx=>tx.type==="recovery" &&
+                    (tx.tripId===t.id || (!tx.tripId && tx.lrNo===t.lrNo && +tx.amount===+t.shortageRecovery)));
+                  if(!found) missing.push({truckNo:tn, lrNo:t.lrNo, date:t.date, kind:"shortage", amount:+t.shortageRecovery, tripId:t.id});
+                }
+              });
+              if(missing.length===0){
+                alert("✅ No missing recovery entries found — every trip's loan/shortage recovery is correctly reflected in its vehicle's ledger.");
+                return;
+              }
+              const preview = missing.slice(0,15).map(m=>`${m.truckNo} · LR ${m.lrNo||"—"} · ${m.date} · ${m.kind==="loan"?"Loan":"Shortage"} ₹${m.amount.toLocaleString("en-IN")}`).join("\n");
+              if(!window.confirm(`Found ${missing.length} trip${missing.length>1?"s":""} with a recovery amount missing from the vehicle ledger:
+
+${preview}${missing.length>15?`\n…and ${missing.length-15} more`:""}
+
+This will ADD the missing entries only — nothing existing will be changed or removed.
+
+Proceed?`)) return;
+              setVehicles(prev => prev.map(veh => {
+                const mine = missing.filter(m=>m.truckNo===veh.truckNo);
+                if(mine.length===0) return veh;
+                let upd = {...veh};
+                mine.forEach(m => {
+                  const txn = {id:uid(), type:"recovery", date:m.date||today(),
+                    amount:m.amount, lrNo:m.lrNo||"", tripId:m.tripId,
+                    note:"Reconciliation — added missing entry", ...(m.kind==="shortage"?{qty:0}:{})};
+                  if(m.kind==="loan") {
+                    upd = {...upd, loanRecovered:(upd.loanRecovered||0)+m.amount, loanTxns:[...(upd.loanTxns||[]),txn]};
+                  } else {
+                    upd = {...upd, shortageRecovered:(upd.shortageRecovered||0)+m.amount, shortageTxns:[...(upd.shortageTxns||[]),txn]};
+                  }
+                });
+                DB.saveVehicle(upd).catch(e=>console.error("saveVehicle reconcile:",e));
+                return upd;
+              }));
+              log("RECONCILE LEDGER", `Added ${missing.length} missing recovery entr${missing.length>1?"ies":"y"}`);
+              alert(`✅ Done — added ${missing.length} missing recovery entr${missing.length>1?"ies":"y"} to the vehicle ledger${missing.length>1?"s":""}.`);
+            }}>
+              🔧 Fix Missing Recoveries
             </Btn>
           )}
         </div>
