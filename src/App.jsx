@@ -15749,7 +15749,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                 const loanCurrent = loanMatches.reduce((s,x)=>s+(+x.amount||0),0);
                 let loan = null;
                 if(newLR<=0 && loanMatches.length>0) loan = {action:"remove", current:loanCurrent, target:0};
-                else if(newLR>0 && (loanMatches.length!==1 || +loanMatches[0].amount!==newLR || !loanMatches[0].tripId))
+                else if(newLR>0 && (loanMatches.length!==1 || +loanMatches[0].amount!==newLR))
                   loan = {action:loanMatches.length===0?"add":"correct", current:loanCurrent, target:newLR};
 
                 const newSR = +t.shortageRecovery||0;
@@ -15757,7 +15757,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                 const shortCurrent = shortMatches.reduce((s,x)=>s+(+x.amount||0),0);
                 let shortage = null;
                 if(newSR<=0 && shortMatches.length>0) shortage = {action:"remove", current:shortCurrent, target:0};
-                else if(newSR>0 && (shortMatches.length!==1 || +shortMatches[0].amount!==newSR || !shortMatches[0].tripId))
+                else if(newSR>0 && (shortMatches.length!==1 || +shortMatches[0].amount!==newSR))
                   shortage = {action:shortMatches.length===0?"add":"correct", current:shortCurrent, target:newSR};
 
                 if(loan || shortage) findings.push({truckNo:tn, lrNo:t.lrNo, date:t.date, tripId:t.id, settled:!!t.driverSettled, loan, shortage});
