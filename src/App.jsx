@@ -7635,17 +7635,32 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                 const rows = shown.map(t => {
                   const v = vehicles?.find(x=>x.truckNo===t.truckNo);
                   const diesel = t.dieselEstimate||0;
-                  const net = (t.qty*(t.givenRate||0)) - (t.advance||0) - (t.tafal||0) - diesel;
-                  return "<tr><td>"+t.date+"</td><td>"+t.truckNo+"</td><td>"+(t.lrNo||"—")+"</td><td>"+(t.client||getDEFAULT_CLIENT())+"</td><td>"+(t.to||"—")+"</td><td>"+t.qty+"</td><td style='text-align:right'>"+fmt(t.qty*(t.frRate||0))+"</td><td style='text-align:right'>"+fmt(t.advance||0)+"</td><td style='text-align:right'>"+fmt(diesel)+"</td><td style='text-align:right'>"+fmt(net)+"</td><td>"+(t.status||"—")+"</td></tr>";
+                  // Same canonical gross/netDue/balance formula used in Driver Payments —
+                  // multi-DI aware, includes shortage/shortageRecovery/loanRecovery deducts.
+                  const gross = (t.diLines&&t.diLines.length>1)
+                    ? t.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
+                    : (t.qty||0)*(t.givenRate||0);
+                  const deducts = (t.advance||0)+(t.tafal||0)+diesel
+                    +((t.shortage||0)*(t.givenRate||0))
+                    +(t.shortageRecovery||0)+(t.loanRecovery||0);
+                  const netDue = Math.max(0, gross - deducts);
+                  const pays = (driverPays||[]).filter(p=>p.tripId===t.id);
+                  const paidSoFar = pays.reduce((s,p)=>s+(p.amount||0),0);
+                  const balance = Math.max(0, netDue - paidSoFar);
+                  const paidCell = pays.length===0 ? "—" : pays.map(p =>
+                    "<div style='margin-bottom:4px'><b>"+fmt(p.amount||0)+"</b> to "+(p.paidTo||"—")
+                    +"<br><span style='color:#888;font-size:9px'>"+(p.utr||"no UTR")+" · "+(p.date||"—")+"</span></div>"
+                  ).join("");
+                  return "<tr><td>"+t.date+"</td><td>"+t.truckNo+"</td><td>"+(t.lrNo||"—")+"</td><td>"+(t.client||getDEFAULT_CLIENT())+"</td><td>"+(t.to||"—")+"</td><td>"+t.qty+"</td><td style='text-align:right'>"+fmt(t.qty*(t.frRate||0))+"</td><td style='text-align:right'>"+fmt(t.advance||0)+"</td><td style='text-align:right'>"+fmt(diesel)+"</td><td style='text-align:right'>"+paidCell+"</td><td style='text-align:right'>"+fmt(balance)+"</td><td>"+(t.status||"—")+"</td></tr>";
                 }).join("");
                 const totalFreight = shown.reduce((s,t)=>s+t.qty*(t.frRate||0),0);
                 const totalQty = shown.reduce((s,t)=>s+t.qty,0);
                 const logoSrc = RC.logoSrc || "";
-                const html = "<html><head><style>body{font-family:Arial,sans-serif;font-size:12px;padding:16px}h2{color:#f97316;margin-bottom:4px}table{width:100%;border-collapse:collapse;margin-top:12px}th{background:#f97316;color:#fff;padding:6px 8px;text-align:left;font-size:11px}td{padding:5px 8px;border-bottom:1px solid #eee;font-size:11px}.summary{display:flex;gap:24px;margin:8px 0;font-size:13px;color:#555}.sv{font-weight:bold;color:#111}.hdr{display:flex;align-items:center;gap:10px}</style></head>"
+                const html = "<html><head><style>body{font-family:Arial,sans-serif;font-size:12px;padding:16px}h2{color:#f97316;margin-bottom:4px}table{width:100%;border-collapse:collapse;margin-top:12px}th{background:#f97316;color:#fff;padding:6px 8px;text-align:left;font-size:11px}th.r{text-align:right}td{padding:5px 8px;border-bottom:1px solid #eee;font-size:11px}.summary{display:flex;gap:24px;margin:8px 0;font-size:13px;color:#555}.sv{font-weight:bold;color:#111}.hdr{display:flex;align-items:center;gap:10px}</style></head>"
                   +`<body><div class='hdr'>${logoSrc?`<img src="${logoSrc}" style="width:40px;height:40px;border-radius:8px;object-fit:cover" alt="${RC.companyShort||''}"/>`:""}<h2>${RC.companyName} — Trip Report</h2></div>`
                   +"<div style='color:#888;font-size:12px'>Period: "+(dateFrom||"all")+" to "+(dateTo||"all")+" &nbsp;|&nbsp; Filter: "+filter+"</div>"
                   +"<div class='summary'><div>Trips: <span class='sv'>"+shown.length+"</span></div><div>Total Qty: <span class='sv'>"+totalQty+"MT</span></div><div>Total Freight: <span class='sv'>"+fmt(totalFreight)+"</span></div></div>"
-                  +"<table><thead><tr><th>Date</th><th>Truck</th><th>LR</th><th>From</th><th>To</th><th>Qty(MT)</th><th>Freight</th><th>Advance</th><th>Diesel</th><th>Net</th><th>Status</th></tr></thead>"
+                  +"<table><thead><tr><th>Date</th><th>Truck</th><th>LR</th><th>From</th><th>To</th><th>Qty(MT)</th><th class='r'>Freight</th><th class='r'>Advance</th><th class='r'>Diesel</th><th class='r'>Paid</th><th class='r'>Balance</th><th>Status</th></tr></thead>"
                   +"<tbody>"+rows+"</tbody></table></body></html>";
                 const w = window.open("","_blank");
                 w.document.write(html);
