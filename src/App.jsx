@@ -20849,6 +20849,17 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
     }
     if(!finalAcc) { alert("Could not find selected account."); return; }
 
+    // ── Only one PENDING request per LR at a time ──────────────────────────
+    // A trip can legitimately get a second request later (e.g. partial payment
+    // now, remainder requested after), but never two pending ones open at once.
+    if(!isEditing) {
+      const existingPending = (paymentRequests||[]).find(r=>r.lrNo===t.lrNo && r.status==="pending");
+      if(existingPending) {
+        alert(`⚠ A payment request for LR ${t.lrNo} is already pending (₹${Number(existingPending.amount).toLocaleString("en-IN")}, requested by ${existingPending.createdBy||"—"}).\n\nMark that one done first, or edit it, before creating a new one.`);
+        return;
+      }
+    }
+
     // ── Pouch balance validation: block if only pouch remains and no confirmation ──
     if(t.orderType==="party" && (t.pouchBalance||0)>0) {
       if(!_hasMerged && _balance <= 0) {
@@ -20881,12 +20892,28 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
     };
     if(isEditing) {
       setPaymentRequests(prev=>(prev||[]).map(r=>r.id===pr.id?pr:r));
+      DB.savePaymentRequest(pr).catch(e=>console.error("savePaymentRequest:",e));
+      log("PAY REQUEST EDITED",`LR:${t.lrNo} ${recipientName} ₹${Number(amount).toLocaleString("en-IN")}`);
+      setSubmitted(true);
     } else {
-      setPaymentRequests(prev=>[pr,...(prev||[])]);
+      // Await the DB save before showing success — the "one pending request per
+      // LR" rule is also enforced by a unique index in the database itself, so
+      // if two people submit for the same LR at nearly the same moment, one of
+      // these calls will be rejected even though the earlier client-side check
+      // passed for both. Don't optimistically show success until this confirms.
+      DB.savePaymentRequest(pr).then(() => {
+        setPaymentRequests(prev=>[pr,...(prev||[])]);
+        log("PAY REQUEST",`LR:${t.lrNo} ${recipientName} ₹${Number(amount).toLocaleString("en-IN")}`);
+        setSubmitted(true);
+      }).catch(e => {
+        console.error("savePaymentRequest:", e);
+        if(String(e.message||"").toLowerCase().includes("duplicate") || String(e.message||"").toLowerCase().includes("unique")) {
+          alert(`⚠ A payment request for LR ${t.lrNo} was just created (possibly by someone else at the same moment).\n\nPlease close this and check the Requests list.`);
+        } else {
+          alert("Could not submit the request — please try again.\n\n"+(e.message||""));
+        }
+      });
     }
-    DB.savePaymentRequest(pr).catch(e=>console.error("savePaymentRequest:",e));
-    log(isEditing?"PAY REQUEST EDITED":"PAY REQUEST",`LR:${t.lrNo} ${recipientName} ₹${Number(amount).toLocaleString("en-IN")}`);
-    setSubmitted(true);
   };
 
   if(submitted) return (
