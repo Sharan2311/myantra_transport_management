@@ -323,19 +323,39 @@ const withRetry = async (fn, retries = 3, baseDelay = 800) => {
   }
 };
 
+// Supabase/PostgREST caps any single request at 1000 rows by default — a plain
+// select('*') on a table with more rows than that silently returns only the
+// first 1000 (per the query's sort order), with NO error. `fetchPaginated` pages
+// through in 1000-row chunks so every row actually gets returned regardless of
+// table size. `buildQuery` must return a FRESH query builder each call (select/
+// filters/order already applied, but no .range()), since a builder can only be
+// awaited once.
+const PAGE_SIZE = 1000;
+const fetchPaginated = async (buildQuery) => {
+  let all = [];
+  let from = 0;
+  while (true) {
+    const { data, error } = await buildQuery().range(from, from + PAGE_SIZE - 1);
+    if (error) throw error;
+    if (!data || data.length === 0) break;
+    all = all.concat(data);
+    if (data.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+  return all;
+};
+
 const fetchAll = (table, fromDB) => withRetry(async () => {
-  const { data, error } = await supabase.from(table).select('*').order('id')
-  if (error) throw error
+  const data = await fetchPaginated(() => supabase.from(table).select('*').order('id'));
   return (data||[]).map(fromDB)
 });
 
 // Date-limited fetch — loads only last N days, ordered by date desc
 const fetchRecent = (table, fromDB, dateCol='date', days=120) => withRetry(async () => {
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-  const { data, error } = await supabase.from(table).select('*')
+  const data = await fetchPaginated(() => supabase.from(table).select('*')
     .gte(dateCol, cutoff)
-    .order(dateCol, { ascending: false })
-  if (error) throw error
+    .order(dateCol, { ascending: false }));
   return (data||[]).map(fromDB)
 });
 const upsertOne = async (table, toDB, record) => {
@@ -367,17 +387,18 @@ export const DB = {
     const cutoff = fromDate !== null
       ? fromDate
       : new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-    let q = supabase.from('mye_trips').select('*').order('date', {ascending: false}).order('id');
-    if (cutoff) q = q.gte('date', cutoff);
-    const { data, error } = await q;
-    if (error) throw error;
+    const data = await fetchPaginated(() => {
+      let q = supabase.from('mye_trips').select('*').order('date', {ascending: false}).order('id');
+      if (cutoff) q = q.gte('date', cutoff);
+      return q;
+    });
     const trips = (data||[]).map(tripFromDB);
     // Also fetch clinker placeholder trips (they have DD-MM-YYYY dates that fail the cutoff filter)
-    const { data: clinkerData, error: clinkerErr } = await supabase
+    const clinkerData = await fetchPaginated(() => supabase
       .from('mye_trips')
       .select('*')
-      .like('batch_id', 'CLINKER-PREVFY-%');
-    if (!clinkerErr && clinkerData) {
+      .like('batch_id', 'CLINKER-PREVFY-%'));
+    if (clinkerData) {
       const existingIds = new Set(trips.map(t => t.id));
       const clinkerTrips = clinkerData.map(tripFromDB).filter(t => !existingIds.has(t.id));
       return [...trips, ...clinkerTrips];
@@ -385,8 +406,7 @@ export const DB = {
     return trips;
   },
   getTripsAll: async () => {
-    const { data, error } = await supabase.from('mye_trips').select('*').order('date', {ascending: false}).order('id');
-    if (error) throw error;
+    const data = await fetchPaginated(() => supabase.from('mye_trips').select('*').order('date', {ascending: false}).order('id'));
     return (data||[]).map(tripFromDB);
   },
   saveTrip:       t  => upsertOne('mye_trips', tripToDB, t),
@@ -651,8 +671,7 @@ export const DB = {
       }, { tafalPerTrip: 300 }),
       safe(async () => {
         const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-        const { data, error } = await supabase.from('mye_trips').select('*').order('date', {ascending:false}).order('id').gte('date', cutoff);
-        if (error) throw error;
+        const data = await fetchPaginated(() => supabase.from('mye_trips').select('*').order('date', {ascending:false}).order('id').gte('date', cutoff));
         return (data||[]).map(tripFromDB);
       }),
       safe(() => fetchAll('mye_vehicles', vehicleFromDB)),

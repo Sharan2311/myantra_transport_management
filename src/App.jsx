@@ -80,6 +80,79 @@ const isPureSelfWalletRole = (roleStr) => {
   return roles.length>0 && roles.every(r=>r==="employee_self");
 };
 
+// ─── STRICT RECOVERY LEDGER SYNC ───────────────────────────────────────────────
+// Makes a vehicle's loan/shortage ledger exactly mirror ONE trip's current
+// loanRecovery/shortageRecovery fields — no more, no less:
+//   - trip value is 0/blank  → any existing entry for this trip is REMOVED
+//   - trip value is nonzero  → exactly one entry for this trip exists, corrected
+//                              to that exact amount (added if missing)
+// This is a direct sync, not a delta comparison against a "previous" value, so it
+// self-heals any prior drift every time it runs — call it on every trip
+// create/edit/settle instead of the old scattered create-or-delta logic.
+// Matches by tripId (stable, always present); falls back to lrNo only for
+// legacy entries created before tripId was tracked.
+const syncTripRecoveryToVehicle = (veh, trip) => {
+  let upd = {...veh};
+  const tripId = trip.id;
+  const lrNo   = trip.lrNo||"";
+  const date   = trip.date||today();
+  const newLR  = +trip.loanRecovery||0;
+  const newSR  = +trip.shortageRecovery||0;
+  // Returns ALL matching entries (not just the first) so a vehicle that somehow
+  // ended up with more than one entry for the same trip gets collapsed back to
+  // exactly one, instead of leaving duplicates behind uncorrected.
+  const findMine = (txns) => (txns||[]).filter(tx=>tx.type==="recovery" &&
+    (tx.tripId===tripId || (!tx.tripId && lrNo && tx.lrNo===lrNo)));
+
+  // Loan
+  {
+    const matches = findMine(upd.loanTxns);
+    const matchIds = new Set(matches.map(tx=>tx.id));
+    const priorTotal = matches.reduce((s,tx)=>s+(+tx.amount||0),0);
+    if(newLR<=0){
+      if(matches.length){
+        upd = {...upd, loanTxns:(upd.loanTxns||[]).filter(tx=>!matchIds.has(tx.id)),
+          loanRecovered:Math.max(0,(upd.loanRecovered||0)-priorTotal)};
+      }
+    } else if(matches.length===1 && +matches[0].amount===newLR && matches[0].tripId){
+      // Already exactly correct — no change needed
+    } else if(matches.length>=1){
+      // One or more entries exist but amount/tagging is wrong, or there are
+      // duplicates — collapse to a single correct entry, keep the first's id
+      const keep = {...matches[0], amount:newLR, tripId, lrNo, note:"Synced from trip"};
+      const diff = newLR - priorTotal;
+      upd = {...upd, loanTxns:[keep, ...(upd.loanTxns||[]).filter(tx=>!matchIds.has(tx.id))],
+        loanRecovered:Math.max(0,(upd.loanRecovered||0)+diff)};
+    } else {
+      const txn = {id:uid(), type:"recovery", date, amount:newLR, lrNo, tripId, note:"Synced from trip"};
+      upd = {...upd, loanRecovered:(upd.loanRecovered||0)+newLR, loanTxns:[...(upd.loanTxns||[]),txn]};
+    }
+  }
+  // Shortage
+  {
+    const matches = findMine(upd.shortageTxns);
+    const matchIds = new Set(matches.map(tx=>tx.id));
+    const priorTotal = matches.reduce((s,tx)=>s+(+tx.amount||0),0);
+    if(newSR<=0){
+      if(matches.length){
+        upd = {...upd, shortageTxns:(upd.shortageTxns||[]).filter(tx=>!matchIds.has(tx.id)),
+          shortageRecovered:Math.max(0,(upd.shortageRecovered||0)-priorTotal)};
+      }
+    } else if(matches.length===1 && +matches[0].amount===newSR && matches[0].tripId){
+      // Already exactly correct — no change needed
+    } else if(matches.length>=1){
+      const keep = {...matches[0], amount:newSR, lrNo, tripId, note:"Synced from trip"};
+      const diff = newSR - priorTotal;
+      upd = {...upd, shortageTxns:[keep, ...(upd.shortageTxns||[]).filter(tx=>!matchIds.has(tx.id))],
+        shortageRecovered:Math.max(0,(upd.shortageRecovered||0)+diff)};
+    } else {
+      const txn = {id:uid(), type:"recovery", date, qty:0, amount:newSR, lrNo, tripId, note:"Synced from trip"};
+      upd = {...upd, shortageRecovered:(upd.shortageRecovered||0)+newSR, shortageTxns:[...(upd.shortageTxns||[]),txn]};
+    }
+  }
+  return upd;
+};
+
 // ─── TRANSPORTER MISMATCH GUARD ───────────────────────────────────────────────
 // Compares a "transporterName" extracted from a scanned DI/GR document against
 // this company's own name (RC.companyName / RC.companyShort). Used to block
@@ -3500,13 +3573,11 @@ Rules:
           setCashTransfers(prev=>[wxn,...(Array.isArray(prev)?prev:[])]);
           log("WALLET ADVANCE",`${empName} −₹${trip.advance} LR:${lrNo}`);
         }
-        // Loan/shortage ledger
+        // Loan/shortage ledger — strict sync to match this trip's recovery fields exactly
         if(+g.shortageRecovery>0 || +g.loanRecovery>0) {
           setVehicles(prev=>prev.map(veh=>{
             if(veh.truckNo!==truckNo) return veh;
-            let upd={...veh};
-            if(+g.shortageRecovery>0){const txn={id:uid(),type:"recovery",date:trip.date||today(),qty:0,amount:+g.shortageRecovery,lrNo,tripId:trip.id,note:"Batch DI"};upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+(+g.shortageRecovery),shortageTxns:[...(upd.shortageTxns||[]),txn]};}
-            if(+g.loanRecovery>0){const txn={id:uid(),type:"recovery",date:trip.date||today(),amount:+g.loanRecovery,lrNo,tripId:trip.id,note:"Batch DI"};upd={...upd,loanRecovered:(upd.loanRecovered||0)+(+g.loanRecovery),loanTxns:[...(upd.loanTxns||[]),txn]};}
+            const upd = syncTripRecoveryToVehicle(veh, trip);
             DB.saveVehicle(upd).catch(e=>console.error("saveVehicle batch DI recovery:",e));
             return upd;
           }));
@@ -3678,13 +3749,11 @@ Rules:
           setCashTransfers(prev=>[wxn,...(Array.isArray(prev)?prev:[])]);
           log("WALLET ADVANCE",`${empName} −₹${trip.advance} LR:${lrNo}`);
         }
-        // Loan/shortage ledger
+        // Loan/shortage ledger — strict sync to match this trip's recovery fields exactly
         if(+g.shortageRecovery>0 || +g.loanRecovery>0) {
           setVehicles(prev=>prev.map(veh=>{
             if(veh.truckNo!==truckNo) return veh;
-            let upd={...veh};
-            if(+g.shortageRecovery>0){const txn={id:uid(),type:"recovery",date:trip.date||today(),qty:0,amount:+g.shortageRecovery,lrNo,tripId:trip.id,note:"Batch multi-DI"};upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+(+g.shortageRecovery),shortageTxns:[...(upd.shortageTxns||[]),txn]};}
-            if(+g.loanRecovery>0){const txn={id:uid(),type:"recovery",date:trip.date||today(),amount:+g.loanRecovery,lrNo,tripId:trip.id,note:"Batch multi-DI"};upd={...upd,loanRecovered:(upd.loanRecovered||0)+(+g.loanRecovery),loanTxns:[...(upd.loanTxns||[]),txn]};}
+            const upd = syncTripRecoveryToVehicle(veh, trip);
             DB.saveVehicle(upd).catch(e=>console.error("saveVehicle batch multi-DI recovery:",e));
             return upd;
           }));
@@ -7069,20 +7138,11 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         log("VEHICLE OWNER SET", `${tn2} → ${f.ownerName.trim()}`);
       }
     }
-    // Reflect shortageRecovery / loanRecovery into vehicle ledger
+    // Reflect shortageRecovery / loanRecovery into vehicle ledger — strict sync
     if(tn2 && (t.shortageRecovery>0 || t.loanRecovery>0)){
       setVehicles(prev=>prev.map(veh=>{
         if(veh.truckNo!==tn2) return veh;
-        let upd={...veh};
-        if(t.shortageRecovery>0){
-          const txn={id:uid(),type:"recovery",date:t.date||today(),qty:0,amount:t.shortageRecovery,lrNo:t.lrNo,tripId:t.id,note:"From trip form"};
-          upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+t.shortageRecovery,shortageTxns:[...(upd.shortageTxns||[]),txn]};
-        }
-        if(t.loanRecovery>0){
-          const txn={id:uid(),type:"recovery",date:t.date||today(),amount:t.loanRecovery,lrNo:t.lrNo,tripId:t.id,note:"From trip form"};
-          upd={...upd,loanRecovered:(upd.loanRecovered||0)+t.loanRecovery,loanTxns:[...(upd.loanTxns||[]),txn]};
-        }
-        return upd;
+        return syncTripRecoveryToVehicle(veh, t);
       }));
     }
     // ── Auto-attach diesel request if dieselIndentNo was set from dropdown ──
@@ -7210,63 +7270,15 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         log("DIESEL ATTACH", `Indent #${matchReq.indentNo} → LR ${editSheet.lrNo} (edit save)`);
       }
     }
-    // Reflect shortageRecovery / loanRecovery change into vehicle ledger (delta only)
+    // Sync vehicle ledger to exactly match this trip's current recovery fields.
+    // Always runs (not just when the value changed) so it self-heals any prior
+    // drift the moment this trip is saved again — see syncTripRecoveryToVehicle.
     const prevTrip = trips.find(t=>t.id===editSheet.id);
-    const prevSR = prevTrip?.shortageRecovery||0;
-    const prevLR = prevTrip?.loanRecovery||0;
-    const newSR = +editSheet.shortageRecovery||0;
-    const newLR = +editSheet.loanRecovery||0;
-    const deltaSR = newSR - prevSR;
-    const deltaLR = newLR - prevLR;
     const tn3 = (editSheet.truckNo||"").toUpperCase().trim();
-    // Match by tripId first (stable, immune to LR renumbering) — only fall back to
-    // matching on lrNo for older entries created before tripId was tracked.
-    const findTripTxn = (txns) => (txns||[]).find(tx=>tx.type==="recovery" && tx.tripId===editSheet.id)
-      || (txns||[]).find(tx=>tx.type==="recovery" && !tx.tripId && tx.lrNo===editSheet.lrNo);
-    if(tn3 && (deltaSR!==0||deltaLR!==0)){
+    if(tn3){
       setVehicles(prev=>prev.map(veh=>{
         if(veh.truckNo!==tn3) return veh;
-        let upd={...veh};
-        if(deltaSR>0){
-          const existingSRTxn = findTripTxn(upd.shortageTxns);
-          if(existingSRTxn){
-            upd={...upd,shortageTxns:(upd.shortageTxns||[]).map(tx=>tx===existingSRTxn?{...tx,amount:newSR,tripId:editSheet.id}:tx),
-              shortageRecovered:(upd.shortageRecovered||0)+deltaSR};
-          } else {
-            const txn={id:uid(),type:"recovery",date:editSheet.date||today(),qty:0,amount:deltaSR,lrNo:editSheet.lrNo,tripId:editSheet.id,note:"From trip edit"};
-            upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+deltaSR,shortageTxns:[...(upd.shortageTxns||[]),txn]};
-          }
-        } else if(deltaSR<0){
-          // Remove or reduce the shortage txn for this trip
-          const existingTxn = findTripTxn(upd.shortageTxns);
-          if(existingTxn) {
-            const newAmt = newSR; // set to the new total directly rather than adding a signed delta to stale amount
-            if(newAmt <= 0) {
-              upd={...upd,shortageTxns:(upd.shortageTxns||[]).filter(tx=>tx!==existingTxn)};
-            } else {
-              upd={...upd,shortageTxns:(upd.shortageTxns||[]).map(tx=>tx===existingTxn?{...tx,amount:newAmt,tripId:editSheet.id}:tx)};
-            }
-          }
-          upd={...upd,shortageRecovered:Math.max(0,(upd.shortageRecovered||0)+deltaSR)};
-        }
-        if(deltaLR!==0){
-          // Upsert: override existing txn for this trip with new full amount
-          const existingLRTxn = findTripTxn(upd.loanTxns);
-          if(newLR<=0){
-            if(existingLRTxn){
-              upd={...upd,loanTxns:(upd.loanTxns||[]).filter(tx=>tx!==existingLRTxn),
-                loanRecovered:Math.max(0,(upd.loanRecovered||0)-(existingLRTxn.amount||0))};
-            }
-          } else if(existingLRTxn){
-            const diff2 = newLR - (existingLRTxn.amount||0);
-            upd={...upd,loanTxns:(upd.loanTxns||[]).map(tx=>tx===existingLRTxn?{...tx,amount:newLR,tripId:editSheet.id,note:"From trip edit"}:tx),
-              loanRecovered:Math.max(0,(upd.loanRecovered||0)+diff2)};
-          } else if(newLR>0){
-            const txn={id:uid(),type:"recovery",date:editSheet.date||today(),amount:newLR,lrNo:editSheet.lrNo,tripId:editSheet.id,note:"From trip edit"};
-            upd={...upd,loanRecovered:(upd.loanRecovered||0)+newLR,loanTxns:[...(upd.loanTxns||[]),txn]};
-          }
-        }
-        return upd;
+        return syncTripRecoveryToVehicle(veh, editSheet);
       }));
     }
     // Persist ownerName to vehicle master if it was blank
@@ -7903,21 +7915,26 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                               const veh = (vehicles||[]).find(x=>x.truckNo===t.truckNo);
                               if(veh?.ownerName) normalized.ownerName = veh.ownerName;
                             }
-                            // Recompute loanRecovery + shortageRecovery from current vehicle balance (only if not yet settled)
+                            // Suggest loanRecovery/shortageRecovery from the vehicle's
+                            // deduct/trip setting ONLY when this trip currently has none
+                            // set (0/blank) — never overwrite an amount you already
+                            // customized on this specific trip.
                             if(!t.driverSettled) {
                               const veh = (vehicles||[]).find(x=>x.truckNo===t.truckNo);
                               if(veh) {
-                                const ownerName = (veh.ownerName||"").trim();
-                                const ownerVehs = ownerName ? (vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerName) : [veh];
-                                const ownerBal  = ownerVehs.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
-                                const deductPT  = ownerVehs[0]?.deductPerTrip||0;
-                                const autoLR    = ownerBal<=0 ? 0 : (deductPT>0 ? Math.min(deductPT,ownerBal) : ownerBal);
-                                const stxns     = veh.shortageTxns||[];
-                                const shortBal  = Math.max(0,stxns.filter(x=>x.type==="shortage").reduce((s,x)=>s+(x.amount||0),0)-stxns.filter(x=>x.type==="recovery").reduce((s,x)=>s+(x.amount||0),0));
-                                const sdpt      = veh.shortageDeductPerTrip||0;
-                                const autoSR    = shortBal<=0 ? 0 : (sdpt>0 ? Math.min(sdpt,shortBal) : shortBal);
-                                normalized.loanRecovery     = autoLR;
-                                normalized.shortageRecovery = autoSR;
+                                if(!(+t.loanRecovery>0)) {
+                                  const ownerName = (veh.ownerName||"").trim();
+                                  const ownerVehs = ownerName ? (vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerName) : [veh];
+                                  const ownerBal  = ownerVehs.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
+                                  const deductPT  = ownerVehs[0]?.deductPerTrip||0;
+                                  normalized.loanRecovery = ownerBal<=0 ? 0 : (deductPT>0 ? Math.min(deductPT,ownerBal) : ownerBal);
+                                }
+                                if(!(+t.shortageRecovery>0)) {
+                                  const stxns    = veh.shortageTxns||[];
+                                  const shortBal = Math.max(0,stxns.filter(x=>x.type==="shortage").reduce((s,x)=>s+(x.amount||0),0)-stxns.filter(x=>x.type==="recovery").reduce((s,x)=>s+(x.amount||0),0));
+                                  const sdpt     = veh.shortageDeductPerTrip||0;
+                                  normalized.shortageRecovery = shortBal<=0 ? 0 : (sdpt>0 ? Math.min(sdpt,shortBal) : shortBal);
+                                }
                               }
                             }
                             setEditSheet(normalized);
@@ -8635,10 +8652,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                           if(tn2&&(t.loanRecovery>0||t.shortageRecovery>0)){
                             setVehicles(prev=>prev.map(veh=>{
                               if(veh.truckNo!==tn2) return veh;
-                              let upd={...veh};
-                              if(t.loanRecovery>0){const txn={id:uid(),type:"recovery",date:t.date,amount:t.loanRecovery,lrNo:t.lrNo,tripId:t.id,note:"Party trip"};upd={...upd,loanRecovered:(upd.loanRecovered||0)+t.loanRecovery,loanTxns:[...(upd.loanTxns||[]),txn]};}
-                              if(t.shortageRecovery>0){const txn={id:uid(),type:"recovery",date:t.date,qty:0,amount:t.shortageRecovery,lrNo:t.lrNo,tripId:t.id,note:"Party trip"};upd={...upd,shortageRecovered:(upd.shortageRecovered||0)+t.shortageRecovery,shortageTxns:[...(upd.shortageTxns||[]),txn]};}
-                              return upd;
+                              return syncTripRecoveryToVehicle(veh, t);
                             }));
                           }
                           setAddSheet(false); setF(blankForm());
@@ -10078,27 +10092,14 @@ function Settlement({trips, setTrips, vehicles, setVehicles, settlements, setSet
     const s = {id:uid(), tripId:t.id, date:today(), truckNo:t.truckNo, lrNo:t.lrNo, grNo:t.grNo, to:t.to, qty:t.qty, givenRate:t.givenRate, ownerName:v?.ownerName||"—", notes, settledBy:user.username, settledAt:nowTs(), ...calc};
     setSettlements(p => [s, ...(p||[])]);
     setTrips(p => p.map(x => x.id===t.id ? {...x, driverSettled:true, settledBy:user.username, netPaid:calc.net} : x));
-    // Update vehicle ledger on settlement
+    // Update vehicle ledger on settlement — strict sync to trip's own recovery
+    // fields only. (calc.loanDeduct is vehicle.deductPerTrip for DISPLAY reference
+    // only, per calcNet's own comment — it must never be recorded as a separate
+    // ledger entry alongside calc.loanRecovery, which is what was happening here
+    // before and would double-count against calc.loanRecovery for the same trip.)
     if (v) setVehicles(p => p.map(x => {
       if (x.truckNo!==t.truckNo) return x;
-      let updated = {...x};
-      const settleDate = today();
-      // Loan deduct per trip
-      if (calc.loanDeduct>0) {
-        const txn = {id:uid(),type:"recovery",date:settleDate,amount:calc.loanDeduct,lrNo:t.lrNo,tripId:t.id,note:"Auto — deduct/trip at settlement"};
-        updated = {...updated, loanRecovered:(updated.loanRecovered||0)+calc.loanDeduct, loanTxns:[...(updated.loanTxns||[]),txn]};
-      }
-      // Explicit shortage recovery on this trip
-      if (calc.shortageRecovery>0) {
-        const txn = {id:uid(),type:"recovery",date:settleDate,mt:0,amount:calc.shortageRecovery,lrNo:t.lrNo,tripId:t.id,note:"Shortage recovery at settlement"};
-        updated = {...updated, shortageRecovered:(updated.shortageRecovered||0)+calc.shortageRecovery, shortageTxns:[...(updated.shortageTxns||[]),txn]};
-      }
-      // Explicit loan recovery on this trip
-      if (calc.loanRecovery>0) {
-        const txn = {id:uid(),type:"recovery",date:settleDate,amount:calc.loanRecovery,lrNo:t.lrNo,tripId:t.id,note:"Loan recovery at settlement"};
-        updated = {...updated, loanRecovered:(updated.loanRecovered||0)+calc.loanRecovery, loanTxns:[...(updated.loanTxns||[]),txn]};
-      }
-      return updated;
+      return syncTripRecoveryToVehicle(x, t);
     }));
     log("SETTLEMENT", `LR:${t.lrNo} ${t.truckNo} — Net ${fmt(calc.net)}`);
     setSel(null); setNotes("");
@@ -15256,6 +15257,8 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
   const [pdfTo,    setPdfTo]    = useState("");
   const [showDateFilter, setShowDateFilter] = useState(false);
   const [ownerReportSheet, setOwnerReportSheet] = useState(null);
+  const [reconcileResults, setReconcileResults] = useState(null); // array of candidates, or null if closed
+  const [reconcileSelected, setReconcileSelected] = useState(new Set());
   // Multi-account form state (for vehicle add/edit sheet)
   const [showAddAcc,  setShowAddAcc]  = useState(false);
   const [newAccForm,  setNewAccForm]  = useState({name:"",accountNo:"",ifsc:""});
@@ -15724,58 +15727,47 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
           )}
           {isOwner && (
             <Btn sm outline color={C.purple} onClick={()=>{
-              // Scan every trip with a loan/shortage recovery amount and check whether
-              // a matching ledger entry actually exists on that vehicle. Purely additive —
-              // never touches or removes anything already in loanTxns/shortageTxns, only
-              // adds entries that are provably missing (fixes drift from old LR-based
-              // matching, e.g. when an LR number got corrected after the entry was made).
-              const missing = []; // {truckNo, lrNo, date, kind, amount}
+              // Strict rule: each trip's loan/shortage recovery ledger entry must
+              // exactly mirror that trip's current loanRecovery/shortageRecovery
+              // field — same logic as syncTripRecoveryToVehicle, run here as a
+              // dry-run diagnostic so nothing is changed until you review and pick.
+              // Three possible issues per trip: "add" (field is set, no entry
+              // exists), "correct" (an entry exists but the amount is wrong, or
+              // there's more than one), "remove" (field is 0 but an entry still
+              // exists — most likely a later edit/waiver that the ledger never
+              // picked up).
+              const findings = []; // {truckNo, lrNo, date, tripId, settled, loan, shortage}
               (trips||[]).forEach(t => {
                 const tn = (t.truckNo||"").toUpperCase().trim();
                 const veh = (vehicles||[]).find(v=>v.truckNo===tn);
                 if(!veh) return;
-                if(+t.loanRecovery>0) {
-                  const found = (veh.loanTxns||[]).some(tx=>tx.type==="recovery" &&
-                    (tx.tripId===t.id || (!tx.tripId && tx.lrNo===t.lrNo && +tx.amount===+t.loanRecovery)));
-                  if(!found) missing.push({truckNo:tn, lrNo:t.lrNo, date:t.date, kind:"loan", amount:+t.loanRecovery, tripId:t.id});
-                }
-                if(+t.shortageRecovery>0) {
-                  const found = (veh.shortageTxns||[]).some(tx=>tx.type==="recovery" &&
-                    (tx.tripId===t.id || (!tx.tripId && tx.lrNo===t.lrNo && +tx.amount===+t.shortageRecovery)));
-                  if(!found) missing.push({truckNo:tn, lrNo:t.lrNo, date:t.date, kind:"shortage", amount:+t.shortageRecovery, tripId:t.id});
-                }
+                const findMine = (txns) => (txns||[]).filter(tx=>tx.type==="recovery" &&
+                  (tx.tripId===t.id || (!tx.tripId && t.lrNo && tx.lrNo===t.lrNo)));
+
+                const newLR = +t.loanRecovery||0;
+                const loanMatches = findMine(veh.loanTxns);
+                const loanCurrent = loanMatches.reduce((s,x)=>s+(+x.amount||0),0);
+                let loan = null;
+                if(newLR<=0 && loanMatches.length>0) loan = {action:"remove", current:loanCurrent, target:0};
+                else if(newLR>0 && (loanMatches.length!==1 || +loanMatches[0].amount!==newLR || !loanMatches[0].tripId))
+                  loan = {action:loanMatches.length===0?"add":"correct", current:loanCurrent, target:newLR};
+
+                const newSR = +t.shortageRecovery||0;
+                const shortMatches = findMine(veh.shortageTxns);
+                const shortCurrent = shortMatches.reduce((s,x)=>s+(+x.amount||0),0);
+                let shortage = null;
+                if(newSR<=0 && shortMatches.length>0) shortage = {action:"remove", current:shortCurrent, target:0};
+                else if(newSR>0 && (shortMatches.length!==1 || +shortMatches[0].amount!==newSR || !shortMatches[0].tripId))
+                  shortage = {action:shortMatches.length===0?"add":"correct", current:shortCurrent, target:newSR};
+
+                if(loan || shortage) findings.push({truckNo:tn, lrNo:t.lrNo, date:t.date, tripId:t.id, settled:!!t.driverSettled, loan, shortage});
               });
-              if(missing.length===0){
-                alert("✅ No missing recovery entries found — every trip's loan/shortage recovery is correctly reflected in its vehicle's ledger.");
+              if(findings.length===0){
+                alert("✅ Every trip's loan/shortage recovery exactly matches its vehicle ledger — nothing to fix.");
                 return;
               }
-              const preview = missing.slice(0,15).map(m=>`${m.truckNo} · LR ${m.lrNo||"—"} · ${m.date} · ${m.kind==="loan"?"Loan":"Shortage"} ₹${m.amount.toLocaleString("en-IN")}`).join("\n");
-              if(!window.confirm(`Found ${missing.length} trip${missing.length>1?"s":""} with a recovery amount missing from the vehicle ledger:
-
-${preview}${missing.length>15?`\n…and ${missing.length-15} more`:""}
-
-This will ADD the missing entries only — nothing existing will be changed or removed.
-
-Proceed?`)) return;
-              setVehicles(prev => prev.map(veh => {
-                const mine = missing.filter(m=>m.truckNo===veh.truckNo);
-                if(mine.length===0) return veh;
-                let upd = {...veh};
-                mine.forEach(m => {
-                  const txn = {id:uid(), type:"recovery", date:m.date||today(),
-                    amount:m.amount, lrNo:m.lrNo||"", tripId:m.tripId,
-                    note:"Reconciliation — added missing entry", ...(m.kind==="shortage"?{qty:0}:{})};
-                  if(m.kind==="loan") {
-                    upd = {...upd, loanRecovered:(upd.loanRecovered||0)+m.amount, loanTxns:[...(upd.loanTxns||[]),txn]};
-                  } else {
-                    upd = {...upd, shortageRecovered:(upd.shortageRecovered||0)+m.amount, shortageTxns:[...(upd.shortageTxns||[]),txn]};
-                  }
-                });
-                DB.saveVehicle(upd).catch(e=>console.error("saveVehicle reconcile:",e));
-                return upd;
-              }));
-              log("RECONCILE LEDGER", `Added ${missing.length} missing recovery entr${missing.length>1?"ies":"y"}`);
-              alert(`✅ Done — added ${missing.length} missing recovery entr${missing.length>1?"ies":"y"} to the vehicle ledger${missing.length>1?"s":""}.`);
+              setReconcileResults(findings);
+              setReconcileSelected(new Set()); // opt-in — nothing pre-selected
             }}>
               🔧 Fix Missing Recoveries
             </Btn>
@@ -16871,6 +16863,75 @@ Proceed?`)) return;
           </Sheet>
         );
       })()}
+      {/* Reconcile Missing Recoveries — reviewable checklist, nothing pre-selected, opt-in only */}
+      {reconcileResults && (
+        <Sheet title={`🔧 ${reconcileResults.length} Trip${reconcileResults.length>1?"s":""} Flagged`} onClose={()=>{setReconcileResults(null);setReconcileSelected(new Set());}}>
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:10,padding:"10px 14px",color:C.text,fontSize:12,lineHeight:1.5}}>
+              These trips' loan/shortage recovery fields don't exactly match their vehicle's ledger — <b style={{color:C.green}}>Add</b> (field is set, no ledger entry), <b style={{color:C.purple}}>Correct</b> (entry exists but the amount is wrong), or <b style={{color:C.red}}>Remove</b> (field is 0 but a ledger entry still exists — often a later edit/waiver the ledger never picked up). <b>Nothing is selected by default</b> — review each one before applying.
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>setReconcileSelected(new Set(reconcileResults.map((_,i)=>i)))}
+                style={{flex:1,background:"none",border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,padding:"7px",fontSize:12,cursor:"pointer"}}>
+                Select All
+              </button>
+              <button onClick={()=>setReconcileSelected(new Set())}
+                style={{flex:1,background:"none",border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,padding:"7px",fontSize:12,cursor:"pointer"}}>
+                Select None
+              </button>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:400,overflowY:"auto"}}>
+              {reconcileResults.map((m,i)=>{
+                const actionColor = a => a==="remove"?C.red:a==="correct"?C.purple:C.green;
+                const actionLabel = a => a==="remove"?"Remove":a==="correct"?"Correct":"Add";
+                return (
+                <label key={i} style={{display:"flex",alignItems:"center",gap:10,
+                  background:C.bg,borderRadius:8,padding:"9px 12px",border:`1px solid ${C.border}`,cursor:"pointer"}}>
+                  <input type="checkbox" checked={reconcileSelected.has(i)} onChange={()=>setReconcileSelected(prev=>{
+                    const n=new Set(prev); if(n.has(i)) n.delete(i); else n.add(i); return n;
+                  })} style={{width:16,height:16,flexShrink:0}} />
+                  <div style={{flex:1,fontSize:12}}>
+                    <div style={{fontWeight:700}}>{m.truckNo} · LR {m.lrNo||"—"} · {m.date}{m.settled?" · Settled":" · Pending"}</div>
+                    {m.loan && (
+                      <div style={{color:C.muted,fontSize:11,display:"flex",gap:6,alignItems:"center",marginTop:2}}>
+                        <span style={{color:actionColor(m.loan.action),fontWeight:700}}>{actionLabel(m.loan.action)}</span>
+                        Loan: ledger ₹{m.loan.current.toLocaleString("en-IN")} → trip says ₹{m.loan.target.toLocaleString("en-IN")}
+                      </div>
+                    )}
+                    {m.shortage && (
+                      <div style={{color:C.muted,fontSize:11,display:"flex",gap:6,alignItems:"center",marginTop:2}}>
+                        <span style={{color:actionColor(m.shortage.action),fontWeight:700}}>{actionLabel(m.shortage.action)}</span>
+                        Shortage: ledger ₹{m.shortage.current.toLocaleString("en-IN")} → trip says ₹{m.shortage.target.toLocaleString("en-IN")}
+                      </div>
+                    )}
+                  </div>
+                </label>
+                );
+              })}
+            </div>
+            <Btn onClick={()=>{
+              const toApply = reconcileResults.filter((_,i)=>reconcileSelected.has(i));
+              if(toApply.length===0){ setReconcileResults(null); return; }
+              setVehicles(prev => prev.map(veh => {
+                const mine = toApply.filter(m=>m.truckNo===veh.truckNo);
+                if(mine.length===0) return veh;
+                let upd = veh;
+                mine.forEach(m => {
+                  const t = trips.find(x=>x.id===m.tripId);
+                  if(t) upd = syncTripRecoveryToVehicle(upd, t);
+                });
+                DB.saveVehicle(upd).catch(e=>console.error("saveVehicle reconcile:",e));
+                return upd;
+              }));
+              log("RECONCILE LEDGER", `Fixed ${toApply.length} selected trip${toApply.length>1?"s":""}`);
+              alert(`✅ Fixed ${toApply.length} selected trip${toApply.length>1?"s":""} in the vehicle ledger.`);
+              setReconcileResults(null); setReconcileSelected(new Set());
+            }} full disabled={reconcileSelected.size===0} color={C.purple}>
+              Apply {reconcileSelected.size} Selected Fix{reconcileSelected.size===1?"":"es"}
+            </Btn>
+          </div>
+        </Sheet>
+      )}
       {/* Owner Report Sheet */}
       {ownerReportSheet!==null && (
         <Sheet title="📊 Owner Report" onClose={()=>setOwnerReportSheet(null)}>
