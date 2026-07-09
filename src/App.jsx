@@ -7640,11 +7640,12 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                 }).join("");
                 const totalFreight = shown.reduce((s,t)=>s+t.qty*(t.frRate||0),0);
                 const totalQty = shown.reduce((s,t)=>s+t.qty,0);
-                const html = "<html><head><style>body{font-family:Arial,sans-serif;font-size:12px;padding:16px}h2{color:#f97316;margin-bottom:4px}table{width:100%;border-collapse:collapse;margin-top:12px}th{background:#f97316;color:#fff;padding:6px 8px;text-align:left;font-size:11px}td{padding:5px 8px;border-bottom:1px solid #eee;font-size:11px}.summary{display:flex;gap:24px;margin:8px 0;font-size:13px;color:#555}.sv{font-weight:bold;color:#111}</style></head>"
-                  +`<body><h2>${RC.companyName} — Trip Report</h2>`
+                const logoSrc = RC.logoSrc || "";
+                const html = "<html><head><style>body{font-family:Arial,sans-serif;font-size:12px;padding:16px}h2{color:#f97316;margin-bottom:4px}table{width:100%;border-collapse:collapse;margin-top:12px}th{background:#f97316;color:#fff;padding:6px 8px;text-align:left;font-size:11px}td{padding:5px 8px;border-bottom:1px solid #eee;font-size:11px}.summary{display:flex;gap:24px;margin:8px 0;font-size:13px;color:#555}.sv{font-weight:bold;color:#111}.hdr{display:flex;align-items:center;gap:10px}</style></head>"
+                  +`<body><div class='hdr'>${logoSrc?`<img src="${logoSrc}" style="width:40px;height:40px;border-radius:8px;object-fit:cover" alt="${RC.companyShort||''}"/>`:""}<h2>${RC.companyName} — Trip Report</h2></div>`
                   +"<div style='color:#888;font-size:12px'>Period: "+(dateFrom||"all")+" to "+(dateTo||"all")+" &nbsp;|&nbsp; Filter: "+filter+"</div>"
                   +"<div class='summary'><div>Trips: <span class='sv'>"+shown.length+"</span></div><div>Total Qty: <span class='sv'>"+totalQty+"MT</span></div><div>Total Freight: <span class='sv'>"+fmt(totalFreight)+"</span></div></div>"
-                  +"<table><thead><tr><th>Date</th><th>Truck</th><th>LR</th><th>To</th><th>Qty(MT)</th><th>Freight</th><th>Advance</th><th>Diesel</th><th>Net</th><th>Status</th></tr></thead>"
+                  +"<table><thead><tr><th>Date</th><th>Truck</th><th>LR</th><th>From</th><th>To</th><th>Qty(MT)</th><th>Freight</th><th>Advance</th><th>Diesel</th><th>Net</th><th>Status</th></tr></thead>"
                   +"<tbody>"+rows+"</tbody></table></body></html>";
                 const w = window.open("","_blank");
                 w.document.write(html);
