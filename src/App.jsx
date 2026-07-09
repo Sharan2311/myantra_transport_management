@@ -21681,14 +21681,34 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
   // eslint-disable-next-line
   }, [JSON.stringify(tripWithBalance.map(t=>({id:t.id,balance:t.balance,settled:t.driverSettled})))]);
 
-  // Close out any PENDING payment request whose trip already has balance=0 —
-  // catches the historical backlog (requests left stale before every settlement
+  // Close out any PENDING request whose OWN trip already has balance=0 — each
+  // request is judged independently by its own trip's balance, not by whether
+  // some other request on the same LR happens to be done (a trip can validly
+  // have one done request for a partial amount and a separate, still-owed
+  // pending request for the remainder — that second one must stay pending).
+  // Catches the historical backlog (requests left stale before every settlement
   // path was wired to call markRequestsDoneForLR), not just new settlements.
+  // IMPORTANT: checks against the full `trips` prop, not `tripWithBalance` (which
+  // is built from `fyTrips || trips` — scoped to whatever FY/client filter is
+  // currently active in the UI). A stale request for a trip outside the
+  // currently-viewed FY would otherwise never be found and never get closed.
   React.useEffect(() => {
+    const balanceForLR = (lrNo) => {
+      const t = (trips||[]).find(x=>x.lrNo && x.lrNo===lrNo);
+      if(!t) return null;
+      const gross = (t.diLines&&t.diLines.length>1)
+        ? t.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
+        : (t.qty||0)*(t.givenRate||0);
+      const deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)
+        +((t.shortage||0)*(t.givenRate||0))+(t.shortageRecovery||0)+(t.loanRecovery||0);
+      const netDue = Math.max(0, gross - deducts);
+      const paidSoFar = (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
+      return Math.max(0, netDue - paidSoFar);
+    };
     const stalePending = (paymentRequests||[]).filter(r => {
       if(r.status!=="pending") return false;
-      const tw = tripWithBalance.find(t=>t.lrNo && t.lrNo===r.lrNo);
-      return tw && tw.balance<=0;
+      const bal = balanceForLR(r.lrNo);
+      return bal!==null && bal<=0;
     });
     if(stalePending.length===0) return;
     setPaymentRequests(prev=>(prev||[]).map(r=>{
@@ -21698,7 +21718,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
       return done;
     }));
   // eslint-disable-next-line
-  }, [JSON.stringify((paymentRequests||[]).map(r=>r.id+r.status)), JSON.stringify(tripWithBalance.map(t=>({lr:t.lrNo,bal:t.balance})))]);
+  }, [JSON.stringify((paymentRequests||[]).map(r=>r.id+r.status)), JSON.stringify((trips||[]).map(t=>({lr:t.lrNo,id:t.id}))), driverPays]);
 
   // Auto-settle: called after any payment save — marks trip settled if balance reaches 0
   const autoSettle = (tripId, extraAmount) => {
