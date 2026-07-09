@@ -1802,6 +1802,16 @@ function AppMain() {
       const netDue  = Math.max(0, gross - deducts);
       return {...t, driverSettled:true, settledBy:"auto", netPaid:netDue};
     }));
+    // Close out any pending payment request for these trips — they're fully paid,
+    // just not through the explicit savePayment→autoSettle→markRequestsDoneForLR
+    // chain (e.g. paid via a route this sweep is specifically designed to catch).
+    setPaymentRequests(prev => (prev||[]).map(r => {
+      if(r.status!=="pending") return r;
+      if(!toSettle.find(s=>s.lrNo && s.lrNo===r.lrNo)) return r;
+      const done = {...r, status:"done", paidAt:today(), paidBy:"auto"};
+      DB.savePaymentRequest(done).catch(e=>console.error("savePaymentRequest auto-settle:",e));
+      return done;
+    }));
   }, [trips, driverPays, vehicles, allTripsLoaded]);
 
   if (!user) {
@@ -10095,7 +10105,7 @@ function Billing({trips, setTrips, fyTrips, selectedClient, user, log}) {
 }
 
 // ─── SETTLEMENT ───────────────────────────────────────────────────────────────
-function Settlement({trips, setTrips, vehicles, setVehicles, settlements, setSettlements, indents, user, log}) {
+function Settlement({trips, setTrips, vehicles, setVehicles, settlements, setSettlements, indents, user, log, paymentRequests, setPaymentRequests}) {
   const [sel, setSel]   = useState(null);
   const [notes, setNotes] = useState("");
   const unsettled = trips.filter(t => !t.driverSettled);
@@ -10108,6 +10118,15 @@ function Settlement({trips, setTrips, vehicles, setVehicles, settlements, setSet
     const s = {id:uid(), tripId:t.id, date:today(), truckNo:t.truckNo, lrNo:t.lrNo, grNo:t.grNo, to:t.to, qty:t.qty, givenRate:t.givenRate, ownerName:v?.ownerName||"—", notes, settledBy:user.username, settledAt:nowTs(), ...calc};
     setSettlements(p => [s, ...(p||[])]);
     setTrips(p => p.map(x => x.id===t.id ? {...x, driverSettled:true, settledBy:user.username, netPaid:calc.net} : x));
+    // Close out any pending payment request for this trip's LR — it's now settled.
+    if(setPaymentRequests && t.lrNo) {
+      setPaymentRequests(prev => (prev||[]).map(r => {
+        if(r.lrNo!==t.lrNo || r.status!=="pending") return r;
+        const done = {...r, status:"done", paidAt:today(), paidBy:user.username};
+        DB.savePaymentRequest(done).catch(e=>console.error("savePaymentRequest settle:",e));
+        return done;
+      }));
+    }
     // Update vehicle ledger on settlement — strict sync to trip's own recovery
     // fields only. (calc.loanDeduct is vehicle.deductPerTrip for DISPLAY reference
     // only, per calcNet's own comment — it must never be recorded as a separate
@@ -21172,7 +21191,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
 // Record bank transfers against a trip. "Balance due" auto-updates.
 // ─── EMPLOYEE TRIP GROUP ─────────────────────────────────────────────────────
 // Groups all unpaid trips for one employee — can request payment for each or all together
-function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPayReqSheet, requestPaymentGuarded, vehicles, fmt,
+function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPaymentRequests, setPayReqSheet, requestPaymentGuarded, vehicles, fmt,
   setDriverPays, setTrips, setEmployees, setCashTransfers, cashTransfers, user, log }) {
   const [open, setOpen] = useState(true);
   const [selected, setSelected] = useState(new Set(empTrips.map(t=>t.id)));
@@ -21235,6 +21254,19 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPayR
       DB.saveTrip(updated).catch(e=>console.error("saveTrip loan recovery settle:",e));
       return updated;
     }));
+    // Close out any pending payment request for these trips — they're now fully
+    // covered via this recovery, not a bank transfer, but the request is resolved.
+    if(setPaymentRequests) {
+      recoverTrips.forEach(rt => {
+        if(!rt.lrNo) return;
+        setPaymentRequests(prev => (prev||[]).map(r => {
+          if(r.lrNo!==rt.lrNo || r.status!=="pending") return r;
+          const done = {...r, status:"done", paidAt:today(), paidBy:user.username};
+          DB.savePaymentRequest(done).catch(e=>console.error("savePaymentRequest recovery:",e));
+          return done;
+        }));
+      });
+    }
     // 3) Apply the recovered total to the employee's loan or wallet ledger
     if(recoverTarget==="loan" && setEmployees) {
       setEmployees(prev => prev.map(e => {
@@ -21642,11 +21674,31 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
       toSettle.forEach(tw=>{
         const updated = {...tw, driverSettled:true, settledBy:"auto", netPaid:tw.netDue};
         DB.saveTrip(updated).catch(e=>console.warn("auto-settle saveTrip:",e));
+        if(tw.lrNo) markRequestsDoneForLR(tw.lrNo);
       });
 
     }
   // eslint-disable-next-line
   }, [JSON.stringify(tripWithBalance.map(t=>({id:t.id,balance:t.balance,settled:t.driverSettled})))]);
+
+  // Close out any PENDING payment request whose trip already has balance=0 —
+  // catches the historical backlog (requests left stale before every settlement
+  // path was wired to call markRequestsDoneForLR), not just new settlements.
+  React.useEffect(() => {
+    const stalePending = (paymentRequests||[]).filter(r => {
+      if(r.status!=="pending") return false;
+      const tw = tripWithBalance.find(t=>t.lrNo && t.lrNo===r.lrNo);
+      return tw && tw.balance<=0;
+    });
+    if(stalePending.length===0) return;
+    setPaymentRequests(prev=>(prev||[]).map(r=>{
+      if(!stalePending.find(s=>s.id===r.id)) return r;
+      const done={...r,status:"done",paidAt:today(),paidBy:"auto"};
+      DB.savePaymentRequest(done).catch(e=>console.error("savePaymentRequest stale cleanup:",e));
+      return done;
+    }));
+  // eslint-disable-next-line
+  }, [JSON.stringify((paymentRequests||[]).map(r=>r.id+r.status)), JSON.stringify(tripWithBalance.map(t=>({lr:t.lrNo,bal:t.balance})))]);
 
   // Auto-settle: called after any payment save — marks trip settled if balance reaches 0
   const autoSettle = (tripId, extraAmount) => {
@@ -22126,7 +22178,7 @@ This will auto-recover in the next trip.`);
               return (
                 <EmpTripGroup key={empId}
                   empId={empId} emp={emp} empTrips={empTrips} totalBal={totalBal}
-                  paymentRequests={paymentRequests||[]}
+                  paymentRequests={paymentRequests||[]} setPaymentRequests={setPaymentRequests}
                   setPayReqSheet={setPayReqSheet}
                   requestPaymentGuarded={requestPaymentGuarded}
                   vehicles={vehicles} fmt={fmt}
