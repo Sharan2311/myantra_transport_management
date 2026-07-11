@@ -55,22 +55,28 @@ const resolveWalletEmpId = (cashEmpId, fallbackEmpId) => hasWalletEmp(cashEmpId)
 // whose Linked Trucks list includes this truck AND who is themselves marked
 // TAFAL-exempt (a deliberate per-employee toggle, not automatic just from
 // linking a truck). Returns null if no such employee-driven exemption applies.
-const employeeTafalExemptFor = (truckNo, employees) => {
+const employeeTafalExemptFor = (truckNo, employees, assignedEmpId) => {
+  // An employee directly assigned to THIS trip (via "Assign Employee") who is
+  // themselves marked TAFAL-exempt takes priority over vehicle-level linking.
+  if (assignedEmpId) {
+    const assignedEmp = (employees||[]).find(e => e.id === assignedEmpId);
+    if (assignedEmp?.tafalExempt) return assignedEmp;
+  }
   if (!truckNo) return null;
   const norm = String(truckNo).toUpperCase().trim();
   return (employees||[]).find(e => e.tafalExempt && (e.linkedTrucks||[]).some(t => String(t).toUpperCase().trim() === norm)) || null;
 };
-const tafalAmountFor = (veh, employees, settingsObj) => {
-  if (employeeTafalExemptFor(veh?.truckNo, employees)) return 0;
+const tafalAmountFor = (veh, employees, settingsObj, assignedEmpId) => {
+  if (employeeTafalExemptFor(veh?.truckNo, employees, assignedEmpId)) return 0;
   if (veh?.tafalExempt) return 0;
   if (veh?.tafalOverride!=null) return veh.tafalOverride;
   return settingsObj?.tafalPerTrip || 300;
 };
 // Whether a vehicle is exempt for ANY reason — used for read-only/badge display,
 // separate from the numeric amount above.
-// Precedence (must match tafalAmountFor exactly): employee-exempt (via link) >
-// manual vehicle exempt > vehicle override > global rate.
-const isTafalExempt = (veh, employees) => !!employeeTafalExemptFor(veh?.truckNo, employees) || !!veh?.tafalExempt;
+// Precedence (must match tafalAmountFor exactly): trip-assigned-employee exempt >
+// vehicle-linked-employee exempt > manual vehicle exempt > vehicle override > global rate.
+const isTafalExempt = (veh, employees, assignedEmpId) => !!employeeTafalExemptFor(veh?.truckNo, employees, assignedEmpId) || !!veh?.tafalExempt;
 // True only when employee_self is the user's ONLY role — used to decide whether to
 // force-land on the wallet tab / hide dashboard. A combined role (e.g. a fleet
 // manager who is also a driver) keeps their normal landing tab and other tabs,
@@ -3320,7 +3326,7 @@ Rules:
       const totalQty  = groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0),0);
       const totalGross = groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0)*(+x.givenRate||0),0);
       const _gVehForTafal = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
-      const tafalVal  = g.tafal!==undefined && g.tafal!=="" ? +g.tafal : tafalAmountFor(_gVehForTafal, employees, settings);
+      const tafalVal  = g.tafal!==undefined && g.tafal!=="" ? +g.tafal : tafalAmountFor(_gVehForTafal, employees, settings, g.assignedEmpId||"");
       const _net = totalGross - (+g.advance||0) - tafalVal - (+g.diesel||0)
                  - (+g.shortageRecovery||0) - (+g.loanRecovery||0);
       if(_net < 0) {
@@ -3415,7 +3421,7 @@ Rules:
       }
 
       const gVehTafal = vehicles.find(v=>v.truckNo===g.truckNo);
-      const _tafalDefault = tafalAmountFor(gVehTafal, employees, settings);
+      const _tafalDefault = tafalAmountFor(gVehTafal, employees, settings, g.assignedEmpId||"");
       const tafalVal = g.tafal!=="" ? +g.tafal : _tafalDefault;
 
       if(groupItems.length === 1) {
@@ -4653,7 +4659,7 @@ Rules:
               {(()=>{
                 const totalGross = groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0)*(+x.givenRate||0),0);
                 const _gVehNet = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
-                const tafalVal   = g.tafal!=="" ? +g.tafal : tafalAmountFor(_gVehNet, employees, settings);
+                const tafalVal   = g.tafal!=="" ? +g.tafal : tafalAmountFor(_gVehNet, employees, settings, g.assignedEmpId||"");
                 const net = totalGross-(+g.advance||0)-tafalVal-(+g.diesel||0)-(+g.shortageRecovery||0)-(+g.loanRecovery||0);
                 if(!totalGross) return null;
                 return (
@@ -4673,7 +4679,21 @@ Rules:
                   <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3,textTransform:"uppercase"}}>
                     👤 Assign Employee *
                   </div>
-                  <select value={g.assignedEmpId||""} onChange={e=>updateGroup(g.id,"assignedEmpId",e.target.value)}
+                  <select value={g.assignedEmpId||""} onChange={e=>{
+                    const newEmpId = e.target.value;
+                    setGroups(prev => prev.map(gr => {
+                      if(gr.id!==g.id) return gr;
+                      const veh = (vehicles||[]).find(v=>v.truckNo===gr.truckNo);
+                      // Only auto-adjust TAFAL if it still equals what it would be
+                      // WITHOUT this employee assigned — i.e. it hasn't been
+                      // manually overridden — so a deliberate manual edit here is
+                      // never silently clobbered by changing the assignment.
+                      const prevDefault = tafalAmountFor(veh, employees, settings, gr.assignedEmpId||"");
+                      const stillDefault = gr.tafal===""||gr.tafal==null||+gr.tafal===prevDefault;
+                      const newTafal = stillDefault ? tafalAmountFor(veh, employees, settings, newEmpId) : gr.tafal;
+                      return {...gr, assignedEmpId:newEmpId, tafal:String(newTafal)};
+                    }));
+                  }}
                     style={{width:"100%",background:C.bg,border:`1.5px solid ${g.assignedEmpId?C.teal:C.border}`,
                       borderRadius:8,color:g.assignedEmpId?C.text:C.muted,padding:"7px 8px",fontSize:13,outline:"none"}}>
                     <option value="">— No employee —</option>
@@ -6917,7 +6937,8 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       // New trip — lrNo will be auto-assigned on saveNew; store empty for now
       const _vehForTafal = existingVehicle || vehicles.find(v=>v.truckNo===truckNo);
       setF(p => ({ ...p, ...extracted, lrNo: "", district:extracted.district||p.district||"", state:extracted.state||p.state||"",
-        tafal: String(tafalAmountFor(_vehForTafal, employees, settings)) }));
+        assignedEmpId: assignedEmpId || p.assignedEmpId || "",
+        tafal: String(tafalAmountFor(_vehForTafal, employees, settings, assignedEmpId || p.assignedEmpId || "")) }));
       setWasScanned(true);
       setDiConflict(null);
     }
@@ -8798,7 +8819,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
             ff={k=>v=>setEditSheet(p=>({...p,[k]:v}))}
             isIn={isIn} ac={C.blue} vehicles={vehicles} settings={settings}
             employees={employees||[]} cashTransfers={cashTransfers||[]}
-            onTruckChange={v=>{const veh=vehicles.find(x=>x.truckNo===v.toUpperCase().trim()); setEditSheet(p=>({...p,truckNo:v,tafal:tafalAmountFor(veh, employees, settings)}));}}
+            onTruckChange={v=>{const veh=vehicles.find(x=>x.truckNo===v.toUpperCase().trim()); setEditSheet(p=>({...p,truckNo:v,tafal:tafalAmountFor(veh, employees, settings, p.assignedEmpId||"")}));}}
             onSubmit={saveEdit} submitLabel="Save Changes" user={user}
             showStatus={true}
             wasScanned={user.role !== "owner"}
