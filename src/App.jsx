@@ -10918,8 +10918,40 @@ function PumpSlipScanner({ pumps, trips, user, onResults }) {
 // single receipt photo. If vehicle, pump name, and date all match the request,
 // auto-confirms (no image stored). If any mismatch, the image is stored and the
 // request stays "open" awaiting manager review in DieselMod.
+// Compresses/resizes a photo before it's sent anywhere. Phone camera photos are
+// often 3-8MB — over rural mobile data that turns both the AI scan call and the
+// storage upload into a multi-minute wait. Downscaling to ~1600px + JPEG ~0.75
+// keeps the receipt perfectly readable (by both a human and the AI) while
+// cutting typical file size by 80-95%.
+async function compressReceiptImage(file, maxDim = 1600, quality = 0.75) {
+  if (!file.type.startsWith("image/") || file.type === "image/svg+xml") return file;
+  try {
+    const img = await new Promise((res, rej) => {
+      const url = URL.createObjectURL(file);
+      const image = new Image();
+      image.onload = () => { URL.revokeObjectURL(url); res(image); };
+      image.onerror = () => { URL.revokeObjectURL(url); rej(new Error("Could not read image")); };
+      image.src = url;
+    });
+    let { width, height } = img;
+    if (width > maxDim || height > maxDim) {
+      const scale = maxDim / Math.max(width, height);
+      width = Math.round(width * scale);
+      height = Math.round(height * scale);
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = width; canvas.height = height;
+    canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+    const blob = await new Promise(res => canvas.toBlob(res, "image/jpeg", quality));
+    if (!blob || blob.size >= file.size) return file; // compression didn't help, keep original
+    return new File([blob], (file.name || "receipt").replace(/\.[^.]+$/, "") + ".jpg", { type: "image/jpeg" });
+  } catch {
+    return file; // any failure — fall back to the original file rather than blocking the upload
+  }
+}
+
 function DieselReceiptScan({ selected, pumps, dieselRequests=[], cashAmount, user, log, onBack, onConfirmed, onPendingReview }) {
-  const [state, setState] = useState("idle"); // idle|reading|scanning|uploading|saving|error
+  const [state, setState] = useState("idle"); // idle|compressing|reading|scanning|uploading|saving|error
   const [error, setError] = useState("");
 
   const handleFile = async (file) => {
@@ -10927,17 +10959,20 @@ function DieselReceiptScan({ selected, pumps, dieselRequests=[], cashAmount, use
     if (!file.type.startsWith("image/")) {
       setError("Please upload an image (JPG/PNG) of the receipt."); setState("error"); return;
     }
+    setState("compressing");
+    const compressed = await compressReceiptImage(file);
+    setState("reading");
     const base64 = await new Promise((res,rej) => {
       const r = new FileReader();
       r.onload = () => res(r.result.split(",")[1]);
       r.onerror = () => rej(new Error("Read failed"));
-      r.readAsDataURL(file);
+      r.readAsDataURL(compressed);
     });
     setState("scanning");
     try {
       const resp = await fetch("/.netlify/functions/scan-diesel-receipt", {
         method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ base64, anthropicKey: RC.anthropicKey, mediaType: file.type }),
+        body: JSON.stringify({ base64, anthropicKey: RC.anthropicKey, mediaType: compressed.type }),
       });
       const data = await resp.json();
       if (!resp.ok || data.error) {
@@ -11006,7 +11041,7 @@ function DieselReceiptScan({ selected, pumps, dieselRequests=[], cashAmount, use
 
       // Mismatch → store the image, save extracted data + flags, request stays "open"
       setState("uploading");
-      const path = await DB.uploadDieselReceipt(selected.id, file);
+      const path = await DB.uploadDieselReceipt(selected.id, compressed);
       const updReq = {
         ...selected,
         receiptImagePath:   path,
@@ -11043,13 +11078,14 @@ function DieselReceiptScan({ selected, pumps, dieselRequests=[], cashAmount, use
           label="Take photo or upload receipt"
           color={C.orange} icon="📷" />
       )}
-      {(state==="reading"||state==="scanning"||state==="uploading"||state==="saving") && (
+      {(state==="compressing"||state==="reading"||state==="scanning"||state==="uploading"||state==="saving") && (
         <div style={{border:`2px solid ${C.orange}44`,borderRadius:14,padding:"20px 16px",
           textAlign:"center",background:C.bg,display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
           <div style={{color:C.orange,fontWeight:800,fontSize:14}}>
-            {state==="reading"?"📖 Loading image…":
+            {state==="compressing"?"🗜️ Shrinking image…":
+             state==="reading"?"📖 Loading image…":
              state==="scanning"?"🤖 Reading receipt…":
-             state==="uploading"?"☁️ Saving receipt…":"💾 Saving…"}
+             state==="uploading"?"☁️ Uploading receipt…":"💾 Saving…"}
           </div>
         </div>
       )}
@@ -12189,6 +12225,12 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
                         {req.cashAmount   ? <span style={{fontSize:12,color:C.muted}}>💵 <b style={{color:C.text}}>₹{req.cashAmount.toLocaleString("en-IN")}</b></span>   : null}
                       </div>
                     ) : null}
+                    {req.rejectedReason && !req.receiptImagePath && (
+                      <div style={{marginTop:6,background:C.red+"11",border:`1px solid ${C.red}44`,borderRadius:8,
+                        padding:"6px 10px",fontSize:11,color:C.red}}>
+                        ⚠ Receipt rejected by {req.rejectedBy||"manager"}: "{req.rejectedReason}" — please upload again
+                      </div>
+                    )}
                   </div>
                   <div style={{fontWeight:800,fontSize:18,color:C.text}}>{fmt(req.amount)}</div>
                 </div>
@@ -12586,6 +12628,9 @@ function DieselReceiptReviewCard({ req, pumps, dieselRequests=[], user, log, vie
   });
   const [date, setDate] = useState(req.extractedDate || req.date || "");
   const [approving, setApproving] = useState(false);
+  const [rejecting, setRejecting] = useState(false);
+  const [showRejectBox, setShowRejectBox] = useState(false);
+  const [rejectReason, setRejectReason] = useState("");
 
   useEffect(()=>{
     let live = true;
@@ -12641,6 +12686,38 @@ function DieselReceiptReviewCard({ req, pumps, dieselRequests=[], user, log, vie
     }
   };
 
+  const rejectReceipt = async () => {
+    if (!rejectReason.trim()) { alert("Add a short reason so the operator knows what to fix"); return; }
+    setRejecting(true);
+    try {
+      // Clear the receipt — request stays "open" so the operator can upload a fresh one (or use PIN, still valid)
+      const updReq = {
+        ...req,
+        receiptImagePath:   "",
+        receiptNo:          "",
+        extractedVehicleNo: "",
+        extractedAmount:    null,
+        extractedDate:      "",
+        extractedPumpName:  "",
+        vehicleMismatch:    false,
+        pumpMismatch:       false,
+        dateMismatch:       false,
+        confirmationMethod: "",
+        rejectedReason:     rejectReason.trim(),
+        rejectedBy:         user?.name || "",
+        rejectedAt:         nowTs(),
+      };
+      await DB.saveDieselRequest(updReq);
+      await DB.deleteDieselReceipt(req.receiptImagePath);
+      log("DIESEL RECEIPT REJECTED", `Indent #${req.indentNo} · ${req.truckNo} · Sent back for reupload by ${user?.name||"manager"} · "${rejectReason.trim()}"`);
+      onApproved(updReq);
+    } catch(e) {
+      alert("Could not reject: " + e.message);
+    } finally {
+      setRejecting(false);
+    }
+  };
+
   return (
     <div style={{background:C.card,borderRadius:12,padding:"14px 16px",border:`1.5px solid ${C.red}44`,display:"flex",flexDirection:"column",gap:10}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -12690,10 +12767,31 @@ function DieselReceiptReviewCard({ req, pumps, dieselRequests=[], user, log, vie
         </div>
       </div>
 
-      {!viewOnly && (
-        <Btn onClick={approve} full color={C.green} disabled={approving}>
-          {approving ? "Saving…" : "✓ Approve & Confirm"}
-        </Btn>
+      {!viewOnly && !showRejectBox && (
+        <div style={{display:"flex",gap:8}}>
+          <Btn onClick={approve} full color={C.green} disabled={approving}>
+            {approving ? "Saving…" : "✓ Approve & Confirm"}
+          </Btn>
+          <Btn onClick={()=>setShowRejectBox(true)} outline color={C.red} disabled={approving}>
+            ✕ Reject
+          </Btn>
+        </div>
+      )}
+
+      {!viewOnly && showRejectBox && (
+        <div style={{background:C.red+"11",border:`1.5px solid ${C.red}44`,borderRadius:10,padding:"10px 12px",display:"flex",flexDirection:"column",gap:8}}>
+          <div style={{color:C.red,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Reject & Send Back for Reupload</div>
+          <Field label="Reason (shown to operator)" value={rejectReason} onChange={setRejectReason}
+            placeholder="e.g. Photo too blurry, amount not visible…" />
+          <div style={{display:"flex",gap:8}}>
+            <Btn onClick={rejectReceipt} full color={C.red} disabled={rejecting || !rejectReason.trim()}>
+              {rejecting ? "Rejecting…" : "✕ Confirm Reject"}
+            </Btn>
+            <Btn onClick={()=>{setShowRejectBox(false); setRejectReason("");}} outline color={C.muted} disabled={rejecting}>
+              Cancel
+            </Btn>
+          </div>
+        </div>
       )}
     </div>
   );

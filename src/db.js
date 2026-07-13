@@ -555,6 +555,9 @@ export const DB = {
         confirmationMethod: r.confirmation_method||'',
         reviewedBy: r.reviewed_by||'',
         reviewedAt: r.reviewed_at||'',
+        rejectedReason: r.rejected_reason||'',
+        rejectedBy: r.rejected_by||'',
+        rejectedAt: r.rejected_at||'',
       }));
     } catch(e) { console.warn('mye_diesel_requests not ready:', e.message); return []; }
   },
@@ -592,6 +595,9 @@ export const DB = {
       confirmation_method: r.confirmationMethod||null,
       reviewed_by: r.reviewedBy||null,
       reviewed_at: r.reviewedAt||null,
+      rejected_reason: r.rejectedReason||null,
+      rejected_by: r.rejectedBy||null,
+      rejected_at: r.rejectedAt||null,
     }, { onConflict: 'id', ignoreDuplicates: false });
     if(error && !error.message?.includes('duplicate key')) throw error;
   },
@@ -612,6 +618,11 @@ export const DB = {
     const { data, error } = await supabase.storage.from('diesel-receipts').createSignedUrl(path, expiresIn);
     if(error) throw error;
     return data.signedUrl;
+  },
+  deleteDieselReceipt: async (path) => {
+    if(!path) return;
+    const { error } = await supabase.storage.from('diesel-receipts').remove([path]);
+    if(error) console.warn('Could not delete rejected receipt image:', error.message);
   },
   deleteDieselRequest: async (id) => {
     const { error } = await supabase.from('mye_diesel_requests').delete().eq('id', id);
