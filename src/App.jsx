@@ -10973,6 +10973,7 @@ function DieselReceiptScan({ selected, pumps, cashAmount, user, log, onBack, onC
           confirmedCash:       confCash,
           confirmedReason:     dieselChanged||cashChanged ? "Confirmed via receipt scan" : null,
           confirmedAt:         nowTs(),
+          confirmedBy:         user?.name || "",
           pin:                 "****",
           receiptNo:           data.receiptNo||"",
           extractedVehicleNo:  data.vehicleNo,
@@ -12013,6 +12014,7 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
       confirmedCash:   confCash,     // explicit cash confirmation field
       confirmedReason: changed ? (reason||"Changed at pump") : null,
       confirmedAt:     nowTs(),
+      confirmedBy:     user?.name || "",
       pin:             "****",
       // Track originals for the "changed" display
       originalDieselAmount: changed ? origDiesel  : selected.originalDieselAmount,
@@ -12072,7 +12074,7 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
   <table>
     <thead>
       <tr>
-        <th>#</th><th>Truck</th><th>Date</th><th>Amount</th><th>Diesel</th><th>Cash</th><th>LR</th><th>Status</th>
+        <th>#</th><th>Truck</th><th>Date</th><th>Amount</th><th>Diesel</th><th>Cash</th><th>Receipt #</th><th>LR</th><th>Status</th>
       </tr>
     </thead>
     <tbody>
@@ -12086,6 +12088,7 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
           <td class="amount">&#8377;${(r.amount||0).toLocaleString("en-IN")}</td>
           <td>${r.dieselAmount ? "&#8377;"+r.dieselAmount.toLocaleString("en-IN") : "&#8212;"}</td>
           <td>${r.cashAmount   ? "&#8377;"+r.cashAmount.toLocaleString("en-IN")   : "&#8212;"}</td>
+          <td>${r.receiptNo||"&#8212;"}</td>
           <td>${r.lrNo||"&#8212;"}</td>
           <td class="${statusClass}">${r.status.toUpperCase()}</td>
         </tr>`;
@@ -12563,6 +12566,7 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
 function DieselReceiptReviewCard({ req, pumps, user, log, viewOnly, onApproved }) {
   const [imgUrl, setImgUrl] = useState(null);
   const [imgError, setImgError] = useState(false);
+  const [zoomed, setZoomed] = useState(false);
   const [vehicleNo, setVehicleNo] = useState(req.extractedVehicleNo || req.truckNo || "");
   const [pumpId, setPumpId] = useState(()=>{
     const byName = pumps.find(p => pumpNamesMatch(req.extractedPumpName, p.name));
@@ -12598,6 +12602,7 @@ function DieselReceiptReviewCard({ req, pumps, user, log, viewOnly, onApproved }
         confirmedCash:   cashAmount,
         confirmedReason: "Approved after manager review (receipt scan)",
         confirmedAt:     nowTs(),
+        confirmedBy:     user?.name || "",
         pin:             "****",
         vehicleMismatch: false,
         pumpMismatch:    false,
@@ -12628,8 +12633,30 @@ function DieselReceiptReviewCard({ req, pumps, user, log, viewOnly, onApproved }
         {req.dateMismatch    && <span style={{background:C.red+"22",color:C.red,fontSize:11,fontWeight:700,borderRadius:6,padding:"3px 8px"}}>⚠ Date mismatch</span>}
       </div>
 
-      {imgUrl && <img src={imgUrl} alt="Receipt" style={{width:"100%",maxHeight:320,objectFit:"contain",borderRadius:8,background:C.bg}} />}
+      {imgUrl && (
+        <div style={{position:"relative"}}>
+          <img src={imgUrl} alt="Receipt" onClick={()=>setZoomed(true)}
+            style={{width:"100%",maxHeight:320,objectFit:"contain",borderRadius:8,background:C.bg,cursor:"zoom-in"}} />
+          <div onClick={()=>setZoomed(true)}
+            style={{position:"absolute",bottom:8,right:8,background:"rgba(0,0,0,0.65)",color:"#fff",
+              fontSize:11,fontWeight:700,borderRadius:6,padding:"4px 9px",cursor:"pointer"}}>
+            🔍 Tap to zoom
+          </div>
+        </div>
+      )}
       {imgError && <div style={{color:C.muted,fontSize:12}}>Could not load receipt image.</div>}
+
+      {zoomed && imgUrl && (
+        <div onClick={()=>setZoomed(false)}
+          style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.9)",zIndex:9999,
+            display:"flex",alignItems:"center",justifyContent:"center",padding:16,cursor:"zoom-out"}}>
+          <img src={imgUrl} alt="Receipt (zoomed)"
+            style={{maxWidth:"100%",maxHeight:"100%",objectFit:"contain",touchAction:"pinch-zoom"}} />
+          <button onClick={()=>setZoomed(false)}
+            style={{position:"absolute",top:16,right:16,background:"rgba(255,255,255,0.15)",color:"#fff",
+              border:"none",borderRadius:8,width:36,height:36,fontSize:18,cursor:"pointer"}}>✕</button>
+        </div>
+      )}
 
       <div style={{background:C.bg,borderRadius:10,padding:"10px 12px",display:"flex",flexDirection:"column",gap:8}}>
         <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Correct & Approve</div>
@@ -14024,6 +14051,13 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                       {req.status==="confirmed" && (
                         <div style={{color:C.teal,fontSize:11,marginTop:2}}>
                           ✓ Confirmed by pump — PIN invalidated
+                          {(req.confirmedBy||req.receiptNo) && (
+                            <div style={{marginTop:2,color:C.text}}>
+                              {req.confirmedBy && <span>Confirmed by: <b>{req.confirmedBy}</b></span>}
+                              {req.confirmedBy && req.receiptNo && <span>{" · "}</span>}
+                              {req.receiptNo && <span>Receipt #: <b>{req.receiptNo}</b></span>}
+                            </div>
+                          )}
                           {(req.originalDieselAmount!=null||req.originalCashAmount!=null) && (
                             <div style={{marginTop:2}}>
                               {req.originalDieselAmount!=null && req.originalDieselAmount!==req.dieselAmount && (
