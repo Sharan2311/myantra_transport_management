@@ -17,7 +17,8 @@ alter table mye_diesel_requests
   add column if not exists date_mismatch           boolean default false,
   add column if not exists confirmation_method     text,          -- 'pin' | 'receipt_scan'
   add column if not exists reviewed_by             text,
-  add column if not exists reviewed_at             text;
+  add column if not exists reviewed_at             text,
+  add column if not exists confirmed_by            text;          -- name of whoever confirmed (pump operator or manager)
 
 -- Storage bucket for receipt images pending manager review.
 -- Create manually in Supabase → Storage if it doesn't already exist:
