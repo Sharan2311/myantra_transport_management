@@ -3508,7 +3508,9 @@ Rules:
           }).catch(e=>console.warn("District officer save:", e.message));
         }
         if(!saveResult.success) {
-          setLrError(saveResult.duplicateDI
+          setLrError(saveResult.missingRequired
+            ? `Cannot save: ${[saveResult.missingDI&&"DI No",saveResult.missingGR&&"GR No"].filter(Boolean).join(" and ")} missing. Both are mandatory — please re-scan a clearer image or enter manually.`
+            : saveResult.duplicateDI
             ? `DI ${saveResult.duplicateDI} already exists in LR ${saveResult.existingLR} (${saveResult.existingTruck}). This trip was not saved — another device may have saved it first.`
             : saveResult.duplicateGR
             ? `GR ${saveResult.duplicateGR} already exists in LR ${saveResult.existingLR} (${saveResult.existingTruck}). This trip was not saved — another device may have saved it first.`
@@ -3697,7 +3699,9 @@ Rules:
           new Promise((_,rej)=>setTimeout(()=>rej(new Error("Save timed out — check connection")),15000))
         ]).catch(e=>({success:false, duplicateDI:null, duplicateGR:null, error:e.message}));
         if(!saveResultM.success) {
-          setLrError(saveResultM.duplicateDI
+          setLrError(saveResultM.missingRequired
+            ? `Cannot save: ${[saveResultM.missingDI&&"DI No",saveResultM.missingGR&&"GR No"].filter(Boolean).join(" and ")} missing. Both are mandatory — please re-scan a clearer image or enter manually.`
+            : saveResultM.duplicateDI
             ? `DI ${saveResultM.duplicateDI} already exists in LR ${saveResultM.existingLR} (${saveResultM.existingTruck}). This trip was not saved — another device may have saved it first.`
             : saveResultM.duplicateGR
             ? `GR ${saveResultM.duplicateGR} already exists in LR ${saveResultM.existingLR} (${saveResultM.existingTruck}). This trip was not saved — another device may have saved it first.`

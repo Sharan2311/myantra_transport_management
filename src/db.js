@@ -414,6 +414,17 @@ export const DB = {
   // Atomic insert that checks for duplicate DI numbers before saving
   // Returns {success, error, duplicateDI} 
   saveTripSafe: async (t) => {
+    // DI and GR are mandatory for every trip — a trip saved with either
+    // missing breaks duplicate detection entirely (see the empty-DI bug).
+    // Enforced HERE, in the data layer, so every save path (single scan,
+    // batch scan, multi-DI merge, manual entry) is covered by one check
+    // instead of relying on every UI entry point remembering to validate.
+    const hasDI = (t.diNo||'').trim() || (t.diLines||[]).some(d=>(d.diNo||'').trim());
+    const hasGR = (t.grNo||'').trim() || (t.diLines||[]).some(d=>(d.grNo||'').trim());
+    if(!hasDI || !hasGR) {
+      return { success: false, missingRequired: true, missingDI: !hasDI, missingGR: !hasGR };
+    }
+
     // Extract all DI numbers from this trip
     const diNos = [];
     if(t.diLines && t.diLines.length > 0) {
