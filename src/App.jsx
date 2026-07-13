@@ -10913,6 +10913,140 @@ function PumpSlipScanner({ pumps, trips, user, onResults }) {
   );
 }
 
+// ─── DIESEL RECEIPT SCAN — single-receipt upload confirmation (PumpPortal) ────
+// Alternative to PIN confirmation. Extracts vehicle/amount/date/pump from a
+// single receipt photo. If vehicle, pump name, and date all match the request,
+// auto-confirms (no image stored). If any mismatch, the image is stored and the
+// request stays "open" awaiting manager review in DieselMod.
+function DieselReceiptScan({ selected, pumps, cashAmount, user, log, onBack, onConfirmed, onPendingReview }) {
+  const [state, setState] = useState("idle"); // idle|reading|scanning|uploading|saving|error
+  const [error, setError] = useState("");
+
+  const handleFile = async (file) => {
+    setError(""); setState("reading");
+    if (!file.type.startsWith("image/")) {
+      setError("Please upload an image (JPG/PNG) of the receipt."); setState("error"); return;
+    }
+    const base64 = await new Promise((res,rej) => {
+      const r = new FileReader();
+      r.onload = () => res(r.result.split(",")[1]);
+      r.onerror = () => rej(new Error("Read failed"));
+      r.readAsDataURL(file);
+    });
+    setState("scanning");
+    try {
+      const resp = await fetch("/.netlify/functions/scan-diesel-receipt", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ base64, anthropicKey: RC.anthropicKey, mediaType: file.type }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || data.error) {
+        logScan("diesel_receipt_scan", false, 0);
+        setError(data.error || "Could not read the receipt. Please upload a clearer image.");
+        setState("error");
+        return;
+      }
+      logScan("diesel_receipt_scan", true, data._costInr||0);
+
+      const pump = pumps.find(p => p.id === selected.pumpId);
+      const vehicleMismatch = normVehicleNo(data.vehicleNo) !== normVehicleNo(selected.truckNo);
+      const pumpMismatch    = pump ? !pumpNamesMatch(data.pumpName, pump.name) : false;
+      const dateMismatch    = dieselDateMismatch(data.date, selected.date);
+      const anyMismatch     = vehicleMismatch || pumpMismatch || dateMismatch;
+
+      if (!anyMismatch) {
+        // Clean match → auto-confirm, override diesel amount, recalc total, no image stored
+        const origDiesel = selected.dieselAmount ?? selected.amount;
+        const origCash    = selected.cashAmount   ?? 0;
+        const confDiesel  = data.amount;
+        const confCash    = cashAmount;
+        const confTotal   = confDiesel + confCash;
+        const dieselChanged = confDiesel !== origDiesel;
+        const cashChanged   = confCash   !== origCash;
+        const updReq = {
+          ...selected,
+          status:              "confirmed",
+          dieselAmount:        confDiesel,
+          cashAmount:          confCash,
+          amount:              confTotal,
+          confirmedAmount:     confDiesel,
+          confirmedCash:       confCash,
+          confirmedReason:     dieselChanged||cashChanged ? "Confirmed via receipt scan" : null,
+          confirmedAt:         nowTs(),
+          pin:                 "****",
+          receiptNo:           data.receiptNo||"",
+          extractedVehicleNo:  data.vehicleNo,
+          extractedAmount:     data.amount,
+          extractedDate:       data.date,
+          extractedPumpName:   data.pumpName,
+          vehicleMismatch:     false,
+          pumpMismatch:        false,
+          dateMismatch:        false,
+          confirmationMethod:  "receipt_scan",
+          originalDieselAmount: dieselChanged ? origDiesel : selected.originalDieselAmount,
+          originalCashAmount:   cashChanged   ? origCash   : selected.originalCashAmount,
+        };
+        setState("saving");
+        await DB.saveDieselRequest(updReq);
+        log("PUMP CONFIRM", `Indent #${selected.indentNo} · ${selected.truckNo} · Receipt scan · Diesel ₹${confDiesel} Cash ₹${confCash} Total ₹${confTotal}${data.receiptNo?` · Receipt #${data.receiptNo}`:""}`);
+        onConfirmed(updReq, { changed: dieselChanged||cashChanged, dieselChanged, cashChanged, origDiesel, origCash });
+        return;
+      }
+
+      // Mismatch → store the image, save extracted data + flags, request stays "open"
+      setState("uploading");
+      const path = await DB.uploadDieselReceipt(selected.id, file);
+      const updReq = {
+        ...selected,
+        receiptImagePath:   path,
+        receiptNo:          data.receiptNo||"",
+        extractedVehicleNo: data.vehicleNo,
+        extractedAmount:    data.amount,
+        extractedDate:      data.date,
+        extractedPumpName:  data.pumpName,
+        vehicleMismatch, pumpMismatch, dateMismatch,
+        confirmationMethod: "receipt_scan",
+      };
+      setState("saving");
+      await DB.saveDieselRequest(updReq);
+      log("PUMP RECEIPT MISMATCH", `Indent #${selected.indentNo} · ${selected.truckNo} · Sent for manager review${vehicleMismatch?" · vehicle":""}${pumpMismatch?" · pump":""}${dateMismatch?" · date":""}`);
+      onPendingReview(updReq);
+    } catch(e) {
+      setError("Could not read receipt: " + e.message); setState("error");
+      logScan("diesel_receipt_scan", false, 0);
+    }
+  };
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      <button onClick={onBack} style={{background:"none",border:"none",color:C.muted,fontSize:13,cursor:"pointer",textAlign:"left",padding:0}}>← Back</button>
+      <div style={{background:C.card,borderRadius:12,padding:"14px 16px"}}>
+        <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:8,textTransform:"uppercase",letterSpacing:1}}>Uploading Receipt For</div>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:14}}>
+          <span style={{color:C.muted}}>Indent</span>
+          <span style={{fontWeight:700}}>#{selected.indentNo} · {selected.truckNo}</span>
+        </div>
+      </div>
+      {(state==="idle"||state==="error") && (
+        <FileSourcePicker onFile={handleFile} accept="image/*"
+          label="Take photo or upload receipt"
+          color={C.orange} icon="📷" />
+      )}
+      {(state==="reading"||state==="scanning"||state==="uploading"||state==="saving") && (
+        <div style={{border:`2px solid ${C.orange}44`,borderRadius:14,padding:"20px 16px",
+          textAlign:"center",background:C.bg,display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
+          <div style={{color:C.orange,fontWeight:800,fontSize:14}}>
+            {state==="reading"?"📖 Loading image…":
+             state==="scanning"?"🤖 Reading receipt…":
+             state==="uploading"?"☁️ Saving receipt…":"💾 Saving…"}
+          </div>
+        </div>
+      )}
+      {error && <div style={{color:C.red,fontSize:13,background:C.red+"11",borderRadius:8,padding:"10px 12px"}}>{error}</div>}
+    </div>
+  );
+}
+
 // ─── SCAN PAYMENT IMAGE ───────────────────────────────────────────────────────
 function ScanPaymentBtn({ onResult }) {
   const [scanning, setScanning] = useState(false);
@@ -11776,6 +11910,24 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
 // Dedicated view for pump_operator role — shows only open diesel requests
 // Pump operator can update amount + reason using driver's PIN
 // Once confirmed, PIN is invalidated and request is locked
+// ─── DIESEL RECEIPT-SCAN CONFIRMATION — shared matching helpers ──────────────
+// Used by both the PumpPortal upload flow and the DieselMod manager review screen.
+const normVehicleNo = v => String(v||"").replace(/[\s-]+/g,"").toUpperCase();
+const normPumpName  = s => String(s||"").toLowerCase().replace(/[^a-z0-9]/g,"");
+const pumpNamesMatch = (extracted, stored) => {
+  const a = normPumpName(extracted), b = normPumpName(stored);
+  if (!a || !b) return false;
+  return a.includes(b) || b.includes(a); // substring either direction — receipts often print outlet+area, stored name may be shorter
+};
+const dieselDateMismatch = (extractedDate, requestDate) => {
+  if (!extractedDate || !requestDate) return true; // can't verify → treat as mismatch, send for review
+  const d1 = new Date(extractedDate+"T00:00:00");
+  const d2 = new Date(requestDate+"T00:00:00");
+  if (isNaN(d1) || isNaN(d2)) return true;
+  const diffDays = Math.abs(d1 - d2) / 86400000;
+  return diffDays > 1;
+};
+
 function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayments=[], user, log}) {
   const [activeTab,   setActiveTab]   = useState("open");   // open | history | payments
   const [lrSearch,    setLrSearch]    = useState("");
@@ -11786,7 +11938,8 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
   const [pinEntry,    setPinEntry]    = useState("");
   const [pinError,    setPinError]    = useState(false);
   const [confirmed,   setConfirmed]   = useState(null);
-  const [step,        setStep]        = useState("list"); // list | review | pin | done
+  const [pendingReview, setPendingReview] = useState(null); // receipt saved, mismatch found, awaiting manager
+  const [step,        setStep]        = useState("list"); // list | review | pin | receipt | done
 
   // History date filter
   const [histFrom,    setHistFrom]    = useState("");
@@ -11820,7 +11973,7 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
 
   const resetFlow = () => {
     setSelected(null); setNewDieselAmt(""); setNewCashAmt(""); setReason("");
-    setPinEntry(""); setPinError(false); setStep("list");
+    setPinEntry(""); setPinError(false); setConfirmed(null); setPendingReview(null); setStep("list");
   };
   const startEdit = (req) => {
     setSelected(req);
@@ -12119,6 +12272,54 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
             }} full color={C.teal}>
               Proceed to Driver PIN Verification →
             </Btn>
+            <Btn onClick={()=>{
+              const _c = newCashAmt !== "" ? +newCashAmt : (selected.cashAmount ?? 0);
+              const _cChanged = _c !== (selected.cashAmount ?? 0);
+              if(_cChanged && !reason){alert("Select a reason for the amount change");return;}
+              setStep("receipt");
+            }} full outline color={C.orange}>
+              📷 Upload Receipt Instead
+            </Btn>
+          </div>
+        )}
+
+        {step==="receipt" && selected && (
+          <DieselReceiptScan
+            selected={selected}
+            pumps={pumps}
+            cashAmount={newCashAmt !== "" ? +newCashAmt : (selected.cashAmount ?? 0)}
+            user={user}
+            log={log}
+            onBack={()=>setStep("review")}
+            onConfirmed={(updReq, meta)=>{
+              setDieselRequests(p=>p.map(r=>r.id===updReq.id ? updReq : r));
+              setConfirmed({...updReq, ...meta});
+              setStep("done");
+            }}
+            onPendingReview={(updReq)=>{
+              setDieselRequests(p=>p.map(r=>r.id===updReq.id ? updReq : r));
+              setPendingReview(updReq);
+              setStep("receipt_pending");
+            }}
+          />
+        )}
+
+        {step==="receipt_pending" && pendingReview && (
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <div style={{background:C.orange+"11",border:`2px solid ${C.orange}`,borderRadius:14,padding:"24px 20px",textAlign:"center"}}>
+              <div style={{fontSize:44,marginBottom:8}}>📋</div>
+              <div style={{fontWeight:800,fontSize:18,color:C.orange,marginBottom:8}}>Sent for Manager Review</div>
+              <div style={{color:C.text,fontSize:13,marginBottom:10,textAlign:"left",background:C.card,borderRadius:10,padding:"10px 14px"}}>
+                {pendingReview.vehicleMismatch && <div>⚠ Vehicle number on receipt doesn't match request</div>}
+                {pendingReview.pumpMismatch && <div>⚠ Pump name on receipt doesn't match</div>}
+                {pendingReview.dateMismatch && <div>⚠ Date on receipt differs by more than 1 day</div>}
+              </div>
+              <div style={{color:C.muted,fontSize:12,marginBottom:16}}>
+                Indent #{pendingReview.indentNo} · {pendingReview.truckNo}<br/>
+                The receipt has been saved. This indent stays open until a manager reviews and approves it.
+              </div>
+              <Btn onClick={resetFlow} full color={C.teal}>← Back to Requests</Btn>
+            </div>
           </div>
         )}
 
@@ -12218,6 +12419,7 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
               )}
               <div style={{color:C.muted,fontSize:12,marginBottom:16}}>
                 Indent #{confirmed.indentNo} · {confirmed.truckNo}<br/>This indent is now locked. PIN is no longer valid.
+                {confirmed.confirmationMethod==="receipt_scan" && <div style={{marginTop:4}}>📷 Confirmed via receipt scan{confirmed.receiptNo?` · Receipt #${confirmed.receiptNo}`:""}</div>}
               </div>
               <Btn onClick={()=>{ setConfirmed(null); setStep("list"); setActiveTab("open"); }} full color={C.teal}>← Back to Requests</Btn>
             </div>
@@ -12357,6 +12559,99 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
   );
 }
 
+// ─── DIESEL RECEIPT REVIEW CARD — owner/manager approval for mismatched scans ─
+function DieselReceiptReviewCard({ req, pumps, user, log, viewOnly, onApproved }) {
+  const [imgUrl, setImgUrl] = useState(null);
+  const [imgError, setImgError] = useState(false);
+  const [vehicleNo, setVehicleNo] = useState(req.extractedVehicleNo || req.truckNo || "");
+  const [pumpId, setPumpId] = useState(()=>{
+    const byName = pumps.find(p => pumpNamesMatch(req.extractedPumpName, p.name));
+    return byName ? byName.id : (req.pumpId || "");
+  });
+  const [date, setDate] = useState(req.extractedDate || req.date || "");
+  const [approving, setApproving] = useState(false);
+
+  useEffect(()=>{
+    let live = true;
+    DB.getDieselReceiptUrl(req.receiptImagePath).then(url => { if(live) setImgUrl(url); })
+      .catch(()=> { if(live) setImgError(true); });
+    return ()=>{ live = false; };
+  }, [req.receiptImagePath]);
+
+  const approve = async () => {
+    if (!vehicleNo.trim()) { alert("Vehicle number is required"); return; }
+    if (!date) { alert("Date is required"); return; }
+    setApproving(true);
+    try {
+      const dieselAmount = req.extractedAmount ?? req.dieselAmount ?? req.amount;
+      const cashAmount   = req.cashAmount ?? 0;
+      const updReq = {
+        ...req,
+        truckNo: normVehicleNo(vehicleNo),
+        pumpId:  pumpId || req.pumpId,
+        date,
+        status:          "confirmed",
+        dieselAmount,
+        cashAmount,
+        amount:          dieselAmount + cashAmount,
+        confirmedAmount: dieselAmount,
+        confirmedCash:   cashAmount,
+        confirmedReason: "Approved after manager review (receipt scan)",
+        confirmedAt:     nowTs(),
+        pin:             "****",
+        vehicleMismatch: false,
+        pumpMismatch:    false,
+        dateMismatch:    false,
+        confirmationMethod: "receipt_scan",
+        reviewedBy:      user?.id || user?.name || "",
+        reviewedAt:      nowTs(),
+      };
+      await DB.saveDieselRequest(updReq);
+      log("DIESEL RECEIPT APPROVED", `Indent #${req.indentNo} · ${updReq.truckNo} · ₹${dieselAmount} by ${user?.name||"manager"}`);
+      onApproved(updReq);
+    } catch(e) {
+      alert("Could not save approval: " + e.message);
+    } finally {
+      setApproving(false);
+    }
+  };
+
+  return (
+    <div style={{background:C.card,borderRadius:12,padding:"14px 16px",border:`1.5px solid ${C.red}44`,display:"flex",flexDirection:"column",gap:10}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div style={{fontWeight:800,fontSize:14}}>Indent #{req.indentNo} · {req.truckNo}</div>
+        <div style={{fontSize:11,color:C.muted}}>{req.date}</div>
+      </div>
+      <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+        {req.vehicleMismatch && <span style={{background:C.red+"22",color:C.red,fontSize:11,fontWeight:700,borderRadius:6,padding:"3px 8px"}}>⚠ Vehicle mismatch</span>}
+        {req.pumpMismatch    && <span style={{background:C.red+"22",color:C.red,fontSize:11,fontWeight:700,borderRadius:6,padding:"3px 8px"}}>⚠ Pump mismatch</span>}
+        {req.dateMismatch    && <span style={{background:C.red+"22",color:C.red,fontSize:11,fontWeight:700,borderRadius:6,padding:"3px 8px"}}>⚠ Date mismatch</span>}
+      </div>
+
+      {imgUrl && <img src={imgUrl} alt="Receipt" style={{width:"100%",maxHeight:320,objectFit:"contain",borderRadius:8,background:C.bg}} />}
+      {imgError && <div style={{color:C.muted,fontSize:12}}>Could not load receipt image.</div>}
+
+      <div style={{background:C.bg,borderRadius:10,padding:"10px 12px",display:"flex",flexDirection:"column",gap:8}}>
+        <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Correct & Approve</div>
+        <Field label="Vehicle No" value={vehicleNo} onChange={v=>setVehicleNo(v.toUpperCase())} />
+        <Field label="Pump" value={pumpId} onChange={setPumpId}
+          opts={[{v:"",l:"— select pump —"}, ...pumps.map(p=>({v:p.id,l:p.name}))]} />
+        <Field label="Date" value={date} onChange={setDate} type="date" />
+        <div style={{fontSize:12,color:C.muted}}>
+          ⛽ Diesel from receipt: <b style={{color:C.text}}>₹{(req.extractedAmount ?? req.dieselAmount ?? req.amount)?.toLocaleString("en-IN")}</b>
+          {" "}(overrides request — not editable here)
+        </div>
+      </div>
+
+      {!viewOnly && (
+        <Btn onClick={approve} full color={C.green} disabled={approving}>
+          {approving ? "Saving…" : "✓ Approve & Confirm"}
+        </Btn>
+      )}
+    </div>
+  );
+}
+
 function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, driverPays, setDriverPays, user, log, viewOnly=false, dieselRequests=[], setDieselRequests, settings}) {
   const [view,        setView]        = useState("requests");
   const [pumpSheet,   setPumpSheet]   = useState(false);
@@ -12427,6 +12722,10 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
   // Only truly confirmed = confirmed:true AND has a valid linked trip
   const confirmedIndents = Array.from(_confirmedMap.values())
     .filter(i => i.confirmed && i.tripId && trips.some(t => t.id === i.tripId));
+  // Diesel requests with a receipt uploaded that has a vehicle/pump/date mismatch —
+  // stay "open" and wait here for owner/manager review + approval.
+  const pendingReceiptReviews = (dieselRequests||[]).filter(r => r.receiptImagePath && r.status === "open");
+
   // Indents with no matching trip — flagged for owner
   const unmatchedIndents = indents.filter(i => i.unmatched);
   // Red alerts = unmatched + truck mismatch + amount mismatch + indent mismatch + confirmed but no trip
@@ -12998,6 +13297,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
 
       <PillBar items={[
         {id:"requests", label:`Requests (${(dieselRequests||[]).filter(r=>r.status!=="attached").length})`, color:C.teal},
+        ...(pendingReceiptReviews.length>0 ? [{id:"review", label:`📷 Review (${pendingReceiptReviews.length})`, color:C.red}] : []),
         {id:"pumps",    label:"By Pump",   color:C.orange},
         ...(user.role==="owner"?[{id:"payments", label:`Payments (${(pumpPayments||[]).length})`, color:C.green}]:[]),
         {id:"indents",  label:`Indents (${confirmedIndents.length})`, color:C.blue},
@@ -13005,6 +13305,21 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
         ...(user.role==="owner"?[{id:"reconcile", label:"🔍 Reconcile", color:C.red}]:[]),
         {id:"history",  label:"Alerts", color:C.muted},
       ]} active={view} onSelect={setView} />
+
+      {/* ── RECEIPT REVIEW VIEW — mismatches flagged by the scan, manager corrects & approves ── */}
+      {view==="review" && (
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          {pendingReceiptReviews.length===0 && (
+            <div style={{textAlign:"center",color:C.muted,padding:48,fontSize:14}}>No receipts awaiting review</div>
+          )}
+          {pendingReceiptReviews.map(req => (
+            <DieselReceiptReviewCard key={req.id} req={req} pumps={pumps} user={user} log={log}
+              viewOnly={viewOnly}
+              onApproved={updReq => setDieselRequests(p=>p.map(r=>r.id===updReq.id?updReq:r))}
+            />
+          ))}
+        </div>
+      )}
 
       {/* ── PAYMENTS VIEW ── */}
       {view==="payments" && (

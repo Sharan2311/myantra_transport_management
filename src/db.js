@@ -541,6 +541,19 @@ export const DB = {
         lrNo: r.lr_no,
         createdBy: r.created_by,
         createdAt: r.created_at,
+        // Receipt-scan confirmation fields (additive — see 2026_07_diesel_receipt_confirmation.sql)
+        receiptNo: r.receipt_no||'',
+        receiptImagePath: r.receipt_image_path||'',
+        extractedVehicleNo: r.extracted_vehicle_no||'',
+        extractedAmount: r.extracted_amount!=null ? +(r.extracted_amount) : null,
+        extractedDate: r.extracted_date||'',
+        extractedPumpName: r.extracted_pump_name||'',
+        vehicleMismatch: r.vehicle_mismatch||false,
+        pumpMismatch: r.pump_mismatch||false,
+        dateMismatch: r.date_mismatch||false,
+        confirmationMethod: r.confirmation_method||'',
+        reviewedBy: r.reviewed_by||'',
+        reviewedAt: r.reviewed_at||'',
       }));
     } catch(e) { console.warn('mye_diesel_requests not ready:', e.message); return []; }
   },
@@ -564,8 +577,39 @@ export const DB = {
       lr_no: r.lrNo||null,
       created_by: r.createdBy,
       created_at: r.createdAt,
+      // Receipt-scan confirmation fields
+      receipt_no: r.receiptNo||null,
+      receipt_image_path: r.receiptImagePath||null,
+      extracted_vehicle_no: r.extractedVehicleNo||null,
+      extracted_amount: r.extractedAmount??null,
+      extracted_date: r.extractedDate||null,
+      extracted_pump_name: r.extractedPumpName||null,
+      vehicle_mismatch: r.vehicleMismatch||false,
+      pump_mismatch: r.pumpMismatch||false,
+      date_mismatch: r.dateMismatch||false,
+      confirmation_method: r.confirmationMethod||null,
+      reviewed_by: r.reviewedBy||null,
+      reviewed_at: r.reviewedAt||null,
     }, { onConflict: 'id', ignoreDuplicates: false });
     if(error && !error.message?.includes('duplicate key')) throw error;
+  },
+  // Diesel receipt image storage — private bucket, signed URLs only (same pattern as trip-files)
+  uploadDieselReceipt: async (requestId, file) => {
+    const ext = (file.name||'').split('.').pop() || 'jpg';
+    const path = `${requestId}/${Date.now()}.${ext}`;
+    const { error } = await supabase.storage.from('diesel-receipts').upload(path, file, { upsert: true });
+    if(error) {
+      if (error.message?.includes('Bucket not found')) {
+        throw new Error('Storage bucket "diesel-receipts" not found. Create it in Supabase → Storage (private).');
+      }
+      throw error;
+    }
+    return path;
+  },
+  getDieselReceiptUrl: async (path, expiresIn = 3600) => {
+    const { data, error } = await supabase.storage.from('diesel-receipts').createSignedUrl(path, expiresIn);
+    if(error) throw error;
+    return data.signedUrl;
   },
   deleteDieselRequest: async (id) => {
     const { error } = await supabase.from('mye_diesel_requests').delete().eq('id', id);
