@@ -12088,8 +12088,14 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
       originalDieselAmount: changed ? origDiesel  : selected.originalDieselAmount,
       originalCashAmount:   changed ? origCash    : selected.originalCashAmount,
     };
+    try {
+      await DB.saveDieselRequest(updReq);
+    } catch(e) {
+      setPinError(false);
+      alert("Could not save confirmation: " + e.message + "\n\nThis usually means a database migration hasn't been run yet. Contact the app owner.");
+      return; // don't update local state or advance the step if the DB write failed
+    }
     setDieselRequests(p=>p.map(r=>r.id===selected.id ? updReq : r));
-    await DB.saveDieselRequest(updReq);
     log("PUMP CONFIRM",`Indent #${selected.indentNo} · ${selected.truckNo} · Diesel ₹${confDiesel} Cash ₹${confCash} Total ₹${confTotal}${changed?` (was Diesel ₹${origDiesel} Cash ₹${origCash})`:""}`)
     setConfirmed({...updReq, changed, dieselChanged, cashChanged, origDiesel, origCash});
     setStep("done");
