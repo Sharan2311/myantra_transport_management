@@ -12370,6 +12370,9 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
   const [payPaidTo,   setPayPaidTo]   = useState("");
   const [payNote,     setPayNote]     = useState("");
   const [expandPump,  setExpandPump]  = useState(null);
+  const [editPumpNameId, setEditPumpNameId] = useState(null);
+  const [editPumpName, setEditPumpName] = useState("");
+  const [savingPumpName, setSavingPumpName] = useState(false);
   const [filterFrom,  setFilterFrom]  = useState("");
   const [filterTo,    setFilterTo]    = useState("");
   const [showFilter,  setShowFilter]  = useState(false);
@@ -13100,14 +13103,49 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                 border:`1.5px solid ${p.pending>0?C.red+"44":C.green+"44"}`}}>
 
                 {/* Pump header — tap to expand */}
-                <div style={{padding:"14px 16px",cursor:"pointer"}}
-                  onClick={()=>setExpandPump(isExpanded?null:p.id)}>
+                <div style={{padding:"14px 16px"}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
-                    <div>
-                      <div style={{fontWeight:800,fontSize:15}}>{p.name}</div>
+                    <div onClick={()=> editPumpNameId!==p.id && setExpandPump(isExpanded?null:p.id)}
+                      style={{flex:1,minWidth:0,cursor:editPumpNameId===p.id?"default":"pointer"}}>
+                      {editPumpNameId===p.id ? (
+                        <div onClick={e=>e.stopPropagation()} style={{display:"flex",gap:6,alignItems:"center"}}>
+                          <input autoFocus value={editPumpName} onChange={e=>setEditPumpName(e.target.value)}
+                            style={{background:C.bg,border:`1.5px solid ${C.teal}`,borderRadius:8,color:C.text,
+                              padding:"7px 10px",fontSize:14,fontWeight:700,outline:"none",flex:1,minWidth:0}} />
+                          <button disabled={savingPumpName||!editPumpName.trim()} onClick={async ()=>{
+                              const nm = editPumpName.trim();
+                              if(!nm){ return; }
+                              setSavingPumpName(true);
+                              try {
+                                const updated = {...p, name: nm};
+                                await DB.savePump(updated);
+                                setPumps(prev => prev.map(x => x.id===p.id ? {...x, name: nm} : x));
+                                log("EDIT PUMP NAME", `${p.name} → ${nm}`);
+                                setEditPumpNameId(null);
+                              } catch(e) { alert("Could not save: "+e.message); }
+                              finally { setSavingPumpName(false); }
+                            }}
+                            style={{background:C.green,color:"#fff",border:"none",borderRadius:8,padding:"7px 12px",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+                            {savingPumpName?"…":"✓"}
+                          </button>
+                          <button onClick={()=>setEditPumpNameId(null)}
+                            style={{background:"none",border:`1.5px solid ${C.border}`,borderRadius:8,padding:"7px 10px",fontSize:13,cursor:"pointer",color:C.muted}}>
+                            ✕
+                          </button>
+                        </div>
+                      ) : (
+                        <div style={{display:"flex",alignItems:"center",gap:6}}>
+                          <div style={{fontWeight:800,fontSize:15}}>{p.name}</div>
+                          {user.role==="owner" && (
+                            <button onClick={e=>{e.stopPropagation(); setEditPumpNameId(p.id); setEditPumpName(p.name); setExpandPump(p.id);}}
+                              style={{background:"none",border:"none",color:C.muted,fontSize:13,cursor:"pointer",padding:"2px 4px"}}
+                              title="Edit pump name">✎</button>
+                          )}
+                        </div>
+                      )}
                       <div style={{color:C.muted,fontSize:12,marginTop:2}}>{p.pIndents.length} confirmed indents</div>
                     </div>
-                    <div style={{textAlign:"right"}}>
+                    <div style={{textAlign:"right"}} onClick={()=> editPumpNameId!==p.id && setExpandPump(isExpanded?null:p.id)}>
                       <div style={{fontSize:11,color:C.muted}}>Pending to Credit</div>
                       <div style={{color:p.pending>0?C.red:C.green,fontWeight:800,fontSize:20}}>
                         {fmt(Math.max(0,p.pending))}
@@ -13115,7 +13153,8 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                     </div>
                   </div>
                   {/* Mini balance bar */}
-                  <div style={{marginTop:10,display:"flex",gap:10,fontSize:12}}>
+                  <div style={{marginTop:10,display:"flex",gap:10,fontSize:12,cursor:"pointer"}}
+                    onClick={()=> editPumpNameId!==p.id && setExpandPump(isExpanded?null:p.id)}>
                     <span style={{color:C.muted}}>Total Owed: <b style={{color:C.text}}>{fmt(p.totalOwed)}</b></span>
                     <span style={{color:C.muted}}>Paid: <b style={{color:C.green}}>{fmt(p.totalPaid)}</b></span>
                     <span style={{color:C.muted,marginLeft:"auto"}}>{isExpanded?"▲":"▼"}</span>
