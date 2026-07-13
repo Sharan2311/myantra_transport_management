@@ -414,12 +414,34 @@ export const DB = {
   // Atomic insert that checks for duplicate DI numbers before saving
   // Returns {success, error, duplicateDI} 
   saveTripSafe: async (t) => {
+    // DI and GR are mandatory for every trip — a trip saved with either
+    // missing breaks duplicate detection entirely (see the empty-DI bug).
+    // Enforced HERE, in the data layer, so every save path (single scan,
+    // batch scan, multi-DI merge, manual entry) is covered by one check
+    // instead of relying on every UI entry point remembering to validate.
+    const hasDI = (t.diNo||'').trim() || (t.diLines||[]).some(d=>(d.diNo||'').trim());
+    const hasGR = (t.grNo||'').trim() || (t.diLines||[]).some(d=>(d.grNo||'').trim());
+    if(!hasDI || !hasGR) {
+      return { success: false, missingRequired: true, missingDI: !hasDI, missingGR: !hasGR };
+    }
+
     // Extract all DI numbers from this trip
     const diNos = [];
     if(t.diLines && t.diLines.length > 0) {
       t.diLines.forEach(d => { if(d.diNo) diNos.push(d.diNo.trim()); });
     } else if(t.diNo) {
       t.diNo.split('+').map(s=>s.trim()).filter(Boolean).forEach(d=>diNos.push(d));
+    }
+
+    // Extract all GR numbers from this trip — checked INDEPENDENTLY of DI.
+    // This is deliberate: if DI extraction ever comes back empty (bad scan,
+    // manual entry, etc.) the DI-based check below has nothing to check against
+    // and silently allows the save through. GR acts as a second, independent key.
+    const grNos = [];
+    if(t.diLines && t.diLines.length > 0) {
+      t.diLines.forEach(d => { if(d.grNo) grNos.push(d.grNo.trim()); });
+    } else if(t.grNo) {
+      t.grNo.split('+').map(s=>s.trim()).filter(Boolean).forEach(g=>grNos.push(g));
     }
 
     if(diNos.length > 0) {
@@ -445,6 +467,35 @@ export const DB = {
             return {
               success: false,
               duplicateDI: diNo,
+              existingLR: realDup.lr_no,
+              existingTruck: realDup.truck_no,
+            };
+          }
+        }
+      }
+    }
+
+    if(grNos.length > 0) {
+      // Independent GR-number check — same pattern as DI, but never skipped
+      // just because diNos was empty.
+      for(const grNo of grNos) {
+        const { data: existing, error: qErr } = await supabase
+          .from('mye_trips')
+          .select('id, lr_no, gr_no, truck_no')
+          .ilike('gr_no', `%${grNo}%`)
+          .limit(5);
+
+        if(qErr) {
+          console.warn('GR check query error:', qErr.message);
+        } else if(existing && existing.length > 0) {
+          const realDup = existing.find(row => {
+            const parts = (row.gr_no||'').split('+').map(s=>s.trim());
+            return parts.includes(grNo);
+          });
+          if(realDup) {
+            return {
+              success: false,
+              duplicateGR: grNo,
               existingLR: realDup.lr_no,
               existingTruck: realDup.truck_no,
             };
