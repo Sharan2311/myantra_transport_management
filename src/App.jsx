@@ -10918,7 +10918,7 @@ function PumpSlipScanner({ pumps, trips, user, onResults }) {
 // single receipt photo. If vehicle, pump name, and date all match the request,
 // auto-confirms (no image stored). If any mismatch, the image is stored and the
 // request stays "open" awaiting manager review in DieselMod.
-function DieselReceiptScan({ selected, pumps, cashAmount, user, log, onBack, onConfirmed, onPendingReview }) {
+function DieselReceiptScan({ selected, pumps, dieselRequests=[], cashAmount, user, log, onBack, onConfirmed, onPendingReview }) {
   const [state, setState] = useState("idle"); // idle|reading|scanning|uploading|saving|error
   const [error, setError] = useState("");
 
@@ -10947,6 +10947,16 @@ function DieselReceiptScan({ selected, pumps, cashAmount, user, log, onBack, onC
         return;
       }
       logScan("diesel_receipt_scan", true, data._costInr||0);
+
+      // Duplicate receipt number check — a receipt can only be attached to one diesel request
+      if (data.receiptNo) {
+        const dup = dieselRequests.find(r => r.id !== selected.id && r.receiptNo && normReceiptNo(r.receiptNo) === normReceiptNo(data.receiptNo));
+        if (dup) {
+          setError(`Receipt #${data.receiptNo} is already attached to Indent #${dup.indentNo} (${dup.truckNo}) — status: ${dup.status.toUpperCase()}. This receipt can't be used again.`);
+          setState("error");
+          return;
+        }
+      }
 
       const pump = pumps.find(p => p.id === selected.pumpId);
       const vehicleMismatch = normVehicleNo(data.vehicleNo) !== normVehicleNo(selected.truckNo);
@@ -11915,6 +11925,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
 // Used by both the PumpPortal upload flow and the DieselMod manager review screen.
 const normVehicleNo = v => String(v||"").replace(/[\s-]+/g,"").toUpperCase();
 const normPumpName  = s => String(s||"").toLowerCase().replace(/[^a-z0-9]/g,"");
+const normReceiptNo = s => String(s||"").trim().toUpperCase();
 const pumpNamesMatch = (extracted, stored) => {
   const a = normPumpName(extracted), b = normPumpName(stored);
   if (!a || !b) return false;
@@ -12290,6 +12301,7 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
           <DieselReceiptScan
             selected={selected}
             pumps={pumps}
+            dieselRequests={dieselRequests}
             cashAmount={newCashAmt !== "" ? +newCashAmt : (selected.cashAmount ?? 0)}
             user={user}
             log={log}
@@ -12563,7 +12575,7 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
 }
 
 // ─── DIESEL RECEIPT REVIEW CARD — owner/manager approval for mismatched scans ─
-function DieselReceiptReviewCard({ req, pumps, user, log, viewOnly, onApproved }) {
+function DieselReceiptReviewCard({ req, pumps, dieselRequests=[], user, log, viewOnly, onApproved }) {
   const [imgUrl, setImgUrl] = useState(null);
   const [imgError, setImgError] = useState(false);
   const [zoomed, setZoomed] = useState(false);
@@ -12585,6 +12597,14 @@ function DieselReceiptReviewCard({ req, pumps, user, log, viewOnly, onApproved }
   const approve = async () => {
     if (!vehicleNo.trim()) { alert("Vehicle number is required"); return; }
     if (!date) { alert("Date is required"); return; }
+    // Safety net — duplicate should already have been blocked at upload time, but re-check here too
+    if (req.receiptNo) {
+      const dup = dieselRequests.find(r => r.id !== req.id && r.receiptNo && normReceiptNo(r.receiptNo) === normReceiptNo(req.receiptNo));
+      if (dup) {
+        alert(`Receipt #${req.receiptNo} is already attached to Indent #${dup.indentNo} (${dup.truckNo}) — status: ${dup.status.toUpperCase()}. This receipt can't be approved for two requests.`);
+        return;
+      }
+    }
     setApproving(true);
     try {
       const dieselAmount = req.extractedAmount ?? req.dieselAmount ?? req.amount;
@@ -13343,7 +13363,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
             <div style={{textAlign:"center",color:C.muted,padding:48,fontSize:14}}>No receipts awaiting review</div>
           )}
           {pendingReceiptReviews.map(req => (
-            <DieselReceiptReviewCard key={req.id} req={req} pumps={pumps} user={user} log={log}
+            <DieselReceiptReviewCard key={req.id} req={req} pumps={pumps} dieselRequests={dieselRequests} user={user} log={log}
               viewOnly={viewOnly}
               onApproved={updReq => setDieselRequests(p=>p.map(r=>r.id===updReq.id?updReq:r))}
             />
