@@ -3480,7 +3480,7 @@ Rules:
         const saveResult = await Promise.race([
           DB.saveTripSafe(trip),
           new Promise((_,rej)=>setTimeout(()=>rej(new Error("Save timed out — check connection")),15000))
-        ]).catch(e=>({success:false, duplicateDI:null, duplicateGR:null, existingLR:null, existingTruck:null, error:e.message}));
+        ]).catch(e=>({success:false, duplicateDI:null, existingLR:null, existingTruck:null, error:e.message}));
         // Auto-update vehicle ownerName if vehicle has none but trip/scan does
         try {
           if(trip.ownerName && trip.truckNo) {
@@ -3512,8 +3512,6 @@ Rules:
             ? `Cannot save: ${[saveResult.missingDI&&"DI No",saveResult.missingGR&&"GR No"].filter(Boolean).join(" and ")} missing. Both are mandatory — please re-scan a clearer image or enter manually.`
             : saveResult.duplicateDI
             ? `DI ${saveResult.duplicateDI} already exists in LR ${saveResult.existingLR} (${saveResult.existingTruck}). This trip was not saved — another device may have saved it first.`
-            : saveResult.duplicateGR
-            ? `GR ${saveResult.duplicateGR} already exists in LR ${saveResult.existingLR} (${saveResult.existingTruck}). This trip was not saved — another device may have saved it first.`
             : `Save failed: ${saveResult.error||"Unknown error"}`);
           setSaving(false);
           return;
@@ -3697,14 +3695,12 @@ Rules:
         const saveResultM = await Promise.race([
           DB.saveTripSafe(trip),
           new Promise((_,rej)=>setTimeout(()=>rej(new Error("Save timed out — check connection")),15000))
-        ]).catch(e=>({success:false, duplicateDI:null, duplicateGR:null, error:e.message}));
+        ]).catch(e=>({success:false, duplicateDI:null, error:e.message}));
         if(!saveResultM.success) {
           setLrError(saveResultM.missingRequired
             ? `Cannot save: ${[saveResultM.missingDI&&"DI No",saveResultM.missingGR&&"GR No"].filter(Boolean).join(" and ")} missing. Both are mandatory — please re-scan a clearer image or enter manually.`
             : saveResultM.duplicateDI
             ? `DI ${saveResultM.duplicateDI} already exists in LR ${saveResultM.existingLR} (${saveResultM.existingTruck}). This trip was not saved — another device may have saved it first.`
-            : saveResultM.duplicateGR
-            ? `GR ${saveResultM.duplicateGR} already exists in LR ${saveResultM.existingLR} (${saveResultM.existingTruck}). This trip was not saved — another device may have saved it first.`
             : `Save failed: ${saveResultM.error||"Unknown error"}`);
           setSaving(false);
           return;
@@ -4787,19 +4783,15 @@ function AskLRSheet({ extracted, trips, vehicles, employees=[], onConfirm, onCan
   const existingVehicle = vehicles ? vehicles.find(v => v.truckNo === truckNo) : null;
   const needsDriverPhone = !existingVehicle || !existingVehicle.driverPhone;
 
-  // Check for duplicate DI or GR — independent checks, either can catch a dup
-  // (GR check matters most when diNo came back empty from a bad scan)
+  // Check for duplicate DI — GR is not checked for duplicates, since the same
+  // GR number can legitimately repeat across separate trips/DIs.
   const scannedDiNo = (extracted.diNo||"").trim();
   const scannedGrNo = (extracted.grNo||"").trim();
   const duplicateDI = scannedDiNo ? trips.find(t => {
     if(t.diLines&&t.diLines.length>0) return t.diLines.some(d=>d.diNo===scannedDiNo);
     return (t.diNo||"").split("+").map(s=>s.trim()).includes(scannedDiNo);
   }) : null;
-  const duplicateGR = (!duplicateDI && scannedGrNo) ? trips.find(t => {
-    if(t.diLines&&t.diLines.length>0) return t.diLines.some(d=>d.grNo===scannedGrNo);
-    return (t.grNo||"").split("+").map(s=>s.trim()).includes(scannedGrNo);
-  }) : null;
-  const duplicateTrip = duplicateDI || duplicateGR;
+  const duplicateTrip = duplicateDI;
 
   // Find unsettled trips for this truck (same vehicle = merge candidates)
   const mergeCandidates = !duplicateTrip ? (trips||[]).filter(t =>
@@ -4860,18 +4852,16 @@ function AskLRSheet({ extracted, trips, vehicles, employees=[], onConfirm, onCan
         );
       })()}
 
-      {/* Duplicate DI/GR block */}
+      {/* Duplicate DI block */}
       {duplicateTrip && (
         <div style={{background:C.red+"11",border:`1px solid ${C.red}44`,borderRadius:10,padding:"12px 14px"}}>
           <div style={{color:C.red,fontWeight:800,fontSize:13,marginBottom:4}}>
-            🚫 Duplicate {duplicateDI?"DI":"GR"} — Already Exists!
+            🚫 Duplicate DI — Already Exists!
           </div>
           <div style={{color:C.muted,fontSize:12}}>
-            {duplicateDI
-              ? <>DI <b style={{color:C.text}}>{scannedDiNo}</b> is already in LR <b style={{color:C.text}}>{duplicateDI.lrNo||"—"}</b> · {duplicateDI.truckNo} · {duplicateDI.qty}MT</>
-              : <>GR <b style={{color:C.text}}>{scannedGrNo}</b> is already in LR <b style={{color:C.text}}>{duplicateGR.lrNo||"—"}</b> · {duplicateGR.truckNo} · {duplicateGR.qty}MT</>}
+            DI <b style={{color:C.text}}>{scannedDiNo}</b> is already in LR <b style={{color:C.text}}>{duplicateDI.lrNo||"—"}</b> · {duplicateDI.truckNo} · {duplicateDI.qty}MT
           </div>
-          <div style={{color:C.red,fontSize:11,marginTop:6,fontWeight:700}}>You cannot add the same {duplicateDI?"DI":"GR"} number twice.</div>
+          <div style={{color:C.red,fontSize:11,marginTop:6,fontWeight:700}}>You cannot add the same DI number twice.</div>
         </div>
       )}
 
