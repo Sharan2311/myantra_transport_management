@@ -350,11 +350,16 @@ const fetchAll = (table, fromDB) => withRetry(async () => {
   return (data||[]).map(fromDB)
 });
 
-// Date-limited fetch — loads only last N days, ordered by date desc
-const fetchRecent = (table, fromDB, dateCol='date', days=120) => withRetry(async () => {
-  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+// Loads the FULL table (paginated), ordered by date desc.
+// NOTE: this used to be a date-limited fetch (only last N days). That cutoff
+// was removed because several screens compute running/cumulative financial
+// balances (employee wallet balance, pump pending balance, etc.) from these
+// tables with no opening-balance carry-forward — silently dropping
+// transactions older than the cutoff produced WRONG balances, not just an
+// incomplete "recent activity" view. Kept the name/signature so all existing
+// call sites work unchanged; the `days` param is now ignored.
+const fetchRecent = (table, fromDB, dateCol='date', _days) => withRetry(async () => {
   const data = await fetchPaginated(() => supabase.from(table).select('*')
-    .gte(dateCol, cutoff)
     .order(dateCol, { ascending: false }));
   return (data||[]).map(fromDB)
 });
@@ -483,24 +488,24 @@ export const DB = {
   saveEmployee:   e  => upsertOne('mye_employees', employeeToDB, e),
   deleteEmployee: id => deleteOne('mye_employees', id),
 
-  getPayments:    () => fetchRecent('mye_payments', paymentFromDB, 'payment_date', 120),
+  getPayments:    () => fetchRecent('mye_payments', paymentFromDB, 'payment_date'),
   savePayment:    p  => upsertOne('mye_payments', paymentToDB, p),
   deletePayment:  id => deleteOne('mye_payments', id),
 
-  getSettlements: () => fetchRecent('mye_settlements', settlementFromDB, 'date', 120),
+  getSettlements: () => fetchRecent('mye_settlements', settlementFromDB, 'date'),
   saveSettlement: s  => upsertOne('mye_settlements', settlementToDB, s),
 
   getPumps:          () => fetchAll('mye_pumps', pumpFromDB),
   savePump:          p  => upsertOne('mye_pumps', pumpToDB, p),
 
   getPumpPayments: async () => {
-    try { return await fetchRecent('mye_pump_payments', pumpPaymentFromDB, 'date', 120); }
+    try { return await fetchRecent('mye_pump_payments', pumpPaymentFromDB, 'date'); }
     catch(e) { console.warn('mye_pump_payments not ready:', e.message); return []; }
   },
   savePumpPayment:   p  => upsertOne('mye_pump_payments', pumpPaymentToDB, p),
   deletePumpPayment: id => deleteOne('mye_pump_payments', id),
 
-  getIndents:      () => fetchRecent('mye_indents', indentFromDB, 'date', 90),
+  getIndents:      () => fetchRecent('mye_indents', indentFromDB, 'date'),
   saveIndent:      i  => upsertOne('mye_indents', indentToDB, i),
   deleteIndent:    id => deleteOne('mye_indents', id),
   saveManyIndents: async (indents) => {
@@ -508,21 +513,21 @@ export const DB = {
     if (error) throw error
   },
 
-  getDriverPays:   () => fetchRecent('mye_driver_payments', driverPayFromDB, 'date', 120),
+  getDriverPays:   () => fetchRecent('mye_driver_payments', driverPayFromDB, 'date'),
   saveDriverPay:   p  => upsertOne('mye_driver_payments', driverPayToDB, p),
   deleteDriverPay: id => deleteOne('mye_driver_payments', id),
 
-  getExpenses:     () => fetchRecent('mye_expenses', expenseFromDB, 'date', 120),
+  getExpenses:     () => fetchRecent('mye_expenses', expenseFromDB, 'date'),
   saveExpense:     e  => upsertOne('mye_expenses', expenseToDB, e),
   deleteExpense:   id => deleteOne('mye_expenses', id),
 
-  getGstReleases:  () => fetchRecent('mye_gst_releases', gstFromDB, 'date', 120),
+  getGstReleases:  () => fetchRecent('mye_gst_releases', gstFromDB, 'date'),
   saveGstRelease:  g  => upsertOne('mye_gst_releases', gstToDB, g),
   deleteGstRelease:id => deleteOne('mye_gst_releases', id),
 
   // Cash Transfers — employee wallet (credits + advance deductions)
   getCashTransfers: async () => {
-    try { return await fetchRecent('mye_cash_transfers', cashTransferFromDB, 'date', 120); }
+    try { return await fetchRecent('mye_cash_transfers', cashTransferFromDB, 'date'); }
     catch(e) { console.warn('mye_cash_transfers not ready:', e.message); return []; }
   },
   saveCashTransfer:   t  => upsertOne('mye_cash_transfers', cashTransferToDB, t),
@@ -751,9 +756,9 @@ export const DB = {
     // ── Phase 2: needed for billing, payments, employee tabs ──────────────────
     const [employees, payments, pumps, indents, dieselRequests] = await Promise.all([
       safe(() => fetchAll('mye_employees', employeeFromDB)),
-      safe(() => fetchRecent('mye_payments', paymentFromDB, 'payment_date', 120)),
+      safe(() => fetchRecent('mye_payments', paymentFromDB, 'payment_date')),
       safe(() => fetchAll('mye_pumps', pumpFromDB)),
-      safe(() => fetchRecent('mye_indents', indentFromDB, 'date', 90)),
+      safe(() => fetchRecent('mye_indents', indentFromDB, 'date')),
       safe(async () => {
         const { data, error } = await supabase.from('mye_diesel_requests').select('*').order('created_at', {ascending:false});
         if (error) throw error;
@@ -774,16 +779,16 @@ export const DB = {
 
     // ── Phase 3: background — driver pays, expenses, wallet, activity etc ─────
     const [driverPays, cashTransfers, pumpPayments, settlements, paymentRequests, activity] = await Promise.all([
-      safe(() => fetchRecent('mye_driver_payments', driverPayFromDB, 'date', 120)),
+      safe(() => fetchRecent('mye_driver_payments', driverPayFromDB, 'date')),
       safe(async () => {
-        try { return await fetchRecent('mye_cash_transfers', cashTransferFromDB, 'date', 120); }
+        try { return await fetchRecent('mye_cash_transfers', cashTransferFromDB, 'date'); }
         catch(e) { console.warn('mye_cash_transfers not ready:', e.message); return []; }
       }),
       safe(async () => {
-        try { return await fetchRecent('mye_pump_payments', pumpPaymentFromDB, 'date', 120); }
+        try { return await fetchRecent('mye_pump_payments', pumpPaymentFromDB, 'date'); }
         catch(e) { console.warn('mye_pump_payments not ready:', e.message); return []; }
       }),
-      safe(() => fetchRecent('mye_settlements', settlementFromDB, 'date', 120)),
+      safe(() => fetchRecent('mye_settlements', settlementFromDB, 'date')),
       safe(async () => {
         try { return await fetchAll('mye_payment_requests', r => ({
           id: r.id, tripId: r.trip_id, lrNo: r.lr_no, truckNo: r.truck_no,
