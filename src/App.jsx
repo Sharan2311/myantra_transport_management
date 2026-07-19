@@ -21289,11 +21289,11 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
     ? t.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
     : (t.qty||0)*(t.givenRate||0);
   // Release pouch hold once confirmation/sealed invoice is uploaded (mergedPdfPath = both upload + merge done)
-  // Pouch unlocks once EITHER the sealed invoice/confirmation is uploaded, OR
-  // the trip has otherwise been marked fully Paid (driverSettled) — a settled
-  // trip should never leave its pouch permanently stranded just because the
-  // paperwork never came in.
-  const _hasMerged = !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received"||t.driverSettled);
+  // Pouch is released ONLY when the sealed invoice/confirmation is actually
+  // uploaded — no other condition unlocks it. A trip being marked settled by
+  // the owner does not release the pouch; it closes the trip out entirely
+  // (see the bulk "Mark Settled" action, which zeroes pouchBalance directly).
+  const _hasMerged = !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received");
   const _pouchHold = (t.orderType==="party"&&!_hasMerged) ? (t.pouchBalance||0) : 0;
   const _deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)+(t.shortageRecovery||0)+(t.loanRecovery||0)+_pouchHold;
   const _netDue  = Math.max(0, _diGross - _deducts);
@@ -22131,6 +22131,12 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
 
   const requestPaymentGuarded = (checkTrips, openWith) => {
     const list = Array.isArray(checkTrips) ? checkTrips : [checkTrips];
+    // Hard stop — a trip marked driverSettled is done, regardless of how this
+    // function got called. No payment request can be raised for it again.
+    if (list.some(t => t.driverSettled)) {
+      alert("This trip is already marked as settled — no further payment can be requested for it.");
+      return;
+    }
     const needsCheck = list.filter(t => !((t.dieselIndentNo||"").trim()) && !t.noDieselConfirmed);
     if (needsCheck.length === 0) { setPayReqSheet(openWith); return; }
     setDieselGateQueue(needsCheck);
@@ -22205,8 +22211,13 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
     return {...t, gross, netDue, paidSoFar, balance, veh};
   });
 
-  const unpaidTrips  = tripWithBalance.filter(t=>t.balance>0);
-  const paidTrips    = tripWithBalance.filter(t=>t.balance<=0 && t.netDue>0);
+  // driverSettled is authoritative — once set, a trip is Paid and cannot show as
+  // Unpaid regardless of what the balance math says (e.g. a manual bulk-settle
+  // where the owner asserts it's covered even if paidSoFar wasn't recorded to
+  // exactly match). Previously this filtered on balance alone, so a settled
+  // trip with any residual computed balance still showed up as fully requestable.
+  const unpaidTrips  = tripWithBalance.filter(t=>t.balance>0 && !t.driverSettled);
+  const paidTrips    = tripWithBalance.filter(t=>(t.balance<=0 || t.driverSettled) && t.netDue>0);
 
   // "My Requests" — trips in last 4 days where employee has NOT yet sent a payment request
   // (non-owners only; helps employee know which trips still need a request)
@@ -22977,24 +22988,17 @@ This will auto-recover in the next trip.`);
             </div>
           )}
           <div style={{display:"flex",gap:8,marginTop:4}}>
-            {t.balance>0&&!viewOnly&&(
+            {t.balance>0&&!viewOnly&&!t.driverSettled&&(
               <Btn onClick={()=>{setPaySheet(t);setPf({amount:String(t.balance),utr:"",date:today(),paidTo:"",notes:""});}} full sm color={C.green}>+ Record Payment</Btn>
             )}
-            {t.balance>0&&(
+            {t.balance>0&&!t.driverSettled&&(
               <Btn onClick={()=>requestPaymentGuarded(t, t)} sm outline color={C.purple}>📋 Request Payment</Btn>
             )}
-            {/* Stranded party pouch — trip is otherwise settled, but its pouch amount
-                was held out of the balance calc while unmerged and never got paid.
-                Owner-only, since this bypasses the normal request-guard flow. */}
-            {t.balance<=0 && t.orderType==="party" && t.pouchBalance>0 && user.role==="owner" && (()=>{
-              const strandedPouch = Math.max(0, ((t.netDue||0)+(t.pouchBalance||0)) - (t.paidSoFar||0));
-              if(strandedPouch<=0) return null;
-              return (
-                <Btn onClick={()=>setPayReqSheet(t)} sm outline color={C.orange}>
-                  🤝 Request {fmt(strandedPouch)} Pouch
-                </Btn>
-              );
-            })()}
+            {t.balance>0&&t.driverSettled&&(
+              <div style={{flex:1,background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:8,padding:"8px 10px",fontSize:11,color:C.orange,fontWeight:600}}>
+                ⚠ Marked settled with {fmt(t.balance)} unaccounted for — no further requests allowed on this trip.
+              </div>
+            )}
           </div>
         </div>
           ))}
