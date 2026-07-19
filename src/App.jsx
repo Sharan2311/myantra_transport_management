@@ -22131,9 +22131,16 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
 
   const requestPaymentGuarded = (checkTrips, openWith) => {
     const list = Array.isArray(checkTrips) ? checkTrips : [checkTrips];
-    // Hard stop — a trip marked driverSettled is done, regardless of how this
-    // function got called. No payment request can be raised for it again.
-    if (list.some(t => t.driverSettled)) {
+    // A settled trip normally can't have anything else requested for it — EXCEPT
+    // a party trip that settled on its main balance while the invoice was still
+    // unmerged, then later got its invoice uploaded: the pouch only unlocks on
+    // that upload, so this is the one legitimate case where a genuinely new,
+    // unpaid amount can exist on an already-"settled" trip. Don't block that.
+    const hasGenuinePouchClaim = (t) => {
+      const hasMerged = !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received");
+      return t.orderType==="party" && hasMerged && (t.pouchBalance||0)>0;
+    };
+    if (list.some(t => t.driverSettled && !hasGenuinePouchClaim(t))) {
       alert("This trip is already marked as settled — no further payment can be requested for it.");
       return;
     }
@@ -22273,34 +22280,49 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
   // eslint-disable-next-line
   }, [JSON.stringify(tripWithBalance.map(t=>({id:t.id,balance:t.balance,settled:t.driverSettled})))]);
 
-  // Close out any PENDING request whose OWN trip already has balance=0 — each
-  // request is judged independently by its own trip's balance, not by whether
-  // some other request on the same LR happens to be done (a trip can validly
-  // have one done request for a partial amount and a separate, still-owed
-  // pending request for the remainder — that second one must stay pending).
-  // Catches the historical backlog (requests left stale before every settlement
-  // path was wired to call markRequestsDoneForLR), not just new settlements.
+  // Close out any PENDING request whose OWN trip already has balance=0, OR
+  // whose trip is marked driverSettled (authoritative — a settled trip closes
+  // out its requests regardless of what the balance math shows, same rule as
+  // the Unpaid/Paid tab filtering and requestPaymentGuarded) — EXCEPT when the
+  // trip has a genuine, still-owed party pouch claim (sealed invoice/confirmation
+  // uploaded, pouch balance >0, not yet paid). That's the one case where a
+  // request can be legitimately pending even though the main balance looks
+  // settled: the pouch only unlocks on invoice upload, which can happen after
+  // the main portion was already fully paid off.
+  // Catches the historical backlog — trips settled (individually or via
+  // bulk-settle) before this request-closing behavior existed, not just new
+  // settlements.
   // IMPORTANT: checks against the full `trips` prop, not `tripWithBalance` (which
   // is built from `fyTrips || trips` — scoped to whatever FY/client filter is
   // currently active in the UI). A stale request for a trip outside the
   // currently-viewed FY would otherwise never be found and never get closed.
   React.useEffect(() => {
-    const balanceForLR = (lrNo) => {
-      const t = (trips||[]).find(x=>x.lrNo && x.lrNo===lrNo);
-      if(!t) return null;
+    const tripForLR = (lrNo) => (trips||[]).find(x=>x.lrNo && x.lrNo===lrNo) || null;
+    const hasGenuinePouchClaim = (t) => {
+      const hasMerged = !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received");
+      return t.orderType==="party" && hasMerged && (t.pouchBalance||0)>0;
+    };
+    const balanceForTrip = (t) => {
       const gross = (t.diLines&&t.diLines.length>1)
         ? t.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
         : (t.qty||0)*(t.givenRate||0);
+      // Pouch counts toward netDue once merged — same rule as RequestPaymentSheet
+      // — so a fully-paid main balance doesn't mask a genuinely outstanding pouch.
+      const hasMerged = !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received");
+      const pouchHold = (t.orderType==="party" && !hasMerged) ? (t.pouchBalance||0) : 0;
       const deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)
-        +((t.shortage||0)*(t.givenRate||0))+(t.shortageRecovery||0)+(t.loanRecovery||0);
+        +((t.shortage||0)*(t.givenRate||0))+(t.shortageRecovery||0)+(t.loanRecovery||0)+pouchHold;
       const netDue = Math.max(0, gross - deducts);
       const paidSoFar = (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
       return Math.max(0, netDue - paidSoFar);
     };
     const stalePending = (paymentRequests||[]).filter(r => {
       if(r.status!=="pending") return false;
-      const bal = balanceForLR(r.lrNo);
-      return bal!==null && bal<=0;
+      const t = tripForLR(r.lrNo);
+      if(!t) return false;
+      if(hasGenuinePouchClaim(t)) return false; // never auto-close a live pouch claim
+      if(t.driverSettled) return true; // authoritative — closed regardless of balance
+      return balanceForTrip(t) <= 0;
     });
     if(stalePending.length===0) return;
     setPaymentRequests(prev=>(prev||[]).map(r=>{
@@ -22310,7 +22332,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
       return done;
     }));
   // eslint-disable-next-line
-  }, [JSON.stringify((paymentRequests||[]).map(r=>r.id+r.status)), JSON.stringify((trips||[]).map(t=>({lr:t.lrNo,id:t.id}))), driverPays]);
+  }, [JSON.stringify((paymentRequests||[]).map(r=>r.id+r.status)), JSON.stringify((trips||[]).map(t=>({lr:t.lrNo,id:t.id,settled:t.driverSettled}))), driverPays]);
 
   // Auto-settle: called after any payment save — marks trip settled if balance reaches 0
   const autoSettle = (tripId, extraAmount) => {
@@ -23003,6 +23025,14 @@ This will auto-recover in the next trip.`);
               <Btn onClick={()=>{setPaySheet(t);setPf({amount:String(t.balance),utr:"",date:today(),paidTo:"",notes:""});}} full sm color={C.green}>+ Record Payment</Btn>
             )}
             {t.balance>0&&!t.driverSettled&&(
+              <Btn onClick={()=>requestPaymentGuarded(t, t)} sm outline color={C.purple}>📋 Request Payment</Btn>
+            )}
+            {/* A trip can settle on its main balance before the sealed invoice/
+                confirmation is ever uploaded — the pouch only unlocks on that
+                upload, so this is the one case a "settled" trip can still have a
+                genuine, unpaid amount. t.balance itself won't reflect this (it's
+                never pouch-aware), so this checks pouchBalance directly instead. */}
+            {t.driverSettled && t.orderType==="party" && (t.pouchBalance||0)>0 && !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received") && (
               <Btn onClick={()=>requestPaymentGuarded(t, t)} sm outline color={C.purple}>📋 Request Payment</Btn>
             )}
             {t.balance>0&&t.driverSettled&&(
