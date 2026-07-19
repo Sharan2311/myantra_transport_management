@@ -21289,7 +21289,11 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
     ? t.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
     : (t.qty||0)*(t.givenRate||0);
   // Release pouch hold once confirmation/sealed invoice is uploaded (mergedPdfPath = both upload + merge done)
-  const _hasMerged = !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received");
+  // Pouch unlocks once EITHER the sealed invoice/confirmation is uploaded, OR
+  // the trip has otherwise been marked fully Paid (driverSettled) — a settled
+  // trip should never leave its pouch permanently stranded just because the
+  // paperwork never came in.
+  const _hasMerged = !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received"||t.driverSettled);
   const _pouchHold = (t.orderType==="party"&&!_hasMerged) ? (t.pouchBalance||0) : 0;
   const _deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)+(t.shortageRecovery||0)+(t.loanRecovery||0)+_pouchHold;
   const _netDue  = Math.max(0, _diGross - _deducts);
@@ -22107,6 +22111,12 @@ const DIESEL_GATE_TXT = {
 
 function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, vehicles, setVehicles, employees, setEmployees, cashTransfers, setCashTransfers, paymentRequests=[], setPaymentRequests, indents=[], dieselRequests=[], setDieselRequests, user, log, viewOnly=false, setTab}) {
   const [filter,    setFilter]    = useState("unpaid");
+  // Party-order sub-filter + bulk "mark settled" (owner only) — for party trips
+  // whose sealed invoice never arrived, where the owner already paid manually
+  // outside the normal request flow and needs to close them out in bulk.
+  const [orderTypeFilter, setOrderTypeFilter] = useState("all"); // all | party | godown
+  const [selectMode,      setSelectMode]      = useState(false);
+  const [selectedTripIds, setSelectedTripIds] = useState(new Set());
   const [paySheet,  setPaySheet]  = useState(null);
   const [payReqSheet,   setPayReqSheet]   = useState(null); // trip for request payment
   // ── Diesel-confirmation gate ────────────────────────────────────────────────
@@ -22624,6 +22634,50 @@ This will auto-recover in the next trip.`);
             width:"100%",boxSizing:"border-box"}} />
       )}
 
+      {/* Order-type filter + bulk "mark settled" — owner only, Unpaid/Paid tabs only */}
+      {user.role==="owner" && (filter==="unpaid"||filter==="paid") && (
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          <div style={{display:"flex",gap:6}}>
+            {["all","party","godown"].map(o=>(
+              <button key={o} onClick={()=>setOrderTypeFilter(o)}
+                style={{padding:"6px 14px",borderRadius:8,fontSize:12,fontWeight:700,cursor:"pointer",
+                  background:orderTypeFilter===o?C.accent+"22":"transparent",
+                  border:`1.5px solid ${orderTypeFilter===o?C.accent:C.border}`,
+                  color:orderTypeFilter===o?C.accent:C.muted}}>
+                {o==="all"?"All Orders":o==="party"?"🤝 Party":"🏭 Godown"}
+              </button>
+            ))}
+          </div>
+          {filter==="unpaid" && (
+            <div style={{display:"flex",gap:8,alignItems:"center"}}>
+              <button onClick={()=>{setSelectMode(m=>!m); setSelectedTripIds(new Set());}}
+                style={{padding:"6px 14px",borderRadius:8,fontSize:12,fontWeight:700,cursor:"pointer",
+                  background:selectMode?C.purple+"22":"transparent",
+                  border:`1.5px solid ${selectMode?C.purple:C.border}`,
+                  color:selectMode?C.purple:C.muted}}>
+                {selectMode?"✓ Selecting…":"☑ Select Multiple"}
+              </button>
+              {selectMode && selectedTripIds.size>0 && (
+                <Btn onClick={()=>{
+                  const count = selectedTripIds.size;
+                  if(!window.confirm(`Mark ${count} trip${count>1?"s":""} as fully settled (Paid)?\n\nThis is for trips already paid manually outside the normal flow — it closes them out completely, including their party pouch balance, so no further payment can be requested for them.`)) return;
+                  setTrips(prev => prev.map(t => {
+                    if(!selectedTripIds.has(t.id)) return t;
+                    const updated = {...t, driverSettled:true, settledBy:user.username, netPaid:t.netDue||0, pouchBalance:0};
+                    DB.saveTrip(updated).catch(e=>console.error("saveTrip bulk settle:",e));
+                    return updated;
+                  }));
+                  log("BULK MARK SETTLED", `${count} trip(s) marked fully paid`);
+                  setSelectedTripIds(new Set()); setSelectMode(false);
+                }} sm color={C.green}>
+                  ✓ Mark {selectedTripIds.size} as Settled
+                </Btn>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ── PAYMENT HISTORY TAB ── */}
       {filter==="history" && (
         <div style={{display:"flex",flexDirection:"column",gap:10}}>
@@ -22786,7 +22840,10 @@ This will auto-recover in the next trip.`);
       {/* ── TRIP LIST (unpaid / paid / all / myreqs) ── */}
       {filter!=="history" && filter!=="requests" && filter!=="byemp" && (()=>{
         const base = filter==="myreqs"?myReqTrips:filter==="unpaid"?unpaidTrips:filter==="paid"?paidTrips:tripWithBalance;
-        const shown = histLR ? base.filter(t=>(t.lrNo+t.truckNo).toLowerCase().includes(histLR.toLowerCase())) : base;
+        const orderFiltered = (filter==="unpaid"||filter==="paid") && orderTypeFilter!=="all"
+          ? base.filter(t=>orderTypeFilter==="party" ? t.orderType==="party" : (!t.orderType||t.orderType==="godown"))
+          : base;
+        const shown = histLR ? orderFiltered.filter(t=>(t.lrNo+t.truckNo).toLowerCase().includes(histLR.toLowerCase())) : orderFiltered;
         return (<>
           {filter==="myreqs" && (
             <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,borderRadius:10,
@@ -22796,9 +22853,15 @@ This will auto-recover in the next trip.`);
             </div>
           )}
           {shown.map(t=>(
-        <div key={t.id} style={{background:C.card,borderRadius:14,padding:"14px 16px",borderLeft:`4px solid ${t.balance>0?C.accent:C.green}`,marginBottom:8}}>
+        <div key={t.id} style={{background:C.card,borderRadius:14,padding:"14px 16px",borderLeft:`4px solid ${selectedTripIds.has(t.id)?C.purple:t.balance>0?C.accent:C.green}`,marginBottom:8}}>
           <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
-            <div>
+            <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
+              {filter==="unpaid" && selectMode && (
+                <input type="checkbox" checked={selectedTripIds.has(t.id)} onChange={()=>setSelectedTripIds(prev=>{
+                  const n=new Set(prev); if(n.has(t.id)) n.delete(t.id); else n.add(t.id); return n;
+                })} style={{width:18,height:18,marginTop:3,flexShrink:0}} />
+              )}
+              <div>
               <div style={{fontWeight:800,fontSize:14}}>{t.truckNo}</div>
               <div style={{color:C.blue,fontSize:12}}>LR: {t.lrNo||"—"}</div>
               <div style={{color:C.muted,fontSize:11}}>{t.from}→{t.to} · {t.qty}MT · {t.date}</div>
@@ -22817,6 +22880,7 @@ This will auto-recover in the next trip.`);
                 );
                 return null;
               })()}
+            </div>
             </div>
             <div style={{textAlign:"right"}}>
               {t.balance>0
@@ -22919,6 +22983,18 @@ This will auto-recover in the next trip.`);
             {t.balance>0&&(
               <Btn onClick={()=>requestPaymentGuarded(t, t)} sm outline color={C.purple}>📋 Request Payment</Btn>
             )}
+            {/* Stranded party pouch — trip is otherwise settled, but its pouch amount
+                was held out of the balance calc while unmerged and never got paid.
+                Owner-only, since this bypasses the normal request-guard flow. */}
+            {t.balance<=0 && t.orderType==="party" && t.pouchBalance>0 && user.role==="owner" && (()=>{
+              const strandedPouch = Math.max(0, ((t.netDue||0)+(t.pouchBalance||0)) - (t.paidSoFar||0));
+              if(strandedPouch<=0) return null;
+              return (
+                <Btn onClick={()=>setPayReqSheet(t)} sm outline color={C.orange}>
+                  🤝 Request {fmt(strandedPouch)} Pouch
+                </Btn>
+              );
+            })()}
           </div>
         </div>
           ))}
