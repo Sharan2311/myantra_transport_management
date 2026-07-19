@@ -22671,12 +22671,23 @@ This will auto-recover in the next trip.`);
               {selectMode && selectedTripIds.size>0 && (
                 <Btn onClick={()=>{
                   const count = selectedTripIds.size;
-                  if(!window.confirm(`Mark ${count} trip${count>1?"s":""} as fully settled (Paid)?\n\nThis is for trips already paid manually outside the normal flow — it closes them out completely, including their party pouch balance, so no further payment can be requested for them.`)) return;
+                  if(!window.confirm(`Mark ${count} trip${count>1?"s":""} as fully settled (Paid)?\n\nThis is for trips already paid manually outside the normal flow — it closes them out completely, including their party pouch balance and any pending payment requests, so no further payment can be requested for them.`)) return;
+                  const settledLRs = new Set();
                   setTrips(prev => prev.map(t => {
                     if(!selectedTripIds.has(t.id)) return t;
+                    if(t.lrNo) settledLRs.add(t.lrNo);
                     const updated = {...t, driverSettled:true, settledBy:user.username, netPaid:t.netDue||0, pouchBalance:0};
                     DB.saveTrip(updated).catch(e=>console.error("saveTrip bulk settle:",e));
                     return updated;
+                  }));
+                  // Close out any still-pending payment request tied to these trips —
+                  // the balance is zeroed now, so a dangling "Pending" request would
+                  // otherwise sit unresolved forever.
+                  setPaymentRequests(prev => (prev||[]).map(r => {
+                    if(r.status!=="pending" || !settledLRs.has(r.lrNo)) return r;
+                    const done = {...r, status:"done", paidAt:today(), paidBy:user.username};
+                    DB.savePaymentRequest(done).catch(e=>console.error("savePaymentRequest bulk settle:",e));
+                    return done;
                   }));
                   log("BULK MARK SETTLED", `${count} trip(s) marked fully paid`);
                   setSelectedTripIds(new Set()); setSelectMode(false);
