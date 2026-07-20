@@ -20215,7 +20215,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                             )}
                             {!trip && diOk && (
                               <div style={{color:"#c67c00",fontSize:10,marginTop:2}}>
-                                ↳ Go to Trips tab, add this trip (DI: {st.diNo}) first, then scan invoice again
+                                ↳ Not in system yet — saving will create an action item for the assigned employee to upload this DI (or the owner, if the truck can't be resolved)
                               </div>
                             )}
                           </div>
@@ -20229,11 +20229,14 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                         const noTrip      = lines.length - identityOk;
                         const amtMismatch = identityOk - amtOk;
                         const allOk       = noTrip===0 && amtMismatch===0 && identityOk===lines.length;
-                        const allUnmatched = noTrip===lines.length && lines.length>0;
-                        // Mixed: some matched + some unmatched all from prevFY
-                        const prevFYCount = lines.filter(st=>{ const d=parseDD(st.date||""); return d&&getFY(d)<currentFY()&&!matchInvoiceLine(st,trips||[]); }).length;
-                        const mixedPrevFY = noTrip>0 && noTrip<lines.length && prevFYCount===noTrip;
-                        const alreadySaved = (trips||[]).some(t=>t.invoiceNo===scanResult.invoiceNo);
+                        // Missing DIs and amount mismatches no longer block saving — both now
+                        // create an action item (missing_di → assigned employee/owner;
+                        // amount_mismatch → owner-only) while the invoice still gets applied.
+                        // The only real blockers left are: nothing scanned, no client/material
+                        // chosen yet, or this exact invoice already applied/logged.
+                        const alreadySaved = (trips||[]).some(t=>t.invoiceNo===scanResult.invoiceNo || (t.diLines||[]).some(d=>d.invoiceNo===scanResult.invoiceNo))
+                          || (actionItems||[]).some(ai=>ai.invoiceNo===scanResult.invoiceNo && ai.status==="open");
+                        const canApply = lines.length>0 && !alreadySaved && scanClient && scanMaterial;
                         return (<>
                           <div style={{marginTop:8,padding:"8px 0",display:"flex",gap:12,flexWrap:"wrap",
                             fontSize:11,borderTop:`1px solid ${C.border}`}}>
@@ -20241,14 +20244,14 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                               ? <span style={{color:"#1b6e3a",fontWeight:700}}>✓ All {lines.length} trips matched — ready to apply</span>
                               : <>
                                   <span style={{color:"#1b6e3a"}}>{amtOk} matched</span>
-                                  {amtMismatch>0 && <span style={{color:"#c67c00"}}>⚠ {amtMismatch} amount mismatch</span>}
-                                  {noTrip>0 && <span style={{color:"#b91c1c"}}>✗ {noTrip} trip not in system — add to Trips tab first</span>}
+                                  {amtMismatch>0 && <span style={{color:"#c67c00"}}>⚠ {amtMismatch} amount mismatch — will bill at invoice amount + flag owner</span>}
+                                  {noTrip>0 && <span style={{color:"#b91c1c"}}>ℹ {noTrip} DI not in system — will create action item(s) instead of blocking</span>}
                                 </>}
                           </div>
                           {alreadySaved && (
                             <div style={{background:"#fef2f2",border:"1px solid #ff6b6b44",borderRadius:8,
                               padding:"8px 12px",color:"#b91c1c",fontSize:12,fontWeight:700}}>
-                              ⚠ Invoice {scanResult.invoiceNo} is already saved. Scanning again will not change anything.
+                              ⚠ Invoice {scanResult.invoiceNo} is already saved or logged. Scanning again will not change anything.
                             </div>
                           )}
                           {/* Client + Material override */}
@@ -20279,19 +20282,16 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                           )}
                           <div style={{display:"flex",gap:8,marginTop:8}}>
                             <button onClick={applyInvoiceScan}
-                              disabled={(!allOk&&!allUnmatched&&!mixedPrevFY)||alreadySaved||!scanClient||!scanMaterial}
+                              disabled={!canApply}
                               style={{flex:1,
-                                background:(allOk||allUnmatched||mixedPrevFY)&&!alreadySaved&&scanClient&&scanMaterial
-                                  ?(allUnmatched||mixedPrevFY)?C.orange:C.green:C.dim,
-                                color:(allOk||allUnmatched||mixedPrevFY)&&!alreadySaved&&scanClient&&scanMaterial?"#000":"#666",
+                                background:canApply?(allOk?C.green:C.orange):C.dim,
+                                color:canApply?"#000":"#666",
                                 border:"none",borderRadius:6,padding:"10px",fontWeight:700,
-                                cursor:(allOk||allUnmatched||mixedPrevFY)&&!alreadySaved&&scanClient&&scanMaterial?"pointer":"not-allowed",fontSize:13}}>
+                                cursor:canApply?"pointer":"not-allowed",fontSize:13}}>
                               {alreadySaved ? "Already Saved"
                                 : !scanClient||!scanMaterial ? "Select client & material first"
                                 : allOk ? "✓ Apply — Mark Billed"
-                                : allUnmatched ? "📅 Save as Previous FY Invoice"
-                                : mixedPrevFY ? "📅 Apply (includes Prev FY trips)"
-                                : "Fix issues above first"}
+                                : "✓ Apply — Bill matched, log the rest as action items"}
                             </button>
                             <button onClick={()=>setScanResult(null)}
                               style={{background:"#e8f0fa",color:C.muted,border:"1px solid #ccddf0",borderRadius:6,
