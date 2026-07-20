@@ -8078,17 +8078,24 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                           <span style={{color:C.blue,fontWeight:700}}>LR: {t.lrNo||"—"}</span>
                           {t.grNo && <span style={{color:C.muted}}> · GR: {t.grNo}</span>}
                         </div>
-                        {/* DI numbers in bold — each shows its own billed/pending state for multi-DI trips */}
+                        {/* DI numbers in bold — each shows its own billed/pending state AND
+                            its own invoice number for multi-DI trips (two DIs on one LR can
+                            legitimately be billed under two different invoices) */}
                         {(t.diLines&&t.diLines.length>1) ? (
-                          <div style={{fontSize:11,marginTop:2,fontWeight:800,color:C.text,display:"flex",flexWrap:"wrap",gap:6,alignItems:"center"}}>
-                            <span>DI:</span>
+                          <div style={{fontSize:11,marginTop:2,display:"flex",flexWrap:"wrap",gap:6,alignItems:"center"}}>
+                            <span style={{fontWeight:800,color:C.text}}>DI:</span>
                             {t.diLines.filter(d=>d.diNo).map((d,i)=>(
-                              <span key={d.diNo+i} style={{display:"inline-flex",alignItems:"center",gap:3}}>
-                                {d.diNo}
-                                <span style={{fontSize:9,fontWeight:700,padding:"1px 5px",borderRadius:5,
-                                  color:"#fff",background:d.billed?C.blue:"#d97706"}}>
-                                  {d.orderType==="party"?"Party ":"Godown "}{d.billed?"✓":"⏳"}
+                              <span key={d.diNo+i} style={{display:"inline-flex",flexDirection:"column",alignItems:"flex-start"}}>
+                                <span style={{display:"inline-flex",alignItems:"center",gap:3}}>
+                                  <span style={{fontWeight:800,color:C.text}}>{d.diNo}</span>
+                                  <span style={{fontSize:9,fontWeight:700,padding:"1px 5px",borderRadius:5,
+                                    color:"#fff",background:d.billed?C.blue:"#d97706"}}>
+                                    {d.orderType==="party"?"Party ":"Godown "}{d.billed?"✓":"⏳"}
+                                  </span>
                                 </span>
+                                {d.billed && d.invoiceNo && (
+                                  <span style={{fontSize:9,color:C.muted,fontFamily:"monospace"}}>{d.invoiceNo}</span>
+                                )}
                               </span>
                             ))}
                           </div>
@@ -18828,27 +18835,47 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
   const shreeInvoices = useMemo(() => {
     const map = {};
     const isValidDate = d => /^\d{4}-\d{2}-\d{2}$/.test(d);
-    // Count of actual DI lines billed under THIS invoice — a multi-DI trip can
-    // contribute more than one DI to the same invoice, so this is NOT the same
-    // as trip count.
-    const diCountFor = (t, invoiceNo) => (t.diLines||[]).length > 0
-      ? (t.diLines||[]).filter(d=>d.invoiceNo===invoiceNo).length
-      : (t.invoiceNo===invoiceNo ? 1 : 0);
-    payTrips.filter(t=>t.billedToShree&&t.invoiceNo).forEach(t => {
-      if(!map[t.invoiceNo]) {
-        const isClinkerPrev = (t.batchId||"").startsWith("CLINKER-PREVFY-");
-        const clinkerPrevFYNum = isClinkerPrev ? parseInt((t.batchId||"").split("CLINKER-PREVFY-")[1]||"0") : null;
-        map[t.invoiceNo] = {
-          invoiceNo:t.invoiceNo, invoiceDate:parseDD(t.invoiceDate||""), totalAmt:0, trips:[], diCount:0, status:"billed",
-          prevFY: isClinkerPrev || t.prevFY || t.grParticulars?.prevFY || false,
-          prevFYLabel: isClinkerPrev ? FY_LABEL(clinkerPrevFYNum) : (t.prevFYLabel||t.grParticulars?.prevFYLabel||""),
-          clinkerInvoice: isClinkerPrev || t.grParticulars?.clinkerPlaceholder || false,
-        };
+    const ensureInvoice = (invNo, dateSample, sampleTrip) => {
+      if(map[invNo]) return;
+      const isClinkerPrev = (sampleTrip.batchId||"").startsWith("CLINKER-PREVFY-");
+      const clinkerPrevFYNum = isClinkerPrev ? parseInt((sampleTrip.batchId||"").split("CLINKER-PREVFY-")[1]||"0") : null;
+      map[invNo] = {
+        invoiceNo:invNo, invoiceDate:parseDD(dateSample||""), totalAmt:0, trips:[], diCount:0, status:"billed",
+        prevFY: isClinkerPrev || sampleTrip.prevFY || sampleTrip.grParticulars?.prevFY || false,
+        prevFYLabel: isClinkerPrev ? FY_LABEL(clinkerPrevFYNum) : (sampleTrip.prevFYLabel||sampleTrip.grParticulars?.prevFYLabel||""),
+        clinkerInvoice: isClinkerPrev || sampleTrip.grParticulars?.clinkerPlaceholder || false,
+      };
+    };
+    payTrips.forEach(t => {
+      const lines = t.diLines||[];
+      if(lines.length > 0) {
+        // Multi-DI trip: one entry per BILLED diLine, grouped under THAT
+        // line's OWN invoice number and using ONLY that line's own billed
+        // amount — never the trip's combined billedToShree, which would
+        // double-count a sibling DI billed under a completely different
+        // invoice (this was the actual reported bug: SKLC744's invoice-67
+        // total included an amount from a DI that isn't even on invoice 67).
+        lines.filter(d=>d.billed && d.invoiceNo).forEach(d => {
+          ensureInvoice(d.invoiceNo, d.invoiceDate, t);
+          map[d.invoiceNo].trips.push({...t,
+            id: t.id+"__"+normalizeDI(d.diNo), // unique key per DI line, not per trip
+            diNo: d.diNo, grNo: d.grNo||t.grNo, qty: d.qty||t.qty,
+            billedToShree: d.billedAmt||0, invoiceNo: d.invoiceNo, invoiceDate: d.invoiceDate,
+          });
+          map[d.invoiceNo].totalAmt += Number(d.billedAmt||0);
+          map[d.invoiceNo].diCount += 1;
+          // Payment tracking is trip-level only in this data model (not
+          // per-DI) — a known limitation, unchanged by this fix.
+          if(t.paymentDate) map[d.invoiceNo].status = "paid";
+        });
+      } else if(t.billedToShree && t.invoiceNo) {
+        // Single-DI trip: unchanged, one DI = one invoice always.
+        ensureInvoice(t.invoiceNo, t.invoiceDate, t);
+        map[t.invoiceNo].trips.push(t);
+        map[t.invoiceNo].totalAmt += Number(t.billedToShree||0);
+        map[t.invoiceNo].diCount += 1;
+        if(t.paymentDate) map[t.invoiceNo].status = "paid";
       }
-      map[t.invoiceNo].trips.push(t);
-      map[t.invoiceNo].totalAmt += Number(t.billedToShree||0);
-      map[t.invoiceNo].diCount += diCountFor(t, t.invoiceNo);
-      if(t.paymentDate) map[t.invoiceNo].status = "paid";
     });
     // If invoiceDate is invalid/missing, use earliest trip date as fallback
     Object.values(map).forEach(inv => {
@@ -18859,6 +18886,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     });
     return Object.values(map).sort((a,b)=>(b.invoiceDate||"").localeCompare(a.invoiceDate||""));
   }, [trips, payClient, payMaterial]);
+
 
   const shreeTrips = payTrips.filter(t=>t.billedToShree)
     .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
