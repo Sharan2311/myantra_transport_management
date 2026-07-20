@@ -1887,16 +1887,25 @@ function AppMain() {
       // Multi-DI trip: check each unbilled diLine for an exact DI match.
       if((t.diLines||[]).length > 0) {
         let changed = false;
+        let lastHit = null;
         const newDiLines = t.diLines.map(d => {
           if(d.billed) return d;
           const hit = open.find(ai => normalizeDI(ai.diNo)===normalizeDI(d.diNo));
           if(!hit) return d;
           changed = true;
+          lastHit = hit;
           resolvedIds.push(hit.id);
           return {...d, billed:true, invoiceNo:hit.invoiceNo, invoiceDate:hit.invoiceDate, billedAmt:hit.invoiceAmt};
         });
         if(!changed) return t;
-        const updated = {...t, diLines:newDiLines};
+        const updated = {...t, diLines:newDiLines,
+          // Trip-level invoiceNo/invoiceDate kept in sync with the MOST RECENT
+          // invoice to touch this trip — legacy views (Invoices tab, GST Hold,
+          // receivables, Pill status, search) all key off these trip-level
+          // fields and don't know about per-DI billing. Known tradeoff: if a
+          // trip's two DIs are ever billed under genuinely different invoice
+          // numbers, this field only reflects the latest one (see chat).
+          invoiceNo:lastHit.invoiceNo, invoiceDate:lastHit.invoiceDate};
         updated.status = tripBillingStatus(updated);
         updated.billedToShree = tripBilledAmount(updated);
         if(updated.status==="Billed") { updated.billedBy="auto-resolve"; updated.billedAt=ts; updated.shreeStatus="billed"; }
@@ -8087,6 +8096,20 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                           <div style={{fontSize:11,marginTop:2,fontWeight:800,color:C.text}}>DI: {t.diNo}</div>
                         ) : null}
                         <div style={{color:C.muted,fontSize:11,marginTop:1}}>{t.from}→{t.to} · {t.date}</div>
+                        {(() => {
+                          // Assigned employee: direct trip assignment first, else the
+                          // truck's linked fleet manager (same resolution used for
+                          // missing-DI action items) — shown as a fallback label.
+                          const direct = t.assignedEmpId && (employees||[]).find(e=>e.id===t.assignedEmpId);
+                          const linked = !direct && (employees||[]).find(e=>(e.linkedTrucks||[]).some(tr=>String(tr).toUpperCase().trim()===String(t.truckNo||"").toUpperCase().trim()));
+                          const emp = direct || linked;
+                          if(!emp) return null;
+                          return (
+                            <div style={{fontSize:11,marginTop:1,color:C.purple,fontWeight:600}}>
+                              👤 {emp.name}{!direct?" (fleet mgr)":""}
+                            </div>
+                          );
+                        })()}
                       </div>
                       <div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0}}>
                         <Badge label={t.status} color={SC(t.status)} />
@@ -19091,12 +19114,27 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                        : chosenMaterial==="Raw Material" ? "inbound"
                        : null;
 
-    // Block only an exact re-scan of an invoice already applied — either billed
-    // onto a trip/DI-line, or already sitting as an open "missing DI" action item.
-    const alreadyBilled = (trips||[]).some(t=>t.invoiceNo===invNo || (t.diLines||[]).some(d=>d.invoiceNo===invNo));
-    const alreadyLogged = (actionItems||[]).some(ai=>ai.invoiceNo===invNo && ai.status==="open");
-    if(alreadyBilled || alreadyLogged) {
-      setScanError("Invoice "+invNo+" is already scanned and saved. No changes made.");
+    // Block only when EVERY line on this invoice is already fully resolved —
+    // either billed onto a trip/DI-line, or already sitting as an open action
+    // item. A PARTIALLY processed invoice (some lines billed, one genuinely
+    // missing) must still be re-scannable so the remaining line gets its
+    // action item created — re-billing already-billed lines is harmless
+    // (same invoiceNo/date/amount gets written again).
+    const scTripsForDupeCheck = scanResult.trips||[];
+    const lineAlreadyResolved = (st) => {
+      const m = matchInvoiceLine(st, trips||[]);
+      if(m) {
+        const t = m.trip;
+        if((t.diLines||[]).length > 0) {
+          const stDi = normalizeDI(st.diNo), stGr = normalizeDI(st.grNo);
+          const dl = t.diLines.find(d => (stDi && normalizeDI(d.diNo)===stDi) || (!stDi && stGr && normalizeDI(d.grNo)===stGr));
+          if(dl?.billed && dl.invoiceNo===invNo) return true;
+        } else if(t.invoiceNo===invNo) return true;
+      }
+      return (actionItems||[]).some(ai=>ai.invoiceNo===invNo && ai.status==="open" && normalizeDI(ai.diNo)===normalizeDI(st.diNo));
+    };
+    if(scTripsForDupeCheck.length>0 && scTripsForDupeCheck.every(lineAlreadyResolved)) {
+      setScanError("Invoice "+invNo+" is already fully processed. No changes made.");
       return;
     }
 
@@ -19184,6 +19222,10 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
           return {...d, billed:true, invoiceNo:invNo, invoiceDate:invDate, billedAmt:invoiceAmt};
         });
         updated = {...t, diLines:newDiLines,
+          // Kept in sync so legacy trip-level views (Invoices tab, GST Hold,
+          // receivables, Pill status, search, deleteInvoice) still work for
+          // multi-DI trips — see note in the auto-resolve effect above.
+          invoiceNo:invNo, invoiceDate:invDate,
           ...(chosenClient ? {client:chosenClient} : {}),
           ...(typeOverride  ? {type:typeOverride}   : {})};
         updated.status = tripBillingStatus(updated);
@@ -19455,11 +19497,33 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
   // delete (owner only)
   const deleteInvoice = async (invoiceNo) => {
     if(!window.confirm(`Delete invoice ${invoiceNo}? This will unmark all its trips.`)) return;
-    const updated = (trips||[]).map(t=>t.invoiceNo===invoiceNo
-      ?{...t,invoiceNo:"",invoiceDate:"",billedToShree:0,shreeStatus:"pending"}:t);
+    const updated = (trips||[]).map(t => {
+      const hasDiLineMatch = (t.diLines||[]).some(d=>d.invoiceNo===invoiceNo);
+      if(t.invoiceNo!==invoiceNo && !hasDiLineMatch) return t;
+      if((t.diLines||[]).length > 0) {
+        // Revert only the diLine(s) billed under THIS invoice — a trip billed
+        // across two invoices (one per DI) keeps the other DI's billing intact.
+        const newDiLines = t.diLines.map(d => d.invoiceNo===invoiceNo
+          ? {...d, billed:false, invoiceNo:"", invoiceDate:"", billedAmt:0} : d);
+        const reverted = {...t, diLines:newDiLines};
+        reverted.status = tripBillingStatus(reverted);
+        reverted.billedToShree = tripBilledAmount(reverted);
+        // Trip-level invoiceNo/invoiceDate/shreeStatus only clear if NO diLine
+        // is billed anymore; otherwise leave them as-is (still reflects the
+        // other invoice still billing this trip, if any lines remain billed).
+        if(reverted.status==="Pending Bill") { reverted.invoiceNo=""; reverted.invoiceDate=""; reverted.shreeStatus="pending"; }
+        return reverted;
+      }
+      return {...t,invoiceNo:"",invoiceDate:"",billedToShree:0,shreeStatus:"pending"};
+    });
     setTrips(updated);
-    // Persist each reverted trip to DB
-    for(const t of updated.filter(t=>t.shreeStatus==="pending"&&!t.invoiceNo)){
+    // Persist every trip that was actually touched by this revert (whether it
+    // went fully back to Pending Bill, or just lost one diLine while another
+    // DI on the same trip stays billed under a different invoice).
+    const touchedIds = new Set((trips||[])
+      .filter(t => t.invoiceNo===invoiceNo || (t.diLines||[]).some(d=>d.invoiceNo===invoiceNo))
+      .map(t=>t.id));
+    for(const t of updated.filter(t=>touchedIds.has(t.id))){
       try { await DB.saveTrip(t); } catch(e){ console.error("revert trip:",e); }
     }
     log && log(`Invoice ${invoiceNo} deleted by ${user?.name}`);
@@ -20232,10 +20296,22 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                         // Missing DIs and amount mismatches no longer block saving — both now
                         // create an action item (missing_di → assigned employee/owner;
                         // amount_mismatch → owner-only) while the invoice still gets applied.
-                        // The only real blockers left are: nothing scanned, no client/material
-                        // chosen yet, or this exact invoice already applied/logged.
-                        const alreadySaved = (trips||[]).some(t=>t.invoiceNo===scanResult.invoiceNo || (t.diLines||[]).some(d=>d.invoiceNo===scanResult.invoiceNo))
-                          || (actionItems||[]).some(ai=>ai.invoiceNo===scanResult.invoiceNo && ai.status==="open");
+                        // "Already saved" only means EVERY line is already resolved (billed or
+                        // logged) — a partially-processed invoice must stay re-scannable so the
+                        // remaining unresolved line(s) can still get their action item created.
+                        const lineAlreadyResolvedPreview = (st) => {
+                          const m = matchInvoiceLine(st, trips||[]);
+                          if(m) {
+                            const t = m.trip;
+                            if((t.diLines||[]).length > 0) {
+                              const stDi = normalizeDI(st.diNo), stGr = normalizeDI(st.grNo);
+                              const dl = t.diLines.find(d => (stDi && normalizeDI(d.diNo)===stDi) || (!stDi && stGr && normalizeDI(d.grNo)===stGr));
+                              if(dl?.billed && dl.invoiceNo===scanResult.invoiceNo) return true;
+                            } else if(t.invoiceNo===scanResult.invoiceNo) return true;
+                          }
+                          return (actionItems||[]).some(ai=>ai.invoiceNo===scanResult.invoiceNo && ai.status==="open" && normalizeDI(ai.diNo)===normalizeDI(st.diNo));
+                        };
+                        const alreadySaved = lines.length>0 && lines.every(lineAlreadyResolvedPreview);
                         const canApply = lines.length>0 && !alreadySaved && scanClient && scanMaterial;
                         return (<>
                           <div style={{marginTop:8,padding:"8px 0",display:"flex",gap:12,flexWrap:"wrap",
