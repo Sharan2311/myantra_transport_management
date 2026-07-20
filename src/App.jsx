@@ -77,6 +77,48 @@ const tafalAmountFor = (veh, employees, settingsObj, assignedEmpId) => {
 // Precedence (must match tafalAmountFor exactly): trip-assigned-employee exempt >
 // vehicle-linked-employee exempt > manual vehicle exempt > vehicle override > global rate.
 const isTafalExempt = (veh, employees, assignedEmpId) => !!employeeTafalExemptFor(veh?.truckNo, employees, assignedEmpId) || !!veh?.tafalExempt;
+
+// ── Per-DI billing (multi-DI / partial billing) ─────────────────────────────
+// DI numbers must match EXACTLY (trim only) — no case-folding or fuzzy match,
+// per explicit instruction: a DI cannot be duplicated across trips so an exact
+// string match is the only correct comparison.
+const normalizeDI = s => String(s||"").trim();
+
+// A trip's diLines carry per-line billing now (billed/invoiceNo/invoiceDate/billedAmt).
+// Trip-level status is DERIVED from these, never set independently for billing purposes:
+//   - no diLines (or all empty)      → unchanged (caller decides, e.g. "Pending Bill")
+//   - every diLine billed            → "Billed"
+//   - some (not all) diLines billed  → "Partially Billed"
+//   - none billed                    → "Pending Bill"
+const tripBillingStatus = (trip) => {
+  const lines = trip.diLines||[];
+  if(lines.length === 0) return trip.status; // single-DI-only trips w/o diLines handled by caller
+  const billedCount = lines.filter(d=>d.billed).length;
+  if(billedCount === 0) return "Pending Bill";
+  if(billedCount === lines.length) return "Billed";
+  return "Partially Billed";
+};
+
+// The trip's own billedToShree = sum of what's actually been billed across diLines
+// (so partially-billed trips report only the billed portion, not the full estimate).
+const tripBilledAmount = (trip) => {
+  const lines = trip.diLines||[];
+  if(lines.length === 0) return trip.billedToShree||0;
+  return lines.reduce((s,d)=>s + (d.billed ? (d.billedAmt||0) : 0), 0);
+};
+
+// Resolve which employee is responsible for a truck when a DI/trip doesn't exist
+// yet in the app: use the most recent trip (by date) for that truck number and
+// its assignedEmpId. Returns "" (owner-only / unassigned) if the truck has no
+// trip history at all in the app.
+const resolveEmpForTruck = (truckNo, tripList) => {
+  const norm = String(truckNo||"").toUpperCase().trim();
+  if(!norm) return "";
+  const truckTrips = (tripList||[])
+    .filter(t => String(t.truckNo||"").toUpperCase().trim() === norm)
+    .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+  return truckTrips[0]?.assignedEmpId || "";
+};
 // True only when employee_self is the user's ONLY role — used to decide whether to
 // force-land on the wallet tab / hide dashboard. A combined role (e.g. a fleet
 // manager who is also a driver) keeps their normal landing tab and other tabs,
@@ -401,7 +443,11 @@ const mkTrip = (o) => ({
 const Badge = ({label, color}) => (
   <span style={{background:color+"22",color,border:`1px solid ${color}44`,borderRadius:20,padding:"3px 10px",fontSize:11,fontWeight:700,whiteSpace:"nowrap"}}>{label}</span>
 );
-const SC = s => ({"Pending Bill":C.accent,"Yet to Bill":"#7c3aed","Billed":C.blue,"Paid":C.green,"Unpaid":C.red}[s]||C.muted);
+const SC = s => ({"Pending Bill":C.accent,"Yet to Bill":"#7c3aed","Partially Billed":"#d97706","Billed":C.blue,"Paid":C.green,"Unpaid":C.red}[s]||C.muted);
+// A trip counts as "unbilled" for search/filter purposes if it's fully pending
+// OR partially billed (some DI lines billed, at least one — e.g. the party DI
+// on a mixed godown+party LR — still pending).
+const isUnbilled = t => t.status==="Pending Bill" || t.status==="Partially Billed";
 
 const Field = ({label, value, onChange, type="text", placeholder="", opts=null, half=false, note=""}) => {
   const isNum = type === "number";
@@ -820,7 +866,7 @@ function BottomNav({tab, setTab, user, trips, driverPays, vehicles, dieselReques
   const visibleItems = items.filter(n => (!n.perm || can(user, n.perm)) && canFeature(n.feat));
 
   // Badge counts
-  const pendingBills = (trips||[]).filter(t=>t.status==="Pending Bill").length;
+  const pendingBills = (trips||[]).filter(isUnbilled).length;
   const unsettledDrivers = (trips||[]).filter(t=>{
     if(t.driverSettled) return false;
     const veh = (vehicles||[]).find(v=>v.truckNo===t.truckNo);
@@ -901,7 +947,7 @@ const MORE_GROUPS = [
 ];
 function MoreMenu({user, setTab, trips, driverPays, vehicles}) {
   // Compute badges for more menu items
-  const pendingBills = (trips||[]).filter(t=>t.status==="Pending Bill").length;
+  const pendingBills = (trips||[]).filter(isUnbilled).length;
   const unsettled = (trips||[]).filter(t=>{
     if(t.driverSettled) return false;
     const veh=(vehicles||[]).find(v=>v.truckNo===t.truckNo);
@@ -1520,6 +1566,7 @@ function AppMain() {
   const [cashTransfers,  setCashTransfers,  rCT, reloadCashTransfers] = useDB(DB.getCashTransfers,  [], 650);
   const [pumpPayments,   setPumpPayments,   rPP, reloadPumpPayments]  = useDB(DB.getPumpPayments,   [], 650);
   const [paymentRequests, setPaymentRequests, rPR] = useDB(DB.getPaymentRequests, [],               650);
+  const [actionItems, setActionItems, rAI, reloadActionItems] = useDB(DB.getActionItems, [],         650);
   const dbSetPumpPayments = async (val) => { setPumpPayments(val); };
 
   const loading = !rU||!rT||!rV||!rE||!rP||!rS||!rPu||!rI||!rSt||!rDP||!rEx||!rGR;
@@ -1780,6 +1827,7 @@ function AppMain() {
     gstReleases, setGstReleases:dbSetGstReleases,
     cashTransfers, setCashTransfers:dbSetCashTransfers,
     paymentRequests, setPaymentRequests,
+    actionItems, setActionItems,
     user, log,
     allTripsLoaded, loadingAllTrips, loadAllTrips,
   };
@@ -1819,6 +1867,57 @@ function AppMain() {
       return done;
     }));
   }, [trips, driverPays, vehicles, allTripsLoaded]);
+
+  // ── Auto-resolve "missing DI" action items ─────────────────────────────────
+  // Runs whenever trips or actionItems change — so it fires no matter which
+  // screen/flow the employee used to finally add the missing DI (single-trip
+  // form, party trip form, batch DI scanner, etc.) without needing to hook
+  // every trip-creation code path individually.
+  // Match is an EXACT DI-number match only (no fuzzy/normalized comparison
+  // beyond trim) — a DI cannot be duplicated across trips, so exact match is
+  // the only correct comparison. On match: bill using the invoice info stored
+  // on the action item, mark the trip/DI-line billed, then delete the item.
+  React.useEffect(() => {
+    const open = (actionItems||[]).filter(ai=>ai.type==="missing_di" && ai.status==="open" && ai.diNo);
+    if(open.length===0 || !trips?.length) return;
+
+    const resolvedIds = [];
+    const ts = nowTs();
+    dbSetTrips(prev => prev.map(t => {
+      // Multi-DI trip: check each unbilled diLine for an exact DI match.
+      if((t.diLines||[]).length > 0) {
+        let changed = false;
+        const newDiLines = t.diLines.map(d => {
+          if(d.billed) return d;
+          const hit = open.find(ai => normalizeDI(ai.diNo)===normalizeDI(d.diNo));
+          if(!hit) return d;
+          changed = true;
+          resolvedIds.push(hit.id);
+          return {...d, billed:true, invoiceNo:hit.invoiceNo, invoiceDate:hit.invoiceDate, billedAmt:hit.invoiceAmt};
+        });
+        if(!changed) return t;
+        const updated = {...t, diLines:newDiLines};
+        updated.status = tripBillingStatus(updated);
+        updated.billedToShree = tripBilledAmount(updated);
+        if(updated.status==="Billed") { updated.billedBy="auto-resolve"; updated.billedAt=ts; updated.shreeStatus="billed"; }
+        return updated;
+      }
+      // Single-DI trip: only if it's not already billed.
+      if(t.status==="Billed" || t.status==="Partially Billed") return t;
+      const hit = open.find(ai => normalizeDI(ai.diNo)===normalizeDI(t.diNo));
+      if(!hit) return t;
+      resolvedIds.push(hit.id);
+      return {...t, invoiceNo:hit.invoiceNo, invoiceDate:hit.invoiceDate,
+        status:"Billed", billedBy:"auto-resolve", billedAt:ts, shreeStatus:"billed",
+        billedToShree: hit.invoiceAmt || (t.qty||0)*(t.frRate||0)};
+    }));
+
+    if(resolvedIds.length>0 && setActionItems) {
+      setActionItems(prev => (prev||[]).filter(ai => !resolvedIds.includes(ai.id)));
+      resolvedIds.forEach(id => DB.deleteActionItem(id).catch(e=>console.error("deleteActionItem auto-resolve:",e)));
+      log && log("Auto-billed "+resolvedIds.length+" DI(s) on upload — action item(s) closed");
+    }
+  }, [trips, actionItems]);
 
   if (!user) {
     if (loading) return (
@@ -2032,7 +2131,7 @@ function AppMain() {
   );
 }
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
-function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pumps, pumpPayments, driverPays, cashTransfers, activity, settings, setTab, user, selectedFY, selectedClient}) {
+function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pumps, pumpPayments, driverPays, cashTransfers, activity, settings, setTab, user, selectedFY, selectedClient, actionItems=[]}) {
   const [dashMonth, setDashMonth] = useState(""); // "YYYY-MM" or "" = all
   const [uncreditedOpen, setUncreditedOpen] = useState(false);
   const [creditedOpen,   setCreditedOpen]   = useState(false);
@@ -2063,7 +2162,7 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   const monthTripsAll   = allFyClientTrips.filter(t => (t.date||"").startsWith(monthPrefix));
   const monthTotalTons  = monthTripsAll.reduce((s,t)=>s+(+(t.qty)||0),0);
   const monthAvgTons    = todayDayNum > 0 ? monthTotalTons / todayDayNum : 0;
-  const pending     = allFyClientTrips.filter(t => t.status==="Pending Bill");
+  const pending     = allFyClientTrips.filter(isUnbilled);
   const weekAgo     = new Date(); weekAgo.setDate(weekAgo.getDate()-7);
   const weekAgoStr  = weekAgo.toISOString().split("T")[0];
   const oldUnsettled = allFyClientTrips.filter(t => !t.driverSettled && t.date < weekAgoStr && (t.qty||0)*(t.givenRate||0)>0);
@@ -2105,7 +2204,7 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   const creditedInvoices   = allInvoices.filter(x=>x.paid);
 
   // ── Unbilled: trips not yet invoiced to Shree ────────────────────────────────
-  const unbilledTrips = clientFiltered.filter(t=>t.status==="Pending Bill");
+  const unbilledTrips = clientFiltered.filter(isUnbilled);
   const unbilledTotal = unbilledTrips.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
 
   // KPIs derived from same source as the invoice lists — consistent numbers
@@ -2198,10 +2297,10 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
           Today — {todayStr}
           {fyLabel && <span style={{color:C.accent,marginLeft:8,fontWeight:600}}>· {fyLabel}</span>}
         </div>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+        <div style={{display:"grid",gridTemplateColumns:user.role==="fleet_manager"?"1fr 1fr":"1fr 1fr 1fr",gap:8}}>
           {[
             {l:"Trips Added",  v:todayTrips.length,       c:C.blue},
-            {l:"Today Margin", v:fmt(todayMargin),         c:C.green},
+            ...(user.role!=="fleet_manager" ? [{l:"Today Margin", v:fmt(todayMargin), c:C.green}] : []),
             {l:"Pending Bills",v:pending.length,           c:pending.length>0?C.accent:C.muted},
           ].map(x=>(
             <div key={x.l} style={{background:C.bg,borderRadius:8,padding:"8px",textAlign:"center"}}>
@@ -2356,6 +2455,33 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
               </div>
             )}
           </>
+        );
+      })()}
+
+      {/* ── Missing-DI action items assigned to this employee — bold, impossible to miss ── */}
+      {(() => {
+        const myItems = (actionItems||[]).filter(ai=>ai.type==="missing_di" && ai.status==="open" && ai.empId && ai.empId===user.assignedEmployeeId);
+        if(myItems.length===0) return null;
+        return (
+          <div style={{background:C.red+"18",border:`2px solid ${C.red}`,borderRadius:14,padding:"14px 16px"}}>
+            <div style={{color:C.red,fontSize:14,fontWeight:900,textTransform:"uppercase",letterSpacing:0.5,marginBottom:10,display:"flex",alignItems:"center",gap:6}}>
+              🚨 Upload These DIs — {myItems.length} Missing
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {myItems.map(ai=>(
+                <div key={ai.id} style={{background:C.card,borderRadius:10,padding:"10px 12px",border:`1px solid ${C.red}55`}}>
+                  <div style={{fontWeight:900,fontSize:15,color:C.text}}>DI: {ai.diNo||"—"}</div>
+                  <div style={{fontSize:12,color:C.muted,marginTop:2}}>
+                    {ai.truckNo && <>Truck: {ai.truckNo} · </>}
+                    Invoice date: {ai.invoiceDate||"—"} · Invoice #{ai.invoiceNo}
+                  </div>
+                  <div style={{fontSize:11,color:C.red,marginTop:2,fontWeight:700}}>
+                    This LR was billed to Shree but the DI is missing from the app — add the trip to complete billing.
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
         );
       })()}
 
@@ -2647,7 +2773,7 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
                   {clientData.map(cd=>{
                     const billed   = cd.cement.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
                     const received = (payments||[]).filter(p=>p.client===cd.name||!p.client).reduce((s,p)=>s+Number(p.totalPaid||0),0);
-                    const pending  = cd.cement.filter(t=>t.status==="Pending Bill");
+                    const pending  = cd.cement.filter(isUnbilled);
                     return (
                       <div key={cd.name} style={{display:"flex",alignItems:"center",gap:10,
                         background:C.bg,borderRadius:8,padding:"8px 10px",
@@ -7726,7 +7852,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       </div>
 
       <PillBar items={[
-        ...["All","Pending Bill","Yet to Bill","Billed","Paid"].map(s=>({id:s,label:s+(s!=="All"?` (${list.filter(t=>t.status===s).length})`:""),color:SC(s)})),
+        ...["All","Pending Bill","Partially Billed","Yet to Bill","Billed","Paid"].map(s=>({id:s,label:s+(s!=="All"?` (${list.filter(t=>t.status===s).length})`:""),color:SC(s)})),
         {id:"Confirmation Email Received",
          label:`📤 Confirmed (${list.filter(t=>t.status==="Confirmation Email Received"&&t.orderType==="party").length})`,
          color:C.teal},
@@ -7943,10 +8069,19 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                           <span style={{color:C.blue,fontWeight:700}}>LR: {t.lrNo||"—"}</span>
                           {t.grNo && <span style={{color:C.muted}}> · GR: {t.grNo}</span>}
                         </div>
-                        {/* DI numbers in bold */}
+                        {/* DI numbers in bold — each shows its own billed/pending state for multi-DI trips */}
                         {(t.diLines&&t.diLines.length>1) ? (
-                          <div style={{fontSize:11,marginTop:2,fontWeight:800,color:C.text}}>
-                            DI: {t.diLines.map(d=>d.diNo).filter(Boolean).join(" · ")}
+                          <div style={{fontSize:11,marginTop:2,fontWeight:800,color:C.text,display:"flex",flexWrap:"wrap",gap:6,alignItems:"center"}}>
+                            <span>DI:</span>
+                            {t.diLines.filter(d=>d.diNo).map((d,i)=>(
+                              <span key={d.diNo+i} style={{display:"inline-flex",alignItems:"center",gap:3}}>
+                                {d.diNo}
+                                <span style={{fontSize:9,fontWeight:700,padding:"1px 5px",borderRadius:5,
+                                  color:"#fff",background:d.billed?C.blue:"#d97706"}}>
+                                  {d.orderType==="party"?"Party ":"Godown "}{d.billed?"✓":"⏳"}
+                                </span>
+                              </span>
+                            ))}
                           </div>
                         ) : t.diNo ? (
                           <div style={{fontSize:11,marginTop:2,fontWeight:800,color:C.text}}>DI: {t.diNo}</div>
@@ -9880,7 +10015,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
 function Billing({trips, setTrips, fyTrips, selectedClient, user, log}) {
   const baseTrips = fyTrips || trips; // already role-filtered via sp
   const filteredTrips = selectedClient ? baseTrips.filter(t=>(t.client||getDEFAULT_CLIENT())===selectedClient) : baseTrips;
-  const pending = filteredTrips.filter(t => t.status==="Pending Bill");
+  const pending = filteredTrips.filter(isUnbilled);
   const billed  = filteredTrips.filter(t => t.status==="Billed");
   const paid    = filteredTrips.filter(t => t.status==="Paid");
   const [orderFilter, setOrderFilter] = useState("All"); // "All" | "godown" | "party"
@@ -18564,7 +18699,7 @@ const SearchBar = ({value,onChange,placeholder}) => (
   </div>
 );
 
-function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, setVehicles, gstReleases, setGstReleases, expenses, setExpenses, user, log}) {
+function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, setVehicles, gstReleases, setGstReleases, expenses, setExpenses, user, log, employees=[], actionItems=[], setActionItems}) {
 
   const [activeTab,   setActiveTab]   = useState("overview");
   const [scanResult,  setScanResult]  = useState(null);
@@ -18942,7 +19077,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     }
 
     const diff = invoiceAmt - expectedAmt;
-    const ok = Math.abs(diff) < 2; // ₹2 rounding tolerance
+    const ok = diff === 0; // exact match required — no tolerance
     return {ok, diff, invoiceAmt, expectedAmt};
   };
 
@@ -18956,14 +19091,18 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                        : chosenMaterial==="Raw Material" ? "inbound"
                        : null;
 
-    // Block if invoice already saved
-    if((trips||[]).some(t=>t.invoiceNo===invNo)) {
+    // Block only an exact re-scan of an invoice already applied — either billed
+    // onto a trip/DI-line, or already sitting as an open "missing DI" action item.
+    const alreadyBilled = (trips||[]).some(t=>t.invoiceNo===invNo || (t.diLines||[]).some(d=>d.invoiceNo===invNo));
+    const alreadyLogged = (actionItems||[]).some(ai=>ai.invoiceNo===invNo && ai.status==="open");
+    if(alreadyBilled || alreadyLogged) {
       setScanError("Invoice "+invNo+" is already scanned and saved. No changes made.");
       return;
     }
 
     const scTrips = scanResult.trips||[];
     const allTrips = trips||[];
+    const ts = nowTs();
 
     // Separate unmatched into prevFY vs current FY (check TRIP dates only, not invoice date)
     const unmatched = scTrips.filter(st => !matchInvoiceLine(st, allTrips));
@@ -18973,26 +19112,13 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     });
     const currentFYUnmatched = unmatched.filter(st => !prevFYUnmatched.includes(st));
 
-    // Block if any current FY trips are missing in DB
-    if(currentFYUnmatched.length > 0) {
-      const details = currentFYUnmatched.map(st =>
-        "DI: "+(st.diNo||"---")+" / GR: "+(st.grNo||"---")+" / Rs."+Number(st.frtAmt||0).toLocaleString("en-IN")
-      ).join("\n");
-      setScanError(
-        currentFYUnmatched.length+" trip"+(currentFYUnmatched.length>1?"s":"")+" not found in your Trips:\n\n"+
-        details+"\n\nAdd these trips first, then scan invoice again."
-      );
-      return;
-    }
-
-    // Save prevFY placeholder records (if any) then continue to process matched trips
+    // Save prevFY placeholder records (if any) — unchanged: these are genuinely
+    // out-of-scope trips from a closed FY, not "employee hasn't uploaded the DI yet".
     if(prevFYUnmatched.length > 0) {
       const parsedInvDate = parseDD(scanResult.invoiceDate || "");
-      // Safe FY label from trip date (avoid NaN if invoice date is missing)
       const firstTripDate = parseDD(prevFYUnmatched[0].date||"");
       const sampleFY = firstTripDate ? getFY(firstTripDate) : null;
       const fyLabel = sampleFY ? FY_LABEL(sampleFY) : "Previous FY";
-      const ts = nowTs();
       const prevFYTrips = prevFYUnmatched.map(st => ({
         id: (typeof crypto!=="undefined"&&crypto.randomUUID)?crypto.randomUUID():"prevfy_"+(st.diNo||Date.now())+"_"+Math.random().toString(36).slice(2,8),
         prevFY: true, prevFYLabel: fyLabel,
@@ -19003,51 +19129,37 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         qty: st.qty||0, frRate: st.frRate||0,
         billedToShree: Number(st.frtAmt||0),
         status: "Billed", billedBy: "scan", billedAt: ts, shreeStatus: "billed",
-        date: invDate||parsedInvDate||ts.slice(0,10), // invoice date (current FY) so it shows in billing tab
-        tripDate: parseDD(st.date||""), // original DI trip date preserved for reference
+        date: invDate||parsedInvDate||ts.slice(0,10),
+        tripDate: parseDD(st.date||""),
         lrNo: "", orderType: "outbound", client: chosenClient||"", type: "outbound",
       }));
       setTrips(prev => [...prev, ...prevFYTrips]);
       Promise.all(prevFYTrips.map(t => DB.saveTrip(t).catch(e => console.error("saveTrip prevFY:",e))));
       log && log("PrevFY "+prevFYTrips.length+" DIs saved under "+invNo+" ("+fyLabel+")");
-      // Do NOT return here - fall through to process any matched current-year trips
     }
 
-    // Check amount mismatches — distinguish hard mismatches from unverifiable multi-DI lines
-    const mismatches = scTrips.filter(st=>{
-      const m = matchInvoiceLine(st, allTrips);
-      if(!m) return false;
-      const check = checkAmount(st, m.trip);
-      return !check.ok && !check.note; // skip "unverifiable" and "unmatched-di" notes
+    // ── Current-FY DIs missing from the app → action item, does NOT block the invoice.
+    // Employee resolved via most recent trip on this truck; brand-new truck = owner-only.
+    const missingActionItems = currentFYUnmatched.map(st => {
+      const truckNo = String(st.truckNo||"").replace(/\s+/g,"").toUpperCase();
+      const empId = resolveEmpForTruck(truckNo, allTrips); // "" = owner-only/unassigned
+      return {
+        id: uid()+Date.now().toString(36),
+        type: "missing_di", status: "open",
+        diNo: normalizeDI(st.diNo), grNo: normalizeDI(st.grNo), truckNo,
+        invoiceNo: invNo, invoiceDate: invDate,
+        invoiceAmt: Number(st.frtAmt||0), expectedAmt: 0,
+        empId, tripId: "",
+        note: "",
+        createdAt: ts,
+      };
     });
-    const unverifiable = scTrips.filter(st=>{
-      const m = matchInvoiceLine(st, allTrips);
-      if(!m) return false;
-      const check = checkAmount(st, m.trip);
-      return check.note === "unverifiable"; // multi-DI without frRate per line
-    });
 
-    if(mismatches.length > 0) {
-      const details = mismatches.map(st=>{
-        const m = matchInvoiceLine(st, allTrips);
-        const {invoiceAmt, expectedAmt} = checkAmount(st, m.trip);
-        return "DI "+(st.diNo||st.grNo)+": invoice ₹"+invoiceAmt.toLocaleString("en-IN")+" vs trip ₹"+expectedAmt.toLocaleString("en-IN");
-      }).join("\n");
-      setScanError("Amount mismatch on "+mismatches.length+" line(s):\n\n"+details+"\n\nFix the trip freight rate first, then scan again.");
-      return;
-    }
-
-    // Warn about unverifiable multi-DI lines but allow proceeding
-    if(unverifiable.length > 0) {
-      const diNos = unverifiable.map(st=>st.diNo||st.grNo).join(", ");
-      const proceed = window.confirm(
-        `⚠ ${unverifiable.length} DI line(s) in this invoice belong to multi-DI trips where per-DI freight rate is not stored:\n${diNos}\n\nCannot verify individual DI amounts. The invoice total will still be saved correctly.\n\nProceed anyway?`
-      );
-      if(!proceed) return;
-    }
-
-    // All matched and amounts OK — apply
-    let matched = 0;
+    // ── Bill every matched line. Multi-DI trips: bill only the matching diLine
+    // (partial billing). Single-DI trips: bill the trip directly. Either way the
+    // INVOICE's own amount is what gets saved — no rejection on mismatch.
+    let billedCount = 0;
+    const mismatchActionItems = [];
     const updatedTrips = [];
     setTrips(prev=>prev.map(t=>{
       const lineMatch = scTrips.reduce((found, st) => {
@@ -19055,24 +19167,72 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         const r = matchInvoiceLine(st, [t]);
         return r ? {st, via:r.via} : null;
       }, null);
-      if(lineMatch) {
-        matched++;
-        const updated = {...t, invoiceNo:invNo, invoiceDate:invDate,
-          status:"Billed", billedBy:"scan", billedAt:nowTs(),
-          shreeStatus:"billed",
+      if(!lineMatch) return t;
+
+      const st = lineMatch.st;
+      const invoiceAmt = Number(st.frtAmt||0);
+      const check = checkAmount(st, t); // computed against the pre-update trip
+
+      let updated;
+      if((t.diLines||[]).length > 0) {
+        // ── Multi-DI trip: bill only the matching diLine ────────────────────────
+        const stDi = normalizeDI(st.diNo);
+        const stGr = normalizeDI(st.grNo);
+        const newDiLines = t.diLines.map(d => {
+          const dMatches = (stDi && normalizeDI(d.diNo)===stDi) || (!stDi && stGr && normalizeDI(d.grNo)===stGr);
+          if(!dMatches) return d;
+          return {...d, billed:true, invoiceNo:invNo, invoiceDate:invDate, billedAmt:invoiceAmt};
+        });
+        updated = {...t, diLines:newDiLines,
+          ...(chosenClient ? {client:chosenClient} : {}),
+          ...(typeOverride  ? {type:typeOverride}   : {})};
+        updated.status = tripBillingStatus(updated);
+        updated.billedToShree = tripBilledAmount(updated);
+        if(updated.status==="Billed") { updated.billedBy="scan"; updated.billedAt=ts; updated.shreeStatus="billed"; }
+      } else {
+        // ── Single-DI trip: bill at trip level, using the invoice's own amount ──
+        updated = {...t, invoiceNo:invNo, invoiceDate:invDate,
+          status:"Billed", billedBy:"scan", billedAt:ts, shreeStatus:"billed",
           ...(chosenClient ? {client:chosenClient} : {}),
           ...(typeOverride  ? {type:typeOverride}   : {}),
-          // Always ensure billedToShree is set — fall back to qty×frRate
-          billedToShree: Number(lineMatch.st.frtAmt||0) || Number(t.billedToShree||0) || (t.qty||0)*(t.frRate||0)};
-        updatedTrips.push(updated);
-        return updated;
+          billedToShree: invoiceAmt || Number(t.billedToShree||0) || (t.qty||0)*(t.frRate||0)};
       }
-      return t;
+      billedCount++;
+
+      // Any non-zero diff (exact match required, no tolerance) → owner-only action
+      // item flagging the gap. The line is still billed above at the invoice amount.
+      if(!check.ok && !check.note) {
+        mismatchActionItems.push({
+          id: uid()+Date.now().toString(36),
+          type: "amount_mismatch", status: "open",
+          diNo: normalizeDI(st.diNo||t.diNo), grNo: normalizeDI(st.grNo||t.grNo), truckNo: t.truckNo||"",
+          invoiceNo: invNo, invoiceDate: invDate,
+          invoiceAmt: check.invoiceAmt, expectedAmt: check.expectedAmt,
+          empId: "", tripId: t.id,
+          note: "",
+          createdAt: ts,
+        });
+      }
+
+      updatedTrips.push(updated);
+      return updated;
     }));
-    // Persist each updated trip to DB
+
     Promise.all(updatedTrips.map(t => DB.saveTrip(t).catch(e=>console.error("saveTrip invoice scan:",e))))
-      .then(()=>console.log(`Invoice ${invNo}: ${matched} trips saved to DB`));
-    log && log("Invoice "+invNo+" scanned — "+matched+" trip(s) marked Billed · "+chosenClient+" · "+chosenMaterial);
+      .then(()=>console.log(`Invoice ${invNo}: ${billedCount} DI line(s) billed`));
+
+    const allNewActionItems = [...missingActionItems, ...mismatchActionItems];
+    if(allNewActionItems.length > 0 && setActionItems) {
+      setActionItems(prev => [...allNewActionItems, ...(prev||[])]);
+      Promise.all(allNewActionItems.map(ai => DB.saveActionItem(ai).catch(e=>console.error("saveActionItem:",e))));
+    }
+
+    const parts = [];
+    if(billedCount>0) parts.push(billedCount+" DI line(s) billed");
+    if(missingActionItems.length>0) parts.push(missingActionItems.length+" DI(s) missing — action item created");
+    if(mismatchActionItems.length>0) parts.push(mismatchActionItems.length+" amount mismatch(es) flagged");
+    log && log("Invoice "+invNo+" scanned — "+(parts.join(", ")||"no changes")+" · "+chosenClient+" · "+chosenMaterial);
+
     setScanResult(null);
     setScanClient("");
     setScanMaterial("Cement");
@@ -19434,6 +19594,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
           {id:"gst",       label:"GST Hold",  badge:gstHoldPending>0?gstHoldItems.filter(g=>g.balance>0).length:null},
           {id:"gstpay",    label:"GST Recon", badge:null},
           {id:"profit",    label:"Profit",    badge:null},
+          ...(isOwner ? [{id:"action_items", label:"Action Items", badge:(actionItems||[]).filter(ai=>ai.status==="open").length||null}] : []),
         ].map(t=>(
           <button key={t.id} onClick={()=>setActiveTab(t.id)} style={{
             background:"none",border:"none",padding:"11px 14px",cursor:"pointer",
@@ -19796,6 +19957,98 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                 </Btn>
               </div>
             </Sheet>
+          );
+        })()}
+
+        {activeTab==="action_items"&&isOwner&&(()=>{
+          const empName = id => (employees||[]).find(e=>e.id===id)?.name || (id ? "Unknown employee" : "Unassigned / new truck");
+          const open = (actionItems||[]).filter(ai=>ai.status==="open").sort((a,b)=>(b.createdAt||"").localeCompare(a.createdAt||""));
+          const resolved = (actionItems||[]).filter(ai=>ai.status==="done").sort((a,b)=>(b.resolvedAt||"").localeCompare(a.resolvedAt||""));
+          const missing = open.filter(ai=>ai.type==="missing_di");
+          const mismatch = open.filter(ai=>ai.type==="amount_mismatch");
+
+          const dismiss = (ai) => {
+            if(!window.confirm("Dismiss this action item? This does not bill anything — use this only if you've resolved it manually.")) return;
+            setActionItems(prev=>(prev||[]).filter(x=>x.id!==ai.id));
+            DB.deleteActionItem(ai.id).catch(e=>console.error("deleteActionItem dismiss:",e));
+            log && log("Dismissed action item — "+ai.type+" · DI "+ai.diNo);
+          };
+
+          return (
+            <div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:16}}>
+                <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.border}`}}>
+                  <div style={{fontSize:20,fontWeight:800,color:C.red}}>{missing.length}</div>
+                  <div style={{fontSize:11,color:C.muted}}>Missing DIs (open)</div>
+                </div>
+                <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.border}`}}>
+                  <div style={{fontSize:20,fontWeight:800,color:"#d97706"}}>{mismatch.length}</div>
+                  <div style={{fontSize:11,color:C.muted}}>Amount mismatches (open)</div>
+                </div>
+              </div>
+
+              <div style={{fontSize:12,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:8}}>
+                🚨 Missing DIs — waiting on employee upload
+              </div>
+              {missing.length===0 && <div style={{color:C.muted,fontSize:13,marginBottom:16}}>None open.</div>}
+              <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:20}}>
+                {missing.map(ai=>(
+                  <div key={ai.id} style={{background:C.card,borderRadius:10,padding:"11px 14px",border:`1px solid ${C.red}44`}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                      <div>
+                        <div style={{fontWeight:800,fontSize:14}}>DI: {ai.diNo||"—"} {ai.grNo && <span style={{color:C.muted,fontWeight:400}}>· GR: {ai.grNo}</span>}</div>
+                        <div style={{fontSize:12,color:C.muted,marginTop:2}}>Truck: {ai.truckNo||"—"} · Invoice #{ai.invoiceNo} · {ai.invoiceDate||"—"} · {fmt(ai.invoiceAmt)}</div>
+                        <div style={{fontSize:12,marginTop:4,fontWeight:700,color:ai.empId?C.blue:C.orange}}>
+                          Assigned to: {empName(ai.empId)}
+                        </div>
+                      </div>
+                      <button onClick={()=>dismiss(ai)} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,fontSize:11,padding:"4px 8px",cursor:"pointer"}}>Dismiss</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div style={{fontSize:12,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:8}}>
+                ⚠ Amount mismatches — invoice differed from expected DI amount
+              </div>
+              {mismatch.length===0 && <div style={{color:C.muted,fontSize:13,marginBottom:16}}>None open.</div>}
+              <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:20}}>
+                {mismatch.map(ai=>{
+                  const diff = ai.invoiceAmt - ai.expectedAmt;
+                  return (
+                    <div key={ai.id} style={{background:C.card,borderRadius:10,padding:"11px 14px",border:`1px solid #d9770644`}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                        <div>
+                          <div style={{fontWeight:800,fontSize:14}}>DI: {ai.diNo||"—"} {ai.grNo && <span style={{color:C.muted,fontWeight:400}}>· GR: {ai.grNo}</span>}</div>
+                          <div style={{fontSize:12,color:C.muted,marginTop:2}}>Truck: {ai.truckNo||"—"} · Invoice #{ai.invoiceNo} · {ai.invoiceDate||"—"}</div>
+                          <div style={{fontSize:12,marginTop:4,fontWeight:700}}>
+                            Invoice: {fmt(ai.invoiceAmt)} vs Expected: {fmt(ai.expectedAmt)}
+                            <span style={{color:diff<0?C.red:C.green,marginLeft:6}}>({diff<0?"":"+"}{fmt(diff)})</span>
+                          </div>
+                          <div style={{fontSize:11,color:C.muted,marginTop:2}}>Already billed at the invoice amount — this is a review flag only.</div>
+                        </div>
+                        <button onClick={()=>dismiss(ai)} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,fontSize:11,padding:"4px 8px",cursor:"pointer"}}>Dismiss</button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {resolved.length>0 && (
+                <>
+                  <div style={{fontSize:12,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:8}}>
+                    ✓ Recently resolved
+                  </div>
+                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                    {resolved.slice(0,20).map(ai=>(
+                      <div key={ai.id} style={{fontSize:12,color:C.muted,padding:"6px 10px",background:C.bg,borderRadius:8}}>
+                        DI {ai.diNo} · {ai.type==="missing_di"?"uploaded":"reviewed"} · {ai.resolvedAt||"—"}
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
           );
         })()}
 
@@ -23732,7 +23985,7 @@ function DailyOps({trips, vehicles, employees, dieselRequests=[], activity=[], u
   const partyToday   = dayTrips.filter(t => t.orderType==="party");
 
   // ── STAGE 5: Bill submission ───────────────────────────────────────────────
-  const pendingBills = (trips||[]).filter(t => t.status==="Pending Bill" && t.type==="outbound");
+  const pendingBills = (trips||[]).filter(t => isUnbilled(t) && t.type==="outbound");
   const billedToday  = (trips||[]).filter(t => t.status==="Billed" && (t.billedDate||"")===viewDate);
   const paidTrips    = (trips||[]).filter(t => t.paymentStatus==="Paid" && t.type==="outbound");
 

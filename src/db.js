@@ -691,6 +691,31 @@ export const DB = {
   }), pr),
   deletePaymentRequest: id => deleteOne('mye_payment_requests', id),
 
+  // Action Items — created when invoice scan can't cleanly bill a DI:
+  //  type "missing_di"     → DI on the invoice has no matching trip in the app
+  //  type "amount_mismatch"→ DI matched, but invoice amount != app's expected amount
+  getActionItems: async () => {
+    try { return await fetchAll('mye_action_items', r => ({
+      id: r.id, type: r.type, status: r.status||'open',
+      diNo: r.di_no||'', grNo: r.gr_no||'', truckNo: r.truck_no||'',
+      invoiceNo: r.invoice_no||'', invoiceDate: r.invoice_date||'',
+      invoiceAmt: +(r.invoice_amt||0), expectedAmt: +(r.expected_amt||0),
+      empId: r.emp_id||'', tripId: r.trip_id||'',
+      note: r.note||'',
+      createdAt: r.created_at, resolvedAt: r.resolved_at||'',
+    })); } catch(e) { console.warn('mye_action_items not ready:', e.message); return []; }
+  },
+  saveActionItem: async (ai) => upsertOne('mye_action_items', ai => ({
+    id: ai.id, type: ai.type, status: ai.status||'open',
+    di_no: ai.diNo||'', gr_no: ai.grNo||'', truck_no: ai.truckNo||'',
+    invoice_no: ai.invoiceNo||'', invoice_date: ai.invoiceDate||'',
+    invoice_amt: ai.invoiceAmt||0, expected_amt: ai.expectedAmt||0,
+    emp_id: ai.empId||'', trip_id: ai.tripId||'',
+    note: ai.note||'',
+    created_at: ai.createdAt, resolved_at: ai.resolvedAt||'',
+  }), ai),
+  deleteActionItem: id => deleteOne('mye_action_items', id),
+
   // Party contacts lookup
   getPartyContacts: async () => {
     try { return await fetchAll('mye_party_contacts', partyContactFromDB); }
@@ -778,7 +803,7 @@ export const DB = {
     await sleep(350);
 
     // ── Phase 3: background — driver pays, expenses, wallet, activity etc ─────
-    const [driverPays, cashTransfers, pumpPayments, settlements, paymentRequests, activity] = await Promise.all([
+    const [driverPays, cashTransfers, pumpPayments, settlements, paymentRequests, activity, actionItems] = await Promise.all([
       safe(() => fetchRecent('mye_driver_payments', driverPayFromDB, 'date')),
       safe(async () => {
         try { return await fetchRecent('mye_cash_transfers', cashTransferFromDB, 'date'); }
@@ -806,7 +831,18 @@ export const DB = {
         if (error) throw error;
         return (data||[]).map(activityFromDB);
       }),
+      safe(async () => {
+        try { return await fetchAll('mye_action_items', r => ({
+          id: r.id, type: r.type, status: r.status||'open',
+          diNo: r.di_no||'', grNo: r.gr_no||'', truckNo: r.truck_no||'',
+          invoiceNo: r.invoice_no||'', invoiceDate: r.invoice_date||'',
+          invoiceAmt: +(r.invoice_amt||0), expectedAmt: +(r.expected_amt||0),
+          empId: r.emp_id||'', tripId: r.trip_id||'',
+          note: r.note||'',
+          createdAt: r.created_at, resolvedAt: r.resolved_at||'',
+        })); } catch(e) { console.warn('mye_action_items not ready:', e.message); return []; }
+      }),
     ]);
-    onPhase?.({ driverPays, cashTransfers, pumpPayments, settlements, paymentRequests, activity });
+    onPhase?.({ driverPays, cashTransfers, pumpPayments, settlements, paymentRequests, activity, actionItems });
   },
 }
