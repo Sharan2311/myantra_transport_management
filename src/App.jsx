@@ -19210,6 +19210,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     // INVOICE's own amount is what gets saved — no rejection on mismatch.
     let billedCount = 0;
     const mismatchActionItems = [];
+    const conflictActionItems = [];
     const updatedTrips = [];
     const pushMismatchIfAny = (st, t, check) => {
       if(check.ok || check.note) return;
@@ -19234,22 +19235,44 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
       if(lineMatches.length===0) return t;
 
       let updated;
+      let anyChange = false;
       if((t.diLines||[]).length > 0) {
         // ── Multi-DI trip: bill every matching diLine ───────────────────────────
         let newDiLines = t.diLines;
         lineMatches.forEach(st => {
-          const check = checkAmount(st, t); // checked against the ORIGINAL trip, per line
           const invoiceAmt = Number(st.frtAmt||0);
           const stDi = normalizeDI(st.diNo);
           const stGr = normalizeDI(st.grNo);
+          const target = newDiLines.find(d =>
+            (stDi && normalizeDI(d.diNo)===stDi) || (!stDi && stGr && normalizeDI(d.grNo)===stGr));
+          // A single DI must never be billed under two different invoice numbers.
+          // If this DI is already billed under a DIFFERENT invoice, don't
+          // silently overwrite it — flag the conflict and leave the original
+          // billing untouched (preserving whichever invoice billed it first).
+          if(target?.billed && target.invoiceNo && target.invoiceNo!==invNo) {
+            conflictActionItems.push({
+              id: uid()+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
+              type: "duplicate_di", status: "open",
+              diNo: normalizeDI(st.diNo||target.diNo), grNo: normalizeDI(st.grNo||target.grNo), truckNo: t.truckNo||"",
+              invoiceNo: invNo, invoiceDate: invDate,
+              invoiceAmt, expectedAmt: target.billedAmt||0,
+              note: `Already billed under ${target.invoiceNo} — now also appears on ${invNo}`,
+              empId: "", tripId: t.id,
+              createdAt: ts,
+            });
+            return;
+          }
+          const check = checkAmount(st, t); // checked against the ORIGINAL trip, per line
           newDiLines = newDiLines.map(d => {
             const dMatches = (stDi && normalizeDI(d.diNo)===stDi) || (!stDi && stGr && normalizeDI(d.grNo)===stGr);
             if(!dMatches) return d;
             return {...d, billed:true, invoiceNo:invNo, invoiceDate:invDate, billedAmt:invoiceAmt};
           });
           billedCount++;
+          anyChange = true;
           pushMismatchIfAny(st, t, check);
         });
+        if(!anyChange) return t;
         updated = {...t, diLines:newDiLines,
           // Kept in sync so legacy trip-level views (Invoices tab, GST Hold,
           // receivables, Pill status, search, deleteInvoice) still work for
@@ -19263,6 +19286,21 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
       } else {
         // ── Single-DI trip: only one line can ever match; bill at trip level ────
         const st = lineMatches[0];
+        // Same guard as multi-DI: never silently rebill a DI already billed
+        // under a DIFFERENT invoice.
+        if(t.status==="Billed" && t.invoiceNo && t.invoiceNo!==invNo) {
+          conflictActionItems.push({
+            id: uid()+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
+            type: "duplicate_di", status: "open",
+            diNo: normalizeDI(st.diNo||t.diNo), grNo: normalizeDI(st.grNo||t.grNo), truckNo: t.truckNo||"",
+            invoiceNo: invNo, invoiceDate: invDate,
+            invoiceAmt: Number(st.frtAmt||0), expectedAmt: t.billedToShree||0,
+            note: `Already billed under ${t.invoiceNo} — now also appears on ${invNo}`,
+            empId: "", tripId: t.id,
+            createdAt: ts,
+          });
+          return t;
+        }
         const check = checkAmount(st, t);
         const invoiceAmt = Number(st.frtAmt||0);
         updated = {...t, invoiceNo:invNo, invoiceDate:invDate,
@@ -19281,7 +19319,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     Promise.all(updatedTrips.map(t => DB.saveTrip(t).catch(e=>console.error("saveTrip invoice scan:",e))))
       .then(()=>console.log(`Invoice ${invNo}: ${billedCount} DI line(s) billed`));
 
-    const allNewActionItems = [...missingActionItems, ...mismatchActionItems];
+    const allNewActionItems = [...missingActionItems, ...mismatchActionItems, ...conflictActionItems];
     if(allNewActionItems.length > 0 && setActionItems) {
       setActionItems(prev => [...allNewActionItems, ...(prev||[])]);
       Promise.all(allNewActionItems.map(ai => DB.saveActionItem(ai).catch(e=>console.error("saveActionItem:",e))));
@@ -19291,6 +19329,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     if(billedCount>0) parts.push(billedCount+" DI line(s) billed");
     if(missingActionItems.length>0) parts.push(missingActionItems.length+" DI(s) missing — action item created");
     if(mismatchActionItems.length>0) parts.push(mismatchActionItems.length+" amount mismatch(es) flagged");
+    if(conflictActionItems.length>0) parts.push(conflictActionItems.length+" DI(s) already billed elsewhere — conflict flagged, not overwritten");
     log && log("Invoice "+invNo+" scanned — "+(parts.join(", ")||"no changes")+" · "+chosenClient+" · "+chosenMaterial);
 
     setScanResult(null);
@@ -20067,6 +20106,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
           const resolved = (actionItems||[]).filter(ai=>ai.status==="done").sort((a,b)=>(b.resolvedAt||"").localeCompare(a.resolvedAt||""));
           const missing = open.filter(ai=>ai.type==="missing_di");
           const mismatch = open.filter(ai=>ai.type==="amount_mismatch");
+          const conflict = open.filter(ai=>ai.type==="duplicate_di");
 
           const dismiss = (ai) => {
             if(!window.confirm("Dismiss this action item? This does not bill anything — use this only if you've resolved it manually.")) return;
@@ -20077,7 +20117,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
 
           return (
             <div>
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:16}}>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:16}}>
                 <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.border}`}}>
                   <div style={{fontSize:20,fontWeight:800,color:C.red}}>{missing.length}</div>
                   <div style={{fontSize:11,color:C.muted}}>Missing DIs (open)</div>
@@ -20085,6 +20125,10 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                 <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.border}`}}>
                   <div style={{fontSize:20,fontWeight:800,color:"#d97706"}}>{mismatch.length}</div>
                   <div style={{fontSize:11,color:C.muted}}>Amount mismatches (open)</div>
+                </div>
+                <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.border}`}}>
+                  <div style={{fontSize:20,fontWeight:800,color:C.purple}}>{conflict.length}</div>
+                  <div style={{fontSize:11,color:C.muted}}>DI on 2+ invoices (open)</div>
                 </div>
               </div>
 
@@ -20133,6 +20177,26 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                     </div>
                   );
                 })}
+              </div>
+
+              <div style={{fontSize:12,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:8}}>
+                🔁 Same DI on multiple invoices — not overwritten, needs manual review
+              </div>
+              {conflict.length===0 && <div style={{color:C.muted,fontSize:13,marginBottom:16}}>None open.</div>}
+              <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:20}}>
+                {conflict.map(ai=>(
+                  <div key={ai.id} style={{background:C.card,borderRadius:10,padding:"11px 14px",border:`1px solid ${C.purple}44`}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                      <div>
+                        <div style={{fontWeight:800,fontSize:14}}>DI: {ai.diNo||"—"} {ai.grNo && <span style={{color:C.muted,fontWeight:400}}>· GR: {ai.grNo}</span>}</div>
+                        <div style={{fontSize:12,color:C.muted,marginTop:2}}>Truck: {ai.truckNo||"—"}</div>
+                        <div style={{fontSize:12,marginTop:4,fontWeight:700,color:C.purple}}>{ai.note}</div>
+                        <div style={{fontSize:11,color:C.muted,marginTop:2}}>The original billing was kept as-is — this invoice's line for this DI was skipped.</div>
+                      </div>
+                      <button onClick={()=>dismiss(ai)} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,fontSize:11,padding:"4px 8px",cursor:"pointer"}}>Dismiss</button>
+                    </div>
+                  </div>
+                ))}
               </div>
 
               {resolved.length>0 && (
