@@ -18828,12 +18828,18 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
   const shreeInvoices = useMemo(() => {
     const map = {};
     const isValidDate = d => /^\d{4}-\d{2}-\d{2}$/.test(d);
+    // Count of actual DI lines billed under THIS invoice — a multi-DI trip can
+    // contribute more than one DI to the same invoice, so this is NOT the same
+    // as trip count.
+    const diCountFor = (t, invoiceNo) => (t.diLines||[]).length > 0
+      ? (t.diLines||[]).filter(d=>d.invoiceNo===invoiceNo).length
+      : (t.invoiceNo===invoiceNo ? 1 : 0);
     payTrips.filter(t=>t.billedToShree&&t.invoiceNo).forEach(t => {
       if(!map[t.invoiceNo]) {
         const isClinkerPrev = (t.batchId||"").startsWith("CLINKER-PREVFY-");
         const clinkerPrevFYNum = isClinkerPrev ? parseInt((t.batchId||"").split("CLINKER-PREVFY-")[1]||"0") : null;
         map[t.invoiceNo] = {
-          invoiceNo:t.invoiceNo, invoiceDate:parseDD(t.invoiceDate||""), totalAmt:0, trips:[], status:"billed",
+          invoiceNo:t.invoiceNo, invoiceDate:parseDD(t.invoiceDate||""), totalAmt:0, trips:[], diCount:0, status:"billed",
           prevFY: isClinkerPrev || t.prevFY || t.grParticulars?.prevFY || false,
           prevFYLabel: isClinkerPrev ? FY_LABEL(clinkerPrevFYNum) : (t.prevFYLabel||t.grParticulars?.prevFYLabel||""),
           clinkerInvoice: isClinkerPrev || t.grParticulars?.clinkerPlaceholder || false,
@@ -18841,6 +18847,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
       }
       map[t.invoiceNo].trips.push(t);
       map[t.invoiceNo].totalAmt += Number(t.billedToShree||0);
+      map[t.invoiceNo].diCount += diCountFor(t, t.invoiceNo);
       if(t.paymentDate) map[t.invoiceNo].status = "paid";
     });
     // If invoiceDate is invalid/missing, use earliest trip date as fallback
@@ -19199,27 +19206,44 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     let billedCount = 0;
     const mismatchActionItems = [];
     const updatedTrips = [];
+    const pushMismatchIfAny = (st, t, check) => {
+      if(check.ok || check.note) return;
+      mismatchActionItems.push({
+        id: uid()+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
+        type: "amount_mismatch", status: "open",
+        diNo: normalizeDI(st.diNo||t.diNo), grNo: normalizeDI(st.grNo||t.grNo), truckNo: t.truckNo||"",
+        invoiceNo: invNo, invoiceDate: invDate,
+        invoiceAmt: check.invoiceAmt, expectedAmt: check.expectedAmt,
+        empId: "", tripId: t.id,
+        note: "",
+        createdAt: ts,
+      });
+    };
     setTrips(prev=>prev.map(t=>{
-      const lineMatch = scTrips.reduce((found, st) => {
-        if(found) return found;
-        const r = matchInvoiceLine(st, [t]);
-        return r ? {st, via:r.via} : null;
-      }, null);
-      if(!lineMatch) return t;
-
-      const st = lineMatch.st;
-      const invoiceAmt = Number(st.frtAmt||0);
-      const check = checkAmount(st, t); // computed against the pre-update trip
+      // Find EVERY scanned invoice line matching this trip — a multi-DI trip
+      // can have more than one of its own DIs on the SAME invoice, and every
+      // one must get billed. (Previously only the first match was used and
+      // any further match on the same trip was silently discarded — a real
+      // money-losing bug, not just a display gap.)
+      const lineMatches = scTrips.filter(st => matchInvoiceLine(st, [t]));
+      if(lineMatches.length===0) return t;
 
       let updated;
       if((t.diLines||[]).length > 0) {
-        // ── Multi-DI trip: bill only the matching diLine ────────────────────────
-        const stDi = normalizeDI(st.diNo);
-        const stGr = normalizeDI(st.grNo);
-        const newDiLines = t.diLines.map(d => {
-          const dMatches = (stDi && normalizeDI(d.diNo)===stDi) || (!stDi && stGr && normalizeDI(d.grNo)===stGr);
-          if(!dMatches) return d;
-          return {...d, billed:true, invoiceNo:invNo, invoiceDate:invDate, billedAmt:invoiceAmt};
+        // ── Multi-DI trip: bill every matching diLine ───────────────────────────
+        let newDiLines = t.diLines;
+        lineMatches.forEach(st => {
+          const check = checkAmount(st, t); // checked against the ORIGINAL trip, per line
+          const invoiceAmt = Number(st.frtAmt||0);
+          const stDi = normalizeDI(st.diNo);
+          const stGr = normalizeDI(st.grNo);
+          newDiLines = newDiLines.map(d => {
+            const dMatches = (stDi && normalizeDI(d.diNo)===stDi) || (!stDi && stGr && normalizeDI(d.grNo)===stGr);
+            if(!dMatches) return d;
+            return {...d, billed:true, invoiceNo:invNo, invoiceDate:invDate, billedAmt:invoiceAmt};
+          });
+          billedCount++;
+          pushMismatchIfAny(st, t, check);
         });
         updated = {...t, diLines:newDiLines,
           // Kept in sync so legacy trip-level views (Invoices tab, GST Hold,
@@ -19232,28 +19256,17 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         updated.billedToShree = tripBilledAmount(updated);
         if(updated.status==="Billed") { updated.billedBy="scan"; updated.billedAt=ts; updated.shreeStatus="billed"; }
       } else {
-        // ── Single-DI trip: bill at trip level, using the invoice's own amount ──
+        // ── Single-DI trip: only one line can ever match; bill at trip level ────
+        const st = lineMatches[0];
+        const check = checkAmount(st, t);
+        const invoiceAmt = Number(st.frtAmt||0);
         updated = {...t, invoiceNo:invNo, invoiceDate:invDate,
           status:"Billed", billedBy:"scan", billedAt:ts, shreeStatus:"billed",
           ...(chosenClient ? {client:chosenClient} : {}),
           ...(typeOverride  ? {type:typeOverride}   : {}),
           billedToShree: invoiceAmt || Number(t.billedToShree||0) || (t.qty||0)*(t.frRate||0)};
-      }
-      billedCount++;
-
-      // Any non-zero diff (exact match required, no tolerance) → owner-only action
-      // item flagging the gap. The line is still billed above at the invoice amount.
-      if(!check.ok && !check.note) {
-        mismatchActionItems.push({
-          id: uid()+Date.now().toString(36),
-          type: "amount_mismatch", status: "open",
-          diNo: normalizeDI(st.diNo||t.diNo), grNo: normalizeDI(st.grNo||t.grNo), truckNo: t.truckNo||"",
-          invoiceNo: invNo, invoiceDate: invDate,
-          invoiceAmt: check.invoiceAmt, expectedAmt: check.expectedAmt,
-          empId: "", tripId: t.id,
-          note: "",
-          createdAt: ts,
-        });
+        billedCount++;
+        pushMismatchIfAny(st, t, check);
       }
 
       updatedTrips.push(updated);
@@ -20757,7 +20770,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                         </div>
                         <div style={{display:"flex",gap:10,fontSize:11,color:C.muted,flexWrap:"wrap"}}>
                           <span>{fmtDate(inv.invoiceDate)}</span>
-                          <span>{inv.trips.length} trip{inv.trips.length!==1?"s":""}</span>
+                          <span>{inv.trips.length} trip{inv.trips.length!==1?"s":""} · {inv.diCount||inv.trips.length} DI{(inv.diCount||inv.trips.length)!==1?"s":""}</span>
                           <span style={{color:"#1565c0",fontWeight:700}}>₹{fmtINR(inv.totalAmt)}</span>
                         </div>
                       </div>
