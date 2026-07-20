@@ -19185,20 +19185,25 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
 
     // ── Current-FY DIs missing from the app → action item, does NOT block the invoice.
     // Employee resolved via most recent trip on this truck; brand-new truck = owner-only.
-    const missingActionItems = currentFYUnmatched.map(st => {
-      const truckNo = String(st.truckNo||"").replace(/\s+/g,"").toUpperCase();
-      const empId = resolveEmpForTruck(truckNo, allTrips); // "" = owner-only/unassigned
-      return {
-        id: uid()+Date.now().toString(36),
-        type: "missing_di", status: "open",
-        diNo: normalizeDI(st.diNo), grNo: normalizeDI(st.grNo), truckNo,
-        invoiceNo: invNo, invoiceDate: invDate,
-        invoiceAmt: Number(st.frtAmt||0), expectedAmt: 0,
-        empId, tripId: "",
-        note: "",
-        createdAt: ts,
-      };
-    });
+    // Skip any line that already has an open action item for this exact DI+invoice
+    // (re-scanning a partially-processed invoice must not create duplicates).
+    const missingActionItems = currentFYUnmatched
+      .filter(st => !(actionItems||[]).some(ai=>ai.type==="missing_di" && ai.status==="open"
+        && ai.invoiceNo===invNo && normalizeDI(ai.diNo)===normalizeDI(st.diNo)))
+      .map(st => {
+        const truckNo = String(st.truckNo||"").replace(/\s+/g,"").toUpperCase();
+        const empId = resolveEmpForTruck(truckNo, allTrips); // "" = owner-only/unassigned
+        return {
+          id: uid()+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
+          type: "missing_di", status: "open",
+          diNo: normalizeDI(st.diNo), grNo: normalizeDI(st.grNo), truckNo,
+          invoiceNo: invNo, invoiceDate: invDate,
+          invoiceAmt: Number(st.frtAmt||0), expectedAmt: 0,
+          empId, tripId: "",
+          note: "",
+          createdAt: ts,
+        };
+      });
 
     // ── Bill every matched line. Multi-DI trips: bill only the matching diLine
     // (partial billing). Single-DI trips: bill the trip directly. Either way the
@@ -19521,10 +19526,21 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         const reverted = {...t, diLines:newDiLines};
         reverted.status = tripBillingStatus(reverted);
         reverted.billedToShree = tripBilledAmount(reverted);
-        // Trip-level invoiceNo/invoiceDate/shreeStatus only clear if NO diLine
-        // is billed anymore; otherwise leave them as-is (still reflects the
-        // other invoice still billing this trip, if any lines remain billed).
-        if(reverted.status==="Pending Bill") { reverted.invoiceNo=""; reverted.invoiceDate=""; reverted.shreeStatus="pending"; }
+        // Trip-level invoiceNo/invoiceDate must reflect whichever invoice STILL
+        // bills this trip after the revert — clearing it only when NOTHING
+        // remains billed is wrong; if another diLine is still billed under a
+        // DIFFERENT invoice, the trip must show THAT invoice, not the deleted
+        // one it was stuck showing before (this was the actual bug: a trip
+        // stayed associated with a deleted invoice whenever it had another
+        // diLine still billed elsewhere).
+        const stillBilled = newDiLines.filter(d=>d.billed);
+        if(stillBilled.length === 0) {
+          reverted.invoiceNo=""; reverted.invoiceDate=""; reverted.shreeStatus="pending";
+        } else {
+          const latest = stillBilled.slice().sort((a,b)=>(b.invoiceDate||"").localeCompare(a.invoiceDate||""))[0];
+          reverted.invoiceNo = latest.invoiceNo;
+          reverted.invoiceDate = latest.invoiceDate;
+        }
         return reverted;
       }
       return {...t,invoiceNo:"",invoiceDate:"",billedToShree:0,shreeStatus:"pending"};
@@ -19538,6 +19554,14 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
       .map(t=>t.id));
     for(const t of updated.filter(t=>touchedIds.has(t.id))){
       try { await DB.saveTrip(t); } catch(e){ console.error("revert trip:",e); }
+    }
+    // Cascade-delete any action items tied to this invoice — both a still-open
+    // missing_di (the DI was never uploaded, and now the invoice it belonged to
+    // is gone) and any amount_mismatch flag referencing it no longer apply.
+    const orphanedActionItems = (actionItems||[]).filter(ai=>ai.invoiceNo===invoiceNo);
+    if(orphanedActionItems.length>0 && setActionItems) {
+      setActionItems(prev=>(prev||[]).filter(ai=>ai.invoiceNo!==invoiceNo));
+      orphanedActionItems.forEach(ai => DB.deleteActionItem(ai.id).catch(e=>console.error("deleteActionItem cascade:",e)));
     }
     log && log(`Invoice ${invoiceNo} deleted by ${user?.name}`);
   };
@@ -20205,6 +20229,35 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                         <span>{scanResult.invoiceDate||"—"}</span>
                         <span style={{color:"#1565c0",fontWeight:700}}>₹{fmtINR(scanResult.totalAmount)}</span>
                       </div>
+                      {(() => {
+                        // Sanity check: the invoice's own printed grand total vs the sum of
+                        // what was actually extracted per line. These SHOULD always agree —
+                        // if they don't, at least one line was misread by the scan (e.g. a
+                        // quantity read as a different digit), even if that line's amount
+                        // happens to look internally consistent (qty × rate matches what was
+                        // read, just not what the document actually says). Per-line amount
+                        // checks against trip data can't catch this on their own.
+                        const lines = scanResult.trips||[];
+                        const sumOfLines = lines.reduce((s,st)=>s+Number(st.frtAmt||0),0);
+                        const printedTotal = Number(scanResult.totalAmount||0);
+                        const diff = sumOfLines - printedTotal;
+                        if(printedTotal>0 && Math.abs(diff)>=1) {
+                          return (
+                            <div style={{background:"#fef2f2",border:`1.5px solid ${C.red}`,borderRadius:8,
+                              padding:"10px 12px",marginBottom:10,fontSize:12}}>
+                              <div style={{color:C.red,fontWeight:800}}>
+                                ⚠ Line items don't add up to the invoice's own total
+                              </div>
+                              <div style={{color:"#7a1f1f",marginTop:3}}>
+                                Sum of scanned lines: ₹{fmtINR(sumOfLines)} · Invoice states: ₹{fmtINR(printedTotal)}
+                                {" "}(diff ₹{fmtINR(Math.abs(diff))}). At least one line was likely misread —
+                                check quantities/amounts below against the original PDF before applying.
+                              </div>
+                            </div>
+                          );
+                        }
+                        return null;
+                      })()}
                       {/* Per-line: editable DI/GR + identity match + amount check */}
                       {(scanResult.trips||[]).map((st,i)=>{
                         const m   = matchInvoiceLine(st, trips||[]);
