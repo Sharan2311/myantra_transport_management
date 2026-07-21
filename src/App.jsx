@@ -20089,7 +20089,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   billedBy:    user.username,
                   billedAt:    nowTs(),
                   shreeStatus: "billed",
-                  client:      t.client || "Shree Cement Kodla",
+                  client:      "Shree Cement Kodla", // clinker bills are always this fixed client — never preserve a stale/inconsistent existing value
                   ...(cb.isPrevFY ? {prevFY:true, prevFYLabel} : {}),
                 }));
               setTrips(prev => {
