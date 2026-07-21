@@ -20080,18 +20080,37 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
             } else {
               const localUpdatedTrips = allClinkerTrips
                 .filter(t => selectedIds.includes(t.id))
-                .map(t => ({
-                  ...t,
-                  invoiceNo:   invNo,
-                  invoiceDate: invDate,
-                  billedToShree: Number(t.qty||0) * rate,
-                  status:      "Billed",
-                  billedBy:    user.username,
-                  billedAt:    nowTs(),
-                  shreeStatus: "billed",
-                  client:      "Shree Cement Kodla", // clinker bills are always this fixed client — never preserve a stale/inconsistent existing value
-                  ...(cb.isPrevFY ? {prevFY:true, prevFYLabel} : {}),
-                }));
+                .map(t => {
+                  const billedAt = nowTs();
+                  const baseFields = {
+                    invoiceNo:   invNo,
+                    invoiceDate: invDate,
+                    billedBy:    user.username,
+                    billedAt,
+                    shreeStatus: "billed",
+                    client:      "Shree Cement Kodla", // clinker bills are always this fixed client — never preserve a stale/inconsistent existing value
+                    ...(cb.isPrevFY ? {prevFY:true, prevFYLabel} : {}),
+                  };
+                  if((t.diLines||[]).length > 0) {
+                    // Multi-DI trip: shreeInvoices/Invoices-tab totals for these
+                    // trips are computed ENTIRELY from diLines[].billed — the
+                    // trip-level status/billedToShree below are just kept in
+                    // sync for legacy views (Pill, search, deleteInvoice), same
+                    // as the cement invoice-scan billing path. Previously this
+                    // only set trip-level fields, so multi-DI clinker trips
+                    // showed "Billed" on the card but contributed ₹0 to any
+                    // invoice total — the exact bug reported.
+                    const newDiLines = t.diLines.map(d => ({
+                      ...d, billed:true, invoiceNo:invNo, invoiceDate:invDate,
+                      billedAmt: Number(d.qty||0) * rate,
+                    }));
+                    const updated = {...t, diLines:newDiLines, ...baseFields};
+                    updated.status = tripBillingStatus(updated);
+                    updated.billedToShree = tripBilledAmount(updated);
+                    return updated;
+                  }
+                  return {...t, ...baseFields, billedToShree: Number(t.qty||0) * rate, status:"Billed"};
+                });
               setTrips(prev => {
                 const map = new Map(localUpdatedTrips.map(t=>[t.id,t]));
                 return prev.map(t => map.get(t.id) || t);
