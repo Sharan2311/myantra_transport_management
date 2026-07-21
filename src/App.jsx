@@ -2325,10 +2325,10 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
           Today — {todayStr}
           {fyLabel && <span style={{color:C.accent,marginLeft:8,fontWeight:600}}>· {fyLabel}</span>}
         </div>
-        <div style={{display:"grid",gridTemplateColumns:user.role==="fleet_manager"?"1fr 1fr":"1fr 1fr 1fr",gap:8}}>
+        <div style={{display:"grid",gridTemplateColumns:user.role==="owner"?"1fr 1fr 1fr":"1fr 1fr",gap:8}}>
           {[
             {l:"Trips Added",  v:todayTrips.length,       c:C.blue},
-            ...(user.role!=="fleet_manager" ? [{l:"Today Margin", v:fmt(todayMargin), c:C.green}] : []),
+            ...(user.role==="owner" ? [{l:"Today Margin", v:fmt(todayMargin), c:C.green}] : []),
             {l:"Pending Bills",v:pending.length,           c:pending.length>0?C.accent:C.muted},
           ].map(x=>(
             <div key={x.l} style={{background:C.bg,borderRadius:8,padding:"8px",textAlign:"center"}}>
@@ -2854,10 +2854,8 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
         <KPI icon="🚚" label="Total Trips"     value={displayTrips.filter(t=>t.type==="outbound").length} color={C.blue} sub={[selectedClient,fyLabel].filter(Boolean).join(" · ")||"cement trips"} />
         <KPI icon="🤝" label="TAFAL Pool" value={fmt(tafalBalance)} color={C.purple} sub={`₹${tafalPaid?fmt(tafalPaid)+" paid · ":""} Pool: ${fmt(tafalPool)}`} />
-        {user.role!=="fleet_manager" && <>
-          <KPI icon="📈" label="Total Margin"  value={fmt(margin)}      color={C.green} sub={[selectedClient,fyLabel].filter(Boolean).join(" · ")||"all time"} />
-          <KPI icon="🔴" label="Vehicle Loans" value={fmt(vLoan)}       color={C.red} />
-        </>}
+        {user.role==="owner" && <KPI icon="📈" label="Total Margin"  value={fmt(margin)}      color={C.green} sub={[selectedClient,fyLabel].filter(Boolean).join(" · ")||"all time"} />}
+        {user.role!=="fleet_manager" && <KPI icon="🔴" label="Vehicle Loans" value={fmt(vLoan)}       color={C.red} />}
       </div>
 
       {/* Recent Activity */}
@@ -19994,17 +19992,36 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
           const sgst    = taxable * gstPct / 200;
           const total   = taxable + cgst + sgst;
 
-          const autoTonsMatch = tons > 0 && Math.abs(
-            (allClinkerTrips.filter(t=>autoSelected.includes(t.id)).reduce((s,t)=>s+Number(t.qty||0),0)) - tons
-          ) < 0.01;
-
-          // Allow ±0.5 MT tolerance
+          // Informational only — NOT a save requirement. A clinker invoice has
+          // no per-DI breakdown to reconcile against (unlike cement DIs), and
+          // its stated tonnage comes from Shree's own weighbridge record,
+          // which will rarely match the sum of your trip-side tonnage exactly
+          // (measurement variance between origin/destination is normal). A
+          // hard ±0.5 MT match requirement made saving nearly impossible with
+          // real, irregular trip weights — this is now just a visual cue so
+          // the owner can judge "close enough" themselves.
           const tonsMatch = tons > 0 && Math.abs(selectedTons - tons) <= 0.5;
+          const tonsClose = tons > 0 && Math.abs(selectedTons - tons) <= Math.max(2, tons*0.02); // within 2 MT or 2%, whichever is bigger
           // For prevFY bills: skip tons matching — just need invoice no, date, rate, and at least one trip
-          const canSave   = cb.invoiceNo.trim() && cb.invoiceDate && rate > 0 && (tonsMatch || cb.isPrevFY);
+          const canSave   = cb.invoiceNo.trim() && cb.invoiceDate && rate > 0
+            && (cb.isPrevFY || selectedTrips.length > 0);
 
           const handleSaveClinkerBill = () => {
             if(!canSave) return;
+            // Soft confirmation — not a hard block. If the selection is
+            // meaningfully off from the invoice's stated tons (beyond the
+            // "close" tolerance), ask before proceeding instead of either
+            // silently trusting it or refusing to save.
+            if(tons>0 && !cb.isPrevFY && !tonsClose) {
+              const diff = selectedTons - tons;
+              const proceed = window.confirm(
+                `Selected trips total ${selectedTons.toFixed(2)} MT, but the invoice states ${tons} MT `+
+                `(${diff>0?"+":""}${diff.toFixed(2)} MT ${diff>0?"over":"short"}).\n\n`+
+                `This bills ₹${total.toLocaleString("en-IN",{maximumFractionDigits:0})} based on the ${selectedTons.toFixed(2)} MT actually selected.\n\n`+
+                `Save anyway?`
+              );
+              if(!proceed) return;
+            }
             const invNo   = cb.invoiceNo.trim();
             const invDate = cb.invoiceDate;
             const updatedTrips = [];
@@ -20174,8 +20191,8 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                     <div style={{fontSize:10,color:C.muted,fontWeight:700,letterSpacing:1}}>
                       CLINKER TRIPS (To: Patas · Goods: Clinker · Unbilled)
                     </div>
-                    {/* Manual select toggle — only shown when auto fails */}
-                    {allClinkerTrips.length>0 && !autoTonsMatch && tons>0 && (
+                    {/* Manual select toggle — always available so the owner can fine-tune */}
+                    {allClinkerTrips.length>0 && tons>0 && (
                       <button onClick={()=>{
                         if(manualClinkerSelect){
                           setManualClinkerSelect(false);
@@ -20204,18 +20221,20 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                           ? <span style={{color:C.orange,fontWeight:700}}> · Manual selection mode — tap to toggle</span>
                           : <span> · Auto-selected to match tons</span>}
                       </div>
-                      {/* Tons match indicator */}
+                      {/* Tons indicator — informational, does not block saving */}
                       <div style={{
-                        background: tonsMatch ? C.green+"11" : tons>0 ? C.orange+"11" : C.bg,
-                        border: `1px solid ${tonsMatch ? C.green : tons>0 ? C.orange : C.border}`,
+                        background: tonsMatch ? C.green+"11" : tonsClose ? C.blue+"11" : tons>0 ? C.orange+"11" : C.bg,
+                        border: `1px solid ${tonsMatch ? C.green : tonsClose ? C.blue : tons>0 ? C.orange : C.border}`,
                         borderRadius:8, padding:"8px 12px", marginBottom:8,
                         display:"flex", justifyContent:"space-between", alignItems:"center",
                       }}>
-                        <span style={{fontSize:12,color:tonsMatch?C.green:C.orange,fontWeight:700}}>
-                          {!tons>0 ? "Enter tons to auto-select trips"
+                        <span style={{fontSize:12,color:tonsMatch?C.green:tonsClose?C.blue:C.orange,fontWeight:700}}>
+                          {!(tons>0) ? "Enter tons to auto-select trips"
                             : tonsMatch
-                              ? `✓ Tons within ±0.5 MT (selected ${selectedTons.toFixed(2)} MT)`
-                              : `⚠ Selected ${selectedTons.toFixed(2)} MT — need ${tons} MT (±0.5 MT)`}
+                              ? `✓ Matches invoice tons closely (selected ${selectedTons.toFixed(2)} MT)`
+                              : tonsClose
+                                ? `Close to invoice tons — ${Math.abs(selectedTons-tons).toFixed(2)} MT difference (normal weighbridge variance)`
+                                : `Selected ${selectedTons.toFixed(2)} MT vs invoice's ${tons} MT — add/remove trips manually if this gap looks wrong`}
                         </span>
                         <span style={{fontSize:12,fontWeight:800,color:tonsMatch?C.green:C.text}}>
                           {selectedTrips.length} trip{selectedTrips.length!==1?"s":""} · {selectedTons.toFixed(2)} MT
@@ -20265,15 +20284,9 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                           );
                         })}
                       </div>
-                      {!tonsMatch && tons > 0 && (
-                        <div style={{marginTop:6,fontSize:11,
-                          color: Math.abs(selectedTons-tons)<=0.5 ? C.green : C.red,
-                          fontWeight:700}}>
-                          {Math.abs(selectedTons-tons)<=0.5
-                            ? `✓ Within tolerance (diff: ${Math.abs(selectedTons-tons).toFixed(2)} MT)`
-                            : selectedTons < tons
-                              ? `⚠ ${(tons-selectedTons).toFixed(2)} MT short — ${manualClinkerSelect?"select more trips":"use Manual Select"}`
-                              : `⚠ ${(selectedTons-tons).toFixed(2)} MT over — ${manualClinkerSelect?"deselect some trips":"use Manual Select"}`}
+                      {tons > 0 && !manualClinkerSelect && (
+                        <div style={{marginTop:6,fontSize:11,color:C.muted}}>
+                          Not the right trips? Tap "✎ Select Manually" above to add or remove individual trips before saving.
                         </div>
                       )}
                     </>
@@ -20281,12 +20294,14 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                 </div>
 
                 {/* Save */}
-                {!canSave && tons>0 && rate>0 && cb.invoiceNo && cb.invoiceDate && (
+                {!canSave && (tons>0 || rate>0 || cb.invoiceNo || cb.invoiceDate) && (
                   <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:8,
                     padding:"8px 12px",fontSize:11,color:C.orange,fontWeight:700}}>
-                    {!tonsMatch ? `⚠ Selected ${selectedTons} MT does not match ${tons} MT. Adjust tons or check available trips.` : ""}
-                    {!cb.invoiceNo.trim() ? "Enter Invoice No." : ""}
-                    {!cb.invoiceDate ? " Enter Invoice Date." : ""}
+                    {!cb.invoiceNo.trim() && "Enter Invoice No. "}
+                    {!cb.invoiceDate && "Enter Invoice Date. "}
+                    {!(rate>0) && "Enter a rate. "}
+                    {rate>0 && cb.invoiceNo.trim() && cb.invoiceDate && selectedTrips.length===0 && !cb.isPrevFY &&
+                      "Select at least one trip below (enter tons for an auto-suggestion, or use Manual Select)."}
                   </div>
                 )}
                 <Btn onClick={handleSaveClinkerBill}
@@ -20294,7 +20309,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   style={{opacity: canSave ? 1 : 0.5, cursor: canSave ? "pointer" : "not-allowed"}}>
                   {canSave
                     ? `✓ Save Bill — ${selectedTrips.length} trip${selectedTrips.length!==1?"s":""} · ${selectedTons.toFixed(2)} MT · ₹${total.toLocaleString("en-IN",{maximumFractionDigits:0})}`
-                    : "Fill all fields and match tons (±0.5 MT) to save"}
+                    : "Fill invoice details and select trips to save"}
                 </Btn>
               </div>
             </Sheet>
