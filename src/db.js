@@ -389,12 +389,12 @@ export const DB = {
 
   // By default loads last 90 days only — pass fromDate=null to load all
   getTrips: async (fromDate) => {
-    const cutoff = fromDate !== null
-      ? fromDate
-      : new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    // No date cutoff — a partial trip load silently broke invoice billing
+    // (trips outside the window simply weren't in the array being mapped
+    // over, with no error). Always load everything; `fromDate` param kept
+    // for signature compatibility but no longer used to restrict rows.
     const data = await fetchPaginated(() => {
       let q = supabase.from('mye_trips').select('*').order('date', {ascending: false}).order('id');
-      if (cutoff) q = q.gte('date', cutoff);
       return q;
     });
     const trips = (data||[]).map(tripFromDB);
@@ -791,8 +791,8 @@ export const DB = {
         return data?.value || { tafalPerTrip: 300 };
       }, { tafalPerTrip: 300 }),
       safe(async () => {
-        const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-        const data = await fetchPaginated(() => supabase.from('mye_trips').select('*').order('date', {ascending:false}).order('id').gte('date', cutoff));
+        // No date cutoff — see getTrips() for why.
+        const data = await fetchPaginated(() => supabase.from('mye_trips').select('*').order('date', {ascending:false}).order('id'));
         return (data||[]).map(tripFromDB);
       }),
       safe(() => fetchAll('mye_vehicles', vehicleFromDB)),

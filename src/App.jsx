@@ -3233,10 +3233,13 @@ Rules:
         _stxnsG.filter(x=>x.type==="recovery").reduce((s,x)=>s+(x.amount||0),0));
       const shortDeductG = vehG?.shortageDeductPerTrip||0;
       const autoShortageG = shortBalG<=0 ? 0 : (shortDeductG>0 ? Math.min(shortDeductG, shortBalG) : shortBalG);
-      // Auto-attach ONLY confirmed requests within 4 days — older ones need manual attach
-      const _4daysAgo = new Date(Date.now() - 4*86400000).toISOString().slice(0,10);
+      // Auto-attach any confirmed, unattached request for this truck — no age
+      // limit. A 4-day cutoff here previously caused diesel to silently not
+      // auto-fill on trips created more than 4 days after the request was
+      // confirmed, understating "Est Net Driver Pay" (the deduction was
+      // simply missing) unless someone noticed and manually attached it.
       const confirmedReqsG = (dieselRequests||[])
-        .filter(r => r.truckNo===truckNo && r.status==="confirmed" && (r.date||"")>=_4daysAgo);
+        .filter(r => r.truckNo===truckNo && r.status==="confirmed");
       const autoReqG = confirmedReqsG.length >= 1 ? confirmedReqsG[0] : null;
       const autoIndentNo = autoReqG ? String(autoReqG.indentNo) : "";
       const autoDiesel   = autoReqG ? String(((autoReqG.dieselAmount??autoReqG.amount)||0)+(autoReqG.cashAmount||0)) : "0";
@@ -3293,9 +3296,8 @@ Rules:
         const shortBal2 = Math.max(0,(()=>{const t=vehT2?.shortageTxns||[];return t.filter(x=>x.type==="shortage").reduce((s,x)=>s+(x.amount||0),0)-t.filter(x=>x.type==="recovery").reduce((s,x)=>s+(x.amount||0),0);})());
         const shortDed2 = vehT2?.shortageDeductPerTrip||0;
         const autoSR2 = shortBal2<=0?0:(shortDed2>0?Math.min(shortDed2,shortBal2):shortBal2);
-        const _4dSplit = new Date(Date.now() - 4*86400000).toISOString().slice(0,10);
         const autoReqS = (dieselRequests||[])
-          .filter(r => r.truckNo===g.truckNo && r.status==="confirmed" && (r.date||"")>=_4dSplit)[0] || null;
+          .filter(r => r.truckNo===g.truckNo && r.status==="confirmed")[0] || null;
         const solo = {
           id:uid(), truckNo:g.truckNo, diIds:[itemId],
           client:g.client, tafal:g.tafal,
@@ -3681,10 +3683,9 @@ Rules:
               log("DIESEL ATTACH", `Indent #${preReq.indentNo} → LR ${lrNo} · ₹${preReq.amount} (manual)`);
           }
         }
-        // ── Auto-attach confirmed diesel request for this truck (within 4 days) ──
+        // ── Auto-attach confirmed diesel request for this truck (any age) ──
         if (typeof setDieselRequests === "function" && !g.dieselIndentNo.trim()) {
-          const _4dAgo = new Date(Date.now() - 4*86400000).toISOString().slice(0,10);
-          const confirmedReqs = (dieselRequests||[]).filter(r => r.status==="confirmed" && (r.date||"")>=_4dAgo);
+          const confirmedReqs = (dieselRequests||[]).filter(r => r.status==="confirmed");
           const truckMatch = confirmedReqs.find(r => r.truckNo===truckNo);
           let chosenReq = truckMatch;
           if (!truckMatch) {
@@ -3860,10 +3861,9 @@ Rules:
           return;
         }
         setTrips(p=>[trip,...(p||[])]);
-        // ── Auto-attach confirmed diesel request for this truck (within 4 days) ──
+        // ── Auto-attach confirmed diesel request for this truck (any age) ──
         if (typeof setDieselRequests === "function") {
-          const _4dAgo = new Date(Date.now() - 4*86400000).toISOString().slice(0,10);
-          const confirmedReqs = (dieselRequests||[]).filter(r => r.status==="confirmed" && (r.date||"")>=_4dAgo);
+          const confirmedReqs = (dieselRequests||[]).filter(r => r.status==="confirmed");
           const truckMatch = confirmedReqs.find(r => r.truckNo===truckNo);
           let chosenReq = truckMatch;
           if (!truckMatch) {
@@ -18773,6 +18773,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
   const [scanResult,  setScanResult]  = useState(null);
   const [scanning,    setScanning]    = useState(false);
   const [scanError,   setScanError]   = useState(null);
+  const [applyingInvoice, setApplyingInvoice] = useState(false);
   const [showAlert,   setShowAlert]   = useState(true);
   const [newExp,      setNewExp]      = useState({tripId:"", label:"", amount:""});
   // Clinker Bill state
@@ -19183,7 +19184,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     return {ok, diff, invoiceAmt, expectedAmt};
   };
 
-  const applyInvoiceScan = () => {
+  const applyInvoiceScan = async () => {
     if(!scanResult || scanResult.type!=="invoice") return;
     const invNo = scanResult.invoiceNo;
     const invDate = parseDD(scanResult.invoiceDate);
@@ -19193,6 +19194,26 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                        : chosenMaterial==="Raw Material" ? "inbound"
                        : null;
 
+    // CRITICAL: fetch the full, authoritative trip list directly from the DB
+    // rather than trusting the client-side `trips` state. `trips` is loaded
+    // via a 90-day window by default (see DB.getTrips) — an invoice can
+    // legitimately cover older DIs (e.g. a delayed billing cycle), and the
+    // review screen can show them as correctly matched (if `trips` happened
+    // to be fuller at that render) while the actual apply step later runs
+    // against a smaller/reset `trips` array, silently skipping them. This
+    // was a real bug: trips confirmed "✓ matched" on the review screen never
+    // got billed because they weren't in the array `setTrips` mapped over.
+    setApplyingInvoice(true);
+    let authoritativeTrips;
+    try {
+      authoritativeTrips = await DB.getTripsAll();
+    } catch(e) {
+      setApplyingInvoice(false);
+      setScanError("Could not load the full trip list to apply this invoice safely: "+e.message+". Please check your connection and try again.");
+      return;
+    }
+    setApplyingInvoice(false);
+
     // Block only when EVERY line on this invoice is already fully resolved —
     // either billed onto a trip/DI-line, or already sitting as an open action
     // item. A PARTIALLY processed invoice (some lines billed, one genuinely
@@ -19201,7 +19222,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     // (same invoiceNo/date/amount gets written again).
     const scTripsForDupeCheck = scanResult.trips||[];
     const lineAlreadyResolved = (st) => {
-      const m = matchInvoiceLine(st, trips||[]);
+      const m = matchInvoiceLine(st, authoritativeTrips);
       if(m) {
         const t = m.trip;
         if((t.diLines||[]).length > 0) {
@@ -19218,7 +19239,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     }
 
     const scTrips = scanResult.trips||[];
-    const allTrips = trips||[];
+    const allTrips = authoritativeTrips;
     const ts = nowTs();
 
     // Separate unmatched into prevFY vs current FY (check TRIP dates only, not invoice date)
@@ -19280,10 +19301,12 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     // ── Bill every matched line. Multi-DI trips: bill only the matching diLine
     // (partial billing). Single-DI trips: bill the trip directly. Either way the
     // INVOICE's own amount is what gets saved — no rejection on mismatch.
+    // Computed against `authoritativeTrips` (fresh from DB), NOT the possibly-
+    // incomplete `trips` prop — see note above.
     let billedCount = 0;
     const mismatchActionItems = [];
     const conflictActionItems = [];
-    const updatedTrips = [];
+    const updatedTripsMap = new Map();
     const pushMismatchIfAny = (st, t, check) => {
       if(check.ok) return;
       if(check.note==="unmatched-di") return; // defensive fallback, nothing to report
@@ -19298,14 +19321,12 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         createdAt: ts,
       });
     };
-    setTrips(prev=>prev.map(t=>{
+    authoritativeTrips.forEach(t=>{
       // Find EVERY scanned invoice line matching this trip — a multi-DI trip
       // can have more than one of its own DIs on the SAME invoice, and every
-      // one must get billed. (Previously only the first match was used and
-      // any further match on the same trip was silently discarded — a real
-      // money-losing bug, not just a display gap.)
+      // one must get billed.
       const lineMatches = scTrips.filter(st => matchInvoiceLine(st, [t]));
-      if(lineMatches.length===0) return t;
+      if(lineMatches.length===0) return;
 
       let updated;
       let anyChange = false;
@@ -19319,9 +19340,6 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
           const target = newDiLines.find(d =>
             (stDi && normalizeDI(d.diNo)===stDi) || (!stDi && stGr && normalizeDI(d.grNo)===stGr));
           // A single DI must never be billed under two different invoice numbers.
-          // If this DI is already billed under a DIFFERENT invoice, don't
-          // silently overwrite it — flag the conflict and leave the original
-          // billing untouched (preserving whichever invoice billed it first).
           if(target?.billed && target.invoiceNo && target.invoiceNo!==invNo) {
             conflictActionItems.push({
               id: uid()+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
@@ -19345,11 +19363,8 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
           anyChange = true;
           pushMismatchIfAny(st, t, check);
         });
-        if(!anyChange) return t;
+        if(!anyChange) return;
         updated = {...t, diLines:newDiLines,
-          // Kept in sync so legacy trip-level views (Invoices tab, GST Hold,
-          // receivables, Pill status, search, deleteInvoice) still work for
-          // multi-DI trips — see note in the auto-resolve effect above.
           invoiceNo:invNo, invoiceDate:invDate,
           ...(chosenClient ? {client:chosenClient} : {}),
           ...(typeOverride  ? {type:typeOverride}   : {})};
@@ -19359,8 +19374,6 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
       } else {
         // ── Single-DI trip: only one line can ever match; bill at trip level ────
         const st = lineMatches[0];
-        // Same guard as multi-DI: never silently rebill a DI already billed
-        // under a DIFFERENT invoice.
         if(t.status==="Billed" && t.invoiceNo && t.invoiceNo!==invNo) {
           conflictActionItems.push({
             id: uid()+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
@@ -19372,7 +19385,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
             empId: "", tripId: t.id,
             createdAt: ts,
           });
-          return t;
+          return;
         }
         const check = checkAmount(st, t);
         const invoiceAmt = Number(st.frtAmt||0);
@@ -19385,10 +19398,21 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         pushMismatchIfAny(st, t, check);
       }
 
-      updatedTrips.push(updated);
-      return updated;
-    }));
+      updatedTripsMap.set(t.id, updated);
+    });
 
+    // Merge results into React state: update whichever of these trips are
+    // currently loaded client-side, AND append any that were billed but
+    // weren't loaded (so they're immediately visible without a manual
+    // reload — this is exactly the case that silently failed before).
+    setTrips(prev => {
+      const prevIds = new Set((prev||[]).map(t=>t.id));
+      const merged = (prev||[]).map(t => updatedTripsMap.get(t.id) || t);
+      const additions = [...updatedTripsMap.values()].filter(t => !prevIds.has(t.id));
+      return [...merged, ...additions];
+    });
+
+    const updatedTrips = [...updatedTripsMap.values()];
     Promise.all(updatedTrips.map(t => DB.saveTrip(t).catch(e=>console.error("saveTrip invoice scan:",e))))
       .then(()=>console.log(`Invoice ${invNo}: ${billedCount} DI line(s) billed`));
 
@@ -20665,13 +20689,14 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                           )}
                           <div style={{display:"flex",gap:8,marginTop:8}}>
                             <button onClick={applyInvoiceScan}
-                              disabled={!canApply}
+                              disabled={!canApply||applyingInvoice}
                               style={{flex:1,
-                                background:canApply?(allOk?C.green:C.orange):C.dim,
-                                color:canApply?"#000":"#666",
+                                background:(canApply&&!applyingInvoice)?(allOk?C.green:C.orange):C.dim,
+                                color:(canApply&&!applyingInvoice)?"#000":"#666",
                                 border:"none",borderRadius:6,padding:"10px",fontWeight:700,
-                                cursor:canApply?"pointer":"not-allowed",fontSize:13}}>
-                              {alreadySaved ? "Already Saved"
+                                cursor:(canApply&&!applyingInvoice)?"pointer":"not-allowed",fontSize:13}}>
+                              {applyingInvoice ? "Loading full trip list…"
+                                : alreadySaved ? "Already Saved"
                                 : !scanClient||!scanMaterial ? "Select client & material first"
                                 : allOk ? "✓ Apply — Mark Billed"
                                 : "✓ Apply — Bill matched, log the rest as action items"}
