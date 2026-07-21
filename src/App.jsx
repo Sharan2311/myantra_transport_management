@@ -84,16 +84,25 @@ const isTafalExempt = (veh, employees, assignedEmpId) => !!employeeTafalExemptFo
 // string match is the only correct comparison.
 const normalizeDI = s => String(s||"").trim();
 
-// A trip's diLines carry per-line billing now (billed/invoiceNo/invoiceDate/billedAmt).
-// Trip-level status is DERIVED from these, never set independently for billing purposes:
-//   - no diLines (or all empty)      → unchanged (caller decides, e.g. "Pending Bill")
-//   - every diLine billed            → "Billed"
-//   - some (not all) diLines billed  → "Partially Billed"
-//   - none billed                    → "Pending Bill"
+// A trip's diLines carry per-line billing AND payment now (billed/invoiceNo/
+// invoiceDate/billedAmt, and paid/paidAmount/utr/paymentDate). Trip-level
+// status is DERIVED from these, never set independently:
+//   - no diLines (or all empty)        → unchanged (caller decides)
+//   - every diLine paid                → "Paid"
+//   - some (not all) diLines paid      → "Partially Paid" (regardless of
+//                                         whether every DI is even billed yet
+//                                         — a paid DI takes priority over an
+//                                         unbilled sibling for status purposes)
+//   - every diLine billed, none paid   → "Billed"
+//   - some (not all) diLines billed    → "Partially Billed"
+//   - none billed                     → "Pending Bill"
 const tripBillingStatus = (trip) => {
   const lines = trip.diLines||[];
   if(lines.length === 0) return trip.status; // single-DI-only trips w/o diLines handled by caller
   const billedCount = lines.filter(d=>d.billed).length;
+  const paidCount = lines.filter(d=>d.paid).length;
+  if(paidCount === lines.length) return "Paid";
+  if(paidCount > 0) return "Partially Paid";
   if(billedCount === 0) return "Pending Bill";
   if(billedCount === lines.length) return "Billed";
   return "Partially Billed";
@@ -105,6 +114,14 @@ const tripBilledAmount = (trip) => {
   const lines = trip.diLines||[];
   if(lines.length === 0) return trip.billedToShree||0;
   return lines.reduce((s,d)=>s + (d.billed ? (d.billedAmt||0) : 0), 0);
+};
+
+// Mirrors tripBilledAmount for payments — sum of what's actually been paid
+// across diLines (so a partially-paid trip reports only the paid portion).
+const tripPaidAmount = (trip) => {
+  const lines = trip.diLines||[];
+  if(lines.length === 0) return trip.paidAmount||0;
+  return lines.reduce((s,d)=>s + (d.paid ? (d.paidAmount||0) : 0), 0);
 };
 
 // Resolve which employee is responsible for a truck when a DI/trip doesn't exist
@@ -443,7 +460,7 @@ const mkTrip = (o) => ({
 const Badge = ({label, color}) => (
   <span style={{background:color+"22",color,border:`1px solid ${color}44`,borderRadius:20,padding:"3px 10px",fontSize:11,fontWeight:700,whiteSpace:"nowrap"}}>{label}</span>
 );
-const SC = s => ({"Pending Bill":C.accent,"Yet to Bill":"#7c3aed","Partially Billed":"#d97706","Billed":C.blue,"Paid":C.green,"Unpaid":C.red}[s]||C.muted);
+const SC = s => ({"Pending Bill":C.accent,"Yet to Bill":"#7c3aed","Partially Billed":"#d97706","Billed":C.blue,"Partially Paid":"#0891b2","Paid":C.green,"Unpaid":C.red}[s]||C.muted);
 // A trip counts as "unbilled" for search/filter purposes if it's fully pending
 // OR partially billed (some DI lines billed, at least one — e.g. the party DI
 // on a mixed godown+party LR — still pending).
@@ -1567,6 +1584,7 @@ function AppMain() {
   const [pumpPayments,   setPumpPayments,   rPP, reloadPumpPayments]  = useDB(DB.getPumpPayments,   [], 650);
   const [paymentRequests, setPaymentRequests, rPR] = useDB(DB.getPaymentRequests, [],               650);
   const [actionItems, setActionItems, rAI, reloadActionItems] = useDB(DB.getActionItems, [],         650);
+  const [invoiceRegistry, setInvoiceRegistry] = useDB(DB.getInvoiceRegistry, [],                      650);
   const dbSetPumpPayments = async (val) => { setPumpPayments(val); };
 
   const loading = !rU||!rT||!rV||!rE||!rP||!rS||!rPu||!rI||!rSt||!rDP||!rEx||!rGR;
@@ -1828,6 +1846,7 @@ function AppMain() {
     cashTransfers, setCashTransfers:dbSetCashTransfers,
     paymentRequests, setPaymentRequests,
     actionItems, setActionItems,
+    invoiceRegistry, setInvoiceRegistry,
     user, log,
     allTripsLoaded, loadingAllTrips, loadAllTrips,
   };
@@ -6850,7 +6869,7 @@ function SealedInvoiceSheet({ trip, onMerge, onClose, embedded=false }) {
 
 
 // ─── TRIPS ────────────────────────────────────────────────────────────────────
-function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles, indents, setIndents, settings, tripType, user, log, driverPays, setDriverPays, employees, cashTransfers, setCashTransfers, allTripsLoaded, loadingAllTrips, loadAllTrips, dieselRequests=[], setDieselRequests}) {
+function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles, indents, setIndents, settings, tripType, user, log, driverPays, setDriverPays, employees, cashTransfers, setCashTransfers, allTripsLoaded, loadingAllTrips, loadAllTrips, dieselRequests=[], setDieselRequests, payments=[], invoiceRegistry=[]}) {
   const isIn = tripType === "inbound";
   const ac   = isIn ? C.teal : C.accent;
 
@@ -7861,7 +7880,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       </div>
 
       <PillBar items={[
-        ...["All","Pending Bill","Partially Billed","Yet to Bill","Billed","Paid"].map(s=>({id:s,label:s+(s!=="All"?` (${list.filter(t=>t.status===s).length})`:""),color:SC(s)})),
+        ...["All","Pending Bill","Partially Billed","Yet to Bill","Billed","Partially Paid","Paid"].map(s=>({id:s,label:s+(s!=="All"?` (${list.filter(t=>t.status===s).length})`:""),color:SC(s)})),
         {id:"Confirmation Email Received",
          label:`📤 Confirmed (${list.filter(t=>t.status==="Confirmation Email Received"&&t.orderType==="party").length})`,
          color:C.teal},
@@ -8081,25 +8100,44 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                         {/* DI numbers in bold — each shows its own billed/pending state AND
                             its own invoice number for multi-DI trips (two DIs on one LR can
                             legitimately be billed under two different invoices) */}
-                        {(t.diLines&&t.diLines.length>1) ? (
-                          <div style={{fontSize:11,marginTop:2,display:"flex",flexWrap:"wrap",gap:6,alignItems:"center"}}>
+                        {(t.diLines&&t.diLines.length>1) ? (() => {
+                          const knownUtrs = new Set((payments||[]).map(p=>p.utr).filter(Boolean));
+                          const paidButOrphaned = d => d.paid && d.utr && !knownUtrs.has(d.utr);
+                          // Cross-check against the independent invoice registry — only
+                          // warn on POSITIVE evidence (registry explicitly says 'deleted').
+                          // No warning if there's simply no registry entry at all, since
+                          // every invoice scanned before this table existed has none.
+                          const deletedInvNos = new Set((invoiceRegistry||[])
+                            .filter(inv=>inv.status==="deleted").map(inv=>inv.invoiceNo));
+                          const billedButOrphaned = d => d.billed && d.invoiceNo && deletedInvNos.has(d.invoiceNo);
+                          return (
+                        <div style={{fontSize:11,marginTop:2,display:"flex",flexWrap:"wrap",gap:6,alignItems:"center"}}>
                             <span style={{fontWeight:800,color:C.text}}>DI:</span>
                             {t.diLines.filter(d=>d.diNo).map((d,i)=>(
                               <span key={d.diNo+i} style={{display:"inline-flex",flexDirection:"column",alignItems:"flex-start"}}>
                                 <span style={{display:"inline-flex",alignItems:"center",gap:3}}>
                                   <span style={{fontWeight:800,color:C.text}}>{d.diNo}</span>
                                   <span style={{fontSize:9,fontWeight:700,padding:"1px 5px",borderRadius:5,
-                                    color:"#fff",background:d.billed?C.blue:"#d97706"}}>
-                                    {d.orderType==="party"?"Party ":"Godown "}{d.billed?"✓":"⏳"}
+                                    color:"#fff",background:billedButOrphaned(d)?C.red:d.billed?C.blue:"#d97706"}}
+                                    title={billedButOrphaned(d)?"Invoice "+d.invoiceNo+" was deleted but this DI is still marked billed under it — the revert didn't fully save. Needs manual check.":undefined}>
+                                    {d.orderType==="party"?"Party ":"Godown "}{billedButOrphaned(d)?"⚠":d.billed?"✓":"⏳"}
                                   </span>
+                                  {d.billed && (
+                                    <span style={{fontSize:9,fontWeight:700,padding:"1px 5px",borderRadius:5,
+                                      color:"#fff",background:paidButOrphaned(d)?C.red:d.paid?C.green:"#94a3b8"}}
+                                      title={paidButOrphaned(d)?"This DI is marked paid but its payment record (UTR "+d.utr+") no longer exists — likely a deleted advice that didn't fully revert. Needs manual check.":undefined}>
+                                      {paidButOrphaned(d)?"⚠ Paid?":d.paid?"💰 Paid":"⏳ Unpaid"}
+                                    </span>
+                                  )}
                                 </span>
                                 {d.billed && d.invoiceNo && (
-                                  <span style={{fontSize:9,color:C.muted,fontFamily:"monospace"}}>{d.invoiceNo}</span>
+                                  <span style={{fontSize:9,color:C.muted,fontFamily:"monospace"}}>{d.invoiceNo}{d.paid && d.utr ? " · "+d.utr : ""}</span>
                                 )}
                               </span>
                             ))}
                           </div>
-                        ) : t.diNo ? (
+                          );
+                        })() : t.diNo ? (
                           <div style={{fontSize:11,marginTop:2,fontWeight:800,color:C.text}}>DI: {t.diNo}</div>
                         ) : null}
                         <div style={{color:C.muted,fontSize:11,marginTop:1}}>{t.from}→{t.to} · {t.date}</div>
@@ -18729,7 +18767,7 @@ const SearchBar = ({value,onChange,placeholder}) => (
   </div>
 );
 
-function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, setVehicles, gstReleases, setGstReleases, expenses, setExpenses, user, log, employees=[], actionItems=[], setActionItems}) {
+function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, setVehicles, gstReleases, setGstReleases, expenses, setExpenses, user, log, employees=[], actionItems=[], setActionItems, invoiceRegistry=[], setInvoiceRegistry}) {
 
   const [activeTab,   setActiveTab]   = useState("overview");
   const [scanResult,  setScanResult]  = useState(null);
@@ -18864,9 +18902,11 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
           });
           map[d.invoiceNo].totalAmt += Number(d.billedAmt||0);
           map[d.invoiceNo].diCount += 1;
-          // Payment tracking is trip-level only in this data model (not
-          // per-DI) — a known limitation, unchanged by this fix.
-          if(t.paymentDate) map[d.invoiceNo].status = "paid";
+          // Use the diLine's OWN paid flag — NOT trip-level t.paymentDate,
+          // which is shared/"most recent" across all DIs on this trip and
+          // would incorrectly mark THIS invoice paid just because a sibling
+          // DI (billed under a different invoice) was paid separately.
+          if(d.paid) map[d.invoiceNo].status = "paid";
         });
       } else if(t.billedToShree && t.invoiceNo) {
         // Single-DI trip: unchanged, one DI = one invoice always.
@@ -19098,7 +19138,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     const stGr = (st.grNo||"").trim();
     let expectedAmt = 0;
 
-    if((trip.diLines||[]).length > 1) {
+    if((trip.diLines||[]).length > 0) {
       // ── Multi-DI trip: compute per-DI expected = DI qty × DI frRate ──────────
       const diLine = stDi
         ? trip.diLines.find(d=>(d.diNo||"").trim()===stDi)
@@ -19122,7 +19162,11 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
           if(totalQty > 0 && totalBilled > 0) {
             expectedAmt = Math.round((diLine.qty||0) / totalQty * totalBilled);
           } else {
-            return {ok:true, diff:0, invoiceAmt, expectedAmt:invoiceAmt, note:"unverifiable"};
+            // Genuinely can't compute an expected amount (no per-DI rate, no
+            // trip-level rate, no existing billedToShree to split). Do NOT
+            // silently accept this as "fine" — flag it for owner review with
+            // a distinct note instead of creating zero visibility.
+            return {ok:false, diff:null, invoiceAmt, expectedAmt:0, note:"unverifiable"};
           }
         }
       } else {
@@ -19241,7 +19285,8 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     const conflictActionItems = [];
     const updatedTrips = [];
     const pushMismatchIfAny = (st, t, check) => {
-      if(check.ok || check.note) return;
+      if(check.ok) return;
+      if(check.note==="unmatched-di") return; // defensive fallback, nothing to report
       mismatchActionItems.push({
         id: uid()+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
         type: "amount_mismatch", status: "open",
@@ -19249,7 +19294,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         invoiceNo: invNo, invoiceDate: invDate,
         invoiceAmt: check.invoiceAmt, expectedAmt: check.expectedAmt,
         empId: "", tripId: t.id,
-        note: "",
+        note: check.note==="unverifiable" ? "Could not verify — no per-DI or trip freight rate on file to check against" : "",
         createdAt: ts,
       });
     };
@@ -19347,6 +19392,21 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     Promise.all(updatedTrips.map(t => DB.saveTrip(t).catch(e=>console.error("saveTrip invoice scan:",e))))
       .then(()=>console.log(`Invoice ${invNo}: ${billedCount} DI line(s) billed`));
 
+    if(billedCount > 0 && setInvoiceRegistry) {
+      const existing = (invoiceRegistry||[]).find(inv=>inv.invoiceNo===invNo);
+      const regEntry = {
+        id: invNo, invoiceNo: invNo, invoiceDate: invDate,
+        client: chosenClient || existing?.client || "", material: chosenMaterial || existing?.material || "",
+        totalAmt: Number(scanResult.totalAmount||0) || existing?.totalAmt || 0,
+        diCount: billedCount + (existing?.status==="active" ? (existing?.diCount||0) : 0),
+        status: "active",
+        createdAt: existing?.createdAt || ts, createdBy: existing?.createdBy || (user?.name||""),
+        deletedAt: "", deletedBy: "",
+      };
+      setInvoiceRegistry(prev => [regEntry, ...(prev||[]).filter(inv=>inv.invoiceNo!==invNo)]);
+      DB.saveInvoiceRegistry(regEntry).catch(e=>console.error("saveInvoiceRegistry:",e));
+    }
+
     const allNewActionItems = [...missingActionItems, ...mismatchActionItems, ...conflictActionItems];
     if(allNewActionItems.length > 0 && setActionItems) {
       setActionItems(prev => [...allNewActionItems, ...(prev||[])]);
@@ -19376,7 +19436,10 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     const allInvList=scanResult.invoices||[], shorts=scanResult.shortages||[], exps=scanResult.expenses||[];
 
     // Separate credit entries (freight invoices we have) from debit entries (expenses/penalties)
-    const savedInvoiceNos = new Set((trips||[]).filter(t=>t.invoiceNo).map(t=>t.invoiceNo.trim()));
+    const savedInvoiceNos = new Set((trips||[]).flatMap(t => [
+      t.invoiceNo,
+      ...(t.diLines||[]).map(d=>d.invoiceNo),
+    ].filter(Boolean).map(s=>s.trim())));
     const invList = allInvList.filter(i => {
       const n = (i.invoiceNo||"").trim();
       return n && savedInvoiceNos.has(n);
@@ -19442,8 +19505,37 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     // Apply trip updates — mark paid, attach shreeShortage
     const paidTrips = [];
     const paidTripObjects = [];
+    const matchInvNos = new Set(invListFull.map(i=>(i.invoiceNo||i._matchInv||"").trim()).filter(Boolean));
     setTrips(prev=>prev.map(t=>{
-      if(invListFull.some(i=>(i.invoiceNo||i._matchInv||"").trim()===t.invoiceNo)){
+      if((t.diLines||[]).length > 0) {
+        // ── Multi-DI trip: pay only the diLine(s) whose OWN invoice is on
+        // this advice — a trip whose DIs were billed across two invoices
+        // must be payable in two separate steps, exactly like billing.
+        const matchingLines = t.diLines.filter(d=>d.billed && !d.paid && matchInvNos.has((d.invoiceNo||"").trim()));
+        if(matchingLines.length===0) return t;
+        const lrKey=(t.lrNo||t.lr||"").trim();
+        const short=shorts.find(s=>(s.lrNo||"").trim()===lrKey);
+        const newDiLines = t.diLines.map(d => matchingLines.includes(d)
+          ? {...d, paid:true, paidAmount:d.billedAmt||0, paymentDate:pDate, utr} : d);
+        const updated = {...t, diLines:newDiLines,
+          shortage: short ? (t.shortage||0)+Number(short.tonnes||0) : t.shortage,
+          shreeShortage:short?{tonnes:Number(short.tonnes||0),deduction:Number(short.deduction||0)}:t.shreeShortage};
+        updated.status = tripBillingStatus(updated);
+        updated.paidAmount = tripPaidAmount(updated);
+        // Trip-level utr/paymentDate mirror the MOST RECENT payment touching
+        // this trip — same "last write wins" convention already used for
+        // invoiceNo/invoiceDate, for the same legacy-view-compatibility reason.
+        updated.utr = utr; updated.paymentDate = pDate;
+        updated.shreeStatus = updated.status==="Paid" ? "paid" : updated.status==="Partially Paid" ? "partially_paid" : updated.shreeStatus;
+        // Only clean up party files once the trip is FULLY paid — a
+        // partially-paid multi-DI trip still has outstanding DIs that may
+        // need those files for reference.
+        if(updated.status==="Paid" && t.orderType==="party" && t.id) paidTrips.push(t.id);
+        paidTripObjects.push(updated);
+        return updated;
+      }
+      // ── Single-DI trip: unchanged ────────────────────────────────────────────
+      if(matchInvNos.has((t.invoiceNo||"").trim())){
         const lrKey=(t.lrNo||t.lr||"").trim();
         const short=shorts.find(s=>(s.lrNo||"").trim()===lrKey);
         if(t.orderType==="party" && t.id) paidTrips.push(t.id);
@@ -19619,8 +19711,29 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     const touchedIds = new Set((trips||[])
       .filter(t => t.invoiceNo===invoiceNo || (t.diLines||[]).some(d=>d.invoiceNo===invoiceNo))
       .map(t=>t.id));
+    const failedReverts = [];
     for(const t of updated.filter(t=>touchedIds.has(t.id))){
-      try { await DB.saveTrip(t); } catch(e){ console.error("revert trip:",e); }
+      try { await DB.saveTrip(t); } catch(e){
+        console.error("revert trip:",e);
+        failedReverts.push(t.lrNo||t.lr||t.id);
+      }
+    }
+    if(failedReverts.length>0) {
+      alert(`⚠ Invoice ${invoiceNo} was removed from view, but ${failedReverts.length} trip(s) failed to save the revert to the database: ${failedReverts.join(", ")}. Reloading the app may show them as still billed/paid — please retry deleting this invoice, or check your connection.`);
+    }
+    // Soft-delete the registry entry (status flips to 'deleted', row is kept)
+    // so any diLine that failed to revert above still has something
+    // independent to be flagged against — this is the whole point of the
+    // registry existing.
+    if(setInvoiceRegistry) {
+      const nowTs2 = nowTs();
+      setInvoiceRegistry(prev => (prev||[]).map(inv => inv.invoiceNo===invoiceNo
+        ? {...inv, status:"deleted", deletedAt:nowTs2, deletedBy:user?.name||""} : inv));
+      const regEntry = (invoiceRegistry||[]).find(inv=>inv.invoiceNo===invoiceNo);
+      if(regEntry) {
+        DB.saveInvoiceRegistry({...regEntry, status:"deleted", deletedAt:nowTs2, deletedBy:user?.name||""})
+          .catch(e=>console.error("saveInvoiceRegistry delete:",e));
+      }
     }
     // Cascade-delete any action items tied to this invoice — both a still-open
     // missing_di (the DI was never uploaded, and now the invoice it belonged to
@@ -19636,14 +19749,49 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     if(!window.confirm(`Delete payment advice UTR ${utr}? This will revert trips to Billed status.`)) return;
     // Remove payment record from local state
     setPayments(prev=>prev.filter(p=>p.id!==id));
-    // Revert trips to Billed
-    const revertedTrips = (trips||[]).map(t=>t.utr===utr
-      ?{...t,paidAmount:0,paymentDate:"",utr:"",shreeStatus:"billed",shreeShortage:null}:t);
+    // Revert trips paid under THIS utr
+    const revertedTrips = (trips||[]).map(t => {
+      const hasDiLineMatch = (t.diLines||[]).some(d=>d.utr===utr);
+      if(t.utr!==utr && !hasDiLineMatch) return t;
+      if((t.diLines||[]).length > 0) {
+        // Revert only the diLine(s) paid under THIS utr — a trip paid across
+        // two payment advices (one per DI/invoice) keeps the other DI's
+        // payment intact, mirroring deleteInvoice's per-diLine revert.
+        const newDiLines = t.diLines.map(d => d.utr===utr
+          ? {...d, paid:false, paidAmount:0, paymentDate:"", utr:""} : d);
+        const reverted = {...t, diLines:newDiLines, shreeShortage:null};
+        reverted.status = tripBillingStatus(reverted);
+        reverted.paidAmount = tripPaidAmount(reverted);
+        const stillPaid = newDiLines.filter(d=>d.paid);
+        if(stillPaid.length === 0) {
+          reverted.utr=""; reverted.paymentDate="";
+        } else {
+          const latest = stillPaid.slice().sort((a,b)=>(b.paymentDate||"").localeCompare(a.paymentDate||""))[0];
+          reverted.utr = latest.utr;
+          reverted.paymentDate = latest.paymentDate;
+        }
+        reverted.shreeStatus = reverted.status==="Paid" ? "paid"
+          : reverted.status==="Partially Paid" ? "partially_paid"
+          : (reverted.status==="Billed"||reverted.status==="Partially Billed") ? "billed" : "pending";
+        return reverted;
+      }
+      return {...t,paidAmount:0,paymentDate:"",utr:"",shreeStatus:"billed",shreeShortage:null,status:"Billed"};
+    });
     setTrips(revertedTrips);
     // Persist to DB
     try { await DB.deletePayment(id); } catch(e){ console.error("delete payment:",e); }
-    for(const t of revertedTrips.filter(t=>t.shreeStatus==="billed"&&!t.utr)){
-      try { await DB.saveTrip(t); } catch(e){ console.error("revert trip:",e); }
+    const touchedIds = new Set((trips||[])
+      .filter(t => t.utr===utr || (t.diLines||[]).some(d=>d.utr===utr))
+      .map(t=>t.id));
+    const failedReverts = [];
+    for(const t of revertedTrips.filter(t=>touchedIds.has(t.id))){
+      try { await DB.saveTrip(t); } catch(e){
+        console.error("revert trip:",e);
+        failedReverts.push(t.lrNo||t.lr||t.id);
+      }
+    }
+    if(failedReverts.length>0) {
+      alert(`⚠ Payment advice UTR ${utr} was removed from view, but ${failedReverts.length} trip(s) failed to save the revert to the database: ${failedReverts.join(", ")}. Reloading the app may show them as still paid — please retry deleting this advice, or check your connection.`);
     }
     // Also remove any gstReleases recorded for this UTR
     if(setGstReleases) {
@@ -19662,6 +19810,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
   const Pill = ({status,shortage}) => {
     const c={pending:{bg:C.bg,col:C.muted,txt:"Pending"},
              billed:{bg:C.green+"11",col:C.green,txt:"Billed"},
+             partially_paid:{bg:"#d9770611",col:"#d97706",txt:"Partially Paid"},
              paid:{bg:C.blue+"11",col:C.blue,txt:"Paid"}}[status]||{bg:C.bg,col:C.muted,txt:"Pending"};
     return <span style={{display:"inline-flex",alignItems:"center",gap:3}}>
       <span style={{background:c.bg,color:c.col,border:`1px solid ${c.col}40`,borderRadius:4,padding:"2px 7px",fontSize:10,fontWeight:700}}>{c.txt}</span>
@@ -20251,7 +20400,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
               {[
                 {label:"Shree Trips",     val:shreeTrips.length,                                                               col:C.blue},
                 {label:"Pending Billing", val:shreeTrips.filter(t=>!t.shreeStatus||t.shreeStatus==="pending").length,          col:C.orange},
-                {label:"Billed / Paid",   val:`${shreeTrips.filter(t=>t.shreeStatus==="billed").length} / ${shreeTrips.filter(t=>t.shreeStatus==="paid").length}`, col:C.green},
+                {label:"Billed / Paid",   val:`${shreeTrips.filter(t=>t.shreeStatus==="billed").length} / ${shreeTrips.filter(t=>t.shreeStatus==="paid"||t.shreeStatus==="partially_paid").length}`, col:C.green},
                 {label:"Shortage Alerts", val:allShortages.length,                                                             col:C.red},
               ].map(c=>(
                 <div key={c.label} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,padding:"12px 14px"}}>
@@ -20580,7 +20729,10 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                         </div>
                       )}
                       {(()=>{
-                        const savedInvoiceNos = new Set((trips||[]).filter(t=>t.invoiceNo).map(t=>t.invoiceNo.trim()));
+                        const savedInvoiceNos = new Set((trips||[]).flatMap(t => [
+                          t.invoiceNo,
+                          ...(t.diLines||[]).map(d=>d.invoiceNo),
+                        ].filter(Boolean).map(s=>s.trim())));
                         // Separate credit entries (freight invoices) from debit entries (expenses/penalties)
                         const creditInvs = (scanResult.invoices||[]).filter(i=>{
                           const n=(i.invoiceNo||"").trim();
@@ -20918,6 +21070,15 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                           <span>{inv.trips.length} trip{inv.trips.length!==1?"s":""} · {inv.diCount||inv.trips.length} DI{(inv.diCount||inv.trips.length)!==1?"s":""}</span>
                           <span style={{color:"#1565c0",fontWeight:700}}>₹{fmtINR(inv.totalAmt)}</span>
                         </div>
+                        {(() => {
+                          const regEntry = (invoiceRegistry||[]).find(r=>r.invoiceNo===inv.invoiceNo);
+                          if(regEntry?.status!=="deleted") return null;
+                          return (
+                            <div style={{marginTop:4,fontSize:11,color:C.red,fontWeight:700}}>
+                              ⚠ This invoice was deleted ({fmtDate(regEntry.deletedAt?.slice(0,10))}) but {inv.trips.length} trip(s) are still showing billed under it — a revert likely failed to save. Re-delete or check manually.
+                            </div>
+                          );
+                        })()}
                       </div>
                       <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
                         {isOwner&&(
@@ -21662,7 +21823,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   </div>
                 </div>
                 <div style={{textAlign:"right",fontSize:11,color:C.muted}}>
-                  <div>{shreeTrips.filter(t=>t.shreeStatus==="paid").length} paid trips</div>
+                  <div>{shreeTrips.filter(t=>t.shreeStatus==="paid"||t.shreeStatus==="partially_paid").length} paid/partially-paid trips</div>
                   <div>{shreeTrips.filter(t=>t.shreeShortage).length} with shortages</div>
                 </div>
               </div>

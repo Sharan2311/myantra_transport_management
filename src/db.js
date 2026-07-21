@@ -716,6 +716,29 @@ export const DB = {
   }), ai),
   deleteActionItem: id => deleteOne('mye_action_items', id),
 
+  // Invoice registry — an independent record of invoice existence, separate
+  // from trips.diLines (which holds the actual billing detail). Used purely
+  // as a cross-check signal: does this diLine's invoiceNo still correspond to
+  // an active (non-deleted) registry entry? Soft-delete only (status flips to
+  // 'deleted', row is never removed) so the registry itself can't drift out
+  // of sync the same way a hard-delete-and-recreate pattern could.
+  getInvoiceRegistry: async () => {
+    try { return await fetchAll('mye_invoices', r => ({
+      id: r.id, invoiceNo: r.invoice_no||r.id, invoiceDate: r.invoice_date||'',
+      client: r.client||'', material: r.material||'', totalAmt: +(r.total_amt||0),
+      diCount: +(r.di_count||0), status: r.status||'active',
+      createdAt: r.created_at||'', createdBy: r.created_by||'',
+      deletedAt: r.deleted_at||'', deletedBy: r.deleted_by||'',
+    })); } catch(e) { console.warn('mye_invoices not ready:', e.message); return []; }
+  },
+  saveInvoiceRegistry: async (inv) => upsertOne('mye_invoices', inv => ({
+    id: inv.invoiceNo, invoice_no: inv.invoiceNo, invoice_date: inv.invoiceDate||'',
+    client: inv.client||'', material: inv.material||'', total_amt: inv.totalAmt||0,
+    di_count: inv.diCount||0, status: inv.status||'active',
+    created_at: inv.createdAt||'', created_by: inv.createdBy||'',
+    deleted_at: inv.deletedAt||'', deleted_by: inv.deletedBy||'',
+  }), inv),
+
   // Party contacts lookup
   getPartyContacts: async () => {
     try { return await fetchAll('mye_party_contacts', partyContactFromDB); }
