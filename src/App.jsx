@@ -18777,10 +18777,13 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
   // Clinker Bill state
   const [showClinkerBill, setShowClinkerBill] = useState(false);
   const [clinkerBill, setClinkerBill] = useState({
-    invoiceNo:"", invoiceDate:"", rate:"", tons:"", gstPct:"5", isPrevFY:false,
+    invoiceNo:"", invoiceDate:"", gstPct:"5", isPrevFY:false,
+    rateLines: [{rate:"", tons:""}], // multiple rate slabs within one invoice — e.g. 200 MT @ ₹1000, 100 MT @ ₹1100
   });
-  const [manualClinkerSelect, setManualClinkerSelect] = useState(false);
-  const [manualClinkerIds,    setManualClinkerIds]    = useState([]);
+  // Manual selection is per rate-line now (each line needs its own trip set,
+  // since different lines bill at different rates) — keyed by line index.
+  const [manualClinkerLineMode, setManualClinkerLineMode] = useState({}); // {lineIdx: true}
+  const [manualClinkerIdsByLine, setManualClinkerIdsByLine] = useState({}); // {lineIdx: [tripIds]}
   const [savingClinkerBill,  setSavingClinkerBill]    = useState(false);
   const [searchInv,   setSearchInv]   = useState("");
   const [searchAdv,   setSearchAdv]   = useState("");
@@ -19959,8 +19962,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         {/* ══ CLINKER BILL SHEET ══════════════════════════════════════════════ */}
         {showClinkerBill && isOwner && (()=>{
           const cb = clinkerBill;
-          const rate   = Number(cb.rate||0);
-          const tons   = Number(cb.tons||0);
+          const rateLines = cb.rateLines && cb.rateLines.length ? cb.rateLines : [{rate:"",tons:""}];
           const gstPct = Number(cb.gstPct||0);
           const prevFYNum   = currentFY() - 1;
           const prevFYLabel = FY_LABEL(prevFYNum); // e.g. "FY 2024–25"
@@ -19973,22 +19975,47 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
             return toMatch && goodsMatch && notBilled;
           }).sort((a,b) => (a.date||"").localeCompare(b.date||"")); // oldest first
 
-          // Auto-select: pick oldest trips until qty matches tons
-          let running = 0;
-          const autoSelected = [];
-          for(const t of allClinkerTrips) {
-            if(running >= tons) break;
-            autoSelected.push(t.id);
-            running += Number(t.qty||0);
-          }
+          // Each rate line gets its own trip selection, drawn from whatever's
+          // left after earlier lines have claimed trips — so the same trip
+          // can never be double-billed across two rate slabs in one invoice.
+          let remainingPool = [...allClinkerTrips];
+          const lineResults = rateLines.map((line, idx) => {
+            const lineRate = Number(line.rate||0);
+            const lineTons = Number(line.tons||0);
+            const manualMode = !!manualClinkerLineMode[idx];
+            let selectedIds;
+            if(manualMode) {
+              selectedIds = manualClinkerIdsByLine[idx] || [];
+            } else {
+              let running = 0;
+              const auto = [];
+              for(const t of remainingPool) {
+                if(running >= lineTons) break;
+                auto.push(t.id);
+                running += Number(t.qty||0);
+              }
+              selectedIds = auto;
+            }
+            const selectedTrips = allClinkerTrips.filter(t => selectedIds.includes(t.id));
+            const selectedTons  = selectedTrips.reduce((s,t) => s + Number(t.qty||0), 0);
+            const taxable = lineRate * selectedTons;
+            remainingPool = remainingPool.filter(t => !selectedIds.includes(t.id));
+            return {idx, lineRate, lineTons, manualMode, selectedIds, selectedTrips, selectedTons, taxable};
+          });
 
-          // In manual mode use manualClinkerIds, otherwise use autoSelected
-          const selectedIds   = manualClinkerSelect ? manualClinkerIds : autoSelected;
-          const selectedTrips = allClinkerTrips.filter(t => selectedIds.includes(t.id));
-          const selectedTons  = selectedTrips.reduce((s,t) => s + Number(t.qty||0), 0);
+          // Trips available to a given line's manual picker = eligible trips
+          // minus whatever OTHER lines currently have selected (prevents one
+          // trip being assigned to two rate slabs at once).
+          const availableForLine = (lineIdx) => {
+            const claimedElsewhere = new Set(
+              lineResults.filter(lr=>lr.idx!==lineIdx).flatMap(lr=>lr.selectedIds)
+            );
+            return allClinkerTrips.filter(t => !claimedElsewhere.has(t.id));
+          };
 
-          // Compute amounts based on SELECTED tons (not entered tons)
-          const taxable = rate * selectedTons;
+          const grandTons         = rateLines.reduce((s,l)=>s+Number(l.tons||0),0);
+          const grandSelectedTons = lineResults.reduce((s,lr)=>s+lr.selectedTons,0);
+          const taxable = lineResults.reduce((s,lr)=>s+lr.taxable,0);
           const cgst    = taxable * gstPct / 200;
           const sgst    = taxable * gstPct / 200;
           const total   = taxable + cgst + sgst;
@@ -20001,11 +20028,13 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
           // hard ±0.5 MT match requirement made saving nearly impossible with
           // real, irregular trip weights — this is now just a visual cue so
           // the owner can judge "close enough" themselves.
-          const tonsMatch = tons > 0 && Math.abs(selectedTons - tons) <= 0.5;
-          const tonsClose = tons > 0 && Math.abs(selectedTons - tons) <= Math.max(2, tons*0.02); // within 2 MT or 2%, whichever is bigger
-          // For prevFY bills: skip tons matching — just need invoice no, date, rate, and at least one trip
-          const canSave   = cb.invoiceNo.trim() && cb.invoiceDate && rate > 0
-            && (cb.isPrevFY || selectedTrips.length > 0);
+          const tonsMatch = grandTons > 0 && Math.abs(grandSelectedTons - grandTons) <= 0.5;
+          const tonsClose = grandTons > 0 && Math.abs(grandSelectedTons - grandTons) <= Math.max(2, grandTons*0.02);
+          const totalSelectedTrips = lineResults.reduce((s,lr)=>s+lr.selectedTrips.length,0);
+          const anyRateSet = rateLines.some(l=>Number(l.rate||0)>0);
+          // For prevFY bills: skip tons matching — just need invoice no, date, at least one rate, and at least one trip
+          const canSave   = cb.invoiceNo.trim() && cb.invoiceDate && anyRateSet
+            && (cb.isPrevFY || totalSelectedTrips > 0);
 
           const handleSaveClinkerBill = () => {
             if(!canSave || savingClinkerBill) return;
@@ -20013,24 +20042,26 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
             // meaningfully off from the invoice's stated tons (beyond the
             // "close" tolerance), ask before proceeding instead of either
             // silently trusting it or refusing to save.
-            if(tons>0 && !cb.isPrevFY && !tonsClose) {
-              const diff = selectedTons - tons;
+            if(grandTons>0 && !cb.isPrevFY && !tonsClose) {
+              const diff = grandSelectedTons - grandTons;
               const proceed = window.confirm(
-                `Selected trips total ${selectedTons.toFixed(2)} MT, but the invoice states ${tons} MT `+
+                `Selected trips total ${grandSelectedTons.toFixed(2)} MT, but the invoice states ${grandTons} MT `+
                 `(${diff>0?"+":""}${diff.toFixed(2)} MT ${diff>0?"over":"short"}).\n\n`+
-                `This bills ₹${total.toLocaleString("en-IN",{maximumFractionDigits:0})} based on the ${selectedTons.toFixed(2)} MT actually selected.\n\n`+
+                `This bills ₹${total.toLocaleString("en-IN",{maximumFractionDigits:0})} based on the ${grandSelectedTons.toFixed(2)} MT actually selected.\n\n`+
                 `Save anyway?`
               );
               if(!proceed) return;
             }
             const invNo   = cb.invoiceNo.trim();
             const invDate = cb.invoiceDate;
-            const updatedTrips = [];
 
-            if(selectedTrips.length === 0 && cb.isPrevFY) {
-              // No trips selected — create one synthetic placeholder trip to anchor the invoice
-              const enteredTons  = tons;
-              const enteredTotal = rate * enteredTons; // billedToShree = taxable amount
+            if(totalSelectedTrips === 0 && cb.isPrevFY) {
+              // No trips selected — create one synthetic placeholder trip to anchor the invoice.
+              // Uses the blended average rate across all lines (taxable/grandTons)
+              // since a placeholder has no individual trips to bill per-line.
+              const enteredTons  = grandTons;
+              const blendedTotal = rateLines.reduce((s,l)=>s+Number(l.rate||0)*Number(l.tons||0), 0);
+              const blendedRate  = enteredTons>0 ? blendedTotal/enteredTons : 0;
               const _plId = uid();
               const placeholder = mkTrip({
                 id:            _plId,
@@ -20038,10 +20069,10 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                 truckNo:       "CLINKER-BILL",
                 invoiceNo:     invNo,
                 invoiceDate:   invDate,
-                billedToShree: enteredTotal,
+                billedToShree: blendedTotal,
                 qty:           enteredTons,
-                frRate:        rate,
-                givenRate:     rate,
+                frRate:        blendedRate,
+                givenRate:     blendedRate,
                 to:            "Patas",
                 grade:         "Clinker",
                 status:        "Billed",
@@ -20053,7 +20084,8 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                 date:          invDate,
                 batchId:       "CLINKER-PREVFY-" + prevFYNum,
                 grParticulars: { goods:"Clinker", prevFY:true, prevFYLabel, clinkerPlaceholder:true,
-                                 gstPct, taxable:enteredTotal, total:enteredTotal*(1+gstPct/100) },
+                                 gstPct, taxable:blendedTotal, total:blendedTotal*(1+gstPct/100),
+                                 rateLines: rateLines.map(l=>({rate:Number(l.rate||0),tons:Number(l.tons||0)})) },
               });
               // Save to DB first, then reload trips so placeholder enters state via normal load path
               // (avoids race condition where dbSetTrips delete-logic removes placeholder)
@@ -20069,18 +20101,24 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   if(prev.find(t=>t.id===placeholder.id)) return prev; // already added
                   return [...prev, placeholder];
                 });
-                log && log("CLINKER BILL (prevFY placeholder) " + invNo + " · " + enteredTons + " MT · ₹" + enteredTotal.toLocaleString("en-IN"));
+                log && log("CLINKER BILL (prevFY placeholder) " + invNo + " · " + enteredTons + " MT · ₹" + blendedTotal.toLocaleString("en-IN"));
                 setShowClinkerBill(false);
-                setClinkerBill({invoiceNo:"", invoiceDate:"", rate:"", tons:"", gstPct:"5", isPrevFY:false});
-                setManualClinkerSelect(false);
-                setManualClinkerIds([]);
+                setClinkerBill({invoiceNo:"", invoiceDate:"", gstPct:"5", isPrevFY:false, rateLines:[{rate:"",tons:""}]});
+                setManualClinkerLineMode({});
+                setManualClinkerIdsByLine({});
                 setActiveTab("invoices");
               }).catch(e => { setSavingClinkerBill(false); alert("⚠ Clinker bill DB save failed: " + e.message); });
               return; // sheet closing/reset now happens inside the .then() above
             } else {
-              const localUpdatedTrips = allClinkerTrips
-                .filter(t => selectedIds.includes(t.id))
-                .map(t => {
+              // Each trip bills at the RATE OF THE LINE IT WAS ASSIGNED TO —
+              // not a single global rate, since different lines can have
+              // different rates for different tonnage slabs in one invoice.
+              const rateByTripId = new Map();
+              lineResults.forEach(lr => lr.selectedTrips.forEach(t => rateByTripId.set(t.id, lr.lineRate)));
+              const allSelectedTrips = lineResults.flatMap(lr => lr.selectedTrips);
+
+              const localUpdatedTrips = allSelectedTrips.map(t => {
+                  const tripRate = rateByTripId.get(t.id) || 0;
                   const billedAt = nowTs();
                   const baseFields = {
                     invoiceNo:   invNo,
@@ -20102,14 +20140,14 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                     // invoice total — the exact bug reported.
                     const newDiLines = t.diLines.map(d => ({
                       ...d, billed:true, invoiceNo:invNo, invoiceDate:invDate,
-                      billedAmt: Number(d.qty||0) * rate,
+                      billedAmt: Number(d.qty||0) * tripRate,
                     }));
                     const updated = {...t, diLines:newDiLines, ...baseFields};
                     updated.status = tripBillingStatus(updated);
                     updated.billedToShree = tripBilledAmount(updated);
                     return updated;
                   }
-                  return {...t, ...baseFields, billedToShree: Number(t.qty||0) * rate, status:"Billed"};
+                  return {...t, ...baseFields, billedToShree: Number(t.qty||0) * tripRate, status:"Billed"};
                 });
               setTrips(prev => {
                 const map = new Map(localUpdatedTrips.map(t=>[t.id,t]));
@@ -20128,11 +20166,11 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                     `These ${failed.length} FAILED to save and won't appear in this invoice after a reload: ${failed.join(", ")}. `+
                     `Please retry — do not assume this invoice is complete.`);
                 } else {
-                  log && log("CLINKER BILL " + invNo + " · " + localUpdatedTrips.length + " trips · " + selectedTons.toFixed(2) + " MT · ₹" + total.toLocaleString("en-IN"));
+                  log && log("CLINKER BILL " + invNo + " · " + localUpdatedTrips.length + " trips · " + grandSelectedTons.toFixed(2) + " MT · ₹" + total.toLocaleString("en-IN"));
                   setShowClinkerBill(false);
-                  setClinkerBill({invoiceNo:"", invoiceDate:"", rate:"", tons:"", gstPct:"5", isPrevFY:false});
-                  setManualClinkerSelect(false);
-                  setManualClinkerIds([]);
+                  setClinkerBill({invoiceNo:"", invoiceDate:"", gstPct:"5", isPrevFY:false, rateLines:[{rate:"",tons:""}]});
+                  setManualClinkerLineMode({});
+                  setManualClinkerIdsByLine({});
                   setActiveTab("invoices");
                 }
               })();
@@ -20188,16 +20226,43 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   </div>
                 </div>
 
-                {/* Rate and Tons */}
-                <div style={{display:"flex",gap:10}}>
-                  <div style={{flex:1}}>
-                    <Field label="Rate ₹/MT" value={cb.rate} type="number"
-                      onChange={v=>setClinkerBill(p=>({...p,rate:v}))} placeholder="e.g. 450" />
-                  </div>
-                  <div style={{flex:1}}>
-                    <Field label="Total Tons (MT)" value={cb.tons} type="number"
-                      onChange={v=>setClinkerBill(p=>({...p,tons:v}))} placeholder="e.g. 1200" />
-                  </div>
+                {/* Rate lines — each is its own tonnage slab at its own rate,
+                    e.g. 200 MT @ ₹1000, 100 MT @ ₹1100 within one invoice */}
+                <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                  <div style={{fontSize:10,color:C.muted,fontWeight:700,letterSpacing:1}}>RATE LINES</div>
+                  {rateLines.map((line, idx) => (
+                    <div key={idx} style={{display:"flex",gap:8,alignItems:"flex-end"}}>
+                      <div style={{flex:1}}>
+                        <Field label={`Rate ${idx+1} ₹/MT`} value={line.rate} type="number"
+                          onChange={v=>setClinkerBill(p=>({...p, rateLines: p.rateLines.map((l,i)=>i===idx?{...l,rate:v}:l)}))}
+                          placeholder="e.g. 1000" />
+                      </div>
+                      <div style={{flex:1}}>
+                        <Field label={`Tons ${idx+1} (MT)`} value={line.tons} type="number"
+                          onChange={v=>setClinkerBill(p=>({...p, rateLines: p.rateLines.map((l,i)=>i===idx?{...l,tons:v}:l)}))}
+                          placeholder="e.g. 200" />
+                      </div>
+                      {rateLines.length>1 && (
+                        <button onClick={()=>{
+                          setClinkerBill(p=>({...p, rateLines: p.rateLines.filter((_,i)=>i!==idx)}));
+                          setManualClinkerLineMode(p=>{ const n={...p}; delete n[idx]; return n; });
+                          setManualClinkerIdsByLine(p=>{ const n={...p}; delete n[idx]; return n; });
+                        }} style={{flexShrink:0,padding:"9px 12px",borderRadius:8,border:`1px solid ${C.red}44`,
+                          background:C.red+"11",color:C.red,fontWeight:700,cursor:"pointer",marginBottom:1}}>✕</button>
+                      )}
+                    </div>
+                  ))}
+                  <button onClick={()=>setClinkerBill(p=>({...p, rateLines:[...p.rateLines, {rate:"",tons:""}]}))}
+                    style={{alignSelf:"flex-start",fontSize:11,fontWeight:700,padding:"6px 12px",borderRadius:8,
+                      border:`1.5px solid ${C.blue}`,background:C.blue+"11",color:C.blue,cursor:"pointer"}}>
+                    + Add Another Rate Line
+                  </button>
+                  {grandTons>0 && (
+                    <div style={{fontSize:11,color:C.muted}}>
+                      Total tons across all lines: <b style={{color:C.text}}>{grandTons.toFixed(2)} MT</b>
+                      {" "}· Total (before GST): <b style={{color:C.text}}>₹{taxable.toLocaleString("en-IN",{maximumFractionDigits:0})}</b>
+                    </div>
+                  )}
                 </div>
 
                 {/* GST % */}
@@ -20228,122 +20293,143 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   </div>
                 )}
 
-                {/* Trip selector */}
-                <div style={{background:C.bg,borderRadius:10,padding:"10px 14px"}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-                    <div style={{fontSize:10,color:C.muted,fontWeight:700,letterSpacing:1}}>
-                      CLINKER TRIPS (To: Patas · Goods: Clinker · Unbilled)
-                    </div>
-                    {/* Manual select toggle — always available so the owner can fine-tune */}
-                    {allClinkerTrips.length>0 && tons>0 && (
-                      <button onClick={()=>{
-                        if(manualClinkerSelect){
-                          setManualClinkerSelect(false);
-                          setManualClinkerIds([]);
-                        } else {
-                          setManualClinkerSelect(true);
-                          setManualClinkerIds([...autoSelected]); // start with auto as base
-                        }
-                      }} style={{fontSize:10,fontWeight:700,padding:"3px 10px",borderRadius:6,
-                        cursor:"pointer",border:`1.5px solid ${manualClinkerSelect?C.orange:C.blue}`,
-                        background:manualClinkerSelect?C.orange+"22":C.blue+"11",
-                        color:manualClinkerSelect?C.orange:C.blue}}>
-                        {manualClinkerSelect?"✕ Exit Manual":"✎ Select Manually"}
-                      </button>
-                    )}
+                {/* Trip selector — one section per rate line, since each line
+                    bills its own trips at its own rate */}
+                {allClinkerTrips.length === 0 ? (
+                  <div style={{background:C.bg,borderRadius:10,padding:"10px 14px",color:C.muted,fontSize:12,fontStyle:"italic"}}>
+                    No unbilled clinker trips to Patas found.
                   </div>
-                  {allClinkerTrips.length === 0 ? (
-                    <div style={{color:C.muted,fontSize:12,fontStyle:"italic",padding:"8px 0"}}>
-                      No unbilled clinker trips to Patas found.
-                    </div>
-                  ) : (
-                    <>
-                      <div style={{fontSize:11,color:C.muted,marginBottom:8}}>
-                        {allClinkerTrips.length} eligible trip{allClinkerTrips.length!==1?"s":""} · Sorted oldest first
-                        {manualClinkerSelect
-                          ? <span style={{color:C.orange,fontWeight:700}}> · Manual selection mode — tap to toggle</span>
-                          : <span> · Auto-selected to match tons</span>}
-                      </div>
-                      {/* Tons indicator — informational, does not block saving */}
-                      <div style={{
-                        background: tonsMatch ? C.green+"11" : tonsClose ? C.blue+"11" : tons>0 ? C.orange+"11" : C.bg,
-                        border: `1px solid ${tonsMatch ? C.green : tonsClose ? C.blue : tons>0 ? C.orange : C.border}`,
-                        borderRadius:8, padding:"8px 12px", marginBottom:8,
-                        display:"flex", justifyContent:"space-between", alignItems:"center",
-                      }}>
-                        <span style={{fontSize:12,color:tonsMatch?C.green:tonsClose?C.blue:C.orange,fontWeight:700}}>
-                          {!(tons>0) ? "Enter tons to auto-select trips"
-                            : tonsMatch
-                              ? `✓ Matches invoice tons closely (selected ${selectedTons.toFixed(2)} MT)`
-                              : tonsClose
-                                ? `Close to invoice tons — ${Math.abs(selectedTons-tons).toFixed(2)} MT difference (normal weighbridge variance)`
-                                : `Selected ${selectedTons.toFixed(2)} MT vs invoice's ${tons} MT — add/remove trips manually if this gap looks wrong`}
-                        </span>
-                        <span style={{fontSize:12,fontWeight:800,color:tonsMatch?C.green:C.text}}>
-                          {selectedTrips.length} trip{selectedTrips.length!==1?"s":""} · {selectedTons.toFixed(2)} MT
-                        </span>
-                      </div>
-                      {/* Trip list */}
-                      <div style={{maxHeight:280,overflowY:"auto",display:"flex",flexDirection:"column",gap:4}}>
-                        {allClinkerTrips.map((t,idx)=>{
-                          const isSel = selectedIds.includes(t.id);
-                          const manualToggle = () => {
-                            if(!manualClinkerSelect) return;
-                            setManualClinkerIds(prev =>
-                              prev.includes(t.id) ? prev.filter(id=>id!==t.id) : [...prev, t.id]
-                            );
-                          };
-                          return (
-                            <div key={t.id}
-                              onClick={manualClinkerSelect ? manualToggle : undefined}
-                              style={{
-                                background: isSel ? C.green+"11" : C.card,
-                                border: `1.5px solid ${isSel ? C.green : C.border}`,
-                                borderRadius:7, padding:"7px 10px",
-                                cursor: manualClinkerSelect ? "pointer" : "default",
-                                transition:"border-color 0.1s,background 0.1s",
-                              }}>
-                              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                                <div>
-                                  <span style={{fontFamily:"monospace",fontSize:11,color:C.blue,fontWeight:700}}>
-                                    {t.lrNo||"—"}
-                                  </span>
-                                  <span style={{fontSize:10,color:C.muted,marginLeft:8}}>{t.date}</span>
-                                  <span style={{fontSize:10,color:C.muted,marginLeft:8}}>{t.truckNo}</span>
-                                </div>
-                                <div style={{display:"flex",alignItems:"center",gap:8}}>
-                                  <span style={{fontSize:12,fontWeight:700,color:C.text}}>{t.qty} MT</span>
-                                  <span style={{
-                                    fontSize:9,fontWeight:800,padding:"2px 6px",borderRadius:4,
-                                    background: isSel ? C.green+"22" : C.dim,
-                                    color: isSel ? C.green : C.muted,
-                                  }}>{isSel ? "✓" : manualClinkerSelect ? "TAP" : `#${idx+1}`}</span>
-                                </div>
-                              </div>
-                              <div style={{fontSize:10,color:C.muted,marginTop:2}}>
-                                {t.grParticulars?.goods||t.grade||"—"}
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                      {tons > 0 && !manualClinkerSelect && (
-                        <div style={{marginTop:6,fontSize:11,color:C.muted}}>
-                          Not the right trips? Tap "✎ Select Manually" above to add or remove individual trips before saving.
+                ) : lineResults.map((lr) => {
+                  const idx = lr.idx;
+                  const line = rateLines[idx];
+                  const lineTons = Number(line.tons||0);
+                  const manualMode = lr.manualMode;
+                  const pool = availableForLine(idx); // trips not claimed by OTHER lines
+                  return (
+                    <div key={idx} style={{background:C.bg,borderRadius:10,padding:"10px 14px"}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                        <div style={{fontSize:10,color:C.muted,fontWeight:700,letterSpacing:1}}>
+                          RATE LINE {idx+1} TRIPS (To: Patas · Goods: Clinker · Unbilled)
                         </div>
+                        {pool.length>0 && lineTons>0 && (
+                          <button onClick={()=>{
+                            if(manualMode){
+                              setManualClinkerLineMode(p=>({...p,[idx]:false}));
+                              setManualClinkerIdsByLine(p=>({...p,[idx]:[]}));
+                            } else {
+                              setManualClinkerLineMode(p=>({...p,[idx]:true}));
+                              setManualClinkerIdsByLine(p=>({...p,[idx]:[...lr.selectedIds]})); // start with auto as base
+                            }
+                          }} style={{fontSize:10,fontWeight:700,padding:"3px 10px",borderRadius:6,
+                            cursor:"pointer",border:`1.5px solid ${manualMode?C.orange:C.blue}`,
+                            background:manualMode?C.orange+"22":C.blue+"11",
+                            color:manualMode?C.orange:C.blue}}>
+                            {manualMode?"✕ Exit Manual":"✎ Select Manually"}
+                          </button>
+                        )}
+                      </div>
+                      {pool.length === 0 ? (
+                        <div style={{color:C.muted,fontSize:12,fontStyle:"italic",padding:"8px 0"}}>
+                          No trips left — all eligible trips are claimed by other rate lines.
+                        </div>
+                      ) : (
+                        <>
+                          <div style={{fontSize:11,color:C.muted,marginBottom:8}}>
+                            {pool.length} available trip{pool.length!==1?"s":""} · Sorted oldest first
+                            {manualMode
+                              ? <span style={{color:C.orange,fontWeight:700}}> · Manual selection mode — tap to toggle</span>
+                              : <span> · Auto-selected to match tons</span>}
+                          </div>
+                          {/* Tons indicator — informational, does not block saving */}
+                          <div style={{
+                            background: lineTons>0 && Math.abs(lr.selectedTons-lineTons)<=0.5 ? C.green+"11"
+                              : lineTons>0 && Math.abs(lr.selectedTons-lineTons)<=Math.max(2,lineTons*0.02) ? C.blue+"11"
+                              : lineTons>0 ? C.orange+"11" : C.card,
+                            border: `1px solid ${lineTons>0 && Math.abs(lr.selectedTons-lineTons)<=0.5 ? C.green
+                              : lineTons>0 && Math.abs(lr.selectedTons-lineTons)<=Math.max(2,lineTons*0.02) ? C.blue
+                              : lineTons>0 ? C.orange : C.border}`,
+                            borderRadius:8, padding:"8px 12px", marginBottom:8,
+                            display:"flex", justifyContent:"space-between", alignItems:"center",
+                          }}>
+                            <span style={{fontSize:12,fontWeight:700,
+                              color: !(lineTons>0) ? C.muted
+                                : Math.abs(lr.selectedTons-lineTons)<=0.5 ? C.green
+                                : Math.abs(lr.selectedTons-lineTons)<=Math.max(2,lineTons*0.02) ? C.blue : C.orange}}>
+                              {!(lineTons>0) ? "Enter tons to auto-select trips"
+                                : Math.abs(lr.selectedTons-lineTons)<=0.5
+                                  ? `✓ Matches this line's tons closely`
+                                  : Math.abs(lr.selectedTons-lineTons)<=Math.max(2,lineTons*0.02)
+                                    ? `Close — ${Math.abs(lr.selectedTons-lineTons).toFixed(2)} MT difference`
+                                    : `${lr.selectedTons.toFixed(2)} MT selected vs ${lineTons} MT target — adjust manually if this looks wrong`}
+                            </span>
+                            <span style={{fontSize:12,fontWeight:800,color:C.text}}>
+                              {lr.selectedTrips.length} trip{lr.selectedTrips.length!==1?"s":""} · {lr.selectedTons.toFixed(2)} MT
+                            </span>
+                          </div>
+                          {/* Trip list */}
+                          <div style={{maxHeight:220,overflowY:"auto",display:"flex",flexDirection:"column",gap:4}}>
+                            {pool.map((t,i)=>{
+                              const isSel = lr.selectedIds.includes(t.id);
+                              const manualToggle = () => {
+                                if(!manualMode) return;
+                                setManualClinkerIdsByLine(p => {
+                                  const cur = p[idx] || [];
+                                  return {...p, [idx]: cur.includes(t.id) ? cur.filter(id=>id!==t.id) : [...cur, t.id]};
+                                });
+                              };
+                              return (
+                                <div key={t.id}
+                                  onClick={manualMode ? manualToggle : undefined}
+                                  style={{
+                                    background: isSel ? C.green+"11" : C.card,
+                                    border: `1.5px solid ${isSel ? C.green : C.border}`,
+                                    borderRadius:7, padding:"7px 10px",
+                                    cursor: manualMode ? "pointer" : "default",
+                                    transition:"border-color 0.1s,background 0.1s",
+                                  }}>
+                                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                                    <div>
+                                      <span style={{fontFamily:"monospace",fontSize:11,color:C.blue,fontWeight:700}}>
+                                        {t.lrNo||"—"}
+                                      </span>
+                                      <span style={{fontSize:10,color:C.muted,marginLeft:8}}>{t.date}</span>
+                                      <span style={{fontSize:10,color:C.muted,marginLeft:8}}>{t.truckNo}</span>
+                                    </div>
+                                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                                      <span style={{fontSize:12,fontWeight:700,color:C.text}}>{t.qty} MT</span>
+                                      <span style={{
+                                        fontSize:9,fontWeight:800,padding:"2px 6px",borderRadius:4,
+                                        background: isSel ? C.green+"22" : C.dim,
+                                        color: isSel ? C.green : C.muted,
+                                      }}>{isSel ? "✓" : manualMode ? "TAP" : `#${i+1}`}</span>
+                                    </div>
+                                  </div>
+                                  <div style={{fontSize:10,color:C.muted,marginTop:2}}>
+                                    {t.grParticulars?.goods||t.grade||"—"}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                          {lineTons > 0 && !manualMode && (
+                            <div style={{marginTop:6,fontSize:11,color:C.muted}}>
+                              Not the right trips? Tap "✎ Select Manually" above to add or remove individual trips before saving.
+                            </div>
+                          )}
+                        </>
                       )}
-                    </>
-                  )}
-                </div>
+                    </div>
+                  );
+                })}
 
                 {/* Save */}
-                {!canSave && (tons>0 || rate>0 || cb.invoiceNo || cb.invoiceDate) && (
+                {!canSave && (grandTons>0 || anyRateSet || cb.invoiceNo || cb.invoiceDate) && (
                   <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:8,
                     padding:"8px 12px",fontSize:11,color:C.orange,fontWeight:700}}>
                     {!cb.invoiceNo.trim() && "Enter Invoice No. "}
                     {!cb.invoiceDate && "Enter Invoice Date. "}
-                    {!(rate>0) && "Enter a rate. "}
-                    {rate>0 && cb.invoiceNo.trim() && cb.invoiceDate && selectedTrips.length===0 && !cb.isPrevFY &&
+                    {!anyRateSet && "Enter at least one rate. "}
+                    {anyRateSet && cb.invoiceNo.trim() && cb.invoiceDate && totalSelectedTrips===0 && !cb.isPrevFY &&
                       "Select at least one trip below (enter tons for an auto-suggestion, or use Manual Select)."}
                   </div>
                 )}
@@ -20353,7 +20439,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   {savingClinkerBill
                     ? "Saving… please wait"
                     : canSave
-                      ? `✓ Save Bill — ${selectedTrips.length} trip${selectedTrips.length!==1?"s":""} · ${selectedTons.toFixed(2)} MT · ₹${total.toLocaleString("en-IN",{maximumFractionDigits:0})}`
+                      ? `✓ Save Bill — ${totalSelectedTrips} trip${totalSelectedTrips!==1?"s":""} · ${grandSelectedTons.toFixed(2)} MT · ₹${total.toLocaleString("en-IN",{maximumFractionDigits:0})}`
                       : "Fill invoice details and select trips to save"}
                 </Btn>
               </div>
