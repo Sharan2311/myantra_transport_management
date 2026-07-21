@@ -18781,6 +18781,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
   });
   const [manualClinkerSelect, setManualClinkerSelect] = useState(false);
   const [manualClinkerIds,    setManualClinkerIds]    = useState([]);
+  const [savingClinkerBill,  setSavingClinkerBill]    = useState(false);
   const [searchInv,   setSearchInv]   = useState("");
   const [searchAdv,   setSearchAdv]   = useState("");
   const [searchShort, setSearchShort] = useState("");
@@ -20007,7 +20008,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
             && (cb.isPrevFY || selectedTrips.length > 0);
 
           const handleSaveClinkerBill = () => {
-            if(!canSave) return;
+            if(!canSave || savingClinkerBill) return;
             // Soft confirmation — not a hard block. If the selection is
             // meaningfully off from the invoice's stated tons (beyond the
             // "close" tolerance), ask before proceeding instead of either
@@ -20056,7 +20057,9 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
               });
               // Save to DB first, then reload trips so placeholder enters state via normal load path
               // (avoids race condition where dbSetTrips delete-logic removes placeholder)
+              setSavingClinkerBill(true);
               DB.saveTrip(placeholder).then(r => {
+                setSavingClinkerBill(false);
                 if(r && r.success === false) {
                   alert("⚠ Clinker bill DB save failed: " + (r.error || JSON.stringify(r)));
                   return;
@@ -20067,34 +20070,55 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   return [...prev, placeholder];
                 });
                 log && log("CLINKER BILL (prevFY placeholder) " + invNo + " · " + enteredTons + " MT · ₹" + enteredTotal.toLocaleString("en-IN"));
-              }).catch(e => alert("⚠ Clinker bill DB save failed: " + e.message));
+                setShowClinkerBill(false);
+                setClinkerBill({invoiceNo:"", invoiceDate:"", rate:"", tons:"", gstPct:"5", isPrevFY:false});
+                setManualClinkerSelect(false);
+                setManualClinkerIds([]);
+                setActiveTab("invoices");
+              }).catch(e => { setSavingClinkerBill(false); alert("⚠ Clinker bill DB save failed: " + e.message); });
+              return; // sheet closing/reset now happens inside the .then() above
             } else {
-              setTrips(prev => prev.map(t => {
-                if(!selectedIds.includes(t.id)) return t;
-                const billedAmt = Number(t.qty||0) * rate;
-                const updated = {
+              const localUpdatedTrips = allClinkerTrips
+                .filter(t => selectedIds.includes(t.id))
+                .map(t => ({
                   ...t,
                   invoiceNo:   invNo,
                   invoiceDate: invDate,
-                  billedToShree: billedAmt,
+                  billedToShree: Number(t.qty||0) * rate,
                   status:      "Billed",
                   billedBy:    user.username,
                   billedAt:    nowTs(),
                   shreeStatus: "billed",
                   client:      t.client || "Shree Cement Kodla",
                   ...(cb.isPrevFY ? {prevFY:true, prevFYLabel} : {}),
-                };
-                updatedTrips.push(updated);
-                return updated;
-              }));
-              Promise.all(updatedTrips.map(t => DB.saveTrip(t).catch(e => console.error("saveTrip clinker bill:", e))));
-              log && log("CLINKER BILL " + invNo + " · " + selectedTrips.length + " trips · " + selectedTons.toFixed(2) + " MT · ₹" + total.toLocaleString("en-IN"));
+                }));
+              setTrips(prev => {
+                const map = new Map(localUpdatedTrips.map(t=>[t.id,t]));
+                return prev.map(t => map.get(t.id) || t);
+              });
+              setSavingClinkerBill(true);
+              (async () => {
+                const failed = [];
+                for(const t of localUpdatedTrips) {
+                  try { await DB.saveTrip(t); }
+                  catch(e) { console.error("saveTrip clinker bill:", e); failed.push(t.lrNo||t.id); }
+                }
+                setSavingClinkerBill(false);
+                if(failed.length > 0) {
+                  alert(`⚠ Saved ${localUpdatedTrips.length-failed.length} of ${localUpdatedTrips.length} trips for invoice ${invNo}. `+
+                    `These ${failed.length} FAILED to save and won't appear in this invoice after a reload: ${failed.join(", ")}. `+
+                    `Please retry — do not assume this invoice is complete.`);
+                } else {
+                  log && log("CLINKER BILL " + invNo + " · " + localUpdatedTrips.length + " trips · " + selectedTons.toFixed(2) + " MT · ₹" + total.toLocaleString("en-IN"));
+                  setShowClinkerBill(false);
+                  setClinkerBill({invoiceNo:"", invoiceDate:"", rate:"", tons:"", gstPct:"5", isPrevFY:false});
+                  setManualClinkerSelect(false);
+                  setManualClinkerIds([]);
+                  setActiveTab("invoices");
+                }
+              })();
+              return; // sheet closing/reset now happens inside the async block above
             }
-            setShowClinkerBill(false);
-            setClinkerBill({invoiceNo:"", invoiceDate:"", rate:"", tons:"", gstPct:"5", isPrevFY:false});
-            setManualClinkerSelect(false);
-            setManualClinkerIds([]);
-            setActiveTab("invoices");
           };
 
           return (
@@ -20305,11 +20329,13 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   </div>
                 )}
                 <Btn onClick={handleSaveClinkerBill}
-                  full color={canSave ? C.green : C.muted}
-                  style={{opacity: canSave ? 1 : 0.5, cursor: canSave ? "pointer" : "not-allowed"}}>
-                  {canSave
-                    ? `✓ Save Bill — ${selectedTrips.length} trip${selectedTrips.length!==1?"s":""} · ${selectedTons.toFixed(2)} MT · ₹${total.toLocaleString("en-IN",{maximumFractionDigits:0})}`
-                    : "Fill invoice details and select trips to save"}
+                  full color={(canSave && !savingClinkerBill) ? C.green : C.muted}
+                  style={{opacity: (canSave && !savingClinkerBill) ? 1 : 0.5, cursor: (canSave && !savingClinkerBill) ? "pointer" : "not-allowed"}}>
+                  {savingClinkerBill
+                    ? "Saving… please wait"
+                    : canSave
+                      ? `✓ Save Bill — ${selectedTrips.length} trip${selectedTrips.length!==1?"s":""} · ${selectedTons.toFixed(2)} MT · ₹${total.toLocaleString("en-IN",{maximumFractionDigits:0})}`
+                      : "Fill invoice details and select trips to save"}
                 </Btn>
               </div>
             </Sheet>
