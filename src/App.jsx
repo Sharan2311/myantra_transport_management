@@ -19702,7 +19702,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         }
         return reverted;
       }
-      return {...t,invoiceNo:"",invoiceDate:"",billedToShree:0,shreeStatus:"pending"};
+      return {...t,invoiceNo:"",invoiceDate:"",billedToShree:0,shreeStatus:"pending",status:"Pending Bill"};
     });
     setTrips(updated);
     // Persist every trip that was actually touched by this revert (whether it
