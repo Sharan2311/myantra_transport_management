@@ -20257,12 +20257,23 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                       border:`1.5px solid ${C.blue}`,background:C.blue+"11",color:C.blue,cursor:"pointer"}}>
                     + Add Another Rate Line
                   </button>
-                  {grandTons>0 && (
-                    <div style={{fontSize:11,color:C.muted}}>
-                      Total tons across all lines: <b style={{color:C.text}}>{grandTons.toFixed(2)} MT</b>
-                      {" "}· Total (before GST): <b style={{color:C.text}}>₹{taxable.toLocaleString("en-IN",{maximumFractionDigits:0})}</b>
-                    </div>
-                  )}
+                  {grandTons>0 && (()=>{
+                    const enteredTaxable = rateLines.reduce((s,l)=>s+Number(l.rate||0)*Number(l.tons||0), 0);
+                    const overshoot = grandSelectedTons - grandTons;
+                    return (
+                      <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                        <div style={{fontSize:11,color:C.muted}}>
+                          You entered: <b style={{color:C.text}}>{grandTons.toFixed(2)} MT</b> · would be <b style={{color:C.text}}>₹{enteredTaxable.toLocaleString("en-IN",{maximumFractionDigits:0})}</b> before GST
+                        </div>
+                        {grandSelectedTons>0 && (
+                          <div style={{fontSize:11,color: Math.abs(overshoot)<=0.5 ? C.muted : C.orange, fontWeight: Math.abs(overshoot)<=0.5 ? 400 : 700}}>
+                            Trips actually selected below: <b>{grandSelectedTons.toFixed(2)} MT</b> · will bill <b>₹{taxable.toLocaleString("en-IN",{maximumFractionDigits:0})}</b> before GST
+                            {Math.abs(overshoot)>0.5 && ` (${overshoot>0?"+":""}${overshoot.toFixed(2)} MT vs entered — real trips are irregular sizes, adjust manually below if needed)`}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {/* GST % */}
@@ -20275,7 +20286,8 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                 {/* Auto-computed amounts */}
                 {taxable > 0 && (
                   <div style={{background:C.bg,borderRadius:10,padding:"10px 14px"}}>
-                    <div style={{fontSize:10,color:C.muted,fontWeight:700,letterSpacing:1,marginBottom:8}}>AMOUNT BREAKDOWN</div>
+                    <div style={{fontSize:10,color:C.muted,fontWeight:700,letterSpacing:1,marginBottom:2}}>AMOUNT BREAKDOWN</div>
+                    <div style={{fontSize:10,color:C.muted,marginBottom:8}}>Based on trips actually selected below, not the entered tons above</div>
                     {[
                       {label:"Taxable Amount",       val:taxable, color:C.text},
                       {label:`CGST @ ${gstPct/2}%`,  val:cgst,    color:C.muted},
