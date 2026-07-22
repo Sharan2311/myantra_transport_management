@@ -318,8 +318,8 @@ function computeEffectiveFeatures(plan, overrides={}, rcFeatures={}) {
 
 // ─── ROLES ────────────────────────────────────────────────────────────────────
 const ROLES = {
-  owner:         {label:"Owner",               color:C.accent,  perms:["trips","inbound","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","admin","driverPay","party_portal"]},
-  manager:       {label:"Manager",             color:C.blue,    perms:["trips","inbound","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","driverPay","party_portal"]},
+  owner:         {label:"Owner",               color:C.accent,  perms:["trips","inbound","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","admin","driverPay","party_portal","unbilled_oversight"]},
+  manager:       {label:"Manager",             color:C.blue,    perms:["trips","inbound","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","driverPay","party_portal","unbilled_oversight"]},
   fleet_manager: {label:"Cement Fleet Manager",color:C.teal,    perms:["cement_trips","billing","diesel","driverPay_view"]},
   fleet_mgr_nd:  {label:"Fleet Mgr (No Diesel Req)",color:"#0891b2", perms:["cement_trips","billing","diesel_view","driverPay_view"]},
   operator:      {label:"Trip Operator",       color:C.teal,    perms:["trips","billing","diesel"]},
@@ -939,6 +939,7 @@ const canFeature = (feat) => {
 };
 
 const MORE_TABS = [
+  {id:"unbilled_oversight", icon:"⏰",label:"Unbilled Oversight", perm:"unbilled_oversight", group:"info"},
   {id:"daily_ops",   icon:"📋",label:"Daily Ops",     perm:"reports",      group:"ops",     feat:"daily_ops"},
   {id:"inbound",      icon:"🏭",label:"Raw Material",   perm:"inbound",      group:"ops",     feat:"inbound_trips"},
   {id:"party_portal", icon:"📋",label:"Party Portal",   perm:"party_portal", group:"ops",     feat:"party_billing"},
@@ -2148,6 +2149,7 @@ function AppMain() {
         {tab==="expenses"   && can(user,"payments")   && <ExpensesLedger {...sp} />}
         {tab==="reports"    && can(user,"reports")    && <Reports    {...sp} />}
         {tab==="reminders"  && can(user,"reminders")  && <Reminders  {...sp} />}
+        {tab==="unbilled_oversight" && can(user,"unbilled_oversight") && <UnbilledOversight {...sp} />}
         {tab==="activity"   && can(user,"reports")    && <ActivityLog activity={activity} />}
         {tab==="my_billing" && can(user,"reports")    && <MyBilling />}
         {tab==="daily_ops"  && can(user,"reports")    && <DailyOps {...sp} />}
@@ -25560,6 +25562,140 @@ table{width:100%;border-collapse:collapse;margin:12px 0}th,td{border:1px solid #
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function UnbilledOversight({trips, clinkerBills=[], user}) {
+  const isClinker = t => (t.to||"").toLowerCase().includes("patas") && (t.grParticulars?.goods||"").toLowerCase().includes("clinker");
+  const godownAll = (trips||[]).filter(t => isUnbilled(t) && (!t.orderType||t.orderType==="godown") && !isClinker(t));
+  const partyAll  = (trips||[]).filter(t => isUnbilled(t) && t.orderType==="party" && !isClinker(t));
+  const clinkerAllTrips = (trips||[]).filter(isClinker);
+  const clinkerTotalValue = clinkerAllTrips.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
+  const clinkerBilledAmt = (clinkerBills||[]).filter(b=>b.status==="active").reduce((s,b)=>s+Number(b.taxableAmount||0),0);
+  const clinkerUnbilledAmt = Math.max(0, clinkerTotalValue - clinkerBilledAmt);
+  const clinkerTotalTons = clinkerAllTrips.reduce((s,t)=>s+(t.qty||0),0);
+  const clinkerBilledTons = (clinkerBills||[]).filter(b=>b.status==="active").reduce((s,b)=>s+Number(b.totalTons||0),0);
+  const clinkerUnbilledTons = Math.max(0, clinkerTotalTons - clinkerBilledTons);
+
+  const godownAmt = godownAll.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
+  const partyAmt  = partyAll.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
+
+  // ── Stale godown trips — purely informational, no dismiss/resolve state.
+  // Recomputed live every time this tab renders; disappears on its own once
+  // the trip is billed. 15 days is measured from the TRIP'S OWN date.
+  const todayMs = Date.now();
+  const daysSince = d => d ? Math.floor((todayMs - new Date(d).getTime()) / 86400000) : 0;
+  const staleRows = [];
+  godownAll.forEach(t => {
+    const lines = t.diLines||[];
+    if(lines.length > 0) {
+      lines.forEach(d => {
+        if(d.billed) return;
+        const days = daysSince(t.date);
+        if(days >= 15) staleRows.push({diNo:d.diNo||"—", date:t.date, truckNo:t.truckNo, qty:d.qty||t.qty, days});
+      });
+    } else {
+      const days = daysSince(t.date);
+      if(days >= 15) staleRows.push({diNo:t.diNo||"—", date:t.date, truckNo:t.truckNo, qty:t.qty, days});
+    }
+  });
+  staleRows.sort((a,b)=>b.days-a.days);
+
+  const printReport = () => {
+    const section = (title, rows, amt) => `
+      <div class="section">${title} — ${rows.length} trip${rows.length!==1?"s":""} · ₹${amt.toLocaleString("en-IN",{maximumFractionDigits:0})}</div>
+      <table><thead><tr><th>LR</th><th>Date</th><th>Truck</th><th>MT</th><th>Amount</th></tr></thead><tbody>
+      ${rows.slice().sort((a,b)=>(a.date||"").localeCompare(b.date||"")).map(t=>
+        `<tr><td>${t.lrNo||"—"}</td><td>${t.date||"—"}</td><td>${t.truckNo||"—"}</td><td>${t.qty||0}</td><td>₹${((t.qty||0)*(t.frRate||0)).toLocaleString("en-IN",{maximumFractionDigits:0})}</td></tr>`
+      ).join("")}
+      </tbody></table>`;
+    const html = `
+      <h2>Unbilled Trips Report</h2>
+      <div style="color:#666;font-size:11px;margin-bottom:10px">Generated ${new Date().toLocaleString("en-IN")}</div>
+      ${section("Godown", godownAll, godownAmt)}
+      ${section("Party", partyAll, partyAmt)}
+      <div class="section">Clinker — ${clinkerUnbilledTons.toFixed(2)} MT unbilled · ₹${clinkerUnbilledAmt.toLocaleString("en-IN",{maximumFractionDigits:0})}</div>
+      <div style="font-size:11px;color:#666;margin-bottom:10px">Clinker billing is aggregate-only (no per-trip breakdown). Total logged: ${clinkerTotalTons.toFixed(2)} MT · Already billed: ${clinkerBilledTons.toFixed(2)} MT.</div>
+      ${staleRows.length>0 ? `
+        <div class="section" style="color:#b91c1c">⚠ Godown Trips Unloaded &gt;15 Days — ${staleRows.length}</div>
+        <table><thead><tr><th>DI No</th><th>Date</th><th>Vehicle</th><th>MT</th><th>Days</th></tr></thead><tbody>
+        ${staleRows.map(r=>`<tr><td>${r.diNo}</td><td>${r.date||"—"}</td><td>${r.truckNo||"—"}</td><td>${r.qty||0}</td><td>${r.days}</td></tr>`).join("")}
+        </tbody></table>` : ""}
+    `;
+    const w = window.open("","_blank");
+    w.document.write("<!DOCTYPE html><html><head><title>Unbilled Trips Report</title><style>"+
+      "body{font-family:Arial,sans-serif;padding:20px;font-size:11px}"+
+      "table{width:100%;border-collapse:collapse;margin-bottom:16px}"+
+      "th,td{border:1px solid #ccc;padding:4px 7px;text-align:left}"+
+      "th{background:#f0f0f0;font-size:10px;text-transform:uppercase}"+
+      ".section{margin-top:16px;font-weight:bold;font-size:13px;border-bottom:2px solid #333;padding-bottom:3px;margin-bottom:6px}"+
+      "</style></head><body onload='window.print()'>"+html+"</body></html>");
+    w.document.close();
+  };
+
+  return (
+    <div style={{padding:16,display:"flex",flexDirection:"column",gap:16}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div style={{fontSize:18,fontWeight:800,color:C.text}}>Unbilled Oversight</div>
+        <button onClick={printReport}
+          style={{background:C.orange+"15",border:`1.5px solid ${C.orange}`,borderRadius:8,
+            color:C.orange,fontWeight:700,fontSize:12,padding:"8px 14px",cursor:"pointer"}}>
+          📄 Generate PDF Report
+        </button>
+      </div>
+
+      {/* Unbilled by party/godown/clinker — same numbers as the Dashboard card */}
+      <div style={{display:"flex",flexDirection:"column",gap:8}}>
+        {[
+          {label:"🏭 Godown", count:godownAll.length, amt:godownAmt},
+          {label:"🤝 Party",  count:partyAll.length,  amt:partyAmt},
+        ].map(x=>(
+          <div key={x.label} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,
+            padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span style={{fontWeight:700,fontSize:13,color:C.text}}>{x.label}</span>
+            <span style={{fontSize:12,color:C.muted}}>{x.count} trip{x.count!==1?"s":""} · {fmt(x.amt)}</span>
+          </div>
+        ))}
+        <div style={{background:C.card,border:`1px solid ${"#9333ea"}44`,borderRadius:10,
+          padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{fontWeight:700,fontSize:13,color:"#9333ea"}}>🪨 Clinker</span>
+          <span style={{fontSize:12,color:C.muted}}>{clinkerUnbilledTons.toFixed(2)} MT · {fmt(clinkerUnbilledAmt)}</span>
+        </div>
+      </div>
+
+      {/* Stale godown trips — crisp, purely informational, live every render */}
+      <div>
+        <div style={{fontSize:13,fontWeight:800,color:staleRows.length>0?C.red:C.text,marginBottom:8}}>
+          ⚠ Godown Trips Unloaded &gt;15 Days {staleRows.length>0 && `(${staleRows.length})`}
+        </div>
+        {staleRows.length===0 ? (
+          <div style={{color:C.muted,fontSize:13,fontStyle:"italic"}}>None — nothing stuck past 15 days right now.</div>
+        ) : (
+          <div style={{overflowX:"auto"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+              <thead>
+                <tr style={{background:C.red+"11"}}>
+                  {["DI No","Date","Vehicle","MT"].map(h=>(
+                    <th key={h} style={{padding:"6px 8px",textAlign:"left",fontSize:10,fontWeight:700,
+                      color:C.red,textTransform:"uppercase",borderBottom:`2px solid ${C.red}33`}}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {staleRows.map((r,i)=>(
+                  <tr key={i} style={{borderBottom:`1px solid ${C.border}`}}>
+                    <td style={{padding:"6px 8px",fontWeight:700,color:C.text}}>{r.diNo}</td>
+                    <td style={{padding:"6px 8px",color:C.muted}}>{r.date||"—"}</td>
+                    <td style={{padding:"6px 8px",color:C.muted}}>{r.truckNo||"—"}</td>
+                    <td style={{padding:"6px 8px",fontWeight:700,color:C.text}}>{r.qty}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
