@@ -2234,8 +2234,18 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   const creditedInvoices   = allInvoices.filter(x=>x.paid);
 
   // ── Unbilled: trips not yet invoiced to Shree ────────────────────────────────
-  const unbilledTrips = clientFiltered.filter(isUnbilled);
-  const unbilledTotal = unbilledTrips.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
+  // Clinker trips are excluded from the status-based check — their status
+  // never updates anymore (clinker billing is aggregate-only, not per-trip),
+  // so isUnbilled would permanently treat every clinker trip as unbilled
+  // even after it's actually been billed. Clinker's unbilled value is
+  // computed separately below via the ledger (total value − billed amount).
+  const isClinkerTripDash = t => (t.to||"").toLowerCase().includes("patas") && (t.grParticulars?.goods||"").toLowerCase().includes("clinker");
+  const unbilledTrips = clientFiltered.filter(t => isUnbilled(t) && !isClinkerTripDash(t));
+  const clinkerAllDash = clientFiltered.filter(isClinkerTripDash);
+  const clinkerTotalValueDash = clinkerAllDash.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
+  const clinkerBilledAmtDash = (clinkerBills||[]).filter(b=>b.status==="active").reduce((s,b)=>s+Number(b.taxableAmount||0),0);
+  const clinkerUnbilledAmtDash = Math.max(0, clinkerTotalValueDash - clinkerBilledAmtDash);
+  const unbilledTotal = unbilledTrips.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0) + clinkerUnbilledAmtDash;
 
   // KPIs derived from same source as the invoice lists — consistent numbers
   const totalBilled       = [...uncreditedInvoices, ...creditedInvoices].reduce((s,x)=>s+x.total,0);
@@ -2673,10 +2683,12 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
                       ))}
                     </div>
                   );
-                  const isClinker = t => (t.to||"").toLowerCase().includes("patas") && (t.grParticulars?.goods||"").toLowerCase().includes("clinker");
-                  const clinkerUnbilled = unbilledTrips.filter(isClinker);
-                  const clinkerAmt = clinkerUnbilled.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
-                  const clinkerTons = clinkerUnbilled.reduce((s,t)=>s+(t.qty||0),0);
+                  // Clinker no longer has per-trip billed status (aggregate
+                  // ledger only) — use the outer-scope ledger totals instead
+                  // of filtering unbilledTrips (which excludes clinker now).
+                  const clinkerTons = clinkerAllDash.reduce((s,t)=>s+(t.qty||0),0);
+                  const clinkerBilledTonsDash = (clinkerBills||[]).filter(b=>b.status==="active").reduce((s,b)=>s+Number(b.totalTons||0),0);
+                  const clinkerUnbilledTons = Math.max(0, clinkerTons - clinkerBilledTonsDash);
                   return (
                     <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:8}}>
                       {/* Godown sub-section */}
@@ -2709,36 +2721,34 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
                           {unbilledPartyOpen && <div style={{marginTop:6}}><TripList list={partyUnbilled}/></div>}
                         </div>
                       )}
-                      {/* Clinker sub-section */}
-                      {clinkerUnbilled.length>0 && (
+                      {/* Clinker sub-section — aggregate only, no trip list (billing isn't per-trip anymore) */}
+                      {clinkerAllDash.length>0 && clinkerUnbilledTons>0.005 && (
                         <div>
                           <button onClick={()=>setUnbilledClinkerOpen(p=>!p)}
                             style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,
                               borderRadius:8,padding:"7px 10px",cursor:"pointer",
                               display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                             <span style={{color:C.text,fontSize:11,fontWeight:700}}>
-                              🪨 Clinker <span style={{color:C.muted,fontWeight:400}}>({clinkerUnbilled.length}) · {clinkerTons.toFixed(2)} MT · {fmt(clinkerAmt)}</span>
+                              🪨 Clinker <span style={{color:C.muted,fontWeight:400}}>{clinkerUnbilledTons.toFixed(2)} MT · {fmt(clinkerUnbilledAmtDash)}</span>
                             </span>
                             <span style={{color:C.muted,fontSize:12}}>{unbilledClinkerOpen?"▲":"▼"}</span>
                           </button>
                           {unbilledClinkerOpen && (
-                            <div style={{marginTop:6}}>
-                              <div style={{display:"flex",flexDirection:"column",gap:4,maxHeight:220,overflowY:"auto"}}>
-                                {clinkerUnbilled.slice().sort((a,b)=>(b.date||"").localeCompare(a.date||"")).map(t=>(
-                                  <div key={t.id} style={{background:C.bg,borderRadius:8,padding:"8px 10px",
-                                    borderLeft:"3px solid #9333ea"}}>
-                                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                                      <div>
-                                        <span style={{color:C.text,fontWeight:700,fontSize:12}}>{t.truckNo}</span>
-                                        <span style={{color:C.muted,fontSize:10,marginLeft:6}}>{t.lrNo||"—"}</span>
-                                      </div>
-                                      <span style={{color:"#9333ea",fontWeight:800,fontSize:12}}>{t.qty} MT · {fmt((t.qty||0)*(t.frRate||0))}</span>
-                                    </div>
-                                    <div style={{color:C.muted,fontSize:10,marginTop:2}}>
-                                      {t.date} · {t.to||"—"}
-                                    </div>
-                                  </div>
-                                ))}
+                            <div style={{marginTop:6,background:C.bg,borderRadius:8,padding:"8px 10px"}}>
+                              <div style={{display:"flex",justifyContent:"space-between",fontSize:11,padding:"2px 0"}}>
+                                <span style={{color:C.muted}}>Total value logged (all time)</span>
+                                <span style={{fontWeight:700,color:C.text}}>{fmt(clinkerTotalValueDash)}</span>
+                              </div>
+                              <div style={{display:"flex",justifyContent:"space-between",fontSize:11,padding:"2px 0"}}>
+                                <span style={{color:C.muted}}>Already billed</span>
+                                <span style={{fontWeight:700,color:C.green}}>{fmt(clinkerBilledAmtDash)}</span>
+                              </div>
+                              <div style={{display:"flex",justifyContent:"space-between",fontSize:11,padding:"2px 0"}}>
+                                <span style={{color:C.muted}}>Unbilled remaining</span>
+                                <span style={{fontWeight:700,color:"#9333ea"}}>{fmt(clinkerUnbilledAmtDash)}</span>
+                              </div>
+                              <div style={{fontSize:9,color:C.muted,marginTop:4,fontStyle:"italic"}}>
+                                No per-trip breakdown — clinker billing is aggregate-only. See the Clinker Tonnage card below for full detail.
                               </div>
                             </div>
                           )}
@@ -2760,20 +2770,15 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
               const billedTons = activeBills.reduce((s,b)=>s+Number(b.totalTons||0),0);
               const billedRevenue = activeBills.reduce((s,b)=>s+Number(b.taxableAmount||0),0);
               const unbilledTons = totalTons - billedTons;
-              // Profit = total taxable billed vs total net driver pay owed
-              // across every clinker trip ever logged (same formula as the
-              // Add Clinker Bill sheet — see there for the full breakdown).
-              const totalCost = allClinker.reduce((s,t) => {
-                const gross = (t.diLines&&t.diLines.length>1)
-                  ? t.diLines.reduce((ds,d)=>ds+(d.qty||0)*(d.givenRate||0),0)
-                  : (t.qty||0)*(t.givenRate||0);
-                const hasMerged = !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received");
-                const pouchHold = (t.orderType==="party" && !hasMerged) ? (t.pouchBalance||0) : 0;
-                const deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)
-                  +((t.shortage||0)*(t.givenRate||0))+(t.shortageRecovery||0)+(t.loanRecovery||0)+pouchHold;
-                return s + Math.max(0, gross - deducts);
+              // Profit = sum of each trip's own margin — qty × (Shree Rate −
+              // Driver Rate), using the rates entered per DI on each trip —
+              // same formula as the Add Clinker Bill sheet.
+              const clinkerProfit = allClinker.reduce((s,t) => {
+                if((t.diLines||[]).length > 0) {
+                  return s + t.diLines.reduce((ds,d)=>ds+(d.qty||0)*((d.frRate||0)-(d.givenRate||0)), 0);
+                }
+                return s + (t.qty||0)*((t.frRate||0)-(t.givenRate||0));
               }, 0);
-              const clinkerProfit = billedRevenue - totalCost;
               return (
                 <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${"#9333ea"}44`}}>
                   <button onClick={()=>setBilledClinkerOpen(p=>!p)}
@@ -20019,24 +20024,18 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
           const billedTons    = activeBills.reduce((s,b)=>s+Number(b.totalTons||0),0);
           const billedRevenue = activeBills.reduce((s,b)=>s+Number(b.taxableAmount||0),0); // taxable only, GST excluded — GST is pass-through, not margin
           const unbilledTons  = totalClinkerTons - billedTons;
-          // Profit = total money billed to Shree (taxable) vs total net driver
-          // pay owed across ALL clinker trips ever logged — same netDue
-          // formula used everywhere else in the app (gross minus advance,
-          // TAFAL, diesel, shortage-related deductions, loan recovery).
-          // Uses the full netDue obligation, not "remaining after payment" —
-          // cost is incurred when the trip runs, regardless of when it's
-          // actually paid out.
-          const totalClinkerCost = allClinkerTripsEver.reduce((s,t) => {
-            const gross = (t.diLines&&t.diLines.length>1)
-              ? t.diLines.reduce((ds,d)=>ds+(d.qty||0)*(d.givenRate||0),0)
-              : (t.qty||0)*(t.givenRate||0);
-            const hasMerged = !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received");
-            const pouchHold = (t.orderType==="party" && !hasMerged) ? (t.pouchBalance||0) : 0;
-            const deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)
-              +((t.shortage||0)*(t.givenRate||0))+(t.shortageRecovery||0)+(t.loanRecovery||0)+pouchHold;
-            return s + Math.max(0, gross - deducts);
+          // Profit = sum of each clinker trip's own margin, using the Shree
+          // Rate / Driver Rate already entered per DI on the trip itself
+          // (Edit Trip → "Rates per DI") — NOT derived from the bills ledger,
+          // since a bill no longer links to specific trips. Each DI's margin
+          // = qty × (Shree Rate − Driver Rate); summed across all DIs/trips.
+          const clinkerTripProfit = allClinkerTripsEver.reduce((s,t) => {
+            if((t.diLines||[]).length > 0) {
+              return s + t.diLines.reduce((ds,d)=>ds+(d.qty||0)*((d.frRate||0)-(d.givenRate||0)), 0);
+            }
+            return s + (t.qty||0)*((t.frRate||0)-(t.givenRate||0));
           }, 0);
-          const estProfit = billedRevenue - totalClinkerCost;
+          const estProfit = clinkerTripProfit;
 
           const grandTons = rateLines.reduce((s,l)=>s+Number(l.tons||0),0);
           const taxable   = rateLines.reduce((s,l)=>s+Number(l.rate||0)*Number(l.tons||0),0);
@@ -20110,7 +20109,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                     </div>
                   )}
                   <div style={{marginTop:8,fontSize:9,color:C.muted,fontStyle:"italic"}}>
-                    Total taxable amount billed to Shree across all clinker bills, minus total net driver pay owed (gross freight minus advance/TAFAL/diesel/shortage/loan deductions) across every clinker trip ever logged — regardless of billed/unbilled status.
+                    Sum of each trip's own margin — qty × (Shree Rate − Driver Rate), from the rates entered per DI on each trip — across every clinker trip ever logged.
                   </div>
                 </div>
 
