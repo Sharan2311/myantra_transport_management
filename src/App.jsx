@@ -2241,7 +2241,16 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   // so isUnbilled would permanently treat every clinker trip as unbilled
   // even after it's actually been billed. Clinker's unbilled value is
   // computed separately below via the ledger (total value − billed amount).
-  const isClinkerTripDash = t => (t.to||"").toLowerCase().includes("patas") && (t.grParticulars?.goods||"").toLowerCase().includes("clinker");
+  // Clinker classification: matches on GRADE (the reliable field — confirmed
+  // against the "Rates per DI" edit screen) or the consignee pattern for the
+  // Patas plant, NOT grParticulars.goods (that field isn't consistently
+  // populated, which is why some real clinker trips were being counted as
+  // "godown" instead).
+  const isClinkerTripDash = t => {
+    const grade = (t.grade||"").toLowerCase();
+    const consignee = (t.consignee||"").toLowerCase();
+    return grade.includes("clinker") || (consignee.includes("patas") && consignee.includes("shree cement"));
+  };
   const unbilledTrips = clientFiltered.filter(t => isUnbilled(t) && !isClinkerTripDash(t));
   const clinkerAllDash = clientFiltered.filter(isClinkerTripDash);
   const clinkerTotalValueDash = clinkerAllDash.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
@@ -2764,7 +2773,11 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
 
             {/* ── Clinker tonnage ledger — aggregate only, no per-trip billing marker ── */}
             {(()=>{
-              const isClinkerTrip = t => (t.to||"").toLowerCase().includes("patas") && (t.grParticulars?.goods||"").toLowerCase().includes("clinker");
+              const isClinkerTrip = t => {
+                const grade = (t.grade||"").toLowerCase();
+                const consignee = (t.consignee||"").toLowerCase();
+                return grade.includes("clinker") || (consignee.includes("patas") && consignee.includes("shree cement"));
+              };
               const allClinker = displayTrips.filter(isClinkerTrip);
               if(allClinker.length===0) return null;
               const totalTons = allClinker.reduce((s,t)=>s+Number(t.qty||0),0);
@@ -8150,7 +8163,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                         trips, which no longer carry a per-trip billing marker
                         (clinker billing is aggregate-only now) */}
                     <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:4,flexShrink:0}}>
-                      {!((t.to||"").toLowerCase().includes("patas") && (t.grParticulars?.goods||"").toLowerCase().includes("clinker")) && (
+                      {!(((t.grade||"").toLowerCase().includes("clinker") || ((t.consignee||"").toLowerCase().includes("patas") && (t.consignee||"").toLowerCase().includes("shree cement")))) && (
                         <>
                           <Badge label={t.status} color={SC(t.status)} />
                           {t.invoiceNo && <span style={{fontSize:9,color:C.muted,fontFamily:"monospace"}}>{t.invoiceNo}</span>}
@@ -8236,7 +8249,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                         })()}
                       </div>
                       <div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0}}>
-                        {!((t.to||"").toLowerCase().includes("patas") && (t.grParticulars?.goods||"").toLowerCase().includes("clinker")) && (
+                        {!(((t.grade||"").toLowerCase().includes("clinker") || ((t.consignee||"").toLowerCase().includes("patas") && (t.consignee||"").toLowerCase().includes("shree cement")))) && (
                           <Badge label={t.status} color={SC(t.status)} />
                         )}
                         {t.driverSettled && user.role!=="owner" ? (
@@ -20055,12 +20068,13 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
           const prevFYLabel = FY_LABEL(prevFYNum);
 
           // ── Aggregate ledger — NOT tied to individual trips ─────────────────
-          // "Clinker trips" = route to Patas, goods = Clinker. No per-trip
-          // billed marker anymore; unbilled tons is a pure subtraction.
+          // "Clinker trips" = grade is Clinker, or consignee matches the
+          // Patas plant pattern. No per-trip billed marker anymore; unbilled
+          // tons is a pure subtraction.
           const allClinkerTripsEver = (trips||[]).filter(t => {
-            const toMatch    = (t.to||"").toLowerCase().includes("patas");
-            const goodsMatch = (t.grParticulars?.goods||"").toLowerCase().includes("clinker");
-            return toMatch && goodsMatch;
+            const grade = (t.grade||"").toLowerCase();
+            const consignee = (t.consignee||"").toLowerCase();
+            return grade.includes("clinker") || (consignee.includes("patas") && consignee.includes("shree cement"));
           });
           const totalClinkerTons = allClinkerTripsEver.reduce((s,t)=>s+Number(t.qty||0),0);
           const activeBills = (clinkerBills||[]).filter(b=>b.status==="active");
@@ -25610,7 +25624,11 @@ table{width:100%;border-collapse:collapse;margin:12px 0}th,td{border:1px solid #
 function UnbilledOversight({trips, fyTrips, selectedFY, clinkerBills=[], user}) {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo]     = useState("");
-  const isClinker = t => (t.to||"").toLowerCase().includes("patas") && (t.grParticulars?.goods||"").toLowerCase().includes("clinker");
+  const isClinker = t => {
+    const grade = (t.grade||"").toLowerCase();
+    const consignee = (t.consignee||"").toLowerCase();
+    return grade.includes("clinker") || (consignee.includes("patas") && consignee.includes("shree cement"));
+  };
   // Godown/Party are FY-scoped, matching every other screen in the app —
   // this was a real bug: it previously used the raw, unfiltered trips prop,
   // so pre-FY trips (e.g. March 2026 under an "FY 2026-27" view) leaked in.
