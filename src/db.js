@@ -577,6 +577,49 @@ export const DB = {
       }));
     } catch(e) { console.warn('mye_diesel_requests not ready:', e.message); return []; }
   },
+  // Atomically claims an indent number, retrying with a fresh one if a
+  // concurrent request already took it. The unique constraint on indent_no
+  // (see 2026-07-23_diesel_indent_unique_constraint.sql) is what actually
+  // makes this safe — client-side "max+1" computation alone can't prevent
+  // two near-simultaneous creations from picking the same number. This is
+  // a separate function from saveDieselRequest because that one silently
+  // swallows any "duplicate key" error (for its own id-conflict handling),
+  // which would also hide indent_no violations we need to see and react to.
+  createDieselRequestSafe: async (buildRecord, startingIndentNo, maxAttempts = 5) => {
+    let indentNo = startingIndentNo;
+    for(let attempt = 0; attempt < maxAttempts; attempt++) {
+      const record = buildRecord(indentNo);
+      const dbRow = {
+        id: record.id,
+        indent_no: record.indentNo,
+        truck_no: record.truckNo,
+        pump_id: record.pumpId||null,
+        amount: record.amount||0,
+        diesel_amount: record.dieselAmount??null,
+        cash_amount: record.cashAmount??null,
+        requested_by: record.requestedBy||null,
+        date: record.date,
+        pin: record.pin,
+        status: record.status||'open',
+        confirmed_amount: null, confirmed_reason: null, confirmed_at: null, confirmed_by: null,
+        trip_id: null, lr_no: null,
+        created_by: record.createdBy, created_at: record.createdAt,
+      };
+      const { error } = await supabase.from('mye_diesel_requests').insert(dbRow);
+      if(!error) return { success: true, record, attempts: attempt+1 };
+      // 23505 = unique_violation. Only retry if it's specifically the
+      // indent_no constraint — any other error should surface immediately.
+      const isIndentConflict = error.code === '23505' && (error.message||'').includes('indent_no');
+      if(!isIndentConflict) return { success: false, error: error.message };
+      // Someone else claimed this number between our read and our insert —
+      // bump past whatever's now the highest known indent_no and try again.
+      const { data: latest } = await supabase.from('mye_diesel_requests')
+        .select('indent_no').order('indent_no', { ascending: false }).limit(1);
+      const latestNo = latest && latest[0] ? Number(latest[0].indent_no) : indentNo;
+      indentNo = Math.max(indentNo, latestNo) + 1;
+    }
+    return { success: false, error: `Could not claim a unique indent number after ${maxAttempts} attempts — try again.` };
+  },
   saveDieselRequest: async (r) => {
     const { error } = await supabase.from('mye_diesel_requests').upsert({
       id: r.id,

@@ -3276,8 +3276,11 @@ Rules:
       // auto-fill on trips created more than 4 days after the request was
       // confirmed, understating "Est Net Driver Pay" (the deduction was
       // simply missing) unless someone noticed and manually attached it.
+      // Same normalization fix as the save-time auto-attach blocks — this
+      // pre-fill suggestion had the identical unnormalized-comparison bug.
+      const normTruckG = s => String(s||"").replace(/\s+/g,"").toUpperCase();
       const confirmedReqsG = (dieselRequests||[])
-        .filter(r => r.truckNo===truckNo && r.status==="confirmed");
+        .filter(r => normTruckG(r.truckNo)===normTruckG(truckNo) && r.status==="confirmed");
       const autoReqG = confirmedReqsG.length >= 1 ? confirmedReqsG[0] : null;
       const autoIndentNo = autoReqG ? String(autoReqG.indentNo) : "";
       const autoDiesel   = autoReqG ? String(((autoReqG.dieselAmount??autoReqG.amount)||0)+(autoReqG.cashAmount||0)) : "0";
@@ -3670,6 +3673,19 @@ Rules:
           transporterName: ex.transporterName || "",
           createdBy:user.username, createdAt:nowTs(),
         };
+        // ── Hard block: an advance with no wallet employee would silently
+        // deduct on the trip/driver-pay side while never touching anyone's
+        // wallet ledger — a permanent reconciliation gap. Block BEFORE the
+        // trip is saved (and its LR generated) rather than after, so no LR
+        // number is ever consumed for a trip that can't be saved correctly.
+        if((+g.advance||0) > 0 && !g.cashEmpId) {
+          // Matches saveEdit's exact validation style: an explicit "None"
+          // selection (g.cashEmpId==="__none__") is an acknowledged bypass,
+          // not an oversight — only a truly empty/unselected value blocks.
+          setLrError(`Cannot save: this trip has an advance of ₹${g.advance} but no wallet employee is selected. Choose an owner/driver for the wallet debit (or explicitly choose "None"), or set advance to 0.`);
+          setSaving(false);
+          return;
+        }
         // Atomic DB save — checks for duplicate DI before inserting
         const saveResult = await Promise.race([
           DB.saveTripSafe(trip),
@@ -3723,13 +3739,19 @@ Rules:
         }
         // ── Auto-attach confirmed diesel request for this truck (any age) ──
         if (typeof setDieselRequests === "function" && !g.dieselIndentNo.trim()) {
+          // Normalized comparison — auto-attach was silently failing whenever
+          // the trip's truckNo and the diesel request's stored truckNo
+          // differed only in case/whitespace (diesel requests are saved via
+          // .trim().toUpperCase(), but the trip's own truckNo variable here
+          // is a raw, unnormalized assignment from the form/OCR extraction).
+          const normTruck = s => String(s||"").replace(/\s+/g,"").toUpperCase();
           const confirmedReqs = (dieselRequests||[]).filter(r => r.status==="confirmed");
-          const truckMatch = confirmedReqs.find(r => r.truckNo===truckNo);
+          const truckMatch = confirmedReqs.find(r => normTruck(r.truckNo)===normTruck(truckNo));
           let chosenReq = truckMatch;
           if (!truckMatch) {
             // Also check older/open requests for manual owner override
             // Show truck-specific indents first; only fall back to other trucks if none found
-            const sametruckUnattached = (dieselRequests||[]).filter(r => r.status==="confirmed" && r.truckNo===truckNo);
+            const sametruckUnattached = (dieselRequests||[]).filter(r => r.status==="confirmed" && normTruck(r.truckNo)===normTruck(truckNo));
             const allUnattached = sametruckUnattached.length > 0
               ? sametruckUnattached
               : (dieselRequests||[]).filter(r => r.status==="confirmed");
@@ -3884,6 +3906,17 @@ Rules:
           transporterName: ex0.transporterName || "",
           createdBy:user.username, createdAt:nowTs(),
         };
+        // ── Hard block: same reasoning as the single-trip save path above —
+        // never generate an LR for a trip whose advance can't be recorded
+        // against a wallet.
+        if((+g.advance||0) > 0 && !g.cashEmpId) {
+          // Matches saveEdit's exact validation style: an explicit "None"
+          // selection (g.cashEmpId==="__none__") is an acknowledged bypass,
+          // not an oversight — only a truly empty/unselected value blocks.
+          setLrError(`Cannot save: this trip has an advance of ₹${g.advance} but no wallet employee is selected. Choose an owner/driver for the wallet debit (or explicitly choose "None"), or set advance to 0.`);
+          setSaving(false);
+          return;
+        }
         // Atomic DB save — checks for duplicate DI before inserting
         const saveResultM = await Promise.race([
           DB.saveTripSafe(trip),
@@ -3901,12 +3934,14 @@ Rules:
         setTrips(p=>[trip,...(p||[])]);
         // ── Auto-attach confirmed diesel request for this truck (any age) ──
         if (typeof setDieselRequests === "function") {
+          // Same normalization fix as the single-trip save path above.
+          const normTruck2 = s => String(s||"").replace(/\s+/g,"").toUpperCase();
           const confirmedReqs = (dieselRequests||[]).filter(r => r.status==="confirmed");
-          const truckMatch = confirmedReqs.find(r => r.truckNo===truckNo);
+          const truckMatch = confirmedReqs.find(r => normTruck2(r.truckNo)===normTruck2(truckNo));
           let chosenReq = truckMatch;
           if (!truckMatch) {
             // Show truck-specific indents first; only fall back to other trucks if none found
-            const sametruckUnattached = (dieselRequests||[]).filter(r => r.status==="confirmed" && r.truckNo===truckNo);
+            const sametruckUnattached = (dieselRequests||[]).filter(r => r.status==="confirmed" && normTruck2(r.truckNo)===normTruck2(truckNo));
             const allUnattached = sametruckUnattached.length > 0
               ? sametruckUnattached
               : (dieselRequests||[]).filter(r => r.status==="confirmed");
@@ -14049,21 +14084,27 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
           if (drCashAmt === "") { alert("Cash amount is required — enter 0 if no cash is being given"); return; }
           if (!drPumpId)       { alert("Select a Petrol Pump — it is mandatory for diesel requests"); return; }
           const pin = genUniquePinForTruck(drTruckNo);
-          const req = {
-            id:uid(), indentNo:nextNo,
+          const buildRecord = (indentNo) => ({
+            id:uid(), indentNo,
             truckNo:drTruckNo.trim().toUpperCase(),
             pumpId:drPumpId||null,
             amount:totalAmt,
             dieselAmount: dieselComp,
             cashAmount:   cashComp,
             date:today(), pin, status:"open",
-            confirmedAmount:null, confirmedReason:null, confirmedAt:null,
-            tripId:null, lrNo:null,
             requestedBy: user.username,
             createdBy:user.username, createdAt:nowTs(),
-          };
+          });
+          // Atomic claim — retries with a fresh number if another device/tab
+          // took this one first (race condition fix). nextNo here is just a
+          // starting guess; the DB is the actual source of truth on conflict.
+          const result = await DB.createDieselRequestSafe(buildRecord, nextNo);
+          if(!result.success) {
+            alert("Could not create diesel request: " + result.error);
+            return;
+          }
+          const req = result.record;
           setDieselRequests(p=>[req,...(p||[])]);
-          await DB.saveDieselRequest(req);
           // Auto-create vehicle if truck is new (truckNo only, no phone required here)
           const tn = req.truckNo;
           if(tn && typeof setVehicles==="function" && !(vehicles||[]).find(v=>v.truckNo===tn)) {
@@ -25566,10 +25607,20 @@ table{width:100%;border-collapse:collapse;margin:12px 0}th,td{border:1px solid #
   );
 }
 
-function UnbilledOversight({trips, clinkerBills=[], user}) {
+function UnbilledOversight({trips, fyTrips, selectedFY, clinkerBills=[], user}) {
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo]     = useState("");
   const isClinker = t => (t.to||"").toLowerCase().includes("patas") && (t.grParticulars?.goods||"").toLowerCase().includes("clinker");
-  const godownAll = (trips||[]).filter(t => isUnbilled(t) && (!t.orderType||t.orderType==="godown") && !isClinker(t));
-  const partyAll  = (trips||[]).filter(t => isUnbilled(t) && t.orderType==="party" && !isClinker(t));
+  // Godown/Party are FY-scoped, matching every other screen in the app —
+  // this was a real bug: it previously used the raw, unfiltered trips prop,
+  // so pre-FY trips (e.g. March 2026 under an "FY 2026-27" view) leaked in.
+  const fyScoped = fyTrips || trips || [];
+  const godownAll = fyScoped.filter(t => isUnbilled(t) && (!t.orderType||t.orderType==="godown") && !isClinker(t));
+  const partyAll  = fyScoped.filter(t => isUnbilled(t) && t.orderType==="party" && !isClinker(t));
+  // Clinker is deliberately ALL-TIME (a running ledger, not a per-FY figure —
+  // "total tons logged (all time)" is the established design from the
+  // clinker billing feature itself). Kept separate from the FY toggle above
+  // on purpose; flagged here in case that's not actually what you want.
   const clinkerAllTrips = (trips||[]).filter(isClinker);
   const clinkerTotalValue = clinkerAllTrips.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
   const clinkerBilledAmt = (clinkerBills||[]).filter(b=>b.status==="active").reduce((s,b)=>s+Number(b.taxableAmount||0),0);
@@ -25588,6 +25639,8 @@ function UnbilledOversight({trips, clinkerBills=[], user}) {
   const daysSince = d => d ? Math.floor((todayMs - new Date(d).getTime()) / 86400000) : 0;
   const staleRows = [];
   godownAll.forEach(t => {
+    if(dateFrom && (t.date||"") < dateFrom) return;
+    if(dateTo   && (t.date||"") > dateTo)   return;
     const lines = t.diLines||[];
     if(lines.length > 0) {
       lines.forEach(d => {
@@ -25637,12 +25690,34 @@ function UnbilledOversight({trips, clinkerBills=[], user}) {
   return (
     <div style={{padding:16,display:"flex",flexDirection:"column",gap:16}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-        <div style={{fontSize:18,fontWeight:800,color:C.text}}>Unbilled Oversight</div>
+        <div>
+          <div style={{fontSize:18,fontWeight:800,color:C.text}}>Unbilled Oversight</div>
+          <div style={{fontSize:11,color:C.muted}}>Godown/Party: {selectedFY?FY_LABEL(selectedFY):"current FY"} · Clinker: all-time ledger</div>
+        </div>
         <button onClick={printReport}
           style={{background:C.orange+"15",border:`1.5px solid ${C.orange}`,borderRadius:8,
             color:C.orange,fontWeight:700,fontSize:12,padding:"8px 14px",cursor:"pointer"}}>
           📄 Generate PDF Report
         </button>
+      </div>
+
+      {/* Date range filter — applies to the stale-godown table and the PDF export */}
+      <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
+        <div style={{flex:1}}>
+          <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>FROM</div>
+          <input type="date" value={dateFrom} onChange={e=>setDateFrom(e.target.value)}
+            style={{width:"100%",padding:"7px 10px",borderRadius:8,border:`1px solid ${C.border}`,fontSize:12}} />
+        </div>
+        <div style={{flex:1}}>
+          <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>TO</div>
+          <input type="date" value={dateTo} onChange={e=>setDateTo(e.target.value)}
+            style={{width:"100%",padding:"7px 10px",borderRadius:8,border:`1px solid ${C.border}`,fontSize:12}} />
+        </div>
+        {(dateFrom||dateTo) && (
+          <button onClick={()=>{setDateFrom("");setDateTo("");}}
+            style={{padding:"7px 10px",borderRadius:8,border:`1px solid ${C.border}`,background:C.bg,
+              color:C.muted,fontSize:11,cursor:"pointer"}}>Clear</button>
+        )}
       </div>
 
       {/* Unbilled by party/godown/clinker — same numbers as the Dashboard card */}
