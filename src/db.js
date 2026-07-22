@@ -739,6 +739,29 @@ export const DB = {
     deleted_at: inv.deletedAt||'', deleted_by: inv.deletedBy||'',
   }), inv),
 
+  // Clinker bill ledger — aggregate-only, NOT tied to individual trips.
+  // "Unbilled tons" = sum(all clinker trips' qty) − sum(active bills' tons).
+  getClinkerBills: async () => {
+    try { return await fetchAll('mye_clinker_bills', r => ({
+      id: r.id, invoiceNo: r.invoice_no||'', invoiceDate: r.invoice_date||'',
+      rateLines: r.rate_lines||[], gstPct: +(r.gst_pct||5),
+      taxableAmount: +(r.taxable_amount||0), totalAmount: +(r.total_amount||0),
+      totalTons: +(r.total_tons||0), status: r.status||'active',
+      isPrevFY: !!r.is_prev_fy, prevFYLabel: r.prev_fy_label||'',
+      createdAt: r.created_at||'', createdBy: r.created_by||'',
+      deletedAt: r.deleted_at||'', deletedBy: r.deleted_by||'',
+    })); } catch(e) { console.warn('mye_clinker_bills not ready:', e.message); return []; }
+  },
+  saveClinkerBill: async (b) => upsertOne('mye_clinker_bills', b => ({
+    id: b.id, invoice_no: b.invoiceNo, invoice_date: b.invoiceDate||'',
+    rate_lines: b.rateLines||[], gst_pct: b.gstPct||5,
+    taxable_amount: b.taxableAmount||0, total_amount: b.totalAmount||0,
+    total_tons: b.totalTons||0, status: b.status||'active',
+    is_prev_fy: !!b.isPrevFY, prev_fy_label: b.prevFYLabel||'',
+    created_at: b.createdAt||'', created_by: b.createdBy||'',
+    deleted_at: b.deletedAt||'', deleted_by: b.deletedBy||'',
+  }), b),
+
   // Party contacts lookup
   getPartyContacts: async () => {
     try { return await fetchAll('mye_party_contacts', partyContactFromDB); }

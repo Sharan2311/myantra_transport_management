@@ -1585,6 +1585,7 @@ function AppMain() {
   const [paymentRequests, setPaymentRequests, rPR] = useDB(DB.getPaymentRequests, [],               650);
   const [actionItems, setActionItems, rAI, reloadActionItems] = useDB(DB.getActionItems, [],         650);
   const [invoiceRegistry, setInvoiceRegistry] = useDB(DB.getInvoiceRegistry, [],                      650);
+  const [clinkerBills, setClinkerBills] = useDB(DB.getClinkerBills, [],                                650);
   const dbSetPumpPayments = async (val) => { setPumpPayments(val); };
 
   const loading = !rU||!rT||!rV||!rE||!rP||!rS||!rPu||!rI||!rSt||!rDP||!rEx||!rGR;
@@ -1847,6 +1848,7 @@ function AppMain() {
     paymentRequests, setPaymentRequests,
     actionItems, setActionItems,
     invoiceRegistry, setInvoiceRegistry,
+    clinkerBills, setClinkerBills,
     user, log,
     allTripsLoaded, loadingAllTrips, loadAllTrips,
   };
@@ -2159,7 +2161,7 @@ function AppMain() {
   );
 }
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
-function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pumps, pumpPayments, driverPays, cashTransfers, activity, settings, setTab, user, selectedFY, selectedClient, actionItems=[]}) {
+function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pumps, pumpPayments, driverPays, cashTransfers, activity, settings, setTab, user, selectedFY, selectedClient, actionItems=[], clinkerBills=[]}) {
   const [dashMonth, setDashMonth] = useState(""); // "YYYY-MM" or "" = all
   const [uncreditedOpen, setUncreditedOpen] = useState(false);
   const [creditedOpen,   setCreditedOpen]   = useState(false);
@@ -2748,13 +2750,30 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
               </div>
             )}
 
-            {/* ── Billed Clinker block ── */}
+            {/* ── Clinker tonnage ledger — aggregate only, no per-trip billing marker ── */}
             {(()=>{
               const isClinkerTrip = t => (t.to||"").toLowerCase().includes("patas") && (t.grParticulars?.goods||"").toLowerCase().includes("clinker");
-              const billedClinker = displayTrips.filter(t => isClinkerTrip(t) && t.invoiceNo && t.billedToShree);
-              if(billedClinker.length===0) return null;
-              const billedClinkerAmt  = billedClinker.reduce((s,t)=>s+Number(t.billedToShree||0),0);
-              const billedClinkerTons = billedClinker.reduce((s,t)=>s+Number(t.qty||0),0);
+              const allClinker = displayTrips.filter(isClinkerTrip);
+              if(allClinker.length===0) return null;
+              const totalTons = allClinker.reduce((s,t)=>s+Number(t.qty||0),0);
+              const activeBills = (clinkerBills||[]).filter(b=>b.status==="active");
+              const billedTons = activeBills.reduce((s,b)=>s+Number(b.totalTons||0),0);
+              const billedRevenue = activeBills.reduce((s,b)=>s+Number(b.taxableAmount||0),0);
+              const unbilledTons = totalTons - billedTons;
+              // Profit = total taxable billed vs total net driver pay owed
+              // across every clinker trip ever logged (same formula as the
+              // Add Clinker Bill sheet — see there for the full breakdown).
+              const totalCost = allClinker.reduce((s,t) => {
+                const gross = (t.diLines&&t.diLines.length>1)
+                  ? t.diLines.reduce((ds,d)=>ds+(d.qty||0)*(d.givenRate||0),0)
+                  : (t.qty||0)*(t.givenRate||0);
+                const hasMerged = !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received");
+                const pouchHold = (t.orderType==="party" && !hasMerged) ? (t.pouchBalance||0) : 0;
+                const deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)
+                  +((t.shortage||0)*(t.givenRate||0))+(t.shortageRecovery||0)+(t.loanRecovery||0)+pouchHold;
+                return s + Math.max(0, gross - deducts);
+              }, 0);
+              const clinkerProfit = billedRevenue - totalCost;
               return (
                 <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${"#9333ea"}44`}}>
                   <button onClick={()=>setBilledClinkerOpen(p=>!p)}
@@ -2762,31 +2781,45 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
                       display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                     <div>
                       <span style={{color:"#9333ea",fontWeight:700,fontSize:12}}>
-                        🪨 Billed Clinker
+                        🪨 Clinker Tonnage
                       </span>
                       <span style={{color:C.muted,fontSize:11,marginLeft:8}}>
-                        {billedClinker.length} trip{billedClinker.length!==1?"s":""} · {billedClinkerTons.toFixed(2)} MT · {fmt(billedClinkerAmt)}
+                        {billedTons.toFixed(2)} billed · {unbilledTons.toFixed(2)} unbilled MT
                       </span>
                     </div>
                     <span style={{color:"#9333ea",fontSize:14}}>{billedClinkerOpen?"▲":"▼"}</span>
                   </button>
                   {billedClinkerOpen && (
-                    <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:4,maxHeight:260,overflowY:"auto"}}>
-                      {billedClinker.slice().sort((a,b)=>(b.date||"").localeCompare(a.date||"")).map(t=>(
-                        <div key={t.id} style={{background:C.bg,borderRadius:8,padding:"8px 10px",
-                          borderLeft:"3px solid #9333ea"}}>
-                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                            <div>
-                              <span style={{color:C.text,fontWeight:700,fontSize:12}}>{t.truckNo}</span>
-                              <span style={{color:C.muted,fontSize:10,marginLeft:6}}>{t.lrNo||"—"}</span>
-                            </div>
-                            <span style={{color:"#9333ea",fontWeight:800,fontSize:12}}>{t.qty} MT · {fmt(t.billedToShree)}</span>
-                          </div>
-                          <div style={{color:C.muted,fontSize:10,marginTop:2}}>
-                            {t.date} · {t.invoiceNo} · {t.to||"—"}
-                          </div>
+                    <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:4}}>
+                      <div style={{display:"flex",justifyContent:"space-between",fontSize:12,padding:"4px 0"}}>
+                        <span style={{color:C.muted}}>Total tons logged (all time)</span>
+                        <span style={{fontWeight:700,color:C.text}}>{totalTons.toFixed(2)} MT</span>
+                      </div>
+                      <div style={{display:"flex",justifyContent:"space-between",fontSize:12,padding:"4px 0"}}>
+                        <span style={{color:C.muted}}>Billed ({activeBills.length} bill{activeBills.length!==1?"s":""})</span>
+                        <span style={{fontWeight:700,color:C.green}}>{billedTons.toFixed(2)} MT · {fmt(billedRevenue)}</span>
+                      </div>
+                      <div style={{display:"flex",justifyContent:"space-between",fontSize:12,padding:"4px 0"}}>
+                        <span style={{color:C.muted}}>Unbilled remaining</span>
+                        <span style={{fontWeight:700,color:unbilledTons<0?C.red:"#9333ea"}}>{unbilledTons.toFixed(2)} MT</span>
+                      </div>
+                      {user.role==="owner" && (
+                        <div style={{display:"flex",justifyContent:"space-between",fontSize:12,padding:"4px 0",
+                          borderTop:`1px solid ${C.border}`,marginTop:2,paddingTop:6}}>
+                          <span style={{color:C.muted}}>Profit (all clinker trips)</span>
+                          <span style={{fontWeight:800,color:clinkerProfit>=0?C.green:C.red}}>{fmt(clinkerProfit)}</span>
                         </div>
-                      ))}
+                      )}
+                      {activeBills.length>0 && (
+                        <div style={{marginTop:6,paddingTop:6,borderTop:`1px solid ${C.border}`}}>
+                          {activeBills.slice().sort((a,b)=>(b.invoiceDate||"").localeCompare(a.invoiceDate||"")).slice(0,5).map(b=>(
+                            <div key={b.id} style={{display:"flex",justifyContent:"space-between",fontSize:11,padding:"3px 0"}}>
+                              <span style={{color:C.muted}}>{b.invoiceNo} · {b.invoiceDate}</span>
+                              <span style={{color:C.text,fontWeight:600}}>{Number(b.totalTons||0).toFixed(2)} MT · {fmt(b.totalAmount)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -8071,10 +8104,16 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                       </div>
                     </div>
 
-                    {/* Status + invoice no + chevron */}
+                    {/* Status + invoice no + chevron — suppressed for clinker
+                        trips, which no longer carry a per-trip billing marker
+                        (clinker billing is aggregate-only now) */}
                     <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:4,flexShrink:0}}>
-                      <Badge label={t.status} color={SC(t.status)} />
-                      {t.invoiceNo && <span style={{fontSize:9,color:C.muted,fontFamily:"monospace"}}>{t.invoiceNo}</span>}
+                      {!((t.to||"").toLowerCase().includes("patas") && (t.grParticulars?.goods||"").toLowerCase().includes("clinker")) && (
+                        <>
+                          <Badge label={t.status} color={SC(t.status)} />
+                          {t.invoiceNo && <span style={{fontSize:9,color:C.muted,fontFamily:"monospace"}}>{t.invoiceNo}</span>}
+                        </>
+                      )}
                       <span style={{color:C.muted,fontSize:12,transition:"transform 0.2s",
                         display:"inline-block",transform:isExpanded?"rotate(180deg)":"rotate(0deg)"}}>⌄</span>
                     </div>
@@ -8155,7 +8194,9 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                         })()}
                       </div>
                       <div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0}}>
-                        <Badge label={t.status} color={SC(t.status)} />
+                        {!((t.to||"").toLowerCase().includes("patas") && (t.grParticulars?.goods||"").toLowerCase().includes("clinker")) && (
+                          <Badge label={t.status} color={SC(t.status)} />
+                        )}
                         {t.driverSettled && user.role!=="owner" ? (
                           <div title="Trip is frozen — driver payment complete. Only Owner can edit."
                             style={{background:C.dim,borderRadius:8,color:C.muted+"66",padding:"5px 8px",
@@ -18765,7 +18806,7 @@ const SearchBar = ({value,onChange,placeholder}) => (
   </div>
 );
 
-function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, setVehicles, gstReleases, setGstReleases, expenses, setExpenses, user, log, employees=[], actionItems=[], setActionItems, invoiceRegistry=[], setInvoiceRegistry}) {
+function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, setVehicles, gstReleases, setGstReleases, expenses, setExpenses, user, log, employees=[], actionItems=[], setActionItems, invoiceRegistry=[], setInvoiceRegistry, clinkerBills=[], setClinkerBills}) {
 
   const [activeTab,   setActiveTab]   = useState("overview");
   const [scanResult,  setScanResult]  = useState(null);
@@ -18782,8 +18823,6 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
   });
   // Manual selection is per rate-line now (each line needs its own trip set,
   // since different lines bill at different rates) — keyed by line index.
-  const [manualClinkerLineMode, setManualClinkerLineMode] = useState({}); // {lineIdx: true}
-  const [manualClinkerIdsByLine, setManualClinkerIdsByLine] = useState({}); // {lineIdx: [tripIds]}
   const [savingClinkerBill,  setSavingClinkerBill]    = useState(false);
   const [searchInv,   setSearchInv]   = useState("");
   const [searchAdv,   setSearchAdv]   = useState("");
@@ -19965,216 +20004,71 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
           const rateLines = cb.rateLines && cb.rateLines.length ? cb.rateLines : [{rate:"",tons:""}];
           const gstPct = Number(cb.gstPct||0);
           const prevFYNum   = currentFY() - 1;
-          const prevFYLabel = FY_LABEL(prevFYNum); // e.g. "FY 2024–25"
+          const prevFYLabel = FY_LABEL(prevFYNum);
 
-          // Clinker trips: to contains "patas" AND grParticulars.goods contains "clinker"
-          const allClinkerTrips = (trips||[]).filter(t => {
+          // ── Aggregate ledger — NOT tied to individual trips ─────────────────
+          // "Clinker trips" = route to Patas, goods = Clinker. No per-trip
+          // billed marker anymore; unbilled tons is a pure subtraction.
+          const allClinkerTripsEver = (trips||[]).filter(t => {
             const toMatch    = (t.to||"").toLowerCase().includes("patas");
             const goodsMatch = (t.grParticulars?.goods||"").toLowerCase().includes("clinker");
-            const notBilled  = !t.invoiceNo;
-            return toMatch && goodsMatch && notBilled;
-          }).sort((a,b) => (a.date||"").localeCompare(b.date||"")); // oldest first
-
-          // Each rate line gets its own trip selection, drawn from whatever's
-          // left after earlier lines have claimed trips — so the same trip
-          // can never be double-billed across two rate slabs in one invoice.
-          let remainingPool = [...allClinkerTrips];
-          const lineResults = rateLines.map((line, idx) => {
-            const lineRate = Number(line.rate||0);
-            const lineTons = Number(line.tons||0);
-            const manualMode = !!manualClinkerLineMode[idx];
-            let selectedIds;
-            if(manualMode) {
-              selectedIds = manualClinkerIdsByLine[idx] || [];
-            } else {
-              let running = 0;
-              const auto = [];
-              for(const t of remainingPool) {
-                if(running >= lineTons) break;
-                auto.push(t.id);
-                running += Number(t.qty||0);
-              }
-              selectedIds = auto;
-            }
-            const selectedTrips = allClinkerTrips.filter(t => selectedIds.includes(t.id));
-            const selectedTons  = selectedTrips.reduce((s,t) => s + Number(t.qty||0), 0);
-            const taxable = lineRate * selectedTons;
-            remainingPool = remainingPool.filter(t => !selectedIds.includes(t.id));
-            return {idx, lineRate, lineTons, manualMode, selectedIds, selectedTrips, selectedTons, taxable};
+            return toMatch && goodsMatch;
           });
+          const totalClinkerTons = allClinkerTripsEver.reduce((s,t)=>s+Number(t.qty||0),0);
+          const activeBills = (clinkerBills||[]).filter(b=>b.status==="active");
+          const billedTons    = activeBills.reduce((s,b)=>s+Number(b.totalTons||0),0);
+          const billedRevenue = activeBills.reduce((s,b)=>s+Number(b.taxableAmount||0),0); // taxable only, GST excluded — GST is pass-through, not margin
+          const unbilledTons  = totalClinkerTons - billedTons;
+          // Profit = total money billed to Shree (taxable) vs total net driver
+          // pay owed across ALL clinker trips ever logged — same netDue
+          // formula used everywhere else in the app (gross minus advance,
+          // TAFAL, diesel, shortage-related deductions, loan recovery).
+          // Uses the full netDue obligation, not "remaining after payment" —
+          // cost is incurred when the trip runs, regardless of when it's
+          // actually paid out.
+          const totalClinkerCost = allClinkerTripsEver.reduce((s,t) => {
+            const gross = (t.diLines&&t.diLines.length>1)
+              ? t.diLines.reduce((ds,d)=>ds+(d.qty||0)*(d.givenRate||0),0)
+              : (t.qty||0)*(t.givenRate||0);
+            const hasMerged = !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received");
+            const pouchHold = (t.orderType==="party" && !hasMerged) ? (t.pouchBalance||0) : 0;
+            const deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)
+              +((t.shortage||0)*(t.givenRate||0))+(t.shortageRecovery||0)+(t.loanRecovery||0)+pouchHold;
+            return s + Math.max(0, gross - deducts);
+          }, 0);
+          const estProfit = billedRevenue - totalClinkerCost;
 
-          // Trips available to a given line's manual picker = eligible trips
-          // minus whatever OTHER lines currently have selected (prevents one
-          // trip being assigned to two rate slabs at once).
-          const availableForLine = (lineIdx) => {
-            const claimedElsewhere = new Set(
-              lineResults.filter(lr=>lr.idx!==lineIdx).flatMap(lr=>lr.selectedIds)
-            );
-            return allClinkerTrips.filter(t => !claimedElsewhere.has(t.id));
-          };
+          const grandTons = rateLines.reduce((s,l)=>s+Number(l.tons||0),0);
+          const taxable   = rateLines.reduce((s,l)=>s+Number(l.rate||0)*Number(l.tons||0),0);
+          const cgst      = taxable * gstPct / 200;
+          const sgst      = taxable * gstPct / 200;
+          const total     = taxable + cgst + sgst;
 
-          const grandTons         = rateLines.reduce((s,l)=>s+Number(l.tons||0),0);
-          const grandSelectedTons = lineResults.reduce((s,lr)=>s+lr.selectedTons,0);
-          const taxable = lineResults.reduce((s,lr)=>s+lr.taxable,0);
-          const cgst    = taxable * gstPct / 200;
-          const sgst    = taxable * gstPct / 200;
-          const total   = taxable + cgst + sgst;
+          const anyRateSet = rateLines.some(l=>Number(l.rate||0)>0 && Number(l.tons||0)>0);
+          const canSave = cb.invoiceNo.trim() && cb.invoiceDate && anyRateSet;
 
-          // Informational only — NOT a save requirement. A clinker invoice has
-          // no per-DI breakdown to reconcile against (unlike cement DIs), and
-          // its stated tonnage comes from Shree's own weighbridge record,
-          // which will rarely match the sum of your trip-side tonnage exactly
-          // (measurement variance between origin/destination is normal). A
-          // hard ±0.5 MT match requirement made saving nearly impossible with
-          // real, irregular trip weights — this is now just a visual cue so
-          // the owner can judge "close enough" themselves.
-          const tonsMatch = grandTons > 0 && Math.abs(grandSelectedTons - grandTons) <= 0.5;
-          const tonsClose = grandTons > 0 && Math.abs(grandSelectedTons - grandTons) <= Math.max(2, grandTons*0.02);
-          const totalSelectedTrips = lineResults.reduce((s,lr)=>s+lr.selectedTrips.length,0);
-          const anyRateSet = rateLines.some(l=>Number(l.rate||0)>0);
-          // For prevFY bills: skip tons matching — just need invoice no, date, at least one rate, and at least one trip
-          const canSave   = cb.invoiceNo.trim() && cb.invoiceDate && anyRateSet
-            && (cb.isPrevFY || totalSelectedTrips > 0);
-
-          const handleSaveClinkerBill = () => {
+          const handleSaveClinkerBill = async () => {
             if(!canSave || savingClinkerBill) return;
-            // Soft confirmation — not a hard block. If the selection is
-            // meaningfully off from the invoice's stated tons (beyond the
-            // "close" tolerance), ask before proceeding instead of either
-            // silently trusting it or refusing to save.
-            if(grandTons>0 && !cb.isPrevFY && !tonsClose) {
-              const diff = grandSelectedTons - grandTons;
-              const proceed = window.confirm(
-                `Selected trips total ${grandSelectedTons.toFixed(2)} MT, but the invoice states ${grandTons} MT `+
-                `(${diff>0?"+":""}${diff.toFixed(2)} MT ${diff>0?"over":"short"}).\n\n`+
-                `This bills ₹${total.toLocaleString("en-IN",{maximumFractionDigits:0})} based on the ${grandSelectedTons.toFixed(2)} MT actually selected.\n\n`+
-                `Save anyway?`
-              );
-              if(!proceed) return;
-            }
-            const invNo   = cb.invoiceNo.trim();
-            const invDate = cb.invoiceDate;
-
-            if(totalSelectedTrips === 0 && cb.isPrevFY) {
-              // No trips selected — create one synthetic placeholder trip to anchor the invoice.
-              // Uses the blended average rate across all lines (taxable/grandTons)
-              // since a placeholder has no individual trips to bill per-line.
-              const enteredTons  = grandTons;
-              const blendedTotal = rateLines.reduce((s,l)=>s+Number(l.rate||0)*Number(l.tons||0), 0);
-              const blendedRate  = enteredTons>0 ? blendedTotal/enteredTons : 0;
-              const _plId = uid();
-              const placeholder = mkTrip({
-                id:            _plId,
-                lrNo:          "CLK-" + _plId.slice(0,8).toUpperCase(),
-                truckNo:       "CLINKER-BILL",
-                invoiceNo:     invNo,
-                invoiceDate:   invDate,
-                billedToShree: blendedTotal,
-                qty:           enteredTons,
-                frRate:        blendedRate,
-                givenRate:     blendedRate,
-                to:            "Patas",
-                grade:         "Clinker",
-                status:        "Billed",
-                billedBy:      user.username,
-                billedAt:      nowTs(),
-                shreeStatus:   "billed",
-                client:        "Shree Cement Kodla",
-                type:          "outbound",
-                date:          invDate,
-                batchId:       "CLINKER-PREVFY-" + prevFYNum,
-                grParticulars: { goods:"Clinker", prevFY:true, prevFYLabel, clinkerPlaceholder:true,
-                                 gstPct, taxable:blendedTotal, total:blendedTotal*(1+gstPct/100),
-                                 rateLines: rateLines.map(l=>({rate:Number(l.rate||0),tons:Number(l.tons||0)})) },
-              });
-              // Save to DB first, then reload trips so placeholder enters state via normal load path
-              // (avoids race condition where dbSetTrips delete-logic removes placeholder)
-              setSavingClinkerBill(true);
-              DB.saveTrip(placeholder).then(r => {
-                setSavingClinkerBill(false);
-                if(r && r.success === false) {
-                  alert("⚠ Clinker bill DB save failed: " + (r.error || JSON.stringify(r)));
-                  return;
-                }
-                // Add to in-memory state using functional updater to get latest prev
-                setTrips(prev => {
-                  if(prev.find(t=>t.id===placeholder.id)) return prev; // already added
-                  return [...prev, placeholder];
-                });
-                log && log("CLINKER BILL (prevFY placeholder) " + invNo + " · " + enteredTons + " MT · ₹" + blendedTotal.toLocaleString("en-IN"));
-                setShowClinkerBill(false);
-                setClinkerBill({invoiceNo:"", invoiceDate:"", gstPct:"5", isPrevFY:false, rateLines:[{rate:"",tons:""}]});
-                setManualClinkerLineMode({});
-                setManualClinkerIdsByLine({});
-                setActiveTab("invoices");
-              }).catch(e => { setSavingClinkerBill(false); alert("⚠ Clinker bill DB save failed: " + e.message); });
-              return; // sheet closing/reset now happens inside the .then() above
-            } else {
-              // Each trip bills at the RATE OF THE LINE IT WAS ASSIGNED TO —
-              // not a single global rate, since different lines can have
-              // different rates for different tonnage slabs in one invoice.
-              const rateByTripId = new Map();
-              lineResults.forEach(lr => lr.selectedTrips.forEach(t => rateByTripId.set(t.id, lr.lineRate)));
-              const allSelectedTrips = lineResults.flatMap(lr => lr.selectedTrips);
-
-              const localUpdatedTrips = allSelectedTrips.map(t => {
-                  const tripRate = rateByTripId.get(t.id) || 0;
-                  const billedAt = nowTs();
-                  const baseFields = {
-                    invoiceNo:   invNo,
-                    invoiceDate: invDate,
-                    billedBy:    user.username,
-                    billedAt,
-                    shreeStatus: "billed",
-                    client:      "Shree Cement Kodla", // clinker bills are always this fixed client — never preserve a stale/inconsistent existing value
-                    ...(cb.isPrevFY ? {prevFY:true, prevFYLabel} : {}),
-                  };
-                  if((t.diLines||[]).length > 0) {
-                    // Multi-DI trip: shreeInvoices/Invoices-tab totals for these
-                    // trips are computed ENTIRELY from diLines[].billed — the
-                    // trip-level status/billedToShree below are just kept in
-                    // sync for legacy views (Pill, search, deleteInvoice), same
-                    // as the cement invoice-scan billing path. Previously this
-                    // only set trip-level fields, so multi-DI clinker trips
-                    // showed "Billed" on the card but contributed ₹0 to any
-                    // invoice total — the exact bug reported.
-                    const newDiLines = t.diLines.map(d => ({
-                      ...d, billed:true, invoiceNo:invNo, invoiceDate:invDate,
-                      billedAmt: Number(d.qty||0) * tripRate,
-                    }));
-                    const updated = {...t, diLines:newDiLines, ...baseFields};
-                    updated.status = tripBillingStatus(updated);
-                    updated.billedToShree = tripBilledAmount(updated);
-                    return updated;
-                  }
-                  return {...t, ...baseFields, billedToShree: Number(t.qty||0) * tripRate, status:"Billed"};
-                });
-              setTrips(prev => {
-                const map = new Map(localUpdatedTrips.map(t=>[t.id,t]));
-                return prev.map(t => map.get(t.id) || t);
-              });
-              setSavingClinkerBill(true);
-              (async () => {
-                const failed = [];
-                for(const t of localUpdatedTrips) {
-                  try { await DB.saveTrip(t); }
-                  catch(e) { console.error("saveTrip clinker bill:", e); failed.push(t.lrNo||t.id); }
-                }
-                setSavingClinkerBill(false);
-                if(failed.length > 0) {
-                  alert(`⚠ Saved ${localUpdatedTrips.length-failed.length} of ${localUpdatedTrips.length} trips for invoice ${invNo}. `+
-                    `These ${failed.length} FAILED to save and won't appear in this invoice after a reload: ${failed.join(", ")}. `+
-                    `Please retry — do not assume this invoice is complete.`);
-                } else {
-                  log && log("CLINKER BILL " + invNo + " · " + localUpdatedTrips.length + " trips · " + grandSelectedTons.toFixed(2) + " MT · ₹" + total.toLocaleString("en-IN"));
-                  setShowClinkerBill(false);
-                  setClinkerBill({invoiceNo:"", invoiceDate:"", gstPct:"5", isPrevFY:false, rateLines:[{rate:"",tons:""}]});
-                  setManualClinkerLineMode({});
-                  setManualClinkerIdsByLine({});
-                  setActiveTab("invoices");
-                }
-              })();
-              return; // sheet closing/reset now happens inside the async block above
+            setSavingClinkerBill(true);
+            const bill = {
+              id: uid()+Date.now().toString(36),
+              invoiceNo: cb.invoiceNo.trim(), invoiceDate: cb.invoiceDate,
+              rateLines: rateLines.map(l=>({rate:Number(l.rate||0), tons:Number(l.tons||0)})),
+              gstPct, taxableAmount: taxable, totalAmount: total, totalTons: grandTons,
+              status: "active", isPrevFY: cb.isPrevFY, prevFYLabel: cb.isPrevFY ? prevFYLabel : "",
+              createdAt: nowTs(), createdBy: user.username,
+            };
+            try {
+              await DB.saveClinkerBill(bill);
+              setClinkerBills(prev => [bill, ...(prev||[])]);
+              log && log("CLINKER BILL " + bill.invoiceNo + " · " + grandTons.toFixed(2) + " MT · ₹" + total.toLocaleString("en-IN"));
+              setShowClinkerBill(false);
+              setClinkerBill({invoiceNo:"", invoiceDate:"", gstPct:"5", isPrevFY:false, rateLines:[{rate:"",tons:""}]});
+              setActiveTab("invoices");
+            } catch(e) {
+              alert("⚠ Clinker bill save failed: " + e.message);
+            } finally {
+              setSavingClinkerBill(false);
             }
           };
 
@@ -20189,32 +20083,54 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   <div style={{fontSize:11,color:C.muted}}>GSTIN: 27AACCS8796G2ZQ</div>
                 </div>
 
+                {/* Unbilled tons + profit summary */}
+                <div style={{background:C.blue+"0d",border:`1px solid ${C.blue}33`,borderRadius:10,padding:"10px 14px"}}>
+                  <div style={{fontSize:10,color:C.blue,fontWeight:700,letterSpacing:1,marginBottom:8}}>CLINKER TONNAGE LEDGER</div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                    <div>
+                      <div style={{fontSize:18,fontWeight:800,color:C.text}}>{totalClinkerTons.toFixed(2)}</div>
+                      <div style={{fontSize:10,color:C.muted}}>Total tons logged (all time)</div>
+                    </div>
+                    <div>
+                      <div style={{fontSize:18,fontWeight:800,color:C.green}}>{billedTons.toFixed(2)}</div>
+                      <div style={{fontSize:10,color:C.muted}}>Billed tons ({activeBills.length} bill{activeBills.length!==1?"s":""})</div>
+                    </div>
+                    <div>
+                      <div style={{fontSize:18,fontWeight:800,color:unbilledTons<0?C.red:C.orange}}>{unbilledTons.toFixed(2)}</div>
+                      <div style={{fontSize:10,color:C.muted}}>Unbilled tons remaining</div>
+                    </div>
+                    <div>
+                      <div style={{fontSize:18,fontWeight:800,color:estProfit>=0?C.green:C.red}}>₹{estProfit.toLocaleString("en-IN",{maximumFractionDigits:0})}</div>
+                      <div style={{fontSize:10,color:C.muted}}>Profit (all clinker trips)</div>
+                    </div>
+                  </div>
+                  {unbilledTons<0 && (
+                    <div style={{marginTop:8,fontSize:11,color:C.red,fontWeight:700}}>
+                      ⚠ Billed tons exceed total tons logged — check for a duplicate/incorrect bill, or trips that haven't been entered yet.
+                    </div>
+                  )}
+                  <div style={{marginTop:8,fontSize:9,color:C.muted,fontStyle:"italic"}}>
+                    Total taxable amount billed to Shree across all clinker bills, minus total net driver pay owed (gross freight minus advance/TAFAL/diesel/shortage/loan deductions) across every clinker trip ever logged — regardless of billed/unbilled status.
+                  </div>
+                </div>
+
                 {/* Previous FY toggle */}
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
                   background:cb.isPrevFY?C.orange+"11":C.bg,
                   border:`1.5px solid ${cb.isPrevFY?C.orange:C.border}`,
                   borderRadius:10,padding:"10px 14px"}}>
                   <div>
-                    <div style={{fontWeight:700,fontSize:12,color:cb.isPrevFY?C.orange:C.text}}>
-                      {cb.isPrevFY ? `📅 Saving as ${prevFYLabel}` : "📅 Financial Year"}
-                    </div>
-                    <div style={{fontSize:11,color:C.muted,marginTop:2}}>
-                      {cb.isPrevFY
-                        ? `Invoice will be tagged as ${prevFYLabel} — trips get prevFY flag`
-                        : `Current FY: ${FY_LABEL(currentFY())}`}
-                    </div>
+                    <div style={{fontSize:12,fontWeight:700,color:cb.isPrevFY?C.orange:C.text}}>Mark as Previous FY bill</div>
+                    <div style={{fontSize:10,color:C.muted}}>{prevFYLabel} — for record-keeping only</div>
                   </div>
                   <button onClick={()=>setClinkerBill(p=>({...p,isPrevFY:!p.isPrevFY}))}
-                    style={{flexShrink:0,marginLeft:12,padding:"6px 14px",borderRadius:8,fontWeight:700,
-                      fontSize:11,cursor:"pointer",
-                      border:`1.5px solid ${cb.isPrevFY?C.orange:C.border}`,
-                      background:cb.isPrevFY?C.orange:C.dim,
-                      color:cb.isPrevFY?"#fff":C.muted}}>
-                    {cb.isPrevFY ? `${prevFYLabel} ✓` : "Save as Prev FY"}
+                    style={{width:44,height:24,borderRadius:12,border:"none",cursor:"pointer",
+                      background:cb.isPrevFY?C.orange:C.dim,position:"relative"}}>
+                    <div style={{width:18,height:18,borderRadius:9,background:"#fff",position:"absolute",top:3,
+                      left:cb.isPrevFY?23:3,transition:"left 0.15s"}} />
                   </button>
                 </div>
 
-                {/* Invoice details */}
                 <div style={{display:"flex",gap:10}}>
                   <div style={{flex:1}}>
                     <Field label="Invoice No" value={cb.invoiceNo}
@@ -20243,12 +20159,9 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                           placeholder="e.g. 200" />
                       </div>
                       {rateLines.length>1 && (
-                        <button onClick={()=>{
-                          setClinkerBill(p=>({...p, rateLines: p.rateLines.filter((_,i)=>i!==idx)}));
-                          setManualClinkerLineMode(p=>{ const n={...p}; delete n[idx]; return n; });
-                          setManualClinkerIdsByLine(p=>{ const n={...p}; delete n[idx]; return n; });
-                        }} style={{flexShrink:0,padding:"9px 12px",borderRadius:8,border:`1px solid ${C.red}44`,
-                          background:C.red+"11",color:C.red,fontWeight:700,cursor:"pointer",marginBottom:1}}>✕</button>
+                        <button onClick={()=>setClinkerBill(p=>({...p, rateLines: p.rateLines.filter((_,i)=>i!==idx)}))}
+                          style={{flexShrink:0,padding:"9px 12px",borderRadius:8,border:`1px solid ${C.red}44`,
+                            background:C.red+"11",color:C.red,fontWeight:700,cursor:"pointer",marginBottom:1}}>✕</button>
                       )}
                     </div>
                   ))}
@@ -20257,23 +20170,11 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                       border:`1.5px solid ${C.blue}`,background:C.blue+"11",color:C.blue,cursor:"pointer"}}>
                     + Add Another Rate Line
                   </button>
-                  {grandTons>0 && (()=>{
-                    const enteredTaxable = rateLines.reduce((s,l)=>s+Number(l.rate||0)*Number(l.tons||0), 0);
-                    const overshoot = grandSelectedTons - grandTons;
-                    return (
-                      <div style={{display:"flex",flexDirection:"column",gap:4}}>
-                        <div style={{fontSize:11,color:C.muted}}>
-                          You entered: <b style={{color:C.text}}>{grandTons.toFixed(2)} MT</b> · would be <b style={{color:C.text}}>₹{enteredTaxable.toLocaleString("en-IN",{maximumFractionDigits:0})}</b> before GST
-                        </div>
-                        {grandSelectedTons>0 && (
-                          <div style={{fontSize:11,color: Math.abs(overshoot)<=0.5 ? C.muted : C.orange, fontWeight: Math.abs(overshoot)<=0.5 ? 400 : 700}}>
-                            Trips actually selected below: <b>{grandSelectedTons.toFixed(2)} MT</b> · will bill <b>₹{taxable.toLocaleString("en-IN",{maximumFractionDigits:0})}</b> before GST
-                            {Math.abs(overshoot)>0.5 && ` (${overshoot>0?"+":""}${overshoot.toFixed(2)} MT vs entered — real trips are irregular sizes, adjust manually below if needed)`}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })()}
+                  {grandTons > unbilledTons + 0.5 && grandTons>0 && (
+                    <div style={{fontSize:11,color:C.orange,fontWeight:700}}>
+                      ⚠ This bill's {grandTons.toFixed(2)} MT is more than the {unbilledTons.toFixed(2)} MT currently unbilled — double-check before saving.
+                    </div>
+                  )}
                 </div>
 
                 {/* GST % */}
@@ -20286,8 +20187,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                 {/* Auto-computed amounts */}
                 {taxable > 0 && (
                   <div style={{background:C.bg,borderRadius:10,padding:"10px 14px"}}>
-                    <div style={{fontSize:10,color:C.muted,fontWeight:700,letterSpacing:1,marginBottom:2}}>AMOUNT BREAKDOWN</div>
-                    <div style={{fontSize:10,color:C.muted,marginBottom:8}}>Based on trips actually selected below, not the entered tons above</div>
+                    <div style={{fontSize:10,color:C.muted,fontWeight:700,letterSpacing:1,marginBottom:8}}>AMOUNT BREAKDOWN</div>
                     {[
                       {label:"Taxable Amount",       val:taxable, color:C.text},
                       {label:`CGST @ ${gstPct/2}%`,  val:cgst,    color:C.muted},
@@ -20305,144 +20205,13 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   </div>
                 )}
 
-                {/* Trip selector — one section per rate line, since each line
-                    bills its own trips at its own rate */}
-                {allClinkerTrips.length === 0 ? (
-                  <div style={{background:C.bg,borderRadius:10,padding:"10px 14px",color:C.muted,fontSize:12,fontStyle:"italic"}}>
-                    No unbilled clinker trips to Patas found.
-                  </div>
-                ) : lineResults.map((lr) => {
-                  const idx = lr.idx;
-                  const line = rateLines[idx];
-                  const lineTons = Number(line.tons||0);
-                  const manualMode = lr.manualMode;
-                  const pool = availableForLine(idx); // trips not claimed by OTHER lines
-                  return (
-                    <div key={idx} style={{background:C.bg,borderRadius:10,padding:"10px 14px"}}>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-                        <div style={{fontSize:10,color:C.muted,fontWeight:700,letterSpacing:1}}>
-                          RATE LINE {idx+1} TRIPS (To: Patas · Goods: Clinker · Unbilled)
-                        </div>
-                        {pool.length>0 && lineTons>0 && (
-                          <button onClick={()=>{
-                            if(manualMode){
-                              setManualClinkerLineMode(p=>({...p,[idx]:false}));
-                              setManualClinkerIdsByLine(p=>({...p,[idx]:[]}));
-                            } else {
-                              setManualClinkerLineMode(p=>({...p,[idx]:true}));
-                              setManualClinkerIdsByLine(p=>({...p,[idx]:[...lr.selectedIds]})); // start with auto as base
-                            }
-                          }} style={{fontSize:10,fontWeight:700,padding:"3px 10px",borderRadius:6,
-                            cursor:"pointer",border:`1.5px solid ${manualMode?C.orange:C.blue}`,
-                            background:manualMode?C.orange+"22":C.blue+"11",
-                            color:manualMode?C.orange:C.blue}}>
-                            {manualMode?"✕ Exit Manual":"✎ Select Manually"}
-                          </button>
-                        )}
-                      </div>
-                      {pool.length === 0 ? (
-                        <div style={{color:C.muted,fontSize:12,fontStyle:"italic",padding:"8px 0"}}>
-                          No trips left — all eligible trips are claimed by other rate lines.
-                        </div>
-                      ) : (
-                        <>
-                          <div style={{fontSize:11,color:C.muted,marginBottom:8}}>
-                            {pool.length} available trip{pool.length!==1?"s":""} · Sorted oldest first
-                            {manualMode
-                              ? <span style={{color:C.orange,fontWeight:700}}> · Manual selection mode — tap to toggle</span>
-                              : <span> · Auto-selected to match tons</span>}
-                          </div>
-                          {/* Tons indicator — informational, does not block saving */}
-                          <div style={{
-                            background: lineTons>0 && Math.abs(lr.selectedTons-lineTons)<=0.5 ? C.green+"11"
-                              : lineTons>0 && Math.abs(lr.selectedTons-lineTons)<=Math.max(2,lineTons*0.02) ? C.blue+"11"
-                              : lineTons>0 ? C.orange+"11" : C.card,
-                            border: `1px solid ${lineTons>0 && Math.abs(lr.selectedTons-lineTons)<=0.5 ? C.green
-                              : lineTons>0 && Math.abs(lr.selectedTons-lineTons)<=Math.max(2,lineTons*0.02) ? C.blue
-                              : lineTons>0 ? C.orange : C.border}`,
-                            borderRadius:8, padding:"8px 12px", marginBottom:8,
-                            display:"flex", justifyContent:"space-between", alignItems:"center",
-                          }}>
-                            <span style={{fontSize:12,fontWeight:700,
-                              color: !(lineTons>0) ? C.muted
-                                : Math.abs(lr.selectedTons-lineTons)<=0.5 ? C.green
-                                : Math.abs(lr.selectedTons-lineTons)<=Math.max(2,lineTons*0.02) ? C.blue : C.orange}}>
-                              {!(lineTons>0) ? "Enter tons to auto-select trips"
-                                : Math.abs(lr.selectedTons-lineTons)<=0.5
-                                  ? `✓ Matches this line's tons closely`
-                                  : Math.abs(lr.selectedTons-lineTons)<=Math.max(2,lineTons*0.02)
-                                    ? `Close — ${Math.abs(lr.selectedTons-lineTons).toFixed(2)} MT difference`
-                                    : `${lr.selectedTons.toFixed(2)} MT selected vs ${lineTons} MT target — adjust manually if this looks wrong`}
-                            </span>
-                            <span style={{fontSize:12,fontWeight:800,color:C.text}}>
-                              {lr.selectedTrips.length} trip{lr.selectedTrips.length!==1?"s":""} · {lr.selectedTons.toFixed(2)} MT
-                            </span>
-                          </div>
-                          {/* Trip list */}
-                          <div style={{maxHeight:220,overflowY:"auto",display:"flex",flexDirection:"column",gap:4}}>
-                            {pool.map((t,i)=>{
-                              const isSel = lr.selectedIds.includes(t.id);
-                              const manualToggle = () => {
-                                if(!manualMode) return;
-                                setManualClinkerIdsByLine(p => {
-                                  const cur = p[idx] || [];
-                                  return {...p, [idx]: cur.includes(t.id) ? cur.filter(id=>id!==t.id) : [...cur, t.id]};
-                                });
-                              };
-                              return (
-                                <div key={t.id}
-                                  onClick={manualMode ? manualToggle : undefined}
-                                  style={{
-                                    background: isSel ? C.green+"11" : C.card,
-                                    border: `1.5px solid ${isSel ? C.green : C.border}`,
-                                    borderRadius:7, padding:"7px 10px",
-                                    cursor: manualMode ? "pointer" : "default",
-                                    transition:"border-color 0.1s,background 0.1s",
-                                  }}>
-                                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                                    <div>
-                                      <span style={{fontFamily:"monospace",fontSize:11,color:C.blue,fontWeight:700}}>
-                                        {t.lrNo||"—"}
-                                      </span>
-                                      <span style={{fontSize:10,color:C.muted,marginLeft:8}}>{t.date}</span>
-                                      <span style={{fontSize:10,color:C.muted,marginLeft:8}}>{t.truckNo}</span>
-                                    </div>
-                                    <div style={{display:"flex",alignItems:"center",gap:8}}>
-                                      <span style={{fontSize:12,fontWeight:700,color:C.text}}>{t.qty} MT</span>
-                                      <span style={{
-                                        fontSize:9,fontWeight:800,padding:"2px 6px",borderRadius:4,
-                                        background: isSel ? C.green+"22" : C.dim,
-                                        color: isSel ? C.green : C.muted,
-                                      }}>{isSel ? "✓" : manualMode ? "TAP" : `#${i+1}`}</span>
-                                    </div>
-                                  </div>
-                                  <div style={{fontSize:10,color:C.muted,marginTop:2}}>
-                                    {t.grParticulars?.goods||t.grade||"—"}
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                          {lineTons > 0 && !manualMode && (
-                            <div style={{marginTop:6,fontSize:11,color:C.muted}}>
-                              Not the right trips? Tap "✎ Select Manually" above to add or remove individual trips before saving.
-                            </div>
-                          )}
-                        </>
-                      )}
-                    </div>
-                  );
-                })}
-
                 {/* Save */}
                 {!canSave && (grandTons>0 || anyRateSet || cb.invoiceNo || cb.invoiceDate) && (
                   <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:8,
                     padding:"8px 12px",fontSize:11,color:C.orange,fontWeight:700}}>
                     {!cb.invoiceNo.trim() && "Enter Invoice No. "}
                     {!cb.invoiceDate && "Enter Invoice Date. "}
-                    {!anyRateSet && "Enter at least one rate. "}
-                    {anyRateSet && cb.invoiceNo.trim() && cb.invoiceDate && totalSelectedTrips===0 && !cb.isPrevFY &&
-                      "Select at least one trip below (enter tons for an auto-suggestion, or use Manual Select)."}
+                    {!anyRateSet && "Enter at least one rate line with both rate and tons. "}
                   </div>
                 )}
                 <Btn onClick={handleSaveClinkerBill}
@@ -20451,8 +20220,8 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   {savingClinkerBill
                     ? "Saving… please wait"
                     : canSave
-                      ? `✓ Save Bill — ${totalSelectedTrips} trip${totalSelectedTrips!==1?"s":""} · ${grandSelectedTons.toFixed(2)} MT · ₹${total.toLocaleString("en-IN",{maximumFractionDigits:0})}`
-                      : "Fill invoice details and select trips to save"}
+                      ? `✓ Save Bill — ${grandTons.toFixed(2)} MT · ₹${total.toLocaleString("en-IN",{maximumFractionDigits:0})}`
+                      : "Fill invoice details and at least one rate line to save"}
                 </Btn>
               </div>
             </Sheet>
@@ -21206,6 +20975,56 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
               {filteredInvoices.length} of {shreeInvoices.length} invoice{shreeInvoices.length!==1?"s":""}
               {searchInv&&` · "${searchInv}"`}{(invFrom||invTo)?" (date filtered)":""}
             </div>
+            {/* ── Clinker bills — aggregate ledger, separate from cement DI
+                invoices above. No trip breakdown since bills aren't tied to
+                specific trips anymore. ── */}
+            {(()=>{
+              const q = searchInv.toLowerCase();
+              const activeClinkerBills = (clinkerBills||[]).filter(b=>b.status==="active"
+                && (!q || (b.invoiceNo||"").toLowerCase().includes(q)))
+                .sort((a,b)=>(b.invoiceDate||"").localeCompare(a.invoiceDate||""));
+              if(activeClinkerBills.length===0) return null;
+              const deleteClinkerBillHandler = async (bill) => {
+                if(!window.confirm(`Delete clinker bill ${bill.invoiceNo}? Its ${Number(bill.totalTons||0).toFixed(2)} MT will return to the unbilled pool.`)) return;
+                const updated = {...bill, status:"deleted", deletedAt:nowTs(), deletedBy:user?.name||""};
+                setClinkerBills(prev=>(prev||[]).map(b=>b.id===bill.id?updated:b));
+                try { await DB.saveClinkerBill(updated); }
+                catch(e) { alert("⚠ Failed to delete clinker bill: "+e.message); }
+              };
+              return (
+                <div style={{marginBottom:16}}>
+                  <div style={{fontSize:11,color:"#9333ea",fontWeight:700,marginBottom:8}}>
+                    🪨 CLINKER BILLS ({activeClinkerBills.length})
+                  </div>
+                  <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                    {activeClinkerBills.map(b=>(
+                      <div key={b.id} style={{background:C.card,border:`1px solid ${"#9333ea"}44`,borderRadius:10,padding:"10px 14px"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                          <div>
+                            <div style={{fontWeight:800,fontSize:14,color:C.text}}>{b.invoiceNo}</div>
+                            <div style={{fontSize:11,color:C.muted,marginTop:2}}>
+                              {fmtDate(b.invoiceDate)} · {Number(b.totalTons||0).toFixed(2)} MT
+                              {b.isPrevFY && <span style={{color:C.orange}}> · {b.prevFYLabel}</span>}
+                            </div>
+                            <div style={{fontSize:11,color:C.muted,marginTop:2}}>
+                              {(b.rateLines||[]).map((l,i)=>`${Number(l.tons||0).toFixed(2)} MT @ ₹${l.rate}`).join(" + ")}
+                            </div>
+                          </div>
+                          <button onClick={()=>deleteClinkerBillHandler(b)}
+                            style={{background:C.red+"11",border:`1px solid ${C.red}44`,borderRadius:8,
+                              color:C.red,fontSize:11,padding:"5px 9px",cursor:"pointer"}}>🗑</button>
+                        </div>
+                        <div style={{display:"flex",justifyContent:"space-between",marginTop:8,paddingTop:8,
+                          borderTop:`1px solid ${C.border}`}}>
+                          <span style={{fontSize:11,color:C.muted}}>Taxable ₹{Number(b.taxableAmount||0).toLocaleString("en-IN")} + {b.gstPct}% GST</span>
+                          <span style={{fontSize:13,fontWeight:800,color:"#9333ea"}}>₹{Number(b.totalAmount||0).toLocaleString("en-IN",{maximumFractionDigits:0})}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
             {filteredInvoices.length===0
               ? (() => {
                   const allShreeInvoiceTrips = (displayTrips||[]).filter(t=>t.billedToShree&&t.invoiceNo);
