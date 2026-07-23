@@ -1521,7 +1521,14 @@ export default function App() {
 function AppMain() {
   const [user, setUser] = useState(() => {
     try {
-      const saved = sessionStorage.getItem("mye_user");
+      // localStorage, not sessionStorage — sessionStorage is fragile to
+      // mobile browsers reclaiming memory from backgrounded tabs (screen
+      // lock, switching apps mid-task), which presents to the user as an
+      // unexpected logout. This was likely the cause of pump operators
+      // needing to log back in after every single diesel confirmation —
+      // any phone lock/app-switch between confirmations could drop the
+      // sessionStorage-held session.
+      const saved = localStorage.getItem("mye_user");
       return saved ? JSON.parse(saved) : null;
     } catch { return null; }
   });
@@ -1530,7 +1537,7 @@ function AppMain() {
     // reopened PWA) must land on the right tab immediately, since restricted
     // roles (pump_operator, employee_self, party-only) don't render "dashboard".
     try {
-      const saved = sessionStorage.getItem("mye_user");
+      const saved = localStorage.getItem("mye_user");
       const u = saved ? JSON.parse(saved) : null;
       if(u?.role==="pump_operator") return "pump_portal";
       if(isPureSelfWalletRole(u?.role)) return "employees";
@@ -2033,7 +2040,7 @@ function AppMain() {
       </div>
     );
     return <Login onLogin={u=>{
-      try { sessionStorage.setItem("mye_user", JSON.stringify(u)); } catch{}
+      try { localStorage.setItem("mye_user", JSON.stringify(u)); } catch{}
       setUser(u);
       if(u.role==="pump_operator") setTab("pump_portal");
       if(isPureSelfWalletRole(u.role)) setTab("employees");
@@ -2063,7 +2070,7 @@ function AppMain() {
           <Av name={user.name} role={user.role} />
           <button onClick={()=>{
             log("LOGOUT",`${user.name} signed out`);
-            try { sessionStorage.removeItem("mye_user"); } catch{}
+            try { localStorage.removeItem("mye_user"); } catch{}
             setUser(null);
           }}
             style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"5px 10px",fontSize:12,cursor:"pointer"}}>Out</button>
@@ -3702,7 +3709,7 @@ Rules:
         // Atomic DB save — checks for duplicate DI before inserting
         const saveResult = await Promise.race([
           DB.saveTripSafe(trip),
-          new Promise((_,rej)=>setTimeout(()=>rej(new Error("Save timed out — check connection")),15000))
+          new Promise((_,rej)=>setTimeout(()=>rej(new Error("Save timed out — check connection")),40000)) // bumped from 15s: the real fix is the DI trigram index (see migration), this is just a safety margin
         ]).catch(e=>({success:false, duplicateDI:null, existingLR:null, existingTruck:null, error:e.message}));
         // Auto-update vehicle ownerName if vehicle has none but trip/scan does
         try {
@@ -3933,7 +3940,7 @@ Rules:
         // Atomic DB save — checks for duplicate DI before inserting
         const saveResultM = await Promise.race([
           DB.saveTripSafe(trip),
-          new Promise((_,rej)=>setTimeout(()=>rej(new Error("Save timed out — check connection")),15000))
+          new Promise((_,rej)=>setTimeout(()=>rej(new Error("Save timed out — check connection")),40000)) // bumped from 15s: the real fix is the DI trigram index (see migration), this is just a safety margin
         ]).catch(e=>({success:false, duplicateDI:null, error:e.message}));
         if(!saveResultM.success) {
           setLrError(saveResultM.missingRequired
