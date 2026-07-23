@@ -2961,7 +2961,7 @@ const lookupPincode = async (pincode) => {
   return null;
 };
 
-function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user, log, onClose, employees=[], cashTransfers=[], setCashTransfers, dieselRequests=[], setDieselRequests, manualDiesel=false }) {
+function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user, log, onClose, employees=[], cashTransfers=[], setCashTransfers, dieselRequests=[], setDieselRequests, manualDiesel=false, actionItems=[], setActionItems }) {
   // Party pouch deduction for a vehicle: exempt → 0, per-vehicle override → that,
   // else the owner's global rate (settings.pouchPerTrip), else ₹700 fallback.
   const pouchAmt = (veh) => veh?.pouchExempt ? 0 : (veh?.pouchOverride!=null ? veh.pouchOverride : (settings?.pouchPerTrip ?? 700));
@@ -2986,6 +2986,9 @@ function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user
   // }
   // Each item also carries: orderType, givenRate, grFile, invoiceFile (per-DI)
   const [groups, setGroups] = useState([]); // set after all scans done
+  const [showConfirmScreen, setShowConfirmScreen] = useState(false);
+  const [noDieselGroupIds, setNoDieselGroupIds] = useState(new Set()); // group.id -> explicitly confirmed "no diesel applies"
+  const [reconciliationIssues, setReconciliationIssues] = useState([]); // post-save diesel mismatches, if any
   const [groupsBuilt, setGroupsBuilt] = useState(false);
 
   // ── DI SCAN PROMPT (unchanged) ───────────────────────────────────────────────
@@ -3430,7 +3433,11 @@ Rules:
     // Owner name mandatory for new vehicles
     const readyVeh = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
     if((!readyVeh || !(readyVeh.ownerName||"").trim()) && !(g.ownerName||"").trim()) return false;
-    if(!manualDiesel && +g.diesel > 0 && !g.dieselIndentNo.trim()) return false;
+    // Diesel must be resolved one of two ways: an auto-attached indent, OR an
+    // explicit "No Diesel Request for this Trip" confirmation from the
+    // uploader (tracked in noDieselGroupIds, set on the confirmation screen).
+    // There is no third path — the uploader cannot silently skip this.
+    if(!manualDiesel && +g.diesel > 0 && !g.dieselIndentNo.trim() && !noDieselGroupIds.has(g.id)) return false;
     // Advance given — must explicitly pick an employee wallet or explicit "None"
     if(+g.advance > 0 && !g.cashEmpId) return false;
     // Note: open (unconfirmed) requests are allowed with a warning — not blocked
@@ -3439,7 +3446,40 @@ Rules:
     return true;
   };
 
+  // Same as groupReady, but ignores diesel resolution entirely — used to
+  // decide which groups appear on the confirmation screen at all (a group
+  // with a genuinely missing diesel match should still show up there, so
+  // the uploader can act on it, rather than being invisible until resolved).
+  const groupReadyExceptDiesel = (g) => {
+    const groupItems = doneItems.filter(x=>g.diIds.includes(x.id));
+    if(groupItems.length===0) return false;
+    for(const item of groupItems) {
+      if(!item.givenRate || +item.givenRate<=0) return false;
+      const frRate = +item.extracted?.frRate||0;
+      if(frRate - (+item.givenRate) < 30) return false;
+      if(item.orderType==="party" && (!item.grFile||!item.invoiceFile)) return false;
+      if(canFeature("mandatory_trip_fields") && item.orderType==="party") {
+        if(!(item.partyDriverPhone||"").match(/^\d{10}$/)) return false;
+        if(!(item.salesOfficerPhone||"").match(/^\d{10}$/)) return false;
+        if(!(item.salesOfficerEmail||"").endsWith("shreecement.com")) return false;
+        if(!(item.partyNumber||"").trim()) return false;
+      }
+      if(item.orderType==="party" && item.grFileDiCheck?.status==="error") return false;
+      if(item.orderType==="party" && item.invoiceFileDiCheck?.status==="error") return false;
+      if(item.orderType==="party" && (item.grFileDiCheck?.status==="checking" || item.invoiceFileDiCheck?.status==="checking")) return false;
+      if(checkDupDI(item.extracted?.diNo)) return false;
+    }
+    const readyVeh = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
+    if((!readyVeh || !(readyVeh.ownerName||"").trim()) && !(g.ownerName||"").trim()) return false;
+    if(+g.advance > 0 && !g.cashEmpId) return false;
+    if(!g.assignedEmpId) return false;
+    return true;
+  };
+
   const readyGroups = groups.filter(groupReady);
+  const confirmGroups = groups.filter(groupReadyExceptDiesel);
+  const dieselResolved = (g) => !manualDiesel ? (!(+g.diesel>0) || g.dieselIndentNo.trim() || noDieselGroupIds.has(g.id)) : true;
+  const allDieselResolved = confirmGroups.every(dieselResolved);
   const canSave = readyGroups.length > 0 && !saving;
 
   // ── Save All ──────────────────────────────────────────────────────────────────
@@ -3570,6 +3610,17 @@ Rules:
     const tafal = settings?.tafalPerTrip||300;
     const createdTrucksThisBatch = new Set();
     const savedLRsThisBatch = [];
+    // Tracks diesel request IDs already claimed by an EARLIER group in this
+    // same batch save. Without this, two groups in one batch that both
+    // qualify for the same confirmed diesel request would both read the
+    // same stale `dieselRequests` snapshot (state updates from an earlier
+    // iteration don't retroactively update this closure's variable), both
+    // "successfully" attach to it, and the DB write from the second one
+    // would silently overwrite the first — leaving one trip's diesel
+    // attachment lost with no error shown. This was a real bug, not a
+    // hypothetical: it's the batch-specific version of the auto-attach
+    // issue, distinct from the truck-normalization bug fixed earlier.
+    const claimedDieselIdsThisBatch = new Set();
     let count = 0;
 
     // Use DI date as-is — the FY filter in the app handles display
@@ -3669,8 +3720,10 @@ Rules:
           shortageRecovery:+g.shortageRecovery||0,
           loanRecovery:+g.loanRecovery||0,
           tafal:tafalVal,
-          dieselEstimate:+g.diesel||0,
-          dieselIndentNo:g.dieselIndentNo.trim()||"",
+          dieselEstimate: noDieselGroupIds.has(g.id) ? 0 : (+g.diesel||0),
+          dieselIndentNo: noDieselGroupIds.has(g.id) ? "" : (g.dieselIndentNo.trim()||""),
+          noDieselConfirmedBy: noDieselGroupIds.has(g.id) ? user.name : "",
+          noDieselConfirmedAt: noDieselGroupIds.has(g.id) ? nowTs() : "",
           cashEmpId:g.cashEmpId||"",
           ownerName: item.ownerName || g.ownerName || "",
           orderType:item.orderType||"godown", diLines:[],
@@ -3747,10 +3800,29 @@ Rules:
           return;
         }
         setTrips(p=>[trip,...(p||[])]);
+        // ── Log "no diesel confirmed" — informational record only, no gate,
+        // no manager review. Per the agreed design, this costs the uploader
+        // nothing and blocks nothing; it exists purely so the confirmation
+        // isn't invisible to the owner/manager afterward.
+        if(noDieselGroupIds.has(g.id) && typeof setActionItems === "function") {
+          const aiId = uid()+Date.now().toString(36)+Math.random().toString(36).slice(2,5);
+          const noDieselItem = {
+            id: aiId, type: "no_diesel_confirmed", status: "open",
+            diNo: (ex.diNo||"").trim(), grNo: ex.grNo||"", truckNo,
+            invoiceNo: "", invoiceDate: "",
+            invoiceAmt: 0, expectedAmt: 0,
+            empId: g.assignedEmpId||"", tripId: trip.id,
+            note: `${user.name} confirmed no diesel request applies to LR ${lrNo} (${truckNo})`,
+            createdAt: nowTs(),
+          };
+          setActionItems(prev=>[noDieselItem, ...(prev||[])]);
+          DB.saveActionItem(noDieselItem).catch(e=>console.error("saveActionItem no_diesel_confirmed:",e));
+        }
         // ── Mark pre-filled diesel indent as "attached" ───────────────────
-        if (g.dieselIndentNo.trim() && typeof setDieselRequests === "function") {
-          const preReq = (dieselRequests||[]).find(r => String(r.indentNo)===g.dieselIndentNo.trim() && r.status==="confirmed");
+        if (g.dieselIndentNo.trim() && typeof setDieselRequests === "function" && !noDieselGroupIds.has(g.id)) {
+          const preReq = (dieselRequests||[]).find(r => String(r.indentNo)===g.dieselIndentNo.trim() && r.status==="confirmed" && !claimedDieselIdsThisBatch.has(r.id));
           if (preReq) {
+              claimedDieselIdsThisBatch.add(preReq.id);
               const updPreReq = {...preReq, status:"attached", tripId:trip.id, lrNo};
               setDieselRequests(p=>p.map(r=>r.id===preReq.id?updPreReq:r));
               await DB.saveDieselRequest(updPreReq);
@@ -3758,23 +3830,23 @@ Rules:
           }
         }
         // ── Auto-attach confirmed diesel request for this truck (any age) ──
-        if (typeof setDieselRequests === "function" && !g.dieselIndentNo.trim()) {
+        if (typeof setDieselRequests === "function" && !g.dieselIndentNo.trim() && !noDieselGroupIds.has(g.id)) {
           // Normalized comparison — auto-attach was silently failing whenever
           // the trip's truckNo and the diesel request's stored truckNo
           // differed only in case/whitespace (diesel requests are saved via
           // .trim().toUpperCase(), but the trip's own truckNo variable here
           // is a raw, unnormalized assignment from the form/OCR extraction).
           const normTruck = s => String(s||"").replace(/\s+/g,"").toUpperCase();
-          const confirmedReqs = (dieselRequests||[]).filter(r => r.status==="confirmed");
+          const confirmedReqs = (dieselRequests||[]).filter(r => r.status==="confirmed" && !claimedDieselIdsThisBatch.has(r.id));
           const truckMatch = confirmedReqs.find(r => normTruck(r.truckNo)===normTruck(truckNo));
           let chosenReq = truckMatch;
           if (!truckMatch) {
             // Also check older/open requests for manual owner override
             // Show truck-specific indents first; only fall back to other trucks if none found
-            const sametruckUnattached = (dieselRequests||[]).filter(r => r.status==="confirmed" && normTruck(r.truckNo)===normTruck(truckNo));
+            const sametruckUnattached = (dieselRequests||[]).filter(r => r.status==="confirmed" && !claimedDieselIdsThisBatch.has(r.id) && normTruck(r.truckNo)===normTruck(truckNo));
             const allUnattached = sametruckUnattached.length > 0
               ? sametruckUnattached
-              : (dieselRequests||[]).filter(r => r.status==="confirmed");
+              : (dieselRequests||[]).filter(r => r.status==="confirmed" && !claimedDieselIdsThisBatch.has(r.id));
             const isOtherTruckFallback = sametruckUnattached.length === 0;
             if (allUnattached.length > 0) {
               const listStr = allUnattached.map(r=>{
@@ -3806,6 +3878,7 @@ Rules:
               `⛽ Indent #${chosenReq.indentNo} · ${chosenReq.truckNo}\n₹${effAmt.toLocaleString("en-IN")}${truckWarn}\n\nAttach to LR ${lrNo} and fill Diesel column?`
             );
             if (attach) {
+              claimedDieselIdsThisBatch.add(chosenReq.id);
               const updReq = {...chosenReq, status:"attached", tripId:trip.id, lrNo};
               setDieselRequests(p=>p.map(r=>r.id===chosenReq.id?updReq:r));
               await DB.saveDieselRequest(updReq);
@@ -3898,8 +3971,10 @@ Rules:
           status:"Pending Bill", shortage:0,
           advance:+g.advance||0,
           tafal:tafalVal,
-          dieselEstimate:+g.diesel||0,
-          dieselIndentNo:g.dieselIndentNo.trim()||"",
+          dieselEstimate: noDieselGroupIds.has(g.id) ? 0 : (+g.diesel||0),
+          dieselIndentNo: noDieselGroupIds.has(g.id) ? "" : (g.dieselIndentNo.trim()||""),
+          noDieselConfirmedBy: noDieselGroupIds.has(g.id) ? user.name : "",
+          noDieselConfirmedAt: noDieselGroupIds.has(g.id) ? nowTs() : "",
           shortageRecovery:+g.shortageRecovery||0,
           loanRecovery:+g.loanRecovery||0,
           cashEmpId:g.cashEmpId||"",
@@ -3952,19 +4027,33 @@ Rules:
           return;
         }
         setTrips(p=>[trip,...(p||[])]);
+        if(noDieselGroupIds.has(g.id) && typeof setActionItems === "function") {
+          const aiId = uid()+Date.now().toString(36)+Math.random().toString(36).slice(2,5);
+          const noDieselItem = {
+            id: aiId, type: "no_diesel_confirmed", status: "open",
+            diNo: (diLines||[]).map(d=>d.diNo).filter(Boolean).join("+"), grNo: ex0.grNo||"", truckNo,
+            invoiceNo: "", invoiceDate: "",
+            invoiceAmt: 0, expectedAmt: 0,
+            empId: g.assignedEmpId||"", tripId: trip.id,
+            note: `${user.name} confirmed no diesel request applies to LR ${lrNo} (${truckNo})`,
+            createdAt: nowTs(),
+          };
+          setActionItems(prev=>[noDieselItem, ...(prev||[])]);
+          DB.saveActionItem(noDieselItem).catch(e=>console.error("saveActionItem no_diesel_confirmed:",e));
+        }
         // ── Auto-attach confirmed diesel request for this truck (any age) ──
-        if (typeof setDieselRequests === "function") {
+        if (typeof setDieselRequests === "function" && !noDieselGroupIds.has(g.id)) {
           // Same normalization fix as the single-trip save path above.
           const normTruck2 = s => String(s||"").replace(/\s+/g,"").toUpperCase();
-          const confirmedReqs = (dieselRequests||[]).filter(r => r.status==="confirmed");
+          const confirmedReqs = (dieselRequests||[]).filter(r => r.status==="confirmed" && !claimedDieselIdsThisBatch.has(r.id));
           const truckMatch = confirmedReqs.find(r => normTruck2(r.truckNo)===normTruck2(truckNo));
           let chosenReq = truckMatch;
           if (!truckMatch) {
             // Show truck-specific indents first; only fall back to other trucks if none found
-            const sametruckUnattached = (dieselRequests||[]).filter(r => r.status==="confirmed" && normTruck2(r.truckNo)===normTruck2(truckNo));
+            const sametruckUnattached = (dieselRequests||[]).filter(r => r.status==="confirmed" && !claimedDieselIdsThisBatch.has(r.id) && normTruck2(r.truckNo)===normTruck2(truckNo));
             const allUnattached = sametruckUnattached.length > 0
               ? sametruckUnattached
-              : (dieselRequests||[]).filter(r => r.status==="confirmed");
+              : (dieselRequests||[]).filter(r => r.status==="confirmed" && !claimedDieselIdsThisBatch.has(r.id));
             const isOtherTruckFallback = sametruckUnattached.length === 0;
             if (allUnattached.length > 0) {
               const listStr = allUnattached.map(r=>{
@@ -3996,6 +4085,7 @@ Rules:
               `⛽ Indent #${chosenReq.indentNo} · ${chosenReq.truckNo}\n₹${effAmt.toLocaleString("en-IN")}${truckWarn}\n\nAttach to LR ${lrNo} and fill Diesel column?`
             );
             if (attach) {
+              claimedDieselIdsThisBatch.add(chosenReq.id);
               const updReq = {...chosenReq, status:"attached", tripId:trip.id, lrNo};
               setDieselRequests(p=>p.map(r=>r.id===chosenReq.id?updReq:r));
               await DB.saveDieselRequest(updReq);
@@ -4052,10 +4142,43 @@ Rules:
     setSavedCount(c=>c+count);
     setSavedLRs(prev=>[...savedLRsThisBatch,...prev]);
     setSaving(false);
+    setNoDieselGroupIds(new Set());
     // Remove saved groups' items from list
     const savedItemIds = new Set(readyGroups.flatMap(g=>g.diIds));
     setItems(prev=>prev.filter(x=>!savedItemIds.has(x.id)));
     setGroups(prev=>prev.filter(g=>!readyGroups.find(r=>r.id===g.id)));
+
+    // ── Post-save reconciliation ─────────────────────────────────────────
+    // Fetches FRESH data from the DB rather than trusting React state right
+    // after a batch of writes (state can lag behind what's actually
+    // persisted). Flags any trip that references a diesel indent whose own
+    // record doesn't agree — this is the backstop for the batch-diesel-race
+    // class of bug found earlier: it can't prevent a mismatch, but it makes
+    // one visible immediately instead of surfacing weeks later as a driver
+    // complaint.
+    (async () => {
+      try {
+        const lrNosThisBatch = savedLRsThisBatch.map(s=>s.lrNo);
+        if(lrNosThisBatch.length===0) return;
+        const [freshTrips, freshDiesel] = await Promise.all([DB.getTripsAll(), DB.getDieselRequests()]);
+        const mismatches = [];
+        freshTrips.filter(t=>lrNosThisBatch.includes(t.lrNo)).forEach(t => {
+          if(!t.dieselIndentNo) return; // no diesel claimed — nothing to reconcile
+          const matchingReq = freshDiesel.find(r=>String(r.indentNo)===String(t.dieselIndentNo));
+          if(!matchingReq) {
+            mismatches.push({lrNo:t.lrNo, truckNo:t.truckNo, indentNo:t.dieselIndentNo, issue:"Indent record not found at all"});
+          } else if(matchingReq.status!=="attached" || matchingReq.tripId!==t.id) {
+            mismatches.push({lrNo:t.lrNo, truckNo:t.truckNo, indentNo:t.dieselIndentNo,
+              issue: matchingReq.tripId && matchingReq.tripId!==t.id
+                ? `Indent #${t.dieselIndentNo} is actually attached to a different trip`
+                : `Indent #${t.dieselIndentNo} shows status "${matchingReq.status}", not attached`});
+          }
+        });
+        if(mismatches.length>0) {
+          setReconciliationIssues(mismatches);
+        }
+      } catch(e) { console.error("reconciliation check failed:", e); }
+    })();
   };
 
   const scanningCount = items.filter(x=>x.status==="scanning"||x.status==="pending").length;
@@ -4066,6 +4189,26 @@ Rules:
   // ── RENDER ───────────────────────────────────────────────────────────────────
   return (
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
+
+      {/* Reconciliation banner — appears if a just-saved trip's diesel indent
+          reference doesn't actually match that indent's own record. This is
+          the backstop, not a preventer — by the time this shows, the trip
+          is already saved; it exists so a mismatch is visible immediately
+          instead of surfacing weeks later as a driver complaint. */}
+      {reconciliationIssues.length>0 && (
+        <div style={{background:C.red+"11",border:`2px solid ${C.red}`,borderRadius:12,padding:"12px 14px"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+            <span style={{color:C.red,fontWeight:800,fontSize:13}}>⚠ Diesel reconciliation mismatch — {reconciliationIssues.length}</span>
+            <button onClick={()=>setReconciliationIssues([])}
+              style={{background:"none",border:"none",color:C.muted,fontSize:11,cursor:"pointer",textDecoration:"underline"}}>Dismiss</button>
+          </div>
+          {reconciliationIssues.map((m,i)=>(
+            <div key={i} style={{fontSize:12,color:"#7a1f1f",padding:"4px 0",borderTop:i>0?`1px solid ${C.red}22`:"none"}}>
+              <b>LR {m.lrNo}</b> ({m.truckNo}) — {m.issue}
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* How-to */}
       <div style={{background:C.teal+"11",border:`1px solid ${C.teal}33`,borderRadius:12,padding:"12px 14px"}}>
@@ -4995,16 +5138,117 @@ Rules:
         );
       })}
 
-      {/* Save All */}
-      {readyGroups.length>0&&(
-        <button onClick={saveAll} disabled={saving||!canSave}
+      {/* Review & Save — opens the confirmation screen; the actual save now
+          only happens from there, after diesel is resolved for every group */}
+      {confirmGroups.length>0&&(
+        <button onClick={()=>setShowConfirmScreen(true)} disabled={saving||confirmGroups.length===0}
           style={{background:saving?C.muted:C.green,color:"#fff",border:"none",
             borderRadius:12,padding:"15px",fontSize:16,fontWeight:800,cursor:saving?"not-allowed":"pointer",
             width:"100%",opacity:saving?0.7:1}}>
           {saving
             ? "⏳ Saving & assigning LRs…"
-            : `💾 Save ${readyGroups.length} Group${readyGroups.length>1?"s":""} (${readyGroups.reduce((s,g)=>s+g.diIds.length,0)} DIs)`}
+            : `Review & Save ${confirmGroups.length} Group${confirmGroups.length>1?"s":""} (${confirmGroups.reduce((s,g)=>s+g.diIds.length,0)} DIs)`}
         </button>
+      )}
+
+      {/* ── CONFIRMATION SCREEN ──────────────────────────────────────────────
+          Diesel is resolved ONE of two ways before this screen's own Save
+          button unlocks: an auto-attached match (locked, no editing), or an
+          explicit "No Diesel Request for this Trip" tap (logged, attributed,
+          no manager gate — per the agreed design). There is no third way
+          through, and no silent skip. */}
+      {showConfirmScreen && (
+        <Sheet title="Confirm before saving" onClose={()=>setShowConfirmScreen(false)}>
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <div style={{fontSize:12,color:C.muted}}>
+              {confirmGroups.filter(dieselResolved).length} of {confirmGroups.length} ready
+            </div>
+            {confirmGroups.map(g=>{
+              const groupItems = doneItems.filter(x=>g.diIds.includes(x.id));
+              const totalGross = groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0)*(+x.givenRate||0),0);
+              const _gVeh = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
+              const tafalVal = g.tafal!=="" ? +g.tafal : tafalAmountFor(_gVeh, employees, settings, g.assignedEmpId||"");
+              const dieselVal = noDieselGroupIds.has(g.id) ? 0 : (+g.diesel||0);
+              const net = totalGross-(+g.advance||0)-tafalVal-dieselVal-(+g.shortageRecovery||0)-(+g.loanRecovery||0);
+              const isMatched = !!g.dieselIndentNo.trim();
+              const isNoDieselConfirmed = noDieselGroupIds.has(g.id);
+              const needsDiesel = !manualDiesel && +g.diesel>0 || (!isMatched && !isNoDieselConfirmed);
+              return (
+                <div key={g.id} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                    <span style={{fontWeight:800,fontSize:14,color:C.text}}>🚛 {g.truckNo}</span>
+                    <span style={{fontSize:11,color:C.muted}}>{groupItems.length} DI · {groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0),0)} MT</span>
+                  </div>
+
+                  <div style={{display:"flex",flexDirection:"column",gap:5,marginBottom:10}}>
+                    <div style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:C.muted}}>
+                      <span style={{color:C.green}}>✓</span> {groupItems.map(x=>x.extracted?.diNo).filter(Boolean).join(", ")||"DI"} verified
+                    </div>
+                    <div style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:C.muted}}>
+                      <span style={{color:C.green}}>✓</span> LR will be assigned on save
+                    </div>
+                    {isMatched && (
+                      <div style={{display:"flex",alignItems:"center",gap:6,fontSize:12,fontWeight:700,
+                        background:C.green+"15",borderRadius:8,padding:"6px 8px",color:C.green}}>
+                        ✓ Diesel attached — Indent #{g.dieselIndentNo}, ₹{(+g.diesel||0).toLocaleString("en-IN")}
+                      </div>
+                    )}
+                    {!isMatched && isNoDieselConfirmed && (
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:12,fontWeight:700,
+                        background:C.muted+"15",borderRadius:8,padding:"6px 8px",color:C.muted}}>
+                        <span>✓ Confirmed: no diesel for this trip</span>
+                        <button onClick={()=>setNoDieselGroupIds(prev=>{const n=new Set(prev);n.delete(g.id);return n;})}
+                          style={{background:"none",border:"none",color:C.blue,fontSize:11,cursor:"pointer",textDecoration:"underline"}}>
+                          Undo
+                        </button>
+                      </div>
+                    )}
+                    {!isMatched && !isNoDieselConfirmed && (
+                      <div style={{background:C.orange+"15",borderRadius:8,padding:"8px"}}>
+                        <div style={{fontSize:12,fontWeight:700,color:C.orange,marginBottom:6}}>
+                          ⚠ No diesel request found for this truck
+                        </div>
+                        <button onClick={()=>setNoDieselGroupIds(prev=>new Set(prev).add(g.id))}
+                          style={{width:"100%",background:C.orange,color:"#fff",border:"none",borderRadius:8,
+                            padding:"8px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+                          No Diesel Request for this Trip
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  <div style={{borderTop:`1px solid ${C.border}`,paddingTop:8}}>
+                    <div style={{fontSize:10,color:C.muted,marginBottom:5,textTransform:"uppercase",letterSpacing:0.5}}>Est. net driver pay</div>
+                    {[
+                      {label:"Gross", val:totalGross},
+                      {label:"− Advance", val:-(+g.advance||0)},
+                      {label:"− TAFAL", val:-tafalVal},
+                      {label:"− Diesel", val:-dieselVal},
+                      {label:"− Shortage/loan", val:-((+g.shortageRecovery||0)+(+g.loanRecovery||0))},
+                    ].map(r=>(
+                      <div key={r.label} style={{display:"flex",justifyContent:"space-between",fontSize:12,padding:"2px 0"}}>
+                        <span style={{color:C.muted}}>{r.label}</span>
+                        <span style={{color:r.val<0?C.red:C.text}}>₹{r.val.toLocaleString("en-IN")}</span>
+                      </div>
+                    ))}
+                    <div style={{display:"flex",justifyContent:"space-between",borderTop:`1px solid ${C.border}`,marginTop:4,paddingTop:4}}>
+                      <span style={{fontSize:12,fontWeight:700,color:C.text}}>Net to driver</span>
+                      <span style={{fontSize:14,fontWeight:800,color:net>=0?C.green:C.red}}>₹{net.toLocaleString("en-IN")}</span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+
+            <button onClick={()=>{ setShowConfirmScreen(false); saveAll(); }}
+              disabled={!allDieselResolved || saving}
+              style={{width:"100%",background:(allDieselResolved&&!saving)?C.green:C.muted,color:"#fff",
+                border:"none",borderRadius:12,padding:"15px",fontSize:16,fontWeight:800,
+                cursor:(allDieselResolved&&!saving)?"pointer":"not-allowed"}}>
+              {allDieselResolved ? "Confirm and Save All" : "Resolve diesel for every trip above to continue"}
+            </button>
+          </div>
+        </Sheet>
       )}
 
       {items.length===0&&savedCount===0&&(
@@ -6962,7 +7206,7 @@ function SealedInvoiceSheet({ trip, onMerge, onClose, embedded=false }) {
 
 
 // ─── TRIPS ────────────────────────────────────────────────────────────────────
-function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles, indents, setIndents, settings, tripType, user, log, driverPays, setDriverPays, employees, cashTransfers, setCashTransfers, allTripsLoaded, loadingAllTrips, loadAllTrips, dieselRequests=[], setDieselRequests, payments=[], invoiceRegistry=[]}) {
+function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles, indents, setIndents, settings, tripType, user, log, driverPays, setDriverPays, employees, cashTransfers, setCashTransfers, allTripsLoaded, loadingAllTrips, loadAllTrips, dieselRequests=[], setDieselRequests, payments=[], invoiceRegistry=[], actionItems=[], setActionItems}) {
   const isIn = tripType === "inbound";
   const ac   = isIn ? C.teal : C.accent;
 
@@ -8254,6 +8498,11 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                             </div>
                           );
                         })()}
+                        {t.noDieselConfirmedBy && (
+                          <div style={{fontSize:11,marginTop:1,color:C.orange,fontWeight:600}}>
+                            ⛽ Uploader {t.noDieselConfirmedBy} confirmed "No Diesel"
+                          </div>
+                        )}
                       </div>
                       <div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0}}>
                         {!(((t.grade||"").toLowerCase().includes("clinker") || ((t.consignee||"").toLowerCase().includes("patas") && (t.consignee||"").toLowerCase().includes("shree cement")))) && (
@@ -8667,7 +8916,8 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
             employees={employees||[]} cashTransfers={cashTransfers||[]} setCashTransfers={setCashTransfers}
             dieselRequests={dieselRequests||[]} setDieselRequests={setDieselRequests}
             onClose={()=>setBatchDISheet(false)}
-           manualDiesel={manualDiesel}
+            manualDiesel={manualDiesel}
+            actionItems={actionItems||[]} setActionItems={setActionItems}
                       />
         </Sheet>
       )}
@@ -20298,6 +20548,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
           const missing = open.filter(ai=>ai.type==="missing_di");
           const mismatch = open.filter(ai=>ai.type==="amount_mismatch");
           const conflict = open.filter(ai=>ai.type==="duplicate_di");
+          const noDiesel = open.filter(ai=>ai.type==="no_diesel_confirmed");
 
           const dismiss = (ai) => {
             if(!window.confirm("Dismiss this action item? This does not bill anything — use this only if you've resolved it manually.")) return;
@@ -20308,7 +20559,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
 
           return (
             <div>
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:16}}>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:16}}>
                 <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.border}`}}>
                   <div style={{fontSize:20,fontWeight:800,color:C.red}}>{missing.length}</div>
                   <div style={{fontSize:11,color:C.muted}}>Missing DIs (open)</div>
@@ -20320,6 +20571,10 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                 <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.border}`}}>
                   <div style={{fontSize:20,fontWeight:800,color:C.purple}}>{conflict.length}</div>
                   <div style={{fontSize:11,color:C.muted}}>DI on 2+ invoices (open)</div>
+                </div>
+                <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.border}`}}>
+                  <div style={{fontSize:20,fontWeight:800,color:C.orange}}>{noDiesel.length}</div>
+                  <div style={{fontSize:11,color:C.muted}}>No-diesel confirmations</div>
                 </div>
               </div>
 
@@ -20383,6 +20638,25 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                         <div style={{fontSize:12,color:C.muted,marginTop:2}}>Truck: {ai.truckNo||"—"}</div>
                         <div style={{fontSize:12,marginTop:4,fontWeight:700,color:C.purple}}>{ai.note}</div>
                         <div style={{fontSize:11,color:C.muted,marginTop:2}}>The original billing was kept as-is — this invoice's line for this DI was skipped.</div>
+                      </div>
+                      <button onClick={()=>dismiss(ai)} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,fontSize:11,padding:"4px 8px",cursor:"pointer"}}>Dismiss</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div style={{fontSize:12,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:8}}>
+                ⛽ No-diesel confirmations — logged for your records, not a gate
+              </div>
+              {noDiesel.length===0 && <div style={{color:C.muted,fontSize:13,marginBottom:16}}>None open.</div>}
+              <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:20}}>
+                {noDiesel.map(ai=>(
+                  <div key={ai.id} style={{background:C.card,borderRadius:10,padding:"11px 14px",border:`1px solid ${C.orange}44`}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                      <div>
+                        <div style={{fontWeight:800,fontSize:14}}>DI: {ai.diNo||"—"} {ai.grNo && <span style={{color:C.muted,fontWeight:400}}>· GR: {ai.grNo}</span>}</div>
+                        <div style={{fontSize:12,color:C.muted,marginTop:2}}>Truck: {ai.truckNo||"—"} · Assigned: {empName(ai.empId)}</div>
+                        <div style={{fontSize:12,marginTop:4,fontWeight:700,color:C.orange}}>{ai.note}</div>
                       </div>
                       <button onClick={()=>dismiss(ai)} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,fontSize:11,padding:"4px 8px",cursor:"pointer"}}>Dismiss</button>
                     </div>
