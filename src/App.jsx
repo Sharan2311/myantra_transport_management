@@ -3928,16 +3928,23 @@ Rules:
             note:`Advance — LR ${lrNo} · ${truckNo}`,
             lrNo, tripId:trip.id, createdBy:user.username, createdAt:nowTs()};
           setCashTransfers(prev=>[wxn,...(Array.isArray(prev)?prev:[])]);
+          try { await DB.saveCashTransfer(wxn); } catch(e) { console.error("saveCashTransfer (batch wallet advance):",e); }
           log("WALLET ADVANCE",`${empName} −₹${trip.advance} LR:${lrNo}`);
         }
         // Loan/shortage ledger — strict sync to match this trip's recovery fields exactly
         if(+g.shortageRecovery>0 || +g.loanRecovery>0) {
-          setVehicles(prev=>prev.map(veh=>{
-            if(veh.truckNo!==truckNo) return veh;
-            const upd = syncTripRecoveryToVehicle(veh, trip);
-            DB.saveVehicle(upd).catch(e=>console.error("saveVehicle batch DI recovery:",e));
-            return upd;
-          }));
+          const _veh0 = (vehicles||[]).find(veh=>veh.truckNo===truckNo);
+          if(_veh0) {
+            const upd = syncTripRecoveryToVehicle(_veh0, trip);
+            setVehicles(prev=>prev.map(veh=>veh.truckNo===truckNo?upd:veh));
+            // Awaited, not fire-and-forget — a batch of un-awaited background
+            // writes queuing up before the next group's getNextLR call was
+            // the likely cause of that call hanging indefinitely (confirmed
+            // via [BATCH TIMING] logs + pg_stat_activity showing nothing
+            // running server-side during the hang — the request was stuck
+            // client-side, not in Postgres).
+            try { await DB.saveVehicle(upd); } catch(e) { console.error("saveVehicle batch DI recovery:",e); }
+          }
         }
         log("BATCH TRIP",`LR:${lrNo} DI:${ex.diNo} ${truckNo} ${ex.qty}MT [${item.orderType}]`);
         // ── Excess diesel tracking — if net goes negative, debit employee wallet ──
@@ -3953,7 +3960,7 @@ Rules:
               type:"excess_diesel", ref:lrNo,
               lrNo, tripId:trip.id, createdBy:user.username, createdAt:nowTs()};
             setCashTransfers(prev=>[wxnXD,...(Array.isArray(prev)?prev:[]).filter(x=>x.id!==wxnXD.id)]);
-            DB.saveCashTransfer(wxnXD).catch(e=>console.error("excess diesel save:",e));
+            try { await DB.saveCashTransfer(wxnXD); } catch(e) { console.error("excess diesel save:",e); }
             log("EXCESS DIESEL",`${employees.find(e=>e.id===_empId)?.name||"—"} −₹${excess} LR:${lrNo} (diesel ₹${trip.dieselEstimate} caused negative net)`);
           }
         }}
@@ -4138,16 +4145,17 @@ Rules:
             note:`Advance — LR ${lrNo} · ${truckNo}`,
             lrNo, tripId:trip.id, createdBy:user.username, createdAt:nowTs()};
           setCashTransfers(prev=>[wxn,...(Array.isArray(prev)?prev:[])]);
+          try { await DB.saveCashTransfer(wxn); } catch(e) { console.error("saveCashTransfer (batch wallet advance):",e); }
           log("WALLET ADVANCE",`${empName} −₹${trip.advance} LR:${lrNo}`);
         }
         // Loan/shortage ledger — strict sync to match this trip's recovery fields exactly
         if(+g.shortageRecovery>0 || +g.loanRecovery>0) {
-          setVehicles(prev=>prev.map(veh=>{
-            if(veh.truckNo!==truckNo) return veh;
-            const upd = syncTripRecoveryToVehicle(veh, trip);
-            DB.saveVehicle(upd).catch(e=>console.error("saveVehicle batch multi-DI recovery:",e));
-            return upd;
-          }));
+          const _veh1 = (vehicles||[]).find(veh=>veh.truckNo===truckNo);
+          if(_veh1) {
+            const upd = syncTripRecoveryToVehicle(_veh1, trip);
+            setVehicles(prev=>prev.map(veh=>veh.truckNo===truckNo?upd:veh));
+            try { await DB.saveVehicle(upd); } catch(e) { console.error("saveVehicle batch multi-DI recovery:",e); }
+          }
         }
         log("BATCH MULTI-DI",`LR:${lrNo} ${allDiNos} ${truckNo} ${totalQty}MT`);
         // ── Excess diesel tracking — multi-DI ──
@@ -4163,7 +4171,7 @@ Rules:
               type:"excess_diesel", ref:lrNo,
               lrNo, tripId:trip.id, createdBy:user.username, createdAt:nowTs()};
             setCashTransfers(prev=>[wxnXD,...(Array.isArray(prev)?prev:[]).filter(x=>x.id!==wxnXD.id)]);
-            DB.saveCashTransfer(wxnXD).catch(e=>console.error("excess diesel save:",e));
+            try { await DB.saveCashTransfer(wxnXD); } catch(e) { console.error("excess diesel save:",e); }
             log("EXCESS DIESEL",`${employees.find(e=>e.id===_empId)?.name||"—"} −₹${excess} LR:${lrNo} (multi-DI, diesel ₹${trip.dieselEstimate} caused negative net)`);
           }
         }}
