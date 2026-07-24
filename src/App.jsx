@@ -4179,17 +4179,23 @@ Rules:
       console.log(`[BATCH TIMING] ${g.truckNo}: GROUP COMPLETE at +${(performance.now()-_t0).toFixed(0)}ms`);
       savedLRsThisBatch.push({lrNo, truckNo, qty: groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0),0), diCount: groupItems.length});
       count++;
+      setSavedCount(c=>c+1);
+      setSavedLRs(prev=>[{lrNo, truckNo, qty: groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0),0), diCount: groupItems.length},...prev]);
+      // ── Remove THIS group from the pending list right now, not at the end
+      // of the whole batch. Leaving a just-saved group's card in `groups`
+      // while the loop moves on to later groups meant it stayed visible
+      // through every subsequent re-render — and since checkDupDI/groupReady
+      // recompute fresh on every render (not memoized), the very next render
+      // after this group's trip lands in `trips` would find that trip
+      // (itself) and flag the group as "DUPLICATE — already in LR [its own
+      // LR]". That's the exact bug reported: every successfully-saved group
+      // flipping to a false duplicate warning right after it saves.
+      setItems(prev=>prev.filter(x=>!g.diIds.includes(x.id)));
+      setGroups(prev=>prev.filter(gr=>gr.id!==g.id));
     }
 
-
-    setSavedCount(c=>c+count);
-    setSavedLRs(prev=>[...savedLRsThisBatch,...prev]);
     setSaving(false);
     setNoDieselGroupIds(new Set());
-    // Remove saved groups' items from list
-    const savedItemIds = new Set(readyGroups.flatMap(g=>g.diIds));
-    setItems(prev=>prev.filter(x=>!savedItemIds.has(x.id)));
-    setGroups(prev=>prev.filter(g=>!readyGroups.find(r=>r.id===g.id)));
 
     // ── Post-save reconciliation ─────────────────────────────────────────
     // Fetches FRESH data from the DB rather than trusting React state right
