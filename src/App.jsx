@@ -3303,7 +3303,8 @@ Rules:
       // pre-fill suggestion had the identical unnormalized-comparison bug.
       const normTruckG = s => String(s||"").replace(/\s+/g,"").toUpperCase();
       const confirmedReqsG = (dieselRequests||[])
-        .filter(r => normTruckG(r.truckNo)===normTruckG(truckNo) && r.status==="confirmed");
+        .filter(r => normTruckG(r.truckNo)===normTruckG(truckNo) && r.status==="confirmed")
+        .sort((a,b)=>(b.date||"").localeCompare(a.date||"") || (b.createdAt||"").localeCompare(a.createdAt||""));
       const autoReqG = confirmedReqsG.length >= 1 ? confirmedReqsG[0] : null;
       const autoIndentNo = autoReqG ? String(autoReqG.indentNo) : "";
       const autoDiesel   = autoReqG ? String(((autoReqG.dieselAmount??autoReqG.amount)||0)+(autoReqG.cashAmount||0)) : "0";
@@ -3437,7 +3438,14 @@ Rules:
     // explicit "No Diesel Request for this Trip" confirmation from the
     // uploader (tracked in noDieselGroupIds, set on the confirmation screen).
     // There is no third path — the uploader cannot silently skip this.
-    if(!manualDiesel && +g.diesel > 0 && !g.dieselIndentNo.trim() && !noDieselGroupIds.has(g.id)) return false;
+    // Diesel must be resolved one of two ways: an auto-attached indent, OR an
+    // explicit "No Diesel Request for this Trip" confirmation from the
+    // uploader (tracked in noDieselGroupIds, set on the confirmation screen).
+    // There is no third path, and critically: a diesel amount of 0 does NOT
+    // count as "nothing to resolve" — that was a real bug (a group with no
+    // auto-detected diesel amount could be saved without ever requiring the
+    // confirmation tap). Every group needs one of the two explicit states.
+    if(!manualDiesel && !g.dieselIndentNo.trim() && !noDieselGroupIds.has(g.id)) return false;
     // Advance given — must explicitly pick an employee wallet or explicit "None"
     if(+g.advance > 0 && !g.cashEmpId) return false;
     // Note: open (unconfirmed) requests are allowed with a warning — not blocked
@@ -3478,7 +3486,7 @@ Rules:
 
   const readyGroups = groups.filter(groupReady);
   const confirmGroups = groups.filter(groupReadyExceptDiesel);
-  const dieselResolved = (g) => !manualDiesel ? (!(+g.diesel>0) || g.dieselIndentNo.trim() || noDieselGroupIds.has(g.id)) : true;
+  const dieselResolved = (g) => manualDiesel ? true : (!!g.dieselIndentNo.trim() || noDieselGroupIds.has(g.id));
   const allDieselResolved = confirmGroups.every(dieselResolved);
   const canSave = readyGroups.length > 0 && !saving;
 
@@ -3533,9 +3541,12 @@ Rules:
           return;
         }
       }
-      // Diesel indent — skip check in manual diesel mode
-      if(!manualDiesel && +g.diesel > 0 && !g.dieselIndentNo.trim()) {
-        alert(`Truck ${g.truckNo}: Diesel Indent No is required when Diesel Estimate is entered.`);
+      // Diesel — must be resolved via auto-match OR explicit no-diesel
+      // confirmation (same rule as groupReady/dieselResolved — a diesel
+      // amount of 0 is NOT automatically "nothing to resolve").
+      if(!manualDiesel && !g.dieselIndentNo.trim() && !noDieselGroupIds.has(g.id)) {
+        alert(`Truck ${g.truckNo}: Diesel must be resolved — either an attached indent, or an explicit "No Diesel Request for this Trip" confirmation on the review screen.`);
+        setSaving(false);
         return;
       }
       if(g.dieselIndentNo.trim()) {
@@ -3634,14 +3645,26 @@ Rules:
       const client     = g.client || ex0.client || getDEFAULT_CLIENT();
       const material   = gradeToMaterial(ex0.grade, "outbound");
 
+      // ── TEMPORARY DIAGNOSTIC TIMING — remove once the batch LR issue is
+      // confirmed fixed. Logs wall-clock time at each stage so we can see
+      // exactly where time goes during a batch save, instead of guessing.
+      const _t0 = performance.now();
+      console.log(`[BATCH TIMING] Group start: ${g.truckNo} (${client}/${material}) at +0ms`);
+
       // ── Get auto-assigned LR from DB ──────────────────────────────────────
       let lrNo;
       try {
-        // Timeout after 10s to prevent infinite hang
+        // Bumped from 10s: get_next_lr's fast-path fix is confirmed deployed,
+        // so a single indexed lookup should be near-instant. If this still
+        // times out at 25s, the cause is very likely network conditions or
+        // row-lock contention (concurrent saves for the same client+material
+        // queuing on the same sequence row), not the function itself.
         const lrPromise = DB.getNextLR(client, material);
-        const timeout = new Promise((_,rej) => setTimeout(()=>rej(new Error("Timed out — check internet connection and try again")), 10000));
+        const timeout = new Promise((_,rej) => setTimeout(()=>rej(new Error("Timed out — check internet connection and try again")), 25000));
         lrNo = await Promise.race([lrPromise, timeout]);
+        console.log(`[BATCH TIMING] ${g.truckNo}: getNextLR resolved "${lrNo}" at +${(performance.now()-_t0).toFixed(0)}ms`);
       } catch(e) {
+        console.log(`[BATCH TIMING] ${g.truckNo}: getNextLR FAILED at +${(performance.now()-_t0).toFixed(0)}ms — ${e.message}`);
         setLrError(`LR assignment failed for ${g.truckNo}: ${e.message}`);
         setSaving(false);
         return;
@@ -3764,6 +3787,7 @@ Rules:
           DB.saveTripSafe(trip),
           new Promise((_,rej)=>setTimeout(()=>rej(new Error("Save timed out — check connection")),40000)) // bumped from 15s: the real fix is the DI trigram index (see migration), this is just a safety margin
         ]).catch(e=>({success:false, duplicateDI:null, existingLR:null, existingTruck:null, error:e.message}));
+        console.log(`[BATCH TIMING] ${g.truckNo}: saveTripSafe done (success=${saveResult.success}) at +${(performance.now()-_t0).toFixed(0)}ms`);
         // Auto-update vehicle ownerName if vehicle has none but trip/scan does
         try {
           if(trip.ownerName && trip.truckNo) {
@@ -3826,6 +3850,7 @@ Rules:
               const updPreReq = {...preReq, status:"attached", tripId:trip.id, lrNo};
               setDieselRequests(p=>p.map(r=>r.id===preReq.id?updPreReq:r));
               await DB.saveDieselRequest(updPreReq);
+              console.log(`[BATCH TIMING] ${g.truckNo}: pre-filled diesel attach saved at +${(performance.now()-_t0).toFixed(0)}ms`);
               log("DIESEL ATTACH", `Indent #${preReq.indentNo} → LR ${lrNo} · ₹${preReq.amount} (manual)`);
           }
         }
@@ -3838,7 +3863,12 @@ Rules:
           // is a raw, unnormalized assignment from the form/OCR extraction).
           const normTruck = s => String(s||"").replace(/\s+/g,"").toUpperCase();
           const confirmedReqs = (dieselRequests||[]).filter(r => r.status==="confirmed" && !claimedDieselIdsThisBatch.has(r.id));
-          const truckMatch = confirmedReqs.find(r => normTruck(r.truckNo)===normTruck(truckNo));
+          // Most recent first — if a truck has multiple confirmed requests,
+          // always attach the newest one (by date, then by createdAt as a
+          // tiebreaker for same-day requests).
+          const truckMatches = confirmedReqs.filter(r => normTruck(r.truckNo)===normTruck(truckNo))
+            .sort((a,b)=>(b.date||"").localeCompare(a.date||"") || (b.createdAt||"").localeCompare(a.createdAt||""));
+          const truckMatch = truckMatches[0];
           let chosenReq = truckMatch;
           if (!truckMatch) {
             // Also check older/open requests for manual owner override
@@ -3882,6 +3912,7 @@ Rules:
               const updReq = {...chosenReq, status:"attached", tripId:trip.id, lrNo};
               setDieselRequests(p=>p.map(r=>r.id===chosenReq.id?updReq:r));
               await DB.saveDieselRequest(updReq);
+              console.log(`[BATCH TIMING] ${g.truckNo}: auto-attach diesel saved at +${(performance.now()-_t0).toFixed(0)}ms`);
               const updTrip = {...trip, dieselEstimate:effAmt, dieselIndentNo:String(chosenReq.indentNo)};
               setTrips(p=>p.map(t=>t.id===trip.id?updTrip:t));
               await DB.saveTrip(updTrip);
@@ -4046,7 +4077,9 @@ Rules:
           // Same normalization fix as the single-trip save path above.
           const normTruck2 = s => String(s||"").replace(/\s+/g,"").toUpperCase();
           const confirmedReqs = (dieselRequests||[]).filter(r => r.status==="confirmed" && !claimedDieselIdsThisBatch.has(r.id));
-          const truckMatch = confirmedReqs.find(r => normTruck2(r.truckNo)===normTruck2(truckNo));
+          const truckMatches = confirmedReqs.filter(r => normTruck2(r.truckNo)===normTruck2(truckNo))
+            .sort((a,b)=>(b.date||"").localeCompare(a.date||"") || (b.createdAt||"").localeCompare(a.createdAt||""));
+          const truckMatch = truckMatches[0];
           let chosenReq = truckMatch;
           if (!truckMatch) {
             // Show truck-specific indents first; only fall back to other trucks if none found
@@ -4089,6 +4122,7 @@ Rules:
               const updReq = {...chosenReq, status:"attached", tripId:trip.id, lrNo};
               setDieselRequests(p=>p.map(r=>r.id===chosenReq.id?updReq:r));
               await DB.saveDieselRequest(updReq);
+              console.log(`[BATCH TIMING] ${g.truckNo}: auto-attach diesel saved (merged path) at +${(performance.now()-_t0).toFixed(0)}ms`);
               const updTrip = {...trip, dieselEstimate:effAmt, dieselIndentNo:String(chosenReq.indentNo)};
               setTrips(p=>p.map(t=>t.id===trip.id?updTrip:t));
               await DB.saveTrip(updTrip);
@@ -4134,6 +4168,7 @@ Rules:
           }
         }}
       }
+      console.log(`[BATCH TIMING] ${g.truckNo}: GROUP COMPLETE at +${(performance.now()-_t0).toFixed(0)}ms`);
       savedLRsThisBatch.push({lrNo, truckNo, qty: groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0),0), diCount: groupItems.length});
       count++;
     }
