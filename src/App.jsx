@@ -12623,6 +12623,7 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
   const [reason,       setReason]       = useState("");
   const [pinEntry,    setPinEntry]    = useState("");
   const [pinError,    setPinError]    = useState(false);
+  const [confirming,  setConfirming]  = useState(false); // true while a confirmation save is in flight — blocks re-entry and drives the loading UI
   const [confirmed,   setConfirmed]   = useState(null);
   const [pendingReview, setPendingReview] = useState(null); // receipt saved, mismatch found, awaiting manager
   const [step,        setStep]        = useState("list"); // list | review | pin | receipt | done
@@ -12670,16 +12671,19 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
     setPinEntry(""); setPinError(false); setStep("review");
   };
   const keyPress = (k) => {
+    if(confirming) return; // a confirmation is already saving — ignore all input until it resolves
     if(pinEntry.length >= 4) return;
     const next = pinEntry + k;
     setPinEntry(next); setPinError(false);
     if(next.length === 4) validatePin(next);
   };
-  const keyDel = () => { setPinEntry(p=>p.slice(0,-1)); setPinError(false); };
+  const keyDel = () => { if(confirming) return; setPinEntry(p=>p.slice(0,-1)); setPinError(false); };
 
   const validatePin = async (pin) => {
     if(!selected) return;
+    if(confirming) return; // extra safety net — should be unreachable given the keyPress guard above, but never allow two saves to overlap
     if(pin !== selected.pin) { setPinError(true); setPinEntry(""); return; }
+    setConfirming(true);
     // Resolve confirmed diesel and cash — fall back to original if operator left blank
     const origDiesel = selected.dieselAmount ?? selected.amount;
     const origCash   = selected.cashAmount   ?? 0;
@@ -12708,13 +12712,16 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
     try {
       await DB.saveDieselRequest(updReq);
     } catch(e) {
+      setConfirming(false);
       setPinError(false);
+      setPinEntry("");
       alert("Could not save confirmation: " + e.message + "\n\nThis usually means a database migration hasn't been run yet. Contact the app owner.");
       return; // don't update local state or advance the step if the DB write failed
     }
     setDieselRequests(p=>p.map(r=>r.id===selected.id ? updReq : r));
     log("PUMP CONFIRM",`Indent #${selected.indentNo} · ${selected.truckNo} · Diesel ₹${confDiesel} Cash ₹${confCash} Total ₹${confTotal}${changed?` (was Diesel ₹${origDiesel} Cash ₹${origCash})`:""}`)
     setConfirmed({...updReq, changed, dieselChanged, cashChanged, origDiesel, origCash});
+    setConfirming(false);
     setStep("done");
   };
 
@@ -13067,7 +13074,7 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
             <div style={{background:C.card,borderRadius:12,padding:"20px 16px",textAlign:"center"}}>
               <div style={{color:C.text,fontWeight:700,fontSize:14,marginBottom:4}}>Driver PIN Required</div>
               <div style={{color:C.muted,fontSize:12,marginBottom:20}}>
-                Ask the driver for his 4-digit PIN and type it below
+                {confirming ? "Saving your confirmation — please wait, do not re-enter the PIN" : "Ask the driver for his 4-digit PIN and type it below"}
               </div>
               <input
                 type="password"
@@ -13075,7 +13082,9 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
                 maxLength={4}
                 value={pinEntry}
                 autoFocus
+                disabled={confirming}
                 onChange={e=>{
+                  if(confirming) return;
                   const v = e.target.value.replace(/\D/g,"").slice(0,4);
                   setPinEntry(v);
                   setPinError(false);
@@ -13085,15 +13094,23 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
                 style={{
                   width:160,textAlign:"center",letterSpacing:12,
                   fontSize:32,fontWeight:800,padding:"14px 16px",
-                  background:C.bg,outline:"none",
+                  background:confirming?C.dim:C.bg,outline:"none",
                   border:`2px solid ${pinError?C.red:pinEntry.length>0?C.teal:C.border}`,
                   borderRadius:12,color:C.text,
                   boxSizing:"border-box",
                   WebkitTextSecurity:"disc",
-                  transition:"border-color 0.15s"
+                  transition:"border-color 0.15s",
+                  opacity:confirming?0.6:1,
+                  cursor:confirming?"not-allowed":"text",
                 }}
               />
-              {pinError && (
+              {confirming && (
+                <div style={{color:C.teal,fontWeight:700,fontSize:13,marginTop:12,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+                  <span style={{display:"inline-block",width:14,height:14,border:`2px solid ${C.teal}`,borderTopColor:"transparent",borderRadius:"50%",animation:"spin 0.7s linear infinite"}} />
+                  ⏳ Confirming…
+                </div>
+              )}
+              {pinError && !confirming && (
                 <div style={{color:C.red,fontWeight:700,fontSize:13,marginTop:12}}>
                   ❌ Incorrect PIN — try again
                 </div>
