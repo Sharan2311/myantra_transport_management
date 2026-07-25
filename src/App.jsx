@@ -360,7 +360,7 @@ const canEdit = (user, p) => {
 
 // ─── SUPABASE DATA HOOK ────────────────────────────────────────────────────────
 // Loads data once, then every 15 seconds. Writes go straight to DB + local state.
-function useDB(fetcher, initial = [], delay = 0) {
+function useDB(fetcher, initial = [], delay = 0, enabled = true) {
   const [data,  setData]  = useState(initial);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState(null);
@@ -397,15 +397,21 @@ function useDB(fetcher, initial = [], delay = 0) {
   }, []);
 
   useEffect(() => {
+    // Not enabled for this role — this table is never fetched, never polled.
+    // Mark ready immediately (there's genuinely nothing to wait for, not
+    // "still loading") so overall app-loading checks that look at `ready`
+    // flags don't hang waiting for a table this session will never need.
+    if(!enabled) { setReady(true); return; }
     // Stagger initial load by delay ms to spread DB connections across phases
     const t = delay > 0 ? setTimeout(() => load(), delay) : (load(), null);
     return () => { if(t) clearTimeout(t); };
-  }, [load]);
+  }, [load, enabled]);
   useEffect(() => {
+    if(!enabled) return;
     // Poll every 45s instead of 15s — reduces connection pool pressure by 3×
     const t = setInterval(load, 45000);
     return () => clearInterval(t);
-  }, [load]);
+  }, [load, enabled]);
 
   // Returns [data, optimisticSetter, ready, reload]
   // optimisticSetter updates local state immediately, then saves to DB
@@ -1551,9 +1557,27 @@ function AppMain() {
   const [selectedFY, setSelectedFY] = useState(currentFY()); // Financial year filter
   const [selectedClient, setSelectedClient] = useState(""); // "" = All clients
 
+  // ── Per-role table loading ───────────────────────────────────────────────
+  // Only tables a role actually uses get fetched/polled at all. Currently
+  // only pump_operator has a verified mapping — every other role falls back
+  // to "load everything" (current behavior, unrestricted) until we've
+  // explicitly checked what each one actually needs. Never restrict a role
+  // we haven't verified; that's the whole point of doing this incrementally.
+  // Multi-role users (e.g. "party_manager,email_followup") get the UNION of
+  // every table any of their roles needs.
+  const ROLE_TABLE_NEEDS = {
+    pump_operator: new Set(["users","settings","pumps","dieselRequests"]),
+  };
+  const userRoles = (user?.role||"").split(",").map(r=>r.trim()).filter(Boolean);
+  const hasFullMapping = userRoles.length>0 && userRoles.every(r => ROLE_TABLE_NEEDS[r]);
+  const neededTables = hasFullMapping
+    ? new Set(userRoles.flatMap(r => [...ROLE_TABLE_NEEDS[r]]))
+    : null; // null = unrestricted, load everything (default for unrolled-out roles)
+  const tableEnabled = (name) => !neededTables || neededTables.has(name);
+
   // ── Phase 1 (0ms) — critical for first render: 4 connections ────────────────
-  const [users,       setUsers,       rU, reloadUsers]       = useDB(DB.getUsers,       [],               0);
-  const [trips,       setTrips,       rT, reloadTrips]       = useDB(DB.getTrips,       [],               0);
+  const [users,       setUsers,       rU, reloadUsers]       = useDB(DB.getUsers,       [],               0, tableEnabled("users"));
+  const [trips,       setTrips,       rT, reloadTrips]       = useDB(DB.getTrips,       [],               0, tableEnabled("trips"));
   const [allTripsLoaded, setAllTripsLoaded] = useState(false);
   const [loadingAllTrips, setLoadingAllTrips] = useState(false);
   // Load all trips (beyond 90-day default) — called explicitly by user
@@ -1569,31 +1593,31 @@ function AppMain() {
       setLoadingAllTrips(false);
     }
   };
-  const [vehicles,    setVehicles,    rV, reloadVehicles]    = useDB(DB.getVehicles,    [],               0);
-  const [settings,    setSettings,    rSt,reloadSettings]    = useDB(DB.getSettings,    {tafalPerTrip:300},0);
+  const [vehicles,    setVehicles,    rV, reloadVehicles]    = useDB(DB.getVehicles,    [],               0, tableEnabled("vehicles"));
+  const [settings,    setSettings,    rSt,reloadSettings]    = useDB(DB.getSettings,    {tafalPerTrip:300},0, tableEnabled("settings"));
 
   // ── Phase 2 (300ms) — 5 connections ──────────────────────────────────────────
-  const [employees,   setEmployees,   rE, reloadEmployees]   = useDB(DB.getEmployees,   [],             300);
+  const [employees,   setEmployees,   rE, reloadEmployees]   = useDB(DB.getEmployees,   [],             300, tableEnabled("employees"));
 
   // DEBUG: track employees state changes
   useEffect(() => { console.log('[DEBUG] employees state:', employees.length, employees.map(e=>e.name).join(',')); }, [employees]);
-  const [payments,    setPayments,    rP, reloadPayments]    = useDB(DB.getPayments,    [],             300);
-  const [pumps,       setPumps,       rPu,reloadPumps]       = useDB(DB.getPumps,       [],             300);
-  const [indents,        setIndents,        rI,  reloadIndents]       = useDB(DB.getIndents,       [],  300);
-  const [dieselRequests, setDieselRequests, rDR, reloadDieselRequests] = useDB(DB.getDieselRequests, [], 300);
+  const [payments,    setPayments,    rP, reloadPayments]    = useDB(DB.getPayments,    [],             300, tableEnabled("payments"));
+  const [pumps,       setPumps,       rPu,reloadPumps]       = useDB(DB.getPumps,       [],             300, tableEnabled("pumps"));
+  const [indents,        setIndents,        rI,  reloadIndents]       = useDB(DB.getIndents,       [],  300, tableEnabled("indents"));
+  const [dieselRequests, setDieselRequests, rDR, reloadDieselRequests] = useDB(DB.getDieselRequests, [], 300, tableEnabled("dieselRequests"));
 
   // ── Phase 3 (650ms) — 6 connections ──────────────────────────────────────────
-  const [settlements, setSettlements, rS, reloadSettlements] = useDB(DB.getSettlements, [],             650);
-  const [activity,    setActivity,    rA, reloadActivity]    = useDB(DB.getActivity,    [],             650); // stores all, UI filters to 7d
-  const [driverPays,  setDriverPays,  rDP,reloadDriverPays]  = useDB(DB.getDriverPays,  [],             650);
-  const [expenses,       setExpenses,       rEx, reloadExpenses]      = useDB(DB.getExpenses,       [], 650);
-  const [gstReleases,    setGstReleases,    rGR, reloadGst]           = useDB(DB.getGstReleases,    [], 650);
-  const [cashTransfers,  setCashTransfers,  rCT, reloadCashTransfers] = useDB(DB.getCashTransfers,  [], 650);
-  const [pumpPayments,   setPumpPayments,   rPP, reloadPumpPayments]  = useDB(DB.getPumpPayments,   [], 650);
-  const [paymentRequests, setPaymentRequests, rPR] = useDB(DB.getPaymentRequests, [],               650);
-  const [actionItems, setActionItems, rAI, reloadActionItems] = useDB(DB.getActionItems, [],         650);
-  const [invoiceRegistry, setInvoiceRegistry] = useDB(DB.getInvoiceRegistry, [],                      650);
-  const [clinkerBills, setClinkerBills] = useDB(DB.getClinkerBills, [],                                650);
+  const [settlements, setSettlements, rS, reloadSettlements] = useDB(DB.getSettlements, [],             650, tableEnabled("settlements"));
+  const [activity,    setActivity,    rA, reloadActivity]    = useDB(DB.getActivity,    [],             650, tableEnabled("activity")); // stores all, UI filters to 7d
+  const [driverPays,  setDriverPays,  rDP,reloadDriverPays]  = useDB(DB.getDriverPays,  [],             650, tableEnabled("driverPays"));
+  const [expenses,       setExpenses,       rEx, reloadExpenses]      = useDB(DB.getExpenses,       [], 650, tableEnabled("expenses"));
+  const [gstReleases,    setGstReleases,    rGR, reloadGst]           = useDB(DB.getGstReleases,    [], 650, tableEnabled("gstReleases"));
+  const [cashTransfers,  setCashTransfers,  rCT, reloadCashTransfers] = useDB(DB.getCashTransfers,  [], 650, tableEnabled("cashTransfers"));
+  const [pumpPayments,   setPumpPayments,   rPP, reloadPumpPayments]  = useDB(DB.getPumpPayments,   [], 650, tableEnabled("pumpPayments"));
+  const [paymentRequests, setPaymentRequests, rPR] = useDB(DB.getPaymentRequests, [],               650, tableEnabled("paymentRequests"));
+  const [actionItems, setActionItems, rAI, reloadActionItems] = useDB(DB.getActionItems, [],         650, tableEnabled("actionItems"));
+  const [invoiceRegistry, setInvoiceRegistry] = useDB(DB.getInvoiceRegistry, [],                      650, tableEnabled("invoiceRegistry"));
+  const [clinkerBills, setClinkerBills] = useDB(DB.getClinkerBills, [],                                650, tableEnabled("clinkerBills"));
   const dbSetPumpPayments = async (val) => { setPumpPayments(val); };
 
   const loading = !rU||!rT||!rV||!rE||!rP||!rS||!rPu||!rI||!rSt||!rDP||!rEx||!rGR;
