@@ -1558,15 +1558,28 @@ function AppMain() {
   const [selectedClient, setSelectedClient] = useState(""); // "" = All clients
 
   // ── Per-role table loading ───────────────────────────────────────────────
-  // Only tables a role actually uses get fetched/polled at all. Currently
-  // only pump_operator has a verified mapping — every other role falls back
-  // to "load everything" (current behavior, unrestricted) until we've
-  // explicitly checked what each one actually needs. Never restrict a role
-  // we haven't verified; that's the whole point of doing this incrementally.
+  // Only tables a role actually uses get fetched/polled at all. Each entry
+  // below was verified against the actual component code (which props does
+  // that role's screen destructure/use) plus direct confirmation on
+  // anything ambiguous — never assumed from the permissions list alone.
+  // Roles not listed here fall back to "load everything" (current,
+  // unrestricted behavior) until we've explicitly verified them too.
   // Multi-role users (e.g. "party_manager,email_followup") get the UNION of
   // every table any of their roles needs.
   const ROLE_TABLE_NEEDS = {
     pump_operator: new Set(["users","settings","pumps","dieselRequests"]),
+    // PartyPortal + PartyTripCard only ever destructure trips/employees —
+    // confirmed by checking every reference inside both components' bodies.
+    party_manager: new Set(["users","settings","trips","employees"]),
+    email_followup: new Set(["users","settings","trips","employees"]),
+    // Renders the same shared Employees component owner/manager use, but
+    // restricted to the employee's own record. Confirmed their screen is
+    // purely their own advances/TAFAL/diesel/wallet transactions — no
+    // vehicle loan/shortage display, and nothing they can trigger writes an
+    // expense record — so `vehicles` and expense-writing aren't needed here
+    // even though the shared component references them for the fuller
+    // owner/manager view.
+    employee_self: new Set(["users","settings","trips","cashTransfers"]),
   };
   const userRoles = (user?.role||"").split(",").map(r=>r.trim()).filter(Boolean);
   const hasFullMapping = userRoles.length>0 && userRoles.every(r => ROLE_TABLE_NEEDS[r]);
