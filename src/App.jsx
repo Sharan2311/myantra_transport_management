@@ -1676,9 +1676,19 @@ function AppMain() {
   const dbSetVehicles = (updater) => {
     setVehicles(prev => {
       const next = typeof updater === "function" ? updater(prev) : updater;
+      const prevIds = new Set((prev||[]).map(v=>v.id));
       const nextIds = new Set(next.map(v=>v.id));
       (prev||[]).filter(v=>!nextIds.has(v.id)).forEach(v => DB.deleteVehicle(v.id).catch(e=>setSaveErr(e.message)));
-      next.forEach(v => DB.saveVehicle(v).catch(e => setSaveErr(e.message)));
+      // Only save new or actually-changed vehicles — this used to re-save
+      // the ENTIRE fleet on every single update (any one vehicle changing
+      // triggered an upsert for every other vehicle too), which was a real,
+      // significant source of unnecessary DB load — confirmed as the cause
+      // of the burst of mye_vehicles calls seen during batch trip saves.
+      next.forEach(v => {
+        if (!prevIds.has(v.id) || JSON.stringify(v) !== JSON.stringify((prev||[]).find(x=>x.id===v.id))) {
+          DB.saveVehicle(v).catch(e => setSaveErr(e.message));
+        }
+      });
       return next;
     });
   };
@@ -1686,9 +1696,14 @@ function AppMain() {
   const dbSetEmployees = (updater) => {
     setEmployees(prev => {
       const next = typeof updater === "function" ? updater(prev) : updater;
+      const prevIds = new Set((prev||[]).map(e=>e.id));
       const nextIds = new Set(next.map(e=>e.id));
       (prev||[]).filter(e=>!nextIds.has(e.id)).forEach(e => DB.deleteEmployee(e.id).catch(err=>setSaveErr(err.message)));
-      next.forEach(e => DB.saveEmployee(e).catch(err => setSaveErr(err.message)));
+      next.forEach(e => {
+        if (!prevIds.has(e.id) || JSON.stringify(e) !== JSON.stringify((prev||[]).find(x=>x.id===e.id))) {
+          DB.saveEmployee(e).catch(err => setSaveErr(err.message));
+        }
+      });
       return next;
     });
   };
@@ -1731,7 +1746,11 @@ function AppMain() {
       const prevIds = new Set((prev||[]).map(i=>i.id));
       const nextIds = new Set(next.map(i=>i.id));
       (prev||[]).filter(i=>!nextIds.has(i.id)).forEach(i => DB.deleteIndent(i.id).catch(e=>setSaveErr(e.message)));
-      next.forEach(i => DB.saveIndent(i).catch(e => setSaveErr(e.message)));
+      next.forEach(i => {
+        if (!prevIds.has(i.id) || JSON.stringify(i) !== JSON.stringify((prev||[]).find(x=>x.id===i.id))) {
+          DB.saveIndent(i).catch(e => setSaveErr(e.message));
+        }
+      });
       return next;
     });
   };
@@ -1742,7 +1761,16 @@ function AppMain() {
       const prevIds = new Set((prev||[]).map(r=>r.id));
       const nextIds = new Set(next.map(r=>r.id));
       (prev||[]).filter(r=>!nextIds.has(r.id)).forEach(r => DB.deleteDieselRequest(r.id).catch(e=>setSaveErr(e.message)));
-      next.forEach(r => DB.saveDieselRequest(r).catch(e => setSaveErr(e.message)));
+      // This was the biggest instance of the bug: every single diesel
+      // confirmation — one record changing — was re-saving every diesel
+      // request the company has ever logged. Very likely the real cause of
+      // "second confirmation frozen for minutes," since a single PIN
+      // confirmation was silently triggering thousands of redundant writes.
+      next.forEach(r => {
+        if (!prevIds.has(r.id) || JSON.stringify(r) !== JSON.stringify((prev||[]).find(x=>x.id===r.id))) {
+          DB.saveDieselRequest(r).catch(e => setSaveErr(e.message));
+        }
+      });
       return next;
     });
   };
@@ -1823,9 +1851,14 @@ function AppMain() {
   const dbSetUsers = (updater) => {
     setUsers(prev => {
       const next = typeof updater === "function" ? updater(prev) : updater;
+      const prevIds = new Set((prev||[]).map(u=>u.id));
       const nextIds = new Set(next.map(u=>u.id));
       (prev||[]).filter(u=>!nextIds.has(u.id)).forEach(u => DB.deleteUser(u.id).catch(e=>setSaveErr(e.message)));
-      next.forEach(u => DB.saveUser(u).catch(e => setSaveErr(e.message)));
+      next.forEach(u => {
+        if (!prevIds.has(u.id) || JSON.stringify(u) !== JSON.stringify((prev||[]).find(x=>x.id===u.id))) {
+          DB.saveUser(u).catch(e => setSaveErr(e.message));
+        }
+      });
       return next;
     });
   };
