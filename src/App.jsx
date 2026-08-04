@@ -4001,8 +4001,10 @@ Rules:
           try { await DB.saveCashTransfer(wxn); } catch(e) { console.error("saveCashTransfer (batch wallet advance):",e); }
           log("WALLET ADVANCE",`${empName} −₹${trip.advance} LR:${lrNo}`);
         }
-        // Loan/shortage ledger — strict sync to match this trip's recovery fields exactly
-        if(+g.shortageRecovery>0 || +g.loanRecovery>0) {
+        // Loan/shortage ledger — strict sync to match this trip's recovery fields
+        // exactly. Unconditional: a group whose recovery was edited down to 0
+        // before saving must also have any stale ledger entry removed.
+        {
           const _veh0 = (vehicles||[]).find(veh=>veh.truckNo===truckNo);
           if(_veh0) {
             const upd = syncTripRecoveryToVehicle(_veh0, trip);
@@ -4218,8 +4220,9 @@ Rules:
           try { await DB.saveCashTransfer(wxn); } catch(e) { console.error("saveCashTransfer (batch wallet advance):",e); }
           log("WALLET ADVANCE",`${empName} −₹${trip.advance} LR:${lrNo}`);
         }
-        // Loan/shortage ledger — strict sync to match this trip's recovery fields exactly
-        if(+g.shortageRecovery>0 || +g.loanRecovery>0) {
+        // Loan/shortage ledger — strict sync to match this trip's recovery fields
+        // exactly. Unconditional, same reasoning as the single-DI path above.
+        {
           const _veh1 = (vehicles||[]).find(veh=>veh.truckNo===truckNo);
           if(_veh1) {
             const upd = syncTripRecoveryToVehicle(_veh1, trip);
@@ -7770,6 +7773,10 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       }
     }}
     const tn2 = (t.truckNo||"").toUpperCase().trim();
+    // Holds a vehicle created in THIS handler — `vehicles` is the render-time
+    // snapshot and won't contain it yet, so the ledger sync below would
+    // otherwise silently skip a brand-new truck.
+    let _justCreatedVeh = null;
     // Auto-create vehicle FIRST if not yet registered — so ledger update below finds it
     if (tn2 && !vehicles.find(v => v.truckNo === tn2)) {
       const nv = { id:uid(), truckNo:tn2, ownerName:f.ownerName||"", phone:"",
@@ -7779,6 +7786,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         shortageTxns:[], loanTxns:[], createdBy:user.username };
       setVehicles(p => [...(p||[]), nv]);
       DB.saveVehicle(nv).catch(e=>console.error("saveVehicle auto-create:",e));
+      _justCreatedVeh = nv;
       log("AUTO-CREATE VEHICLE", `${tn2} from trip save`);
     } else if(tn2 && f.ownerName?.trim()) {
       // If vehicle exists but ownerName was blank — persist it now
@@ -7790,12 +7798,21 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         log("VEHICLE OWNER SET", `${tn2} → ${f.ownerName.trim()}`);
       }
     }
-    // Reflect shortageRecovery / loanRecovery into vehicle ledger — strict sync
-    if(tn2 && (t.shortageRecovery>0 || t.loanRecovery>0)){
-      setVehicles(prev=>prev.map(veh=>{
-        if(veh.truckNo!==tn2) return veh;
-        return syncTripRecoveryToVehicle(veh, t);
-      }));
+    // Reflect shortageRecovery / loanRecovery into vehicle ledger — strict sync.
+    // Runs UNCONDITIONALLY (not only when the value is > 0): clearing a recovery
+    // to 0 must delete the matching ledger entry, and syncTripRecoveryToVehicle
+    // only does that if it actually runs. The old `> 0` gate meant "owner removes
+    // the loan recovery from the trip" left the ledger row behind forever.
+    if(tn2){
+      const _vehForSync = vehicles.find(veh=>veh.truckNo===tn2) || _justCreatedVeh;
+      if(_vehForSync){
+        const _updVeh = syncTripRecoveryToVehicle(_vehForSync, t);
+        setVehicles(prev=>prev.map(veh=>veh.truckNo===tn2?_updVeh:veh));
+        // Persist. Without this the sync lived in React state only and was
+        // wiped by the next 45s poll / page refresh, while the trip's own
+        // loanRecovery stayed saved — the exact source of the ledger drift.
+        DB.saveVehicle(_updVeh).catch(e=>console.error("saveVehicle trip recovery sync:",e));
+      }
     }
     // ── Auto-attach diesel request if dieselIndentNo was set from dropdown ──
     if (t.dieselIndentNo && typeof setDieselRequests === "function") {
@@ -7928,10 +7945,28 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     const prevTrip = trips.find(t=>t.id===editSheet.id);
     const tn3 = (editSheet.truckNo||"").toUpperCase().trim();
     if(tn3){
-      setVehicles(prev=>prev.map(veh=>{
-        if(veh.truckNo!==tn3) return veh;
-        return syncTripRecoveryToVehicle(veh, editSheet);
-      }));
+      const _vehForSync3 = vehicles.find(veh=>veh.truckNo===tn3);
+      if(_vehForSync3){
+        const _updVeh3 = syncTripRecoveryToVehicle(_vehForSync3, editSheet);
+        setVehicles(prev=>prev.map(veh=>veh.truckNo===tn3?_updVeh3:veh));
+        // Persist — the in-memory-only sync was why an owner clearing or
+        // lowering a loan recovery saw the trip change but the vehicle ledger
+        // keep the old entry after the next refresh.
+        DB.saveVehicle(_updVeh3).catch(e=>console.error("saveVehicle edit recovery sync:",e));
+      }
+      // If the truck was CHANGED on this edit, the previous truck still holds a
+      // ledger entry for this trip. Sync it against a zeroed copy so the entry
+      // is removed from the vehicle that no longer ran the trip.
+      const _prevTn = (prevTrip?.truckNo||"").toUpperCase().trim();
+      if(_prevTn && _prevTn!==tn3){
+        const _oldVeh = vehicles.find(veh=>veh.truckNo===_prevTn);
+        if(_oldVeh){
+          const _updOld = syncTripRecoveryToVehicle(_oldVeh, {...editSheet, loanRecovery:0, shortageRecovery:0});
+          setVehicles(prev=>prev.map(veh=>veh.truckNo===_prevTn?_updOld:veh));
+          DB.saveVehicle(_updOld).catch(e=>console.error("saveVehicle old-truck recovery cleanup:",e));
+          log("LEDGER MOVE", `LR:${editSheet.lrNo||"—"} recovery moved ${_prevTn} → ${tn3}`);
+        }
+      }
     }
     // Persist ownerName to vehicle master if it was blank
     if(tn3 && (editSheet.ownerName||"").trim()) {
@@ -9374,17 +9409,25 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                           setTrips(p=>[t,...(p||[])]);
                           log("ADD PARTY TRIP",`LR:${t.lrNo} ${t.truckNo}`);
                           const tn2=(t.truckNo||"").toUpperCase().trim();
+                          let _partyNewVeh=null;
                           if(tn2&&!vehicles.find(v=>v.truckNo===tn2)){
                             const nv={id:uid(),truckNo:tn2,ownerName:"",phone:"",driverName:"",driverPhone:"",
                               driverLicense:"",accountNo:"",ifsc:"",loan:0,loanRecovered:0,deductPerTrip:0,
                               tafalExempt:false,shortageOwed:0,shortageRecovered:0,shortageTxns:[],loanTxns:[],createdBy:user.username};
                             setVehicles(p=>[...(p||[]),nv]);
+                            DB.saveVehicle(nv).catch(e=>console.error("saveVehicle party auto-create:",e));
+                            _partyNewVeh=nv;
                           }
-                          if(tn2&&(t.loanRecovery>0||t.shortageRecovery>0)){
-                            setVehicles(prev=>prev.map(veh=>{
-                              if(veh.truckNo!==tn2) return veh;
-                              return syncTripRecoveryToVehicle(veh, t);
-                            }));
+                          // Unconditional strict sync + persist — see the trip-form
+                          // save path for why the `> 0` gate and the missing
+                          // DB.saveVehicle both had to go.
+                          if(tn2){
+                            const _pVehSync=vehicles.find(veh=>veh.truckNo===tn2)||_partyNewVeh;
+                            if(_pVehSync){
+                              const _pUpd=syncTripRecoveryToVehicle(_pVehSync, t);
+                              setVehicles(prev=>prev.map(veh=>veh.truckNo===tn2?_pUpd:veh));
+                              DB.saveVehicle(_pUpd).catch(e=>console.error("saveVehicle party recovery sync:",e));
+                            }
                           }
                           setAddSheet(false); setF(blankForm());
                           setOrderTypeStep(null); setPartyStep("docs");
@@ -10837,10 +10880,12 @@ function Settlement({trips, setTrips, vehicles, setVehicles, settlements, setSet
     // only, per calcNet's own comment — it must never be recorded as a separate
     // ledger entry alongside calc.loanRecovery, which is what was happening here
     // before and would double-count against calc.loanRecovery for the same trip.)
-    if (v) setVehicles(p => p.map(x => {
-      if (x.truckNo!==t.truckNo) return x;
-      return syncTripRecoveryToVehicle(x, t);
-    }));
+    if (v) {
+      const _updV = syncTripRecoveryToVehicle(v, t);
+      setVehicles(p => p.map(x => x.truckNo===t.truckNo ? _updV : x));
+      // Persist — settlement previously synced the ledger in memory only.
+      DB.saveVehicle(_updV).catch(e=>console.error("saveVehicle settle recovery sync:",e));
+    }
     log("SETTLEMENT", `LR:${t.lrNo} ${t.truckNo} — Net ${fmt(calc.net)}`);
     setSel(null); setNotes("");
   };
