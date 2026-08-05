@@ -350,11 +350,16 @@ const fetchAll = (table, fromDB) => withRetry(async () => {
   return (data||[]).map(fromDB)
 });
 
-// Date-limited fetch — loads only last N days, ordered by date desc
-const fetchRecent = (table, fromDB, dateCol='date', days=120) => withRetry(async () => {
-  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+// Loads the FULL table (paginated), ordered by date desc.
+// NOTE: this used to be a date-limited fetch (only last N days). That cutoff
+// was removed because several screens compute running/cumulative financial
+// balances (employee wallet balance, pump pending balance, etc.) from these
+// tables with no opening-balance carry-forward — silently dropping
+// transactions older than the cutoff produced WRONG balances, not just an
+// incomplete "recent activity" view. Kept the name/signature so all existing
+// call sites work unchanged; the `days` param is now ignored.
+const fetchRecent = (table, fromDB, dateCol='date', _days) => withRetry(async () => {
   const data = await fetchPaginated(() => supabase.from(table).select('*')
-    .gte(dateCol, cutoff)
     .order(dateCol, { ascending: false }));
   return (data||[]).map(fromDB)
 });
@@ -384,12 +389,12 @@ export const DB = {
 
   // By default loads last 90 days only — pass fromDate=null to load all
   getTrips: async (fromDate) => {
-    const cutoff = fromDate !== null
-      ? fromDate
-      : new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    // No date cutoff — a partial trip load silently broke invoice billing
+    // (trips outside the window simply weren't in the array being mapped
+    // over, with no error). Always load everything; `fromDate` param kept
+    // for signature compatibility but no longer used to restrict rows.
     const data = await fetchPaginated(() => {
       let q = supabase.from('mye_trips').select('*').order('date', {ascending: false}).order('id');
-      if (cutoff) q = q.gte('date', cutoff);
       return q;
     });
     const trips = (data||[]).map(tripFromDB);
@@ -414,6 +419,17 @@ export const DB = {
   // Atomic insert that checks for duplicate DI numbers before saving
   // Returns {success, error, duplicateDI} 
   saveTripSafe: async (t) => {
+    // DI and GR are mandatory for every trip — a trip saved with either
+    // missing breaks duplicate detection entirely (see the empty-DI bug).
+    // Enforced HERE, in the data layer, so every save path (single scan,
+    // batch scan, multi-DI merge, manual entry) is covered by one check
+    // instead of relying on every UI entry point remembering to validate.
+    const hasDI = (t.diNo||'').trim() || (t.diLines||[]).some(d=>(d.diNo||'').trim());
+    const hasGR = (t.grNo||'').trim() || (t.diLines||[]).some(d=>(d.grNo||'').trim());
+    if(!hasDI || !hasGR) {
+      return { success: false, missingRequired: true, missingDI: !hasDI, missingGR: !hasGR };
+    }
+
     // Extract all DI numbers from this trip
     const diNos = [];
     if(t.diLines && t.diLines.length > 0) {
@@ -472,24 +488,24 @@ export const DB = {
   saveEmployee:   e  => upsertOne('mye_employees', employeeToDB, e),
   deleteEmployee: id => deleteOne('mye_employees', id),
 
-  getPayments:    () => fetchRecent('mye_payments', paymentFromDB, 'payment_date', 120),
+  getPayments:    () => fetchRecent('mye_payments', paymentFromDB, 'payment_date'),
   savePayment:    p  => upsertOne('mye_payments', paymentToDB, p),
   deletePayment:  id => deleteOne('mye_payments', id),
 
-  getSettlements: () => fetchRecent('mye_settlements', settlementFromDB, 'date', 120),
+  getSettlements: () => fetchRecent('mye_settlements', settlementFromDB, 'date'),
   saveSettlement: s  => upsertOne('mye_settlements', settlementToDB, s),
 
   getPumps:          () => fetchAll('mye_pumps', pumpFromDB),
   savePump:          p  => upsertOne('mye_pumps', pumpToDB, p),
 
   getPumpPayments: async () => {
-    try { return await fetchRecent('mye_pump_payments', pumpPaymentFromDB, 'date', 120); }
+    try { return await fetchRecent('mye_pump_payments', pumpPaymentFromDB, 'date'); }
     catch(e) { console.warn('mye_pump_payments not ready:', e.message); return []; }
   },
   savePumpPayment:   p  => upsertOne('mye_pump_payments', pumpPaymentToDB, p),
   deletePumpPayment: id => deleteOne('mye_pump_payments', id),
 
-  getIndents:      () => fetchRecent('mye_indents', indentFromDB, 'date', 90),
+  getIndents:      () => fetchRecent('mye_indents', indentFromDB, 'date'),
   saveIndent:      i  => upsertOne('mye_indents', indentToDB, i),
   deleteIndent:    id => deleteOne('mye_indents', id),
   saveManyIndents: async (indents) => {
@@ -497,21 +513,21 @@ export const DB = {
     if (error) throw error
   },
 
-  getDriverPays:   () => fetchRecent('mye_driver_payments', driverPayFromDB, 'date', 120),
+  getDriverPays:   () => fetchRecent('mye_driver_payments', driverPayFromDB, 'date'),
   saveDriverPay:   p  => upsertOne('mye_driver_payments', driverPayToDB, p),
   deleteDriverPay: id => deleteOne('mye_driver_payments', id),
 
-  getExpenses:     () => fetchRecent('mye_expenses', expenseFromDB, 'date', 120),
+  getExpenses:     () => fetchRecent('mye_expenses', expenseFromDB, 'date'),
   saveExpense:     e  => upsertOne('mye_expenses', expenseToDB, e),
   deleteExpense:   id => deleteOne('mye_expenses', id),
 
-  getGstReleases:  () => fetchRecent('mye_gst_releases', gstFromDB, 'date', 120),
+  getGstReleases:  () => fetchRecent('mye_gst_releases', gstFromDB, 'date'),
   saveGstRelease:  g  => upsertOne('mye_gst_releases', gstToDB, g),
   deleteGstRelease:id => deleteOne('mye_gst_releases', id),
 
   // Cash Transfers — employee wallet (credits + advance deductions)
   getCashTransfers: async () => {
-    try { return await fetchRecent('mye_cash_transfers', cashTransferFromDB, 'date', 120); }
+    try { return await fetchRecent('mye_cash_transfers', cashTransferFromDB, 'date'); }
     catch(e) { console.warn('mye_cash_transfers not ready:', e.message); return []; }
   },
   saveCashTransfer:   t  => upsertOne('mye_cash_transfers', cashTransferToDB, t),
@@ -537,12 +553,72 @@ export const DB = {
         confirmedAmount: r.confirmed_amount!=null ? +(r.confirmed_amount) : null,
         confirmedReason: r.confirmed_reason,
         confirmedAt: r.confirmed_at,
+        confirmedBy: r.confirmed_by||'',
         tripId: r.trip_id,
         lrNo: r.lr_no,
         createdBy: r.created_by,
         createdAt: r.created_at,
+        // Receipt-scan confirmation fields (additive — see 2026_07_diesel_receipt_confirmation.sql)
+        receiptNo: r.receipt_no||'',
+        receiptImagePath: r.receipt_image_path||'',
+        extractedVehicleNo: r.extracted_vehicle_no||'',
+        extractedAmount: r.extracted_amount!=null ? +(r.extracted_amount) : null,
+        extractedDate: r.extracted_date||'',
+        extractedPumpName: r.extracted_pump_name||'',
+        vehicleMismatch: r.vehicle_mismatch||false,
+        pumpMismatch: r.pump_mismatch||false,
+        dateMismatch: r.date_mismatch||false,
+        confirmationMethod: r.confirmation_method||'',
+        reviewedBy: r.reviewed_by||'',
+        reviewedAt: r.reviewed_at||'',
+        rejectedReason: r.rejected_reason||'',
+        rejectedBy: r.rejected_by||'',
+        rejectedAt: r.rejected_at||'',
       }));
     } catch(e) { console.warn('mye_diesel_requests not ready:', e.message); return []; }
+  },
+  // Atomically claims an indent number, retrying with a fresh one if a
+  // concurrent request already took it. The unique constraint on indent_no
+  // (see 2026-07-23_diesel_indent_unique_constraint.sql) is what actually
+  // makes this safe — client-side "max+1" computation alone can't prevent
+  // two near-simultaneous creations from picking the same number. This is
+  // a separate function from saveDieselRequest because that one silently
+  // swallows any "duplicate key" error (for its own id-conflict handling),
+  // which would also hide indent_no violations we need to see and react to.
+  createDieselRequestSafe: async (buildRecord, startingIndentNo, maxAttempts = 5) => {
+    let indentNo = startingIndentNo;
+    for(let attempt = 0; attempt < maxAttempts; attempt++) {
+      const record = buildRecord(indentNo);
+      const dbRow = {
+        id: record.id,
+        indent_no: record.indentNo,
+        truck_no: record.truckNo,
+        pump_id: record.pumpId||null,
+        amount: record.amount||0,
+        diesel_amount: record.dieselAmount??null,
+        cash_amount: record.cashAmount??null,
+        requested_by: record.requestedBy||null,
+        date: record.date,
+        pin: record.pin,
+        status: record.status||'open',
+        confirmed_amount: null, confirmed_reason: null, confirmed_at: null, confirmed_by: null,
+        trip_id: null, lr_no: null,
+        created_by: record.createdBy, created_at: record.createdAt,
+      };
+      const { error } = await supabase.from('mye_diesel_requests').insert(dbRow);
+      if(!error) return { success: true, record, attempts: attempt+1 };
+      // 23505 = unique_violation. Only retry if it's specifically the
+      // indent_no constraint — any other error should surface immediately.
+      const isIndentConflict = error.code === '23505' && (error.message||'').includes('indent_no');
+      if(!isIndentConflict) return { success: false, error: error.message };
+      // Someone else claimed this number between our read and our insert —
+      // bump past whatever's now the highest known indent_no and try again.
+      const { data: latest } = await supabase.from('mye_diesel_requests')
+        .select('indent_no').order('indent_no', { ascending: false }).limit(1);
+      const latestNo = latest && latest[0] ? Number(latest[0].indent_no) : indentNo;
+      indentNo = Math.max(indentNo, latestNo) + 1;
+    }
+    return { success: false, error: `Could not claim a unique indent number after ${maxAttempts} attempts — try again.` };
   },
   saveDieselRequest: async (r) => {
     const { error } = await supabase.from('mye_diesel_requests').upsert({
@@ -560,12 +636,52 @@ export const DB = {
       confirmed_amount: r.confirmedAmount??null,
       confirmed_reason: r.confirmedReason||null,
       confirmed_at: r.confirmedAt||null,
+      confirmed_by: r.confirmedBy||null,
       trip_id: r.tripId||null,
       lr_no: r.lrNo||null,
       created_by: r.createdBy,
       created_at: r.createdAt,
+      // Receipt-scan confirmation fields
+      receipt_no: r.receiptNo||null,
+      receipt_image_path: r.receiptImagePath||null,
+      extracted_vehicle_no: r.extractedVehicleNo||null,
+      extracted_amount: r.extractedAmount??null,
+      extracted_date: r.extractedDate||null,
+      extracted_pump_name: r.extractedPumpName||null,
+      vehicle_mismatch: r.vehicleMismatch||false,
+      pump_mismatch: r.pumpMismatch||false,
+      date_mismatch: r.dateMismatch||false,
+      confirmation_method: r.confirmationMethod||null,
+      reviewed_by: r.reviewedBy||null,
+      reviewed_at: r.reviewedAt||null,
+      rejected_reason: r.rejectedReason||null,
+      rejected_by: r.rejectedBy||null,
+      rejected_at: r.rejectedAt||null,
     }, { onConflict: 'id', ignoreDuplicates: false });
     if(error && !error.message?.includes('duplicate key')) throw error;
+  },
+  // Diesel receipt image storage — private bucket, signed URLs only (same pattern as trip-files)
+  uploadDieselReceipt: async (requestId, file) => {
+    const ext = (file.name||'').split('.').pop() || 'jpg';
+    const path = `${requestId}/${Date.now()}.${ext}`;
+    const { error } = await supabase.storage.from('diesel-receipts').upload(path, file, { upsert: true });
+    if(error) {
+      if (error.message?.includes('Bucket not found')) {
+        throw new Error('Storage bucket "diesel-receipts" not found. Create it in Supabase → Storage (private).');
+      }
+      throw error;
+    }
+    return path;
+  },
+  getDieselReceiptUrl: async (path, expiresIn = 3600) => {
+    const { data, error } = await supabase.storage.from('diesel-receipts').createSignedUrl(path, expiresIn);
+    if(error) throw error;
+    return data.signedUrl;
+  },
+  deleteDieselReceipt: async (path) => {
+    if(!path) return;
+    const { error } = await supabase.storage.from('diesel-receipts').remove([path]);
+    if(error) console.warn('Could not delete rejected receipt image:', error.message);
   },
   deleteDieselRequest: async (id) => {
     const { error } = await supabase.from('mye_diesel_requests').delete().eq('id', id);
@@ -617,6 +733,77 @@ export const DB = {
     paid_at: pr.paidAt||'', paid_by: pr.paidBy||'',
   }), pr),
   deletePaymentRequest: id => deleteOne('mye_payment_requests', id),
+
+  // Action Items — created when invoice scan can't cleanly bill a DI:
+  //  type "missing_di"     → DI on the invoice has no matching trip in the app
+  //  type "amount_mismatch"→ DI matched, but invoice amount != app's expected amount
+  getActionItems: async () => {
+    try { return await fetchAll('mye_action_items', r => ({
+      id: r.id, type: r.type, status: r.status||'open',
+      diNo: r.di_no||'', grNo: r.gr_no||'', truckNo: r.truck_no||'',
+      invoiceNo: r.invoice_no||'', invoiceDate: r.invoice_date||'',
+      invoiceAmt: +(r.invoice_amt||0), expectedAmt: +(r.expected_amt||0),
+      empId: r.emp_id||'', tripId: r.trip_id||'',
+      note: r.note||'',
+      createdAt: r.created_at, resolvedAt: r.resolved_at||'',
+    })); } catch(e) { console.warn('mye_action_items not ready:', e.message); return []; }
+  },
+  saveActionItem: async (ai) => upsertOne('mye_action_items', ai => ({
+    id: ai.id, type: ai.type, status: ai.status||'open',
+    di_no: ai.diNo||'', gr_no: ai.grNo||'', truck_no: ai.truckNo||'',
+    invoice_no: ai.invoiceNo||'', invoice_date: ai.invoiceDate||'',
+    invoice_amt: ai.invoiceAmt||0, expected_amt: ai.expectedAmt||0,
+    emp_id: ai.empId||'', trip_id: ai.tripId||'',
+    note: ai.note||'',
+    created_at: ai.createdAt, resolved_at: ai.resolvedAt||'',
+  }), ai),
+  deleteActionItem: id => deleteOne('mye_action_items', id),
+
+  // Invoice registry — an independent record of invoice existence, separate
+  // from trips.diLines (which holds the actual billing detail). Used purely
+  // as a cross-check signal: does this diLine's invoiceNo still correspond to
+  // an active (non-deleted) registry entry? Soft-delete only (status flips to
+  // 'deleted', row is never removed) so the registry itself can't drift out
+  // of sync the same way a hard-delete-and-recreate pattern could.
+  getInvoiceRegistry: async () => {
+    try { return await fetchAll('mye_invoices', r => ({
+      id: r.id, invoiceNo: r.invoice_no||r.id, invoiceDate: r.invoice_date||'',
+      client: r.client||'', material: r.material||'', totalAmt: +(r.total_amt||0),
+      diCount: +(r.di_count||0), status: r.status||'active',
+      createdAt: r.created_at||'', createdBy: r.created_by||'',
+      deletedAt: r.deleted_at||'', deletedBy: r.deleted_by||'',
+    })); } catch(e) { console.warn('mye_invoices not ready:', e.message); return []; }
+  },
+  saveInvoiceRegistry: async (inv) => upsertOne('mye_invoices', inv => ({
+    id: inv.invoiceNo, invoice_no: inv.invoiceNo, invoice_date: inv.invoiceDate||'',
+    client: inv.client||'', material: inv.material||'', total_amt: inv.totalAmt||0,
+    di_count: inv.diCount||0, status: inv.status||'active',
+    created_at: inv.createdAt||'', created_by: inv.createdBy||'',
+    deleted_at: inv.deletedAt||'', deleted_by: inv.deletedBy||'',
+  }), inv),
+
+  // Clinker bill ledger — aggregate-only, NOT tied to individual trips.
+  // "Unbilled tons" = sum(all clinker trips' qty) − sum(active bills' tons).
+  getClinkerBills: async () => {
+    try { return await fetchAll('mye_clinker_bills', r => ({
+      id: r.id, invoiceNo: r.invoice_no||'', invoiceDate: r.invoice_date||'',
+      rateLines: r.rate_lines||[], gstPct: +(r.gst_pct||5),
+      taxableAmount: +(r.taxable_amount||0), totalAmount: +(r.total_amount||0),
+      totalTons: +(r.total_tons||0), status: r.status||'active',
+      isPrevFY: !!r.is_prev_fy, prevFYLabel: r.prev_fy_label||'',
+      createdAt: r.created_at||'', createdBy: r.created_by||'',
+      deletedAt: r.deleted_at||'', deletedBy: r.deleted_by||'',
+    })); } catch(e) { console.warn('mye_clinker_bills not ready:', e.message); return []; }
+  },
+  saveClinkerBill: async (b) => upsertOne('mye_clinker_bills', b => ({
+    id: b.id, invoice_no: b.invoiceNo, invoice_date: b.invoiceDate||'',
+    rate_lines: b.rateLines||[], gst_pct: b.gstPct||5,
+    taxable_amount: b.taxableAmount||0, total_amount: b.totalAmount||0,
+    total_tons: b.totalTons||0, status: b.status||'active',
+    is_prev_fy: !!b.isPrevFY, prev_fy_label: b.prevFYLabel||'',
+    created_at: b.createdAt||'', created_by: b.createdBy||'',
+    deleted_at: b.deletedAt||'', deleted_by: b.deletedBy||'',
+  }), b),
 
   // Party contacts lookup
   getPartyContacts: async () => {
@@ -670,8 +857,8 @@ export const DB = {
         return data?.value || { tafalPerTrip: 300 };
       }, { tafalPerTrip: 300 }),
       safe(async () => {
-        const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-        const data = await fetchPaginated(() => supabase.from('mye_trips').select('*').order('date', {ascending:false}).order('id').gte('date', cutoff));
+        // No date cutoff — see getTrips() for why.
+        const data = await fetchPaginated(() => supabase.from('mye_trips').select('*').order('date', {ascending:false}).order('id'));
         return (data||[]).map(tripFromDB);
       }),
       safe(() => fetchAll('mye_vehicles', vehicleFromDB)),
@@ -683,9 +870,9 @@ export const DB = {
     // ── Phase 2: needed for billing, payments, employee tabs ──────────────────
     const [employees, payments, pumps, indents, dieselRequests] = await Promise.all([
       safe(() => fetchAll('mye_employees', employeeFromDB)),
-      safe(() => fetchRecent('mye_payments', paymentFromDB, 'payment_date', 120)),
+      safe(() => fetchRecent('mye_payments', paymentFromDB, 'payment_date')),
       safe(() => fetchAll('mye_pumps', pumpFromDB)),
-      safe(() => fetchRecent('mye_indents', indentFromDB, 'date', 90)),
+      safe(() => fetchRecent('mye_indents', indentFromDB, 'date')),
       safe(async () => {
         const { data, error } = await supabase.from('mye_diesel_requests').select('*').order('created_at', {ascending:false});
         if (error) throw error;
@@ -705,17 +892,17 @@ export const DB = {
     await sleep(350);
 
     // ── Phase 3: background — driver pays, expenses, wallet, activity etc ─────
-    const [driverPays, cashTransfers, pumpPayments, settlements, paymentRequests, activity] = await Promise.all([
-      safe(() => fetchRecent('mye_driver_payments', driverPayFromDB, 'date', 120)),
+    const [driverPays, cashTransfers, pumpPayments, settlements, paymentRequests, activity, actionItems] = await Promise.all([
+      safe(() => fetchRecent('mye_driver_payments', driverPayFromDB, 'date')),
       safe(async () => {
-        try { return await fetchRecent('mye_cash_transfers', cashTransferFromDB, 'date', 120); }
+        try { return await fetchRecent('mye_cash_transfers', cashTransferFromDB, 'date'); }
         catch(e) { console.warn('mye_cash_transfers not ready:', e.message); return []; }
       }),
       safe(async () => {
-        try { return await fetchRecent('mye_pump_payments', pumpPaymentFromDB, 'date', 120); }
+        try { return await fetchRecent('mye_pump_payments', pumpPaymentFromDB, 'date'); }
         catch(e) { console.warn('mye_pump_payments not ready:', e.message); return []; }
       }),
-      safe(() => fetchRecent('mye_settlements', settlementFromDB, 'date', 120)),
+      safe(() => fetchRecent('mye_settlements', settlementFromDB, 'date')),
       safe(async () => {
         try { return await fetchAll('mye_payment_requests', r => ({
           id: r.id, tripId: r.trip_id, lrNo: r.lr_no, truckNo: r.truck_no,
@@ -733,7 +920,18 @@ export const DB = {
         if (error) throw error;
         return (data||[]).map(activityFromDB);
       }),
+      safe(async () => {
+        try { return await fetchAll('mye_action_items', r => ({
+          id: r.id, type: r.type, status: r.status||'open',
+          diNo: r.di_no||'', grNo: r.gr_no||'', truckNo: r.truck_no||'',
+          invoiceNo: r.invoice_no||'', invoiceDate: r.invoice_date||'',
+          invoiceAmt: +(r.invoice_amt||0), expectedAmt: +(r.expected_amt||0),
+          empId: r.emp_id||'', tripId: r.trip_id||'',
+          note: r.note||'',
+          createdAt: r.created_at, resolvedAt: r.resolved_at||'',
+        })); } catch(e) { console.warn('mye_action_items not ready:', e.message); return []; }
+      }),
     ]);
-    onPhase?.({ driverPays, cashTransfers, pumpPayments, settlements, paymentRequests, activity });
+    onPhase?.({ driverPays, cashTransfers, pumpPayments, settlements, paymentRequests, activity, actionItems });
   },
 }

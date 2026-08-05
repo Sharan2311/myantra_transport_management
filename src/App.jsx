@@ -77,6 +77,65 @@ const tafalAmountFor = (veh, employees, settingsObj, assignedEmpId) => {
 // Precedence (must match tafalAmountFor exactly): trip-assigned-employee exempt >
 // vehicle-linked-employee exempt > manual vehicle exempt > vehicle override > global rate.
 const isTafalExempt = (veh, employees, assignedEmpId) => !!employeeTafalExemptFor(veh?.truckNo, employees, assignedEmpId) || !!veh?.tafalExempt;
+
+// ── Per-DI billing (multi-DI / partial billing) ─────────────────────────────
+// DI numbers must match EXACTLY (trim only) — no case-folding or fuzzy match,
+// per explicit instruction: a DI cannot be duplicated across trips so an exact
+// string match is the only correct comparison.
+const normalizeDI = s => String(s||"").trim();
+
+// A trip's diLines carry per-line billing AND payment now (billed/invoiceNo/
+// invoiceDate/billedAmt, and paid/paidAmount/utr/paymentDate). Trip-level
+// status is DERIVED from these, never set independently:
+//   - no diLines (or all empty)        → unchanged (caller decides)
+//   - every diLine paid                → "Paid"
+//   - some (not all) diLines paid      → "Partially Paid" (regardless of
+//                                         whether every DI is even billed yet
+//                                         — a paid DI takes priority over an
+//                                         unbilled sibling for status purposes)
+//   - every diLine billed, none paid   → "Billed"
+//   - some (not all) diLines billed    → "Partially Billed"
+//   - none billed                     → "Pending Bill"
+const tripBillingStatus = (trip) => {
+  const lines = trip.diLines||[];
+  if(lines.length === 0) return trip.status; // single-DI-only trips w/o diLines handled by caller
+  const billedCount = lines.filter(d=>d.billed).length;
+  const paidCount = lines.filter(d=>d.paid).length;
+  if(paidCount === lines.length) return "Paid";
+  if(paidCount > 0) return "Partially Paid";
+  if(billedCount === 0) return "Pending Bill";
+  if(billedCount === lines.length) return "Billed";
+  return "Partially Billed";
+};
+
+// The trip's own billedToShree = sum of what's actually been billed across diLines
+// (so partially-billed trips report only the billed portion, not the full estimate).
+const tripBilledAmount = (trip) => {
+  const lines = trip.diLines||[];
+  if(lines.length === 0) return trip.billedToShree||0;
+  return lines.reduce((s,d)=>s + (d.billed ? (d.billedAmt||0) : 0), 0);
+};
+
+// Mirrors tripBilledAmount for payments — sum of what's actually been paid
+// across diLines (so a partially-paid trip reports only the paid portion).
+const tripPaidAmount = (trip) => {
+  const lines = trip.diLines||[];
+  if(lines.length === 0) return trip.paidAmount||0;
+  return lines.reduce((s,d)=>s + (d.paid ? (d.paidAmount||0) : 0), 0);
+};
+
+// Resolve which employee is responsible for a truck when a DI/trip doesn't exist
+// yet in the app: use the most recent trip (by date) for that truck number and
+// its assignedEmpId. Returns "" (owner-only / unassigned) if the truck has no
+// trip history at all in the app.
+const resolveEmpForTruck = (truckNo, tripList) => {
+  const norm = String(truckNo||"").toUpperCase().trim();
+  if(!norm) return "";
+  const truckTrips = (tripList||[])
+    .filter(t => String(t.truckNo||"").toUpperCase().trim() === norm)
+    .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+  return truckTrips[0]?.assignedEmpId || "";
+};
 // True only when employee_self is the user's ONLY role — used to decide whether to
 // force-land on the wallet tab / hide dashboard. A combined role (e.g. a fleet
 // manager who is also a driver) keeps their normal landing tab and other tabs,
@@ -157,6 +216,59 @@ const syncTripRecoveryToVehicle = (veh, trip) => {
     }
   }
   return upd;
+};
+
+// ─── OWNER LOAN STATUS — SINGLE SOURCE OF TRUTH ───────────────────────────────
+// Every screen that shows a vehicle loan balance, and every place that decides
+// how much may still be recovered, MUST go through this. Four different
+// formulas were previously in use for the same number and they disagreed:
+//
+//   card (17795)     Σ(loan) − Σ(loanRecovered)          → owner-level, netted
+//   autofill (7459)  Σ max(0, loan − loanRecovered)      → CLAMPED PER VEHICLE
+//   report (16786)   loan − Σ(trip.loanRecovery)         → per vehicle, trips
+//   report (16817)   Σ(loan) − Σ(trip.loanRecovery)      → owner-level, trips
+//
+// The per-vehicle clamp was the damaging one. A loan is given against ONE truck
+// but recovered on whichever truck happens to run the trip, so the lending truck
+// reads as still owing while the recovering truck's surplus is silently thrown
+// away by max(0, …). AP39UW5149 showed "Clear" on the card while the trip form
+// auto-filled another ₹30,000 against a loan that was already fully repaid.
+//
+// Recovery is counted from TRIPS, not the stored loanRecovered field: the trip
+// is what actually reduced the driver's pay, so it is the authoritative record
+// of what was taken. Clamping happens exactly once, at owner level.
+//
+// IMPORTANT: pass the FULL trips array, never an FY- or client-filtered one — a
+// loan spans financial years and a filtered list understates what was recovered.
+const ownerLoanStatus = (vehicles, veh, trips) => {
+  const ownerName = (veh?.ownerName||"").trim();
+  const ownerVehs = ownerName
+    ? (vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerName)
+    : (veh ? [veh] : []);
+  const truckNos  = new Set(ownerVehs.map(x=>x.truckNo));
+  const given     = ownerVehs.reduce((s,x)=>s+(+x.loan||0),0);
+  const recovered = (trips||[]).reduce((s,t)=>truckNos.has(t.truckNo)?s+(+t.loanRecovery||0):s, 0);
+  const net       = given - recovered;
+  return {
+    ownerVehs,
+    ownerName,
+    given,
+    recovered,
+    // What may still legitimately be deducted. Never negative.
+    balance: Math.max(0, net),
+    // What was taken beyond the loan — money owed BACK to the owner. Surfaced
+    // rather than clamped away so over-recovery is visible instead of silent.
+    overRecovered: Math.max(0, -net),
+    deductPerTrip: +(ownerVehs[0]?.deductPerTrip)||0,
+  };
+};
+
+// How much loan to auto-fill on a new trip. Zero once the loan is repaid.
+// deductPerTrip 0 means "recover the whole outstanding balance on this trip".
+const autoLoanRecoveryFor = (vehicles, veh, trips) => {
+  const {balance, deductPerTrip} = ownerLoanStatus(vehicles, veh, trips);
+  if(balance <= 0) return 0;
+  return deductPerTrip > 0 ? Math.min(deductPerTrip, balance) : balance;
 };
 
 // ─── TRANSPORTER MISMATCH GUARD ───────────────────────────────────────────────
@@ -259,8 +371,8 @@ function computeEffectiveFeatures(plan, overrides={}, rcFeatures={}) {
 
 // ─── ROLES ────────────────────────────────────────────────────────────────────
 const ROLES = {
-  owner:         {label:"Owner",               color:C.accent,  perms:["trips","inbound","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","admin","driverPay","party_portal"]},
-  manager:       {label:"Manager",             color:C.blue,    perms:["trips","inbound","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","driverPay","party_portal"]},
+  owner:         {label:"Owner",               color:C.accent,  perms:["trips","inbound","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","admin","driverPay","party_portal","unbilled_oversight"]},
+  manager:       {label:"Manager",             color:C.blue,    perms:["trips","inbound","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","driverPay","party_portal","unbilled_oversight"]},
   fleet_manager: {label:"Cement Fleet Manager",color:C.teal,    perms:["cement_trips","billing","diesel","driverPay_view"]},
   fleet_mgr_nd:  {label:"Fleet Mgr (No Diesel Req)",color:"#0891b2", perms:["cement_trips","billing","diesel_view","driverPay_view"]},
   operator:      {label:"Trip Operator",       color:C.teal,    perms:["trips","billing","diesel"]},
@@ -301,7 +413,7 @@ const canEdit = (user, p) => {
 
 // ─── SUPABASE DATA HOOK ────────────────────────────────────────────────────────
 // Loads data once, then every 15 seconds. Writes go straight to DB + local state.
-function useDB(fetcher, initial = [], delay = 0) {
+function useDB(fetcher, initial = [], delay = 0, enabled = true) {
   const [data,  setData]  = useState(initial);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState(null);
@@ -338,15 +450,21 @@ function useDB(fetcher, initial = [], delay = 0) {
   }, []);
 
   useEffect(() => {
+    // Not enabled for this role — this table is never fetched, never polled.
+    // Mark ready immediately (there's genuinely nothing to wait for, not
+    // "still loading") so overall app-loading checks that look at `ready`
+    // flags don't hang waiting for a table this session will never need.
+    if(!enabled) { setReady(true); return; }
     // Stagger initial load by delay ms to spread DB connections across phases
     const t = delay > 0 ? setTimeout(() => load(), delay) : (load(), null);
     return () => { if(t) clearTimeout(t); };
-  }, [load]);
+  }, [load, enabled]);
   useEffect(() => {
+    if(!enabled) return;
     // Poll every 45s instead of 15s — reduces connection pool pressure by 3×
     const t = setInterval(load, 45000);
     return () => clearInterval(t);
-  }, [load]);
+  }, [load, enabled]);
 
   // Returns [data, optimisticSetter, ready, reload]
   // optimisticSetter updates local state immediately, then saves to DB
@@ -401,7 +519,11 @@ const mkTrip = (o) => ({
 const Badge = ({label, color}) => (
   <span style={{background:color+"22",color,border:`1px solid ${color}44`,borderRadius:20,padding:"3px 10px",fontSize:11,fontWeight:700,whiteSpace:"nowrap"}}>{label}</span>
 );
-const SC = s => ({"Pending Bill":C.accent,"Yet to Bill":"#7c3aed","Billed":C.blue,"Paid":C.green,"Unpaid":C.red}[s]||C.muted);
+const SC = s => ({"Pending Bill":C.accent,"Yet to Bill":"#7c3aed","Partially Billed":"#d97706","Billed":C.blue,"Partially Paid":"#0891b2","Paid":C.green,"Unpaid":C.red}[s]||C.muted);
+// A trip counts as "unbilled" for search/filter purposes if it's fully pending
+// OR partially billed (some DI lines billed, at least one — e.g. the party DI
+// on a mixed godown+party LR — still pending).
+const isUnbilled = t => t.status==="Pending Bill" || t.status==="Partially Billed";
 
 const Field = ({label, value, onChange, type="text", placeholder="", opts=null, half=false, note=""}) => {
   const isNum = type === "number";
@@ -820,7 +942,7 @@ function BottomNav({tab, setTab, user, trips, driverPays, vehicles, dieselReques
   const visibleItems = items.filter(n => (!n.perm || can(user, n.perm)) && canFeature(n.feat));
 
   // Badge counts
-  const pendingBills = (trips||[]).filter(t=>t.status==="Pending Bill").length;
+  const pendingBills = (trips||[]).filter(isUnbilled).length;
   const unsettledDrivers = (trips||[]).filter(t=>{
     if(t.driverSettled) return false;
     const veh = (vehicles||[]).find(v=>v.truckNo===t.truckNo);
@@ -876,6 +998,7 @@ const canFeature = (feat) => {
 };
 
 const MORE_TABS = [
+  {id:"unbilled_oversight", icon:"⏰",label:"Unbilled Oversight", perm:"unbilled_oversight", group:"info"},
   {id:"daily_ops",   icon:"📋",label:"Daily Ops",     perm:"reports",      group:"ops",     feat:"daily_ops"},
   {id:"inbound",      icon:"🏭",label:"Raw Material",   perm:"inbound",      group:"ops",     feat:"inbound_trips"},
   {id:"party_portal", icon:"📋",label:"Party Portal",   perm:"party_portal", group:"ops",     feat:"party_billing"},
@@ -901,7 +1024,7 @@ const MORE_GROUPS = [
 ];
 function MoreMenu({user, setTab, trips, driverPays, vehicles}) {
   // Compute badges for more menu items
-  const pendingBills = (trips||[]).filter(t=>t.status==="Pending Bill").length;
+  const pendingBills = (trips||[]).filter(isUnbilled).length;
   const unsettled = (trips||[]).filter(t=>{
     if(t.driverSettled) return false;
     const veh=(vehicles||[]).find(v=>v.truckNo===t.truckNo);
@@ -1457,7 +1580,14 @@ export default function App() {
 function AppMain() {
   const [user, setUser] = useState(() => {
     try {
-      const saved = sessionStorage.getItem("mye_user");
+      // localStorage, not sessionStorage — sessionStorage is fragile to
+      // mobile browsers reclaiming memory from backgrounded tabs (screen
+      // lock, switching apps mid-task), which presents to the user as an
+      // unexpected logout. This was likely the cause of pump operators
+      // needing to log back in after every single diesel confirmation —
+      // any phone lock/app-switch between confirmations could drop the
+      // sessionStorage-held session.
+      const saved = localStorage.getItem("mye_user");
       return saved ? JSON.parse(saved) : null;
     } catch { return null; }
   });
@@ -1466,7 +1596,7 @@ function AppMain() {
     // reopened PWA) must land on the right tab immediately, since restricted
     // roles (pump_operator, employee_self, party-only) don't render "dashboard".
     try {
-      const saved = sessionStorage.getItem("mye_user");
+      const saved = localStorage.getItem("mye_user");
       const u = saved ? JSON.parse(saved) : null;
       if(u?.role==="pump_operator") return "pump_portal";
       if(isPureSelfWalletRole(u?.role)) return "employees";
@@ -1480,9 +1610,40 @@ function AppMain() {
   const [selectedFY, setSelectedFY] = useState(currentFY()); // Financial year filter
   const [selectedClient, setSelectedClient] = useState(""); // "" = All clients
 
+  // ── Per-role table loading ───────────────────────────────────────────────
+  // Only tables a role actually uses get fetched/polled at all. Each entry
+  // below was verified against the actual component code (which props does
+  // that role's screen destructure/use) plus direct confirmation on
+  // anything ambiguous — never assumed from the permissions list alone.
+  // Roles not listed here fall back to "load everything" (current,
+  // unrestricted behavior) until we've explicitly verified them too.
+  // Multi-role users (e.g. "party_manager,email_followup") get the UNION of
+  // every table any of their roles needs.
+  const ROLE_TABLE_NEEDS = {
+    pump_operator: new Set(["users","settings","pumps","dieselRequests"]),
+    // PartyPortal + PartyTripCard only ever destructure trips/employees —
+    // confirmed by checking every reference inside both components' bodies.
+    party_manager: new Set(["users","settings","trips","employees"]),
+    email_followup: new Set(["users","settings","trips","employees"]),
+    // Renders the same shared Employees component owner/manager use, but
+    // restricted to the employee's own record. Confirmed their screen is
+    // purely their own advances/TAFAL/diesel/wallet transactions — no
+    // vehicle loan/shortage display, and nothing they can trigger writes an
+    // expense record — so `vehicles` and expense-writing aren't needed here
+    // even though the shared component references them for the fuller
+    // owner/manager view.
+    employee_self: new Set(["users","settings","trips","cashTransfers"]),
+  };
+  const userRoles = (user?.role||"").split(",").map(r=>r.trim()).filter(Boolean);
+  const hasFullMapping = userRoles.length>0 && userRoles.every(r => ROLE_TABLE_NEEDS[r]);
+  const neededTables = hasFullMapping
+    ? new Set(userRoles.flatMap(r => [...ROLE_TABLE_NEEDS[r]]))
+    : null; // null = unrestricted, load everything (default for unrolled-out roles)
+  const tableEnabled = (name) => !neededTables || neededTables.has(name);
+
   // ── Phase 1 (0ms) — critical for first render: 4 connections ────────────────
-  const [users,       setUsers,       rU, reloadUsers]       = useDB(DB.getUsers,       [],               0);
-  const [trips,       setTrips,       rT, reloadTrips]       = useDB(DB.getTrips,       [],               0);
+  const [users,       setUsers,       rU, reloadUsers]       = useDB(DB.getUsers,       [],               0, tableEnabled("users"));
+  const [trips,       setTrips,       rT, reloadTrips]       = useDB(DB.getTrips,       [],               0, tableEnabled("trips"));
   const [allTripsLoaded, setAllTripsLoaded] = useState(false);
   const [loadingAllTrips, setLoadingAllTrips] = useState(false);
   // Load all trips (beyond 90-day default) — called explicitly by user
@@ -1498,28 +1659,31 @@ function AppMain() {
       setLoadingAllTrips(false);
     }
   };
-  const [vehicles,    setVehicles,    rV, reloadVehicles]    = useDB(DB.getVehicles,    [],               0);
-  const [settings,    setSettings,    rSt,reloadSettings]    = useDB(DB.getSettings,    {tafalPerTrip:300},0);
+  const [vehicles,    setVehicles,    rV, reloadVehicles]    = useDB(DB.getVehicles,    [],               0, tableEnabled("vehicles"));
+  const [settings,    setSettings,    rSt,reloadSettings]    = useDB(DB.getSettings,    {tafalPerTrip:300},0, tableEnabled("settings"));
 
   // ── Phase 2 (300ms) — 5 connections ──────────────────────────────────────────
-  const [employees,   setEmployees,   rE, reloadEmployees]   = useDB(DB.getEmployees,   [],             300);
+  const [employees,   setEmployees,   rE, reloadEmployees]   = useDB(DB.getEmployees,   [],             300, tableEnabled("employees"));
 
   // DEBUG: track employees state changes
   useEffect(() => { console.log('[DEBUG] employees state:', employees.length, employees.map(e=>e.name).join(',')); }, [employees]);
-  const [payments,    setPayments,    rP, reloadPayments]    = useDB(DB.getPayments,    [],             300);
-  const [pumps,       setPumps,       rPu,reloadPumps]       = useDB(DB.getPumps,       [],             300);
-  const [indents,        setIndents,        rI,  reloadIndents]       = useDB(DB.getIndents,       [],  300);
-  const [dieselRequests, setDieselRequests, rDR, reloadDieselRequests] = useDB(DB.getDieselRequests, [], 300);
+  const [payments,    setPayments,    rP, reloadPayments]    = useDB(DB.getPayments,    [],             300, tableEnabled("payments"));
+  const [pumps,       setPumps,       rPu,reloadPumps]       = useDB(DB.getPumps,       [],             300, tableEnabled("pumps"));
+  const [indents,        setIndents,        rI,  reloadIndents]       = useDB(DB.getIndents,       [],  300, tableEnabled("indents"));
+  const [dieselRequests, setDieselRequests, rDR, reloadDieselRequests] = useDB(DB.getDieselRequests, [], 300, tableEnabled("dieselRequests"));
 
   // ── Phase 3 (650ms) — 6 connections ──────────────────────────────────────────
-  const [settlements, setSettlements, rS, reloadSettlements] = useDB(DB.getSettlements, [],             650);
-  const [activity,    setActivity,    rA, reloadActivity]    = useDB(DB.getActivity,    [],             650); // stores all, UI filters to 7d
-  const [driverPays,  setDriverPays,  rDP,reloadDriverPays]  = useDB(DB.getDriverPays,  [],             650);
-  const [expenses,       setExpenses,       rEx, reloadExpenses]      = useDB(DB.getExpenses,       [], 650);
-  const [gstReleases,    setGstReleases,    rGR, reloadGst]           = useDB(DB.getGstReleases,    [], 650);
-  const [cashTransfers,  setCashTransfers,  rCT, reloadCashTransfers] = useDB(DB.getCashTransfers,  [], 650);
-  const [pumpPayments,   setPumpPayments,   rPP, reloadPumpPayments]  = useDB(DB.getPumpPayments,   [], 650);
-  const [paymentRequests, setPaymentRequests, rPR] = useDB(DB.getPaymentRequests, [],               650);
+  const [settlements, setSettlements, rS, reloadSettlements] = useDB(DB.getSettlements, [],             650, tableEnabled("settlements"));
+  const [activity,    setActivity,    rA, reloadActivity]    = useDB(DB.getActivity,    [],             650, tableEnabled("activity")); // stores all, UI filters to 7d
+  const [driverPays,  setDriverPays,  rDP,reloadDriverPays]  = useDB(DB.getDriverPays,  [],             650, tableEnabled("driverPays"));
+  const [expenses,       setExpenses,       rEx, reloadExpenses]      = useDB(DB.getExpenses,       [], 650, tableEnabled("expenses"));
+  const [gstReleases,    setGstReleases,    rGR, reloadGst]           = useDB(DB.getGstReleases,    [], 650, tableEnabled("gstReleases"));
+  const [cashTransfers,  setCashTransfers,  rCT, reloadCashTransfers] = useDB(DB.getCashTransfers,  [], 650, tableEnabled("cashTransfers"));
+  const [pumpPayments,   setPumpPayments,   rPP, reloadPumpPayments]  = useDB(DB.getPumpPayments,   [], 650, tableEnabled("pumpPayments"));
+  const [paymentRequests, setPaymentRequests, rPR] = useDB(DB.getPaymentRequests, [],               650, tableEnabled("paymentRequests"));
+  const [actionItems, setActionItems, rAI, reloadActionItems] = useDB(DB.getActionItems, [],         650, tableEnabled("actionItems"));
+  const [invoiceRegistry, setInvoiceRegistry] = useDB(DB.getInvoiceRegistry, [],                      650, tableEnabled("invoiceRegistry"));
+  const [clinkerBills, setClinkerBills] = useDB(DB.getClinkerBills, [],                                650, tableEnabled("clinkerBills"));
   const dbSetPumpPayments = async (val) => { setPumpPayments(val); };
 
   const loading = !rU||!rT||!rV||!rE||!rP||!rS||!rPu||!rI||!rSt||!rDP||!rEx||!rGR;
@@ -1565,9 +1729,19 @@ function AppMain() {
   const dbSetVehicles = (updater) => {
     setVehicles(prev => {
       const next = typeof updater === "function" ? updater(prev) : updater;
+      const prevIds = new Set((prev||[]).map(v=>v.id));
       const nextIds = new Set(next.map(v=>v.id));
       (prev||[]).filter(v=>!nextIds.has(v.id)).forEach(v => DB.deleteVehicle(v.id).catch(e=>setSaveErr(e.message)));
-      next.forEach(v => DB.saveVehicle(v).catch(e => setSaveErr(e.message)));
+      // Only save new or actually-changed vehicles — this used to re-save
+      // the ENTIRE fleet on every single update (any one vehicle changing
+      // triggered an upsert for every other vehicle too), which was a real,
+      // significant source of unnecessary DB load — confirmed as the cause
+      // of the burst of mye_vehicles calls seen during batch trip saves.
+      next.forEach(v => {
+        if (!prevIds.has(v.id) || JSON.stringify(v) !== JSON.stringify((prev||[]).find(x=>x.id===v.id))) {
+          DB.saveVehicle(v).catch(e => setSaveErr(e.message));
+        }
+      });
       return next;
     });
   };
@@ -1575,9 +1749,14 @@ function AppMain() {
   const dbSetEmployees = (updater) => {
     setEmployees(prev => {
       const next = typeof updater === "function" ? updater(prev) : updater;
+      const prevIds = new Set((prev||[]).map(e=>e.id));
       const nextIds = new Set(next.map(e=>e.id));
       (prev||[]).filter(e=>!nextIds.has(e.id)).forEach(e => DB.deleteEmployee(e.id).catch(err=>setSaveErr(err.message)));
-      next.forEach(e => DB.saveEmployee(e).catch(err => setSaveErr(err.message)));
+      next.forEach(e => {
+        if (!prevIds.has(e.id) || JSON.stringify(e) !== JSON.stringify((prev||[]).find(x=>x.id===e.id))) {
+          DB.saveEmployee(e).catch(err => setSaveErr(err.message));
+        }
+      });
       return next;
     });
   };
@@ -1620,7 +1799,11 @@ function AppMain() {
       const prevIds = new Set((prev||[]).map(i=>i.id));
       const nextIds = new Set(next.map(i=>i.id));
       (prev||[]).filter(i=>!nextIds.has(i.id)).forEach(i => DB.deleteIndent(i.id).catch(e=>setSaveErr(e.message)));
-      next.forEach(i => DB.saveIndent(i).catch(e => setSaveErr(e.message)));
+      next.forEach(i => {
+        if (!prevIds.has(i.id) || JSON.stringify(i) !== JSON.stringify((prev||[]).find(x=>x.id===i.id))) {
+          DB.saveIndent(i).catch(e => setSaveErr(e.message));
+        }
+      });
       return next;
     });
   };
@@ -1631,7 +1814,16 @@ function AppMain() {
       const prevIds = new Set((prev||[]).map(r=>r.id));
       const nextIds = new Set(next.map(r=>r.id));
       (prev||[]).filter(r=>!nextIds.has(r.id)).forEach(r => DB.deleteDieselRequest(r.id).catch(e=>setSaveErr(e.message)));
-      next.forEach(r => DB.saveDieselRequest(r).catch(e => setSaveErr(e.message)));
+      // This was the biggest instance of the bug: every single diesel
+      // confirmation — one record changing — was re-saving every diesel
+      // request the company has ever logged. Very likely the real cause of
+      // "second confirmation frozen for minutes," since a single PIN
+      // confirmation was silently triggering thousands of redundant writes.
+      next.forEach(r => {
+        if (!prevIds.has(r.id) || JSON.stringify(r) !== JSON.stringify((prev||[]).find(x=>x.id===r.id))) {
+          DB.saveDieselRequest(r).catch(e => setSaveErr(e.message));
+        }
+      });
       return next;
     });
   };
@@ -1712,9 +1904,14 @@ function AppMain() {
   const dbSetUsers = (updater) => {
     setUsers(prev => {
       const next = typeof updater === "function" ? updater(prev) : updater;
+      const prevIds = new Set((prev||[]).map(u=>u.id));
       const nextIds = new Set(next.map(u=>u.id));
       (prev||[]).filter(u=>!nextIds.has(u.id)).forEach(u => DB.deleteUser(u.id).catch(e=>setSaveErr(e.message)));
-      next.forEach(u => DB.saveUser(u).catch(e => setSaveErr(e.message)));
+      next.forEach(u => {
+        if (!prevIds.has(u.id) || JSON.stringify(u) !== JSON.stringify((prev||[]).find(x=>x.id===u.id))) {
+          DB.saveUser(u).catch(e => setSaveErr(e.message));
+        }
+      });
       return next;
     });
   };
@@ -1763,6 +1960,11 @@ function AppMain() {
 
   const sp = {
     trips: roleTrips, setTrips:dbSetTrips,
+    // Unfiltered by client. Loan math MUST use this: a loan is one debt for the
+    // owner, but their trips can span clients (e.g. Shree Kodla + Guntur), so a
+    // client-scoped `roleTrips` understates what was recovered and would let the
+    // autofill deduct against a loan that is already fully repaid.
+    loanTrips: trips,
     fyTrips: roleFyTrips, selectedFY, setSelectedFY,
     selectedClient, setSelectedClient,
     vehicles, setVehicles:dbSetVehicles,
@@ -1780,6 +1982,9 @@ function AppMain() {
     gstReleases, setGstReleases:dbSetGstReleases,
     cashTransfers, setCashTransfers:dbSetCashTransfers,
     paymentRequests, setPaymentRequests,
+    actionItems, setActionItems,
+    invoiceRegistry, setInvoiceRegistry,
+    clinkerBills, setClinkerBills,
     user, log,
     allTripsLoaded, loadingAllTrips, loadAllTrips,
   };
@@ -1819,6 +2024,66 @@ function AppMain() {
       return done;
     }));
   }, [trips, driverPays, vehicles, allTripsLoaded]);
+
+  // ── Auto-resolve "missing DI" action items ─────────────────────────────────
+  // Runs whenever trips or actionItems change — so it fires no matter which
+  // screen/flow the employee used to finally add the missing DI (single-trip
+  // form, party trip form, batch DI scanner, etc.) without needing to hook
+  // every trip-creation code path individually.
+  // Match is an EXACT DI-number match only (no fuzzy/normalized comparison
+  // beyond trim) — a DI cannot be duplicated across trips, so exact match is
+  // the only correct comparison. On match: bill using the invoice info stored
+  // on the action item, mark the trip/DI-line billed, then delete the item.
+  React.useEffect(() => {
+    const open = (actionItems||[]).filter(ai=>ai.type==="missing_di" && ai.status==="open" && ai.diNo);
+    if(open.length===0 || !trips?.length) return;
+
+    const resolvedIds = [];
+    const ts = nowTs();
+    dbSetTrips(prev => prev.map(t => {
+      // Multi-DI trip: check each unbilled diLine for an exact DI match.
+      if((t.diLines||[]).length > 0) {
+        let changed = false;
+        let lastHit = null;
+        const newDiLines = t.diLines.map(d => {
+          if(d.billed) return d;
+          const hit = open.find(ai => normalizeDI(ai.diNo)===normalizeDI(d.diNo));
+          if(!hit) return d;
+          changed = true;
+          lastHit = hit;
+          resolvedIds.push(hit.id);
+          return {...d, billed:true, invoiceNo:hit.invoiceNo, invoiceDate:hit.invoiceDate, billedAmt:hit.invoiceAmt};
+        });
+        if(!changed) return t;
+        const updated = {...t, diLines:newDiLines,
+          // Trip-level invoiceNo/invoiceDate kept in sync with the MOST RECENT
+          // invoice to touch this trip — legacy views (Invoices tab, GST Hold,
+          // receivables, Pill status, search) all key off these trip-level
+          // fields and don't know about per-DI billing. Known tradeoff: if a
+          // trip's two DIs are ever billed under genuinely different invoice
+          // numbers, this field only reflects the latest one (see chat).
+          invoiceNo:lastHit.invoiceNo, invoiceDate:lastHit.invoiceDate};
+        updated.status = tripBillingStatus(updated);
+        updated.billedToShree = tripBilledAmount(updated);
+        if(updated.status==="Billed") { updated.billedBy="auto-resolve"; updated.billedAt=ts; updated.shreeStatus="billed"; }
+        return updated;
+      }
+      // Single-DI trip: only if it's not already billed.
+      if(t.status==="Billed" || t.status==="Partially Billed") return t;
+      const hit = open.find(ai => normalizeDI(ai.diNo)===normalizeDI(t.diNo));
+      if(!hit) return t;
+      resolvedIds.push(hit.id);
+      return {...t, invoiceNo:hit.invoiceNo, invoiceDate:hit.invoiceDate,
+        status:"Billed", billedBy:"auto-resolve", billedAt:ts, shreeStatus:"billed",
+        billedToShree: hit.invoiceAmt || (t.qty||0)*(t.frRate||0)};
+    }));
+
+    if(resolvedIds.length>0 && setActionItems) {
+      setActionItems(prev => (prev||[]).filter(ai => !resolvedIds.includes(ai.id)));
+      resolvedIds.forEach(id => DB.deleteActionItem(id).catch(e=>console.error("deleteActionItem auto-resolve:",e)));
+      log && log("Auto-billed "+resolvedIds.length+" DI(s) on upload — action item(s) closed");
+    }
+  }, [trips, actionItems]);
 
   if (!user) {
     if (loading) return (
@@ -1903,7 +2168,7 @@ function AppMain() {
       </div>
     );
     return <Login onLogin={u=>{
-      try { sessionStorage.setItem("mye_user", JSON.stringify(u)); } catch{}
+      try { localStorage.setItem("mye_user", JSON.stringify(u)); } catch{}
       setUser(u);
       if(u.role==="pump_operator") setTab("pump_portal");
       if(isPureSelfWalletRole(u.role)) setTab("employees");
@@ -1933,7 +2198,7 @@ function AppMain() {
           <Av name={user.name} role={user.role} />
           <button onClick={()=>{
             log("LOGOUT",`${user.name} signed out`);
-            try { sessionStorage.removeItem("mye_user"); } catch{}
+            try { localStorage.removeItem("mye_user"); } catch{}
             setUser(null);
           }}
             style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"5px 10px",fontSize:12,cursor:"pointer"}}>Out</button>
@@ -2019,6 +2284,7 @@ function AppMain() {
         {tab==="expenses"   && can(user,"payments")   && <ExpensesLedger {...sp} />}
         {tab==="reports"    && can(user,"reports")    && <Reports    {...sp} />}
         {tab==="reminders"  && can(user,"reminders")  && <Reminders  {...sp} />}
+        {tab==="unbilled_oversight" && can(user,"unbilled_oversight") && <UnbilledOversight {...sp} />}
         {tab==="activity"   && can(user,"reports")    && <ActivityLog activity={activity} />}
         {tab==="my_billing" && can(user,"reports")    && <MyBilling />}
         {tab==="daily_ops"  && can(user,"reports")    && <DailyOps {...sp} />}
@@ -2032,7 +2298,7 @@ function AppMain() {
   );
 }
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
-function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pumps, pumpPayments, driverPays, cashTransfers, activity, settings, setTab, user, selectedFY, selectedClient}) {
+function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pumps, pumpPayments, driverPays, cashTransfers, activity, settings, setTab, user, selectedFY, selectedClient, actionItems=[], clinkerBills=[]}) {
   const [dashMonth, setDashMonth] = useState(""); // "YYYY-MM" or "" = all
   const [uncreditedOpen, setUncreditedOpen] = useState(false);
   const [creditedOpen,   setCreditedOpen]   = useState(false);
@@ -2063,7 +2329,7 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   const monthTripsAll   = allFyClientTrips.filter(t => (t.date||"").startsWith(monthPrefix));
   const monthTotalTons  = monthTripsAll.reduce((s,t)=>s+(+(t.qty)||0),0);
   const monthAvgTons    = todayDayNum > 0 ? monthTotalTons / todayDayNum : 0;
-  const pending     = allFyClientTrips.filter(t => t.status==="Pending Bill");
+  const pending     = allFyClientTrips.filter(isUnbilled);
   const weekAgo     = new Date(); weekAgo.setDate(weekAgo.getDate()-7);
   const weekAgoStr  = weekAgo.toISOString().split("T")[0];
   const oldUnsettled = allFyClientTrips.filter(t => !t.driverSettled && t.date < weekAgoStr && (t.qty||0)*(t.givenRate||0)>0);
@@ -2105,8 +2371,27 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   const creditedInvoices   = allInvoices.filter(x=>x.paid);
 
   // ── Unbilled: trips not yet invoiced to Shree ────────────────────────────────
-  const unbilledTrips = clientFiltered.filter(t=>t.status==="Pending Bill");
-  const unbilledTotal = unbilledTrips.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
+  // Clinker trips are excluded from the status-based check — their status
+  // never updates anymore (clinker billing is aggregate-only, not per-trip),
+  // so isUnbilled would permanently treat every clinker trip as unbilled
+  // even after it's actually been billed. Clinker's unbilled value is
+  // computed separately below via the ledger (total value − billed amount).
+  // Clinker classification: matches on GRADE (the reliable field — confirmed
+  // against the "Rates per DI" edit screen) or the consignee pattern for the
+  // Patas plant, NOT grParticulars.goods (that field isn't consistently
+  // populated, which is why some real clinker trips were being counted as
+  // "godown" instead).
+  const isClinkerTripDash = t => {
+    const grade = (t.grade||"").toLowerCase();
+    const consignee = (t.consignee||"").toLowerCase();
+    return grade.includes("clinker") || (consignee.includes("patas") && consignee.includes("shree cement"));
+  };
+  const unbilledTrips = clientFiltered.filter(t => isUnbilled(t) && !isClinkerTripDash(t));
+  const clinkerAllDash = clientFiltered.filter(isClinkerTripDash);
+  const clinkerTotalValueDash = clinkerAllDash.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
+  const clinkerBilledAmtDash = (clinkerBills||[]).filter(b=>b.status==="active").reduce((s,b)=>s+Number(b.taxableAmount||0),0);
+  const clinkerUnbilledAmtDash = Math.max(0, clinkerTotalValueDash - clinkerBilledAmtDash);
+  const unbilledTotal = unbilledTrips.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0) + clinkerUnbilledAmtDash;
 
   // KPIs derived from same source as the invoice lists — consistent numbers
   const totalBilled       = [...uncreditedInvoices, ...creditedInvoices].reduce((s,x)=>s+x.total,0);
@@ -2198,10 +2483,10 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
           Today — {todayStr}
           {fyLabel && <span style={{color:C.accent,marginLeft:8,fontWeight:600}}>· {fyLabel}</span>}
         </div>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+        <div style={{display:"grid",gridTemplateColumns:user.role==="owner"?"1fr 1fr 1fr":"1fr 1fr",gap:8}}>
           {[
             {l:"Trips Added",  v:todayTrips.length,       c:C.blue},
-            {l:"Today Margin", v:fmt(todayMargin),         c:C.green},
+            ...(user.role==="owner" ? [{l:"Today Margin", v:fmt(todayMargin), c:C.green}] : []),
             {l:"Pending Bills",v:pending.length,           c:pending.length>0?C.accent:C.muted},
           ].map(x=>(
             <div key={x.l} style={{background:C.bg,borderRadius:8,padding:"8px",textAlign:"center"}}>
@@ -2356,6 +2641,33 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
               </div>
             )}
           </>
+        );
+      })()}
+
+      {/* ── Missing-DI action items assigned to this employee — bold, impossible to miss ── */}
+      {(() => {
+        const myItems = (actionItems||[]).filter(ai=>ai.type==="missing_di" && ai.status==="open" && ai.empId && ai.empId===user.assignedEmployeeId);
+        if(myItems.length===0) return null;
+        return (
+          <div style={{background:C.red+"18",border:`2px solid ${C.red}`,borderRadius:14,padding:"14px 16px"}}>
+            <div style={{color:C.red,fontSize:14,fontWeight:900,textTransform:"uppercase",letterSpacing:0.5,marginBottom:10,display:"flex",alignItems:"center",gap:6}}>
+              🚨 Upload These DIs — {myItems.length} Missing
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {myItems.map(ai=>(
+                <div key={ai.id} style={{background:C.card,borderRadius:10,padding:"10px 12px",border:`1px solid ${C.red}55`}}>
+                  <div style={{fontWeight:900,fontSize:15,color:C.text}}>DI: {ai.diNo||"—"}</div>
+                  <div style={{fontSize:12,color:C.muted,marginTop:2}}>
+                    {ai.truckNo && <>Truck: {ai.truckNo} · </>}
+                    Invoice date: {ai.invoiceDate||"—"} · Invoice #{ai.invoiceNo}
+                  </div>
+                  <div style={{fontSize:11,color:C.red,marginTop:2,fontWeight:700}}>
+                    This LR was billed to Shree but the DI is missing from the app — add the trip to complete billing.
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
         );
       })()}
 
@@ -2517,10 +2829,12 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
                       ))}
                     </div>
                   );
-                  const isClinker = t => (t.to||"").toLowerCase().includes("patas") && (t.grParticulars?.goods||"").toLowerCase().includes("clinker");
-                  const clinkerUnbilled = unbilledTrips.filter(isClinker);
-                  const clinkerAmt = clinkerUnbilled.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
-                  const clinkerTons = clinkerUnbilled.reduce((s,t)=>s+(t.qty||0),0);
+                  // Clinker no longer has per-trip billed status (aggregate
+                  // ledger only) — use the outer-scope ledger totals instead
+                  // of filtering unbilledTrips (which excludes clinker now).
+                  const clinkerTons = clinkerAllDash.reduce((s,t)=>s+(t.qty||0),0);
+                  const clinkerBilledTonsDash = (clinkerBills||[]).filter(b=>b.status==="active").reduce((s,b)=>s+Number(b.totalTons||0),0);
+                  const clinkerUnbilledTons = Math.max(0, clinkerTons - clinkerBilledTonsDash);
                   return (
                     <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:8}}>
                       {/* Godown sub-section */}
@@ -2553,36 +2867,34 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
                           {unbilledPartyOpen && <div style={{marginTop:6}}><TripList list={partyUnbilled}/></div>}
                         </div>
                       )}
-                      {/* Clinker sub-section */}
-                      {clinkerUnbilled.length>0 && (
+                      {/* Clinker sub-section — aggregate only, no trip list (billing isn't per-trip anymore) */}
+                      {clinkerAllDash.length>0 && clinkerUnbilledTons>0.005 && (
                         <div>
                           <button onClick={()=>setUnbilledClinkerOpen(p=>!p)}
                             style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,
                               borderRadius:8,padding:"7px 10px",cursor:"pointer",
                               display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                             <span style={{color:C.text,fontSize:11,fontWeight:700}}>
-                              🪨 Clinker <span style={{color:C.muted,fontWeight:400}}>({clinkerUnbilled.length}) · {clinkerTons.toFixed(2)} MT · {fmt(clinkerAmt)}</span>
+                              🪨 Clinker <span style={{color:C.muted,fontWeight:400}}>{clinkerUnbilledTons.toFixed(2)} MT · {fmt(clinkerUnbilledAmtDash)}</span>
                             </span>
                             <span style={{color:C.muted,fontSize:12}}>{unbilledClinkerOpen?"▲":"▼"}</span>
                           </button>
                           {unbilledClinkerOpen && (
-                            <div style={{marginTop:6}}>
-                              <div style={{display:"flex",flexDirection:"column",gap:4,maxHeight:220,overflowY:"auto"}}>
-                                {clinkerUnbilled.slice().sort((a,b)=>(b.date||"").localeCompare(a.date||"")).map(t=>(
-                                  <div key={t.id} style={{background:C.bg,borderRadius:8,padding:"8px 10px",
-                                    borderLeft:"3px solid #9333ea"}}>
-                                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                                      <div>
-                                        <span style={{color:C.text,fontWeight:700,fontSize:12}}>{t.truckNo}</span>
-                                        <span style={{color:C.muted,fontSize:10,marginLeft:6}}>{t.lrNo||"—"}</span>
-                                      </div>
-                                      <span style={{color:"#9333ea",fontWeight:800,fontSize:12}}>{t.qty} MT · {fmt((t.qty||0)*(t.frRate||0))}</span>
-                                    </div>
-                                    <div style={{color:C.muted,fontSize:10,marginTop:2}}>
-                                      {t.date} · {t.to||"—"}
-                                    </div>
-                                  </div>
-                                ))}
+                            <div style={{marginTop:6,background:C.bg,borderRadius:8,padding:"8px 10px"}}>
+                              <div style={{display:"flex",justifyContent:"space-between",fontSize:11,padding:"2px 0"}}>
+                                <span style={{color:C.muted}}>Total value logged (all time)</span>
+                                <span style={{fontWeight:700,color:C.text}}>{fmt(clinkerTotalValueDash)}</span>
+                              </div>
+                              <div style={{display:"flex",justifyContent:"space-between",fontSize:11,padding:"2px 0"}}>
+                                <span style={{color:C.muted}}>Already billed</span>
+                                <span style={{fontWeight:700,color:C.green}}>{fmt(clinkerBilledAmtDash)}</span>
+                              </div>
+                              <div style={{display:"flex",justifyContent:"space-between",fontSize:11,padding:"2px 0"}}>
+                                <span style={{color:C.muted}}>Unbilled remaining</span>
+                                <span style={{fontWeight:700,color:"#9333ea"}}>{fmt(clinkerUnbilledAmtDash)}</span>
+                              </div>
+                              <div style={{fontSize:9,color:C.muted,marginTop:4,fontStyle:"italic"}}>
+                                No per-trip breakdown — clinker billing is aggregate-only. See the Clinker Tonnage card below for full detail.
                               </div>
                             </div>
                           )}
@@ -2594,13 +2906,29 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
               </div>
             )}
 
-            {/* ── Billed Clinker block ── */}
+            {/* ── Clinker tonnage ledger — aggregate only, no per-trip billing marker ── */}
             {(()=>{
-              const isClinkerTrip = t => (t.to||"").toLowerCase().includes("patas") && (t.grParticulars?.goods||"").toLowerCase().includes("clinker");
-              const billedClinker = displayTrips.filter(t => isClinkerTrip(t) && t.invoiceNo && t.billedToShree);
-              if(billedClinker.length===0) return null;
-              const billedClinkerAmt  = billedClinker.reduce((s,t)=>s+Number(t.billedToShree||0),0);
-              const billedClinkerTons = billedClinker.reduce((s,t)=>s+Number(t.qty||0),0);
+              const isClinkerTrip = t => {
+                const grade = (t.grade||"").toLowerCase();
+                const consignee = (t.consignee||"").toLowerCase();
+                return grade.includes("clinker") || (consignee.includes("patas") && consignee.includes("shree cement"));
+              };
+              const allClinker = displayTrips.filter(isClinkerTrip);
+              if(allClinker.length===0) return null;
+              const totalTons = allClinker.reduce((s,t)=>s+Number(t.qty||0),0);
+              const activeBills = (clinkerBills||[]).filter(b=>b.status==="active");
+              const billedTons = activeBills.reduce((s,b)=>s+Number(b.totalTons||0),0);
+              const billedRevenue = activeBills.reduce((s,b)=>s+Number(b.taxableAmount||0),0);
+              const unbilledTons = totalTons - billedTons;
+              // Profit = sum of each trip's own margin — qty × (Shree Rate −
+              // Driver Rate), using the rates entered per DI on each trip —
+              // same formula as the Add Clinker Bill sheet.
+              const clinkerProfit = allClinker.reduce((s,t) => {
+                if((t.diLines||[]).length > 0) {
+                  return s + t.diLines.reduce((ds,d)=>ds+(d.qty||0)*((d.frRate||0)-(d.givenRate||0)), 0);
+                }
+                return s + (t.qty||0)*((t.frRate||0)-(t.givenRate||0));
+              }, 0);
               return (
                 <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${"#9333ea"}44`}}>
                   <button onClick={()=>setBilledClinkerOpen(p=>!p)}
@@ -2608,31 +2936,45 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
                       display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                     <div>
                       <span style={{color:"#9333ea",fontWeight:700,fontSize:12}}>
-                        🪨 Billed Clinker
+                        🪨 Clinker Tonnage
                       </span>
                       <span style={{color:C.muted,fontSize:11,marginLeft:8}}>
-                        {billedClinker.length} trip{billedClinker.length!==1?"s":""} · {billedClinkerTons.toFixed(2)} MT · {fmt(billedClinkerAmt)}
+                        {billedTons.toFixed(2)} billed · {unbilledTons.toFixed(2)} unbilled MT
                       </span>
                     </div>
                     <span style={{color:"#9333ea",fontSize:14}}>{billedClinkerOpen?"▲":"▼"}</span>
                   </button>
                   {billedClinkerOpen && (
-                    <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:4,maxHeight:260,overflowY:"auto"}}>
-                      {billedClinker.slice().sort((a,b)=>(b.date||"").localeCompare(a.date||"")).map(t=>(
-                        <div key={t.id} style={{background:C.bg,borderRadius:8,padding:"8px 10px",
-                          borderLeft:"3px solid #9333ea"}}>
-                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                            <div>
-                              <span style={{color:C.text,fontWeight:700,fontSize:12}}>{t.truckNo}</span>
-                              <span style={{color:C.muted,fontSize:10,marginLeft:6}}>{t.lrNo||"—"}</span>
-                            </div>
-                            <span style={{color:"#9333ea",fontWeight:800,fontSize:12}}>{t.qty} MT · {fmt(t.billedToShree)}</span>
-                          </div>
-                          <div style={{color:C.muted,fontSize:10,marginTop:2}}>
-                            {t.date} · {t.invoiceNo} · {t.to||"—"}
-                          </div>
+                    <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:4}}>
+                      <div style={{display:"flex",justifyContent:"space-between",fontSize:12,padding:"4px 0"}}>
+                        <span style={{color:C.muted}}>Total tons logged (all time)</span>
+                        <span style={{fontWeight:700,color:C.text}}>{totalTons.toFixed(2)} MT</span>
+                      </div>
+                      <div style={{display:"flex",justifyContent:"space-between",fontSize:12,padding:"4px 0"}}>
+                        <span style={{color:C.muted}}>Billed ({activeBills.length} bill{activeBills.length!==1?"s":""})</span>
+                        <span style={{fontWeight:700,color:C.green}}>{billedTons.toFixed(2)} MT · {fmt(billedRevenue)}</span>
+                      </div>
+                      <div style={{display:"flex",justifyContent:"space-between",fontSize:12,padding:"4px 0"}}>
+                        <span style={{color:C.muted}}>Unbilled remaining</span>
+                        <span style={{fontWeight:700,color:unbilledTons<0?C.red:"#9333ea"}}>{unbilledTons.toFixed(2)} MT</span>
+                      </div>
+                      {user.role==="owner" && (
+                        <div style={{display:"flex",justifyContent:"space-between",fontSize:12,padding:"4px 0",
+                          borderTop:`1px solid ${C.border}`,marginTop:2,paddingTop:6}}>
+                          <span style={{color:C.muted}}>Profit (all clinker trips)</span>
+                          <span style={{fontWeight:800,color:clinkerProfit>=0?C.green:C.red}}>{fmt(clinkerProfit)}</span>
                         </div>
-                      ))}
+                      )}
+                      {activeBills.length>0 && (
+                        <div style={{marginTop:6,paddingTop:6,borderTop:`1px solid ${C.border}`}}>
+                          {activeBills.slice().sort((a,b)=>(b.invoiceDate||"").localeCompare(a.invoiceDate||"")).slice(0,5).map(b=>(
+                            <div key={b.id} style={{display:"flex",justifyContent:"space-between",fontSize:11,padding:"3px 0"}}>
+                              <span style={{color:C.muted}}>{b.invoiceNo} · {b.invoiceDate}</span>
+                              <span style={{color:C.text,fontWeight:600}}>{Number(b.totalTons||0).toFixed(2)} MT · {fmt(b.totalAmount)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -2647,7 +2989,7 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
                   {clientData.map(cd=>{
                     const billed   = cd.cement.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
                     const received = (payments||[]).filter(p=>p.client===cd.name||!p.client).reduce((s,p)=>s+Number(p.totalPaid||0),0);
-                    const pending  = cd.cement.filter(t=>t.status==="Pending Bill");
+                    const pending  = cd.cement.filter(isUnbilled);
                     return (
                       <div key={cd.name} style={{display:"flex",alignItems:"center",gap:10,
                         background:C.bg,borderRadius:8,padding:"8px 10px",
@@ -2700,10 +3042,8 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
         <KPI icon="🚚" label="Total Trips"     value={displayTrips.filter(t=>t.type==="outbound").length} color={C.blue} sub={[selectedClient,fyLabel].filter(Boolean).join(" · ")||"cement trips"} />
         <KPI icon="🤝" label="TAFAL Pool" value={fmt(tafalBalance)} color={C.purple} sub={`₹${tafalPaid?fmt(tafalPaid)+" paid · ":""} Pool: ${fmt(tafalPool)}`} />
-        {user.role!=="fleet_manager" && <>
-          <KPI icon="📈" label="Total Margin"  value={fmt(margin)}      color={C.green} sub={[selectedClient,fyLabel].filter(Boolean).join(" · ")||"all time"} />
-          <KPI icon="🔴" label="Vehicle Loans" value={fmt(vLoan)}       color={C.red} />
-        </>}
+        {user.role==="owner" && <KPI icon="📈" label="Total Margin"  value={fmt(margin)}      color={C.green} sub={[selectedClient,fyLabel].filter(Boolean).join(" · ")||"all time"} />}
+        {user.role!=="fleet_manager" && <KPI icon="🔴" label="Vehicle Loans" value={fmt(vLoan)}       color={C.red} />}
       </div>
 
       {/* Recent Activity */}
@@ -2749,7 +3089,7 @@ const lookupPincode = async (pincode) => {
   return null;
 };
 
-function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user, log, onClose, employees=[], cashTransfers=[], setCashTransfers, dieselRequests=[], setDieselRequests, manualDiesel=false }) {
+function BatchDIScanner({ trips, loanTrips=null, vehicles, setVehicles, setTrips, settings, user, log, onClose, employees=[], cashTransfers=[], setCashTransfers, dieselRequests=[], setDieselRequests, manualDiesel=false, actionItems=[], setActionItems }) {
   // Party pouch deduction for a vehicle: exempt → 0, per-vehicle override → that,
   // else the owner's global rate (settings.pouchPerTrip), else ₹700 fallback.
   const pouchAmt = (veh) => veh?.pouchExempt ? 0 : (veh?.pouchOverride!=null ? veh.pouchOverride : (settings?.pouchPerTrip ?? 700));
@@ -2774,6 +3114,9 @@ function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user
   // }
   // Each item also carries: orderType, givenRate, grFile, invoiceFile (per-DI)
   const [groups, setGroups] = useState([]); // set after all scans done
+  const [showConfirmScreen, setShowConfirmScreen] = useState(false);
+  const [noDieselGroupIds, setNoDieselGroupIds] = useState(new Set()); // group.id -> explicitly confirmed "no diesel applies"
+  const [reconciliationIssues, setReconciliationIssues] = useState([]); // post-save diesel mismatches, if any
   const [groupsBuilt, setGroupsBuilt] = useState(false);
 
   // ── DI SCAN PROMPT (unchanged) ───────────────────────────────────────────────
@@ -3067,11 +3410,7 @@ Rules:
       const client = firstItem?.extracted?.client || getDEFAULT_CLIENT();
       // Auto loan recovery from owner's deductPerTrip, capped at balance
       const vehG = (vehicles||[]).find(v=>v.truckNo===truckNo);
-      const ownerNameG = (vehG?.ownerName||"").trim();
-      const ownerVehsG = ownerNameG?(vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerNameG):(vehG?[vehG]:[]);
-      const ownerDeductG = ownerVehsG[0]?.deductPerTrip||0;
-      const ownerBalG = ownerVehsG.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
-      const autoLoanG = ownerBalG<=0 ? 0 : (ownerDeductG>0 ? Math.min(ownerDeductG, ownerBalG) : ownerBalG);
+      const autoLoanG = autoLoanRecoveryFor(vehicles, vehG, loanTrips||trips);
       // Auto-fill shortage recovery
       const _stxnsG = vehG?.shortageTxns||[];
       const shortBalG = Math.max(0,
@@ -3079,10 +3418,17 @@ Rules:
         _stxnsG.filter(x=>x.type==="recovery").reduce((s,x)=>s+(x.amount||0),0));
       const shortDeductG = vehG?.shortageDeductPerTrip||0;
       const autoShortageG = shortBalG<=0 ? 0 : (shortDeductG>0 ? Math.min(shortDeductG, shortBalG) : shortBalG);
-      // Auto-attach ONLY confirmed requests within 4 days — older ones need manual attach
-      const _4daysAgo = new Date(Date.now() - 4*86400000).toISOString().slice(0,10);
+      // Auto-attach any confirmed, unattached request for this truck — no age
+      // limit. A 4-day cutoff here previously caused diesel to silently not
+      // auto-fill on trips created more than 4 days after the request was
+      // confirmed, understating "Est Net Driver Pay" (the deduction was
+      // simply missing) unless someone noticed and manually attached it.
+      // Same normalization fix as the save-time auto-attach blocks — this
+      // pre-fill suggestion had the identical unnormalized-comparison bug.
+      const normTruckG = s => String(s||"").replace(/\s+/g,"").toUpperCase();
       const confirmedReqsG = (dieselRequests||[])
-        .filter(r => r.truckNo===truckNo && r.status==="confirmed" && (r.date||"")>=_4daysAgo);
+        .filter(r => normTruckG(r.truckNo)===normTruckG(truckNo) && r.status==="confirmed")
+        .sort((a,b)=>(b.date||"").localeCompare(a.date||"") || (b.createdAt||"").localeCompare(a.createdAt||""));
       const autoReqG = confirmedReqsG.length >= 1 ? confirmedReqsG[0] : null;
       const autoIndentNo = autoReqG ? String(autoReqG.indentNo) : "";
       const autoDiesel   = autoReqG ? String(((autoReqG.dieselAmount??autoReqG.amount)||0)+(autoReqG.cashAmount||0)) : "0";
@@ -3131,17 +3477,12 @@ Rules:
         const updated = prev.map(x => x.id===gid ? {...x, diIds:x.diIds.filter(id=>id!==itemId)} : x);
         const item = doneItems.find(x=>x.id===itemId);
         const vehT2 = (vehicles||[]).find(v=>v.truckNo===(item?.extracted?.truckNo||"").toUpperCase().trim());
-        const ownerN2 = (vehT2?.ownerName||"").trim();
-        const ownerVs2 = ownerN2?(vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerN2):(vehT2?[vehT2]:[]);
-        const ownerDed2 = ownerVs2[0]?.deductPerTrip||0;
-        const ownerBal2 = ownerVs2.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
-        const autoLR2 = ownerBal2<=0 ? 0 : (ownerDed2>0 ? Math.min(ownerDed2,ownerBal2) : ownerBal2);
+        const autoLR2 = autoLoanRecoveryFor(vehicles, vehT2, loanTrips||trips);
         const shortBal2 = Math.max(0,(()=>{const t=vehT2?.shortageTxns||[];return t.filter(x=>x.type==="shortage").reduce((s,x)=>s+(x.amount||0),0)-t.filter(x=>x.type==="recovery").reduce((s,x)=>s+(x.amount||0),0);})());
         const shortDed2 = vehT2?.shortageDeductPerTrip||0;
         const autoSR2 = shortBal2<=0?0:(shortDed2>0?Math.min(shortDed2,shortBal2):shortBal2);
-        const _4dSplit = new Date(Date.now() - 4*86400000).toISOString().slice(0,10);
         const autoReqS = (dieselRequests||[])
-          .filter(r => r.truckNo===g.truckNo && r.status==="confirmed" && (r.date||"")>=_4dSplit)[0] || null;
+          .filter(r => r.truckNo===g.truckNo && r.status==="confirmed")[0] || null;
         const solo = {
           id:uid(), truckNo:g.truckNo, diIds:[itemId],
           client:g.client, tafal:g.tafal,
@@ -3213,7 +3554,18 @@ Rules:
     // Owner name mandatory for new vehicles
     const readyVeh = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
     if((!readyVeh || !(readyVeh.ownerName||"").trim()) && !(g.ownerName||"").trim()) return false;
-    if(!manualDiesel && +g.diesel > 0 && !g.dieselIndentNo.trim()) return false;
+    // Diesel must be resolved one of two ways: an auto-attached indent, OR an
+    // explicit "No Diesel Request for this Trip" confirmation from the
+    // uploader (tracked in noDieselGroupIds, set on the confirmation screen).
+    // There is no third path — the uploader cannot silently skip this.
+    // Diesel must be resolved one of two ways: an auto-attached indent, OR an
+    // explicit "No Diesel Request for this Trip" confirmation from the
+    // uploader (tracked in noDieselGroupIds, set on the confirmation screen).
+    // There is no third path, and critically: a diesel amount of 0 does NOT
+    // count as "nothing to resolve" — that was a real bug (a group with no
+    // auto-detected diesel amount could be saved without ever requiring the
+    // confirmation tap). Every group needs one of the two explicit states.
+    if(!manualDiesel && !g.dieselIndentNo.trim() && !noDieselGroupIds.has(g.id)) return false;
     // Advance given — must explicitly pick an employee wallet or explicit "None"
     if(+g.advance > 0 && !g.cashEmpId) return false;
     // Note: open (unconfirmed) requests are allowed with a warning — not blocked
@@ -3222,7 +3574,40 @@ Rules:
     return true;
   };
 
+  // Same as groupReady, but ignores diesel resolution entirely — used to
+  // decide which groups appear on the confirmation screen at all (a group
+  // with a genuinely missing diesel match should still show up there, so
+  // the uploader can act on it, rather than being invisible until resolved).
+  const groupReadyExceptDiesel = (g) => {
+    const groupItems = doneItems.filter(x=>g.diIds.includes(x.id));
+    if(groupItems.length===0) return false;
+    for(const item of groupItems) {
+      if(!item.givenRate || +item.givenRate<=0) return false;
+      const frRate = +item.extracted?.frRate||0;
+      if(frRate - (+item.givenRate) < 30) return false;
+      if(item.orderType==="party" && (!item.grFile||!item.invoiceFile)) return false;
+      if(canFeature("mandatory_trip_fields") && item.orderType==="party") {
+        if(!(item.partyDriverPhone||"").match(/^\d{10}$/)) return false;
+        if(!(item.salesOfficerPhone||"").match(/^\d{10}$/)) return false;
+        if(!(item.salesOfficerEmail||"").endsWith("shreecement.com")) return false;
+        if(!(item.partyNumber||"").trim()) return false;
+      }
+      if(item.orderType==="party" && item.grFileDiCheck?.status==="error") return false;
+      if(item.orderType==="party" && item.invoiceFileDiCheck?.status==="error") return false;
+      if(item.orderType==="party" && (item.grFileDiCheck?.status==="checking" || item.invoiceFileDiCheck?.status==="checking")) return false;
+      if(checkDupDI(item.extracted?.diNo)) return false;
+    }
+    const readyVeh = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
+    if((!readyVeh || !(readyVeh.ownerName||"").trim()) && !(g.ownerName||"").trim()) return false;
+    if(+g.advance > 0 && !g.cashEmpId) return false;
+    if(!g.assignedEmpId) return false;
+    return true;
+  };
+
   const readyGroups = groups.filter(groupReady);
+  const confirmGroups = groups.filter(groupReadyExceptDiesel);
+  const dieselResolved = (g) => manualDiesel ? true : (!!g.dieselIndentNo.trim() || noDieselGroupIds.has(g.id));
+  const allDieselResolved = confirmGroups.every(dieselResolved);
   const canSave = readyGroups.length > 0 && !saving;
 
   // ── Save All ──────────────────────────────────────────────────────────────────
@@ -3276,9 +3661,12 @@ Rules:
           return;
         }
       }
-      // Diesel indent — skip check in manual diesel mode
-      if(!manualDiesel && +g.diesel > 0 && !g.dieselIndentNo.trim()) {
-        alert(`Truck ${g.truckNo}: Diesel Indent No is required when Diesel Estimate is entered.`);
+      // Diesel — must be resolved via auto-match OR explicit no-diesel
+      // confirmation (same rule as groupReady/dieselResolved — a diesel
+      // amount of 0 is NOT automatically "nothing to resolve").
+      if(!manualDiesel && !g.dieselIndentNo.trim() && !noDieselGroupIds.has(g.id)) {
+        alert(`Truck ${g.truckNo}: Diesel must be resolved — either an attached indent, or an explicit "No Diesel Request for this Trip" confirmation on the review screen.`);
+        setSaving(false);
         return;
       }
       if(g.dieselIndentNo.trim()) {
@@ -3353,6 +3741,17 @@ Rules:
     const tafal = settings?.tafalPerTrip||300;
     const createdTrucksThisBatch = new Set();
     const savedLRsThisBatch = [];
+    // Tracks diesel request IDs already claimed by an EARLIER group in this
+    // same batch save. Without this, two groups in one batch that both
+    // qualify for the same confirmed diesel request would both read the
+    // same stale `dieselRequests` snapshot (state updates from an earlier
+    // iteration don't retroactively update this closure's variable), both
+    // "successfully" attach to it, and the DB write from the second one
+    // would silently overwrite the first — leaving one trip's diesel
+    // attachment lost with no error shown. This was a real bug, not a
+    // hypothetical: it's the batch-specific version of the auto-attach
+    // issue, distinct from the truck-normalization bug fixed earlier.
+    const claimedDieselIdsThisBatch = new Set();
     let count = 0;
 
     // Use DI date as-is — the FY filter in the app handles display
@@ -3366,14 +3765,26 @@ Rules:
       const client     = g.client || ex0.client || getDEFAULT_CLIENT();
       const material   = gradeToMaterial(ex0.grade, "outbound");
 
+      // ── TEMPORARY DIAGNOSTIC TIMING — remove once the batch LR issue is
+      // confirmed fixed. Logs wall-clock time at each stage so we can see
+      // exactly where time goes during a batch save, instead of guessing.
+      const _t0 = performance.now();
+      console.log(`[BATCH TIMING] Group start: ${g.truckNo} (${client}/${material}) at +0ms`);
+
       // ── Get auto-assigned LR from DB ──────────────────────────────────────
       let lrNo;
       try {
-        // Timeout after 10s to prevent infinite hang
+        // Bumped from 10s: get_next_lr's fast-path fix is confirmed deployed,
+        // so a single indexed lookup should be near-instant. If this still
+        // times out at 25s, the cause is very likely network conditions or
+        // row-lock contention (concurrent saves for the same client+material
+        // queuing on the same sequence row), not the function itself.
         const lrPromise = DB.getNextLR(client, material);
-        const timeout = new Promise((_,rej) => setTimeout(()=>rej(new Error("Timed out — check internet connection and try again")), 10000));
+        const timeout = new Promise((_,rej) => setTimeout(()=>rej(new Error("Timed out — check internet connection and try again")), 25000));
         lrNo = await Promise.race([lrPromise, timeout]);
+        console.log(`[BATCH TIMING] ${g.truckNo}: getNextLR resolved "${lrNo}" at +${(performance.now()-_t0).toFixed(0)}ms`);
       } catch(e) {
+        console.log(`[BATCH TIMING] ${g.truckNo}: getNextLR FAILED at +${(performance.now()-_t0).toFixed(0)}ms — ${e.message}`);
         setLrError(`LR assignment failed for ${g.truckNo}: ${e.message}`);
         setSaving(false);
         return;
@@ -3452,8 +3863,10 @@ Rules:
           shortageRecovery:+g.shortageRecovery||0,
           loanRecovery:+g.loanRecovery||0,
           tafal:tafalVal,
-          dieselEstimate:+g.diesel||0,
-          dieselIndentNo:g.dieselIndentNo.trim()||"",
+          dieselEstimate: noDieselGroupIds.has(g.id) ? 0 : (+g.diesel||0),
+          dieselIndentNo: noDieselGroupIds.has(g.id) ? "" : (g.dieselIndentNo.trim()||""),
+          noDieselConfirmedBy: noDieselGroupIds.has(g.id) ? user.name : "",
+          noDieselConfirmedAt: noDieselGroupIds.has(g.id) ? nowTs() : "",
           cashEmpId:g.cashEmpId||"",
           ownerName: item.ownerName || g.ownerName || "",
           orderType:item.orderType||"godown", diLines:[],
@@ -3476,11 +3889,25 @@ Rules:
           transporterName: ex.transporterName || "",
           createdBy:user.username, createdAt:nowTs(),
         };
+        // ── Hard block: an advance with no wallet employee would silently
+        // deduct on the trip/driver-pay side while never touching anyone's
+        // wallet ledger — a permanent reconciliation gap. Block BEFORE the
+        // trip is saved (and its LR generated) rather than after, so no LR
+        // number is ever consumed for a trip that can't be saved correctly.
+        if((+g.advance||0) > 0 && !g.cashEmpId) {
+          // Matches saveEdit's exact validation style: an explicit "None"
+          // selection (g.cashEmpId==="__none__") is an acknowledged bypass,
+          // not an oversight — only a truly empty/unselected value blocks.
+          setLrError(`Cannot save: this trip has an advance of ₹${g.advance} but no wallet employee is selected. Choose an owner/driver for the wallet debit (or explicitly choose "None"), or set advance to 0.`);
+          setSaving(false);
+          return;
+        }
         // Atomic DB save — checks for duplicate DI before inserting
         const saveResult = await Promise.race([
           DB.saveTripSafe(trip),
-          new Promise((_,rej)=>setTimeout(()=>rej(new Error("Save timed out — check connection")),15000))
+          new Promise((_,rej)=>setTimeout(()=>rej(new Error("Save timed out — check connection")),40000)) // bumped from 15s: the real fix is the DI trigram index (see migration), this is just a safety margin
         ]).catch(e=>({success:false, duplicateDI:null, existingLR:null, existingTruck:null, error:e.message}));
+        console.log(`[BATCH TIMING] ${g.truckNo}: saveTripSafe done (success=${saveResult.success}) at +${(performance.now()-_t0).toFixed(0)}ms`);
         // Auto-update vehicle ownerName if vehicle has none but trip/scan does
         try {
           if(trip.ownerName && trip.truckNo) {
@@ -3508,36 +3935,68 @@ Rules:
           }).catch(e=>console.warn("District officer save:", e.message));
         }
         if(!saveResult.success) {
-          setLrError(saveResult.duplicateDI
+          setLrError(saveResult.missingRequired
+            ? `Cannot save: ${[saveResult.missingDI&&"DI No",saveResult.missingGR&&"GR No"].filter(Boolean).join(" and ")} missing. Both are mandatory — please re-scan a clearer image or enter manually.`
+            : saveResult.duplicateDI
             ? `DI ${saveResult.duplicateDI} already exists in LR ${saveResult.existingLR} (${saveResult.existingTruck}). This trip was not saved — another device may have saved it first.`
             : `Save failed: ${saveResult.error||"Unknown error"}`);
           setSaving(false);
           return;
         }
         setTrips(p=>[trip,...(p||[])]);
+        // ── Log "no diesel confirmed" — informational record only, no gate,
+        // no manager review. Per the agreed design, this costs the uploader
+        // nothing and blocks nothing; it exists purely so the confirmation
+        // isn't invisible to the owner/manager afterward.
+        if(noDieselGroupIds.has(g.id) && typeof setActionItems === "function") {
+          const aiId = uid()+Date.now().toString(36)+Math.random().toString(36).slice(2,5);
+          const noDieselItem = {
+            id: aiId, type: "no_diesel_confirmed", status: "open",
+            diNo: (ex.diNo||"").trim(), grNo: ex.grNo||"", truckNo,
+            invoiceNo: "", invoiceDate: "",
+            invoiceAmt: 0, expectedAmt: 0,
+            empId: g.assignedEmpId||"", tripId: trip.id,
+            note: `${user.name} confirmed no diesel request applies to LR ${lrNo} (${truckNo})`,
+            createdAt: nowTs(),
+          };
+          setActionItems(prev=>[noDieselItem, ...(prev||[])]);
+          DB.saveActionItem(noDieselItem).catch(e=>console.error("saveActionItem no_diesel_confirmed:",e));
+        }
         // ── Mark pre-filled diesel indent as "attached" ───────────────────
-        if (g.dieselIndentNo.trim() && typeof setDieselRequests === "function") {
-          const preReq = (dieselRequests||[]).find(r => String(r.indentNo)===g.dieselIndentNo.trim() && r.status==="confirmed");
+        if (g.dieselIndentNo.trim() && typeof setDieselRequests === "function" && !noDieselGroupIds.has(g.id)) {
+          const preReq = (dieselRequests||[]).find(r => String(r.indentNo)===g.dieselIndentNo.trim() && r.status==="confirmed" && !claimedDieselIdsThisBatch.has(r.id));
           if (preReq) {
+              claimedDieselIdsThisBatch.add(preReq.id);
               const updPreReq = {...preReq, status:"attached", tripId:trip.id, lrNo};
               setDieselRequests(p=>p.map(r=>r.id===preReq.id?updPreReq:r));
               await DB.saveDieselRequest(updPreReq);
+              console.log(`[BATCH TIMING] ${g.truckNo}: pre-filled diesel attach saved at +${(performance.now()-_t0).toFixed(0)}ms`);
               log("DIESEL ATTACH", `Indent #${preReq.indentNo} → LR ${lrNo} · ₹${preReq.amount} (manual)`);
           }
         }
-        // ── Auto-attach confirmed diesel request for this truck (within 4 days) ──
-        if (typeof setDieselRequests === "function" && !g.dieselIndentNo.trim()) {
-          const _4dAgo = new Date(Date.now() - 4*86400000).toISOString().slice(0,10);
-          const confirmedReqs = (dieselRequests||[]).filter(r => r.status==="confirmed" && (r.date||"")>=_4dAgo);
-          const truckMatch = confirmedReqs.find(r => r.truckNo===truckNo);
+        // ── Auto-attach confirmed diesel request for this truck (any age) ──
+        if (typeof setDieselRequests === "function" && !g.dieselIndentNo.trim() && !noDieselGroupIds.has(g.id)) {
+          // Normalized comparison — auto-attach was silently failing whenever
+          // the trip's truckNo and the diesel request's stored truckNo
+          // differed only in case/whitespace (diesel requests are saved via
+          // .trim().toUpperCase(), but the trip's own truckNo variable here
+          // is a raw, unnormalized assignment from the form/OCR extraction).
+          const normTruck = s => String(s||"").replace(/\s+/g,"").toUpperCase();
+          const confirmedReqs = (dieselRequests||[]).filter(r => r.status==="confirmed" && !claimedDieselIdsThisBatch.has(r.id));
+          // Most recent first — if a truck has multiple confirmed requests,
+          // always attach the newest one (by date, then by createdAt as a
+          // tiebreaker for same-day requests).
+          const truckMatches = confirmedReqs.filter(r => normTruck(r.truckNo)===normTruck(truckNo))
+            .sort((a,b)=>(b.date||"").localeCompare(a.date||"") || (b.createdAt||"").localeCompare(a.createdAt||""));
+          const truckMatch = truckMatches[0];
           let chosenReq = truckMatch;
           if (!truckMatch) {
             // Also check older/open requests for manual owner override
             // Show truck-specific indents first; only fall back to other trucks if none found
-            const sametruckUnattached = (dieselRequests||[]).filter(r => r.status==="confirmed" && r.truckNo===truckNo);
+            const sametruckUnattached = (dieselRequests||[]).filter(r => r.status==="confirmed" && !claimedDieselIdsThisBatch.has(r.id) && normTruck(r.truckNo)===normTruck(truckNo));
             const allUnattached = sametruckUnattached.length > 0
               ? sametruckUnattached
-              : (dieselRequests||[]).filter(r => r.status==="confirmed");
+              : (dieselRequests||[]).filter(r => r.status==="confirmed" && !claimedDieselIdsThisBatch.has(r.id));
             const isOtherTruckFallback = sametruckUnattached.length === 0;
             if (allUnattached.length > 0) {
               const listStr = allUnattached.map(r=>{
@@ -3569,9 +4028,11 @@ Rules:
               `⛽ Indent #${chosenReq.indentNo} · ${chosenReq.truckNo}\n₹${effAmt.toLocaleString("en-IN")}${truckWarn}\n\nAttach to LR ${lrNo} and fill Diesel column?`
             );
             if (attach) {
+              claimedDieselIdsThisBatch.add(chosenReq.id);
               const updReq = {...chosenReq, status:"attached", tripId:trip.id, lrNo};
               setDieselRequests(p=>p.map(r=>r.id===chosenReq.id?updReq:r));
               await DB.saveDieselRequest(updReq);
+              console.log(`[BATCH TIMING] ${g.truckNo}: auto-attach diesel saved at +${(performance.now()-_t0).toFixed(0)}ms`);
               const updTrip = {...trip, dieselEstimate:effAmt, dieselIndentNo:String(chosenReq.indentNo)};
               setTrips(p=>p.map(t=>t.id===trip.id?updTrip:t));
               await DB.saveTrip(updTrip);
@@ -3587,16 +4048,25 @@ Rules:
             note:`Advance — LR ${lrNo} · ${truckNo}`,
             lrNo, tripId:trip.id, createdBy:user.username, createdAt:nowTs()};
           setCashTransfers(prev=>[wxn,...(Array.isArray(prev)?prev:[])]);
+          try { await DB.saveCashTransfer(wxn); } catch(e) { console.error("saveCashTransfer (batch wallet advance):",e); }
           log("WALLET ADVANCE",`${empName} −₹${trip.advance} LR:${lrNo}`);
         }
-        // Loan/shortage ledger — strict sync to match this trip's recovery fields exactly
-        if(+g.shortageRecovery>0 || +g.loanRecovery>0) {
-          setVehicles(prev=>prev.map(veh=>{
-            if(veh.truckNo!==truckNo) return veh;
-            const upd = syncTripRecoveryToVehicle(veh, trip);
-            DB.saveVehicle(upd).catch(e=>console.error("saveVehicle batch DI recovery:",e));
-            return upd;
-          }));
+        // Loan/shortage ledger — strict sync to match this trip's recovery fields
+        // exactly. Unconditional: a group whose recovery was edited down to 0
+        // before saving must also have any stale ledger entry removed.
+        {
+          const _veh0 = (vehicles||[]).find(veh=>veh.truckNo===truckNo);
+          if(_veh0) {
+            const upd = syncTripRecoveryToVehicle(_veh0, trip);
+            setVehicles(prev=>prev.map(veh=>veh.truckNo===truckNo?upd:veh));
+            // Awaited, not fire-and-forget — a batch of un-awaited background
+            // writes queuing up before the next group's getNextLR call was
+            // the likely cause of that call hanging indefinitely (confirmed
+            // via [BATCH TIMING] logs + pg_stat_activity showing nothing
+            // running server-side during the hang — the request was stuck
+            // client-side, not in Postgres).
+            try { await DB.saveVehicle(upd); } catch(e) { console.error("saveVehicle batch DI recovery:",e); }
+          }
         }
         log("BATCH TRIP",`LR:${lrNo} DI:${ex.diNo} ${truckNo} ${ex.qty}MT [${item.orderType}]`);
         // ── Excess diesel tracking — if net goes negative, debit employee wallet ──
@@ -3612,7 +4082,7 @@ Rules:
               type:"excess_diesel", ref:lrNo,
               lrNo, tripId:trip.id, createdBy:user.username, createdAt:nowTs()};
             setCashTransfers(prev=>[wxnXD,...(Array.isArray(prev)?prev:[]).filter(x=>x.id!==wxnXD.id)]);
-            DB.saveCashTransfer(wxnXD).catch(e=>console.error("excess diesel save:",e));
+            try { await DB.saveCashTransfer(wxnXD); } catch(e) { console.error("excess diesel save:",e); }
             log("EXCESS DIESEL",`${employees.find(e=>e.id===_empId)?.name||"—"} −₹${excess} LR:${lrNo} (diesel ₹${trip.dieselEstimate} caused negative net)`);
           }
         }}
@@ -3661,8 +4131,10 @@ Rules:
           status:"Pending Bill", shortage:0,
           advance:+g.advance||0,
           tafal:tafalVal,
-          dieselEstimate:+g.diesel||0,
-          dieselIndentNo:g.dieselIndentNo.trim()||"",
+          dieselEstimate: noDieselGroupIds.has(g.id) ? 0 : (+g.diesel||0),
+          dieselIndentNo: noDieselGroupIds.has(g.id) ? "" : (g.dieselIndentNo.trim()||""),
+          noDieselConfirmedBy: noDieselGroupIds.has(g.id) ? user.name : "",
+          noDieselConfirmedAt: noDieselGroupIds.has(g.id) ? nowTs() : "",
           shortageRecovery:+g.shortageRecovery||0,
           loanRecovery:+g.loanRecovery||0,
           cashEmpId:g.cashEmpId||"",
@@ -3689,31 +4161,61 @@ Rules:
           transporterName: ex0.transporterName || "",
           createdBy:user.username, createdAt:nowTs(),
         };
+        // ── Hard block: same reasoning as the single-trip save path above —
+        // never generate an LR for a trip whose advance can't be recorded
+        // against a wallet.
+        if((+g.advance||0) > 0 && !g.cashEmpId) {
+          // Matches saveEdit's exact validation style: an explicit "None"
+          // selection (g.cashEmpId==="__none__") is an acknowledged bypass,
+          // not an oversight — only a truly empty/unselected value blocks.
+          setLrError(`Cannot save: this trip has an advance of ₹${g.advance} but no wallet employee is selected. Choose an owner/driver for the wallet debit (or explicitly choose "None"), or set advance to 0.`);
+          setSaving(false);
+          return;
+        }
         // Atomic DB save — checks for duplicate DI before inserting
         const saveResultM = await Promise.race([
           DB.saveTripSafe(trip),
-          new Promise((_,rej)=>setTimeout(()=>rej(new Error("Save timed out — check connection")),15000))
+          new Promise((_,rej)=>setTimeout(()=>rej(new Error("Save timed out — check connection")),40000)) // bumped from 15s: the real fix is the DI trigram index (see migration), this is just a safety margin
         ]).catch(e=>({success:false, duplicateDI:null, error:e.message}));
         if(!saveResultM.success) {
-          setLrError(saveResultM.duplicateDI
+          setLrError(saveResultM.missingRequired
+            ? `Cannot save: ${[saveResultM.missingDI&&"DI No",saveResultM.missingGR&&"GR No"].filter(Boolean).join(" and ")} missing. Both are mandatory — please re-scan a clearer image or enter manually.`
+            : saveResultM.duplicateDI
             ? `DI ${saveResultM.duplicateDI} already exists in LR ${saveResultM.existingLR} (${saveResultM.existingTruck}). This trip was not saved — another device may have saved it first.`
             : `Save failed: ${saveResultM.error||"Unknown error"}`);
           setSaving(false);
           return;
         }
         setTrips(p=>[trip,...(p||[])]);
-        // ── Auto-attach confirmed diesel request for this truck (within 4 days) ──
-        if (typeof setDieselRequests === "function") {
-          const _4dAgo = new Date(Date.now() - 4*86400000).toISOString().slice(0,10);
-          const confirmedReqs = (dieselRequests||[]).filter(r => r.status==="confirmed" && (r.date||"")>=_4dAgo);
-          const truckMatch = confirmedReqs.find(r => r.truckNo===truckNo);
+        if(noDieselGroupIds.has(g.id) && typeof setActionItems === "function") {
+          const aiId = uid()+Date.now().toString(36)+Math.random().toString(36).slice(2,5);
+          const noDieselItem = {
+            id: aiId, type: "no_diesel_confirmed", status: "open",
+            diNo: (diLines||[]).map(d=>d.diNo).filter(Boolean).join("+"), grNo: ex0.grNo||"", truckNo,
+            invoiceNo: "", invoiceDate: "",
+            invoiceAmt: 0, expectedAmt: 0,
+            empId: g.assignedEmpId||"", tripId: trip.id,
+            note: `${user.name} confirmed no diesel request applies to LR ${lrNo} (${truckNo})`,
+            createdAt: nowTs(),
+          };
+          setActionItems(prev=>[noDieselItem, ...(prev||[])]);
+          DB.saveActionItem(noDieselItem).catch(e=>console.error("saveActionItem no_diesel_confirmed:",e));
+        }
+        // ── Auto-attach confirmed diesel request for this truck (any age) ──
+        if (typeof setDieselRequests === "function" && !noDieselGroupIds.has(g.id)) {
+          // Same normalization fix as the single-trip save path above.
+          const normTruck2 = s => String(s||"").replace(/\s+/g,"").toUpperCase();
+          const confirmedReqs = (dieselRequests||[]).filter(r => r.status==="confirmed" && !claimedDieselIdsThisBatch.has(r.id));
+          const truckMatches = confirmedReqs.filter(r => normTruck2(r.truckNo)===normTruck2(truckNo))
+            .sort((a,b)=>(b.date||"").localeCompare(a.date||"") || (b.createdAt||"").localeCompare(a.createdAt||""));
+          const truckMatch = truckMatches[0];
           let chosenReq = truckMatch;
           if (!truckMatch) {
             // Show truck-specific indents first; only fall back to other trucks if none found
-            const sametruckUnattached = (dieselRequests||[]).filter(r => r.status==="confirmed" && r.truckNo===truckNo);
+            const sametruckUnattached = (dieselRequests||[]).filter(r => r.status==="confirmed" && !claimedDieselIdsThisBatch.has(r.id) && normTruck2(r.truckNo)===normTruck2(truckNo));
             const allUnattached = sametruckUnattached.length > 0
               ? sametruckUnattached
-              : (dieselRequests||[]).filter(r => r.status==="confirmed");
+              : (dieselRequests||[]).filter(r => r.status==="confirmed" && !claimedDieselIdsThisBatch.has(r.id));
             const isOtherTruckFallback = sametruckUnattached.length === 0;
             if (allUnattached.length > 0) {
               const listStr = allUnattached.map(r=>{
@@ -3745,9 +4247,11 @@ Rules:
               `⛽ Indent #${chosenReq.indentNo} · ${chosenReq.truckNo}\n₹${effAmt.toLocaleString("en-IN")}${truckWarn}\n\nAttach to LR ${lrNo} and fill Diesel column?`
             );
             if (attach) {
+              claimedDieselIdsThisBatch.add(chosenReq.id);
               const updReq = {...chosenReq, status:"attached", tripId:trip.id, lrNo};
               setDieselRequests(p=>p.map(r=>r.id===chosenReq.id?updReq:r));
               await DB.saveDieselRequest(updReq);
+              console.log(`[BATCH TIMING] ${g.truckNo}: auto-attach diesel saved (merged path) at +${(performance.now()-_t0).toFixed(0)}ms`);
               const updTrip = {...trip, dieselEstimate:effAmt, dieselIndentNo:String(chosenReq.indentNo)};
               setTrips(p=>p.map(t=>t.id===trip.id?updTrip:t));
               await DB.saveTrip(updTrip);
@@ -3763,16 +4267,18 @@ Rules:
             note:`Advance — LR ${lrNo} · ${truckNo}`,
             lrNo, tripId:trip.id, createdBy:user.username, createdAt:nowTs()};
           setCashTransfers(prev=>[wxn,...(Array.isArray(prev)?prev:[])]);
+          try { await DB.saveCashTransfer(wxn); } catch(e) { console.error("saveCashTransfer (batch wallet advance):",e); }
           log("WALLET ADVANCE",`${empName} −₹${trip.advance} LR:${lrNo}`);
         }
-        // Loan/shortage ledger — strict sync to match this trip's recovery fields exactly
-        if(+g.shortageRecovery>0 || +g.loanRecovery>0) {
-          setVehicles(prev=>prev.map(veh=>{
-            if(veh.truckNo!==truckNo) return veh;
-            const upd = syncTripRecoveryToVehicle(veh, trip);
-            DB.saveVehicle(upd).catch(e=>console.error("saveVehicle batch multi-DI recovery:",e));
-            return upd;
-          }));
+        // Loan/shortage ledger — strict sync to match this trip's recovery fields
+        // exactly. Unconditional, same reasoning as the single-DI path above.
+        {
+          const _veh1 = (vehicles||[]).find(veh=>veh.truckNo===truckNo);
+          if(_veh1) {
+            const upd = syncTripRecoveryToVehicle(_veh1, trip);
+            setVehicles(prev=>prev.map(veh=>veh.truckNo===truckNo?upd:veh));
+            try { await DB.saveVehicle(upd); } catch(e) { console.error("saveVehicle batch multi-DI recovery:",e); }
+          }
         }
         log("BATCH MULTI-DI",`LR:${lrNo} ${allDiNos} ${truckNo} ${totalQty}MT`);
         // ── Excess diesel tracking — multi-DI ──
@@ -3788,23 +4294,63 @@ Rules:
               type:"excess_diesel", ref:lrNo,
               lrNo, tripId:trip.id, createdBy:user.username, createdAt:nowTs()};
             setCashTransfers(prev=>[wxnXD,...(Array.isArray(prev)?prev:[]).filter(x=>x.id!==wxnXD.id)]);
-            DB.saveCashTransfer(wxnXD).catch(e=>console.error("excess diesel save:",e));
+            try { await DB.saveCashTransfer(wxnXD); } catch(e) { console.error("excess diesel save:",e); }
             log("EXCESS DIESEL",`${employees.find(e=>e.id===_empId)?.name||"—"} −₹${excess} LR:${lrNo} (multi-DI, diesel ₹${trip.dieselEstimate} caused negative net)`);
           }
         }}
       }
+      console.log(`[BATCH TIMING] ${g.truckNo}: GROUP COMPLETE at +${(performance.now()-_t0).toFixed(0)}ms`);
       savedLRsThisBatch.push({lrNo, truckNo, qty: groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0),0), diCount: groupItems.length});
       count++;
+      setSavedCount(c=>c+1);
+      setSavedLRs(prev=>[{lrNo, truckNo, qty: groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0),0), diCount: groupItems.length},...prev]);
+      // ── Remove THIS group from the pending list right now, not at the end
+      // of the whole batch. Leaving a just-saved group's card in `groups`
+      // while the loop moves on to later groups meant it stayed visible
+      // through every subsequent re-render — and since checkDupDI/groupReady
+      // recompute fresh on every render (not memoized), the very next render
+      // after this group's trip lands in `trips` would find that trip
+      // (itself) and flag the group as "DUPLICATE — already in LR [its own
+      // LR]". That's the exact bug reported: every successfully-saved group
+      // flipping to a false duplicate warning right after it saves.
+      setItems(prev=>prev.filter(x=>!g.diIds.includes(x.id)));
+      setGroups(prev=>prev.filter(gr=>gr.id!==g.id));
     }
 
-
-    setSavedCount(c=>c+count);
-    setSavedLRs(prev=>[...savedLRsThisBatch,...prev]);
     setSaving(false);
-    // Remove saved groups' items from list
-    const savedItemIds = new Set(readyGroups.flatMap(g=>g.diIds));
-    setItems(prev=>prev.filter(x=>!savedItemIds.has(x.id)));
-    setGroups(prev=>prev.filter(g=>!readyGroups.find(r=>r.id===g.id)));
+    setNoDieselGroupIds(new Set());
+
+    // ── Post-save reconciliation ─────────────────────────────────────────
+    // Fetches FRESH data from the DB rather than trusting React state right
+    // after a batch of writes (state can lag behind what's actually
+    // persisted). Flags any trip that references a diesel indent whose own
+    // record doesn't agree — this is the backstop for the batch-diesel-race
+    // class of bug found earlier: it can't prevent a mismatch, but it makes
+    // one visible immediately instead of surfacing weeks later as a driver
+    // complaint.
+    (async () => {
+      try {
+        const lrNosThisBatch = savedLRsThisBatch.map(s=>s.lrNo);
+        if(lrNosThisBatch.length===0) return;
+        const [freshTrips, freshDiesel] = await Promise.all([DB.getTripsAll(), DB.getDieselRequests()]);
+        const mismatches = [];
+        freshTrips.filter(t=>lrNosThisBatch.includes(t.lrNo)).forEach(t => {
+          if(!t.dieselIndentNo) return; // no diesel claimed — nothing to reconcile
+          const matchingReq = freshDiesel.find(r=>String(r.indentNo)===String(t.dieselIndentNo));
+          if(!matchingReq) {
+            mismatches.push({lrNo:t.lrNo, truckNo:t.truckNo, indentNo:t.dieselIndentNo, issue:"Indent record not found at all"});
+          } else if(matchingReq.status!=="attached" || matchingReq.tripId!==t.id) {
+            mismatches.push({lrNo:t.lrNo, truckNo:t.truckNo, indentNo:t.dieselIndentNo,
+              issue: matchingReq.tripId && matchingReq.tripId!==t.id
+                ? `Indent #${t.dieselIndentNo} is actually attached to a different trip`
+                : `Indent #${t.dieselIndentNo} shows status "${matchingReq.status}", not attached`});
+          }
+        });
+        if(mismatches.length>0) {
+          setReconciliationIssues(mismatches);
+        }
+      } catch(e) { console.error("reconciliation check failed:", e); }
+    })();
   };
 
   const scanningCount = items.filter(x=>x.status==="scanning"||x.status==="pending").length;
@@ -3815,6 +4361,26 @@ Rules:
   // ── RENDER ───────────────────────────────────────────────────────────────────
   return (
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
+
+      {/* Reconciliation banner — appears if a just-saved trip's diesel indent
+          reference doesn't actually match that indent's own record. This is
+          the backstop, not a preventer — by the time this shows, the trip
+          is already saved; it exists so a mismatch is visible immediately
+          instead of surfacing weeks later as a driver complaint. */}
+      {reconciliationIssues.length>0 && (
+        <div style={{background:C.red+"11",border:`2px solid ${C.red}`,borderRadius:12,padding:"12px 14px"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+            <span style={{color:C.red,fontWeight:800,fontSize:13}}>⚠ Diesel reconciliation mismatch — {reconciliationIssues.length}</span>
+            <button onClick={()=>setReconciliationIssues([])}
+              style={{background:"none",border:"none",color:C.muted,fontSize:11,cursor:"pointer",textDecoration:"underline"}}>Dismiss</button>
+          </div>
+          {reconciliationIssues.map((m,i)=>(
+            <div key={i} style={{fontSize:12,color:"#7a1f1f",padding:"4px 0",borderTop:i>0?`1px solid ${C.red}22`:"none"}}>
+              <b>LR {m.lrNo}</b> ({m.truckNo}) — {m.issue}
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* How-to */}
       <div style={{background:C.teal+"11",border:`1px solid ${C.teal}33`,borderRadius:12,padding:"12px 14px"}}>
@@ -4744,16 +5310,117 @@ Rules:
         );
       })}
 
-      {/* Save All */}
-      {readyGroups.length>0&&(
-        <button onClick={saveAll} disabled={saving||!canSave}
+      {/* Review & Save — opens the confirmation screen; the actual save now
+          only happens from there, after diesel is resolved for every group */}
+      {confirmGroups.length>0&&(
+        <button onClick={()=>setShowConfirmScreen(true)} disabled={saving||confirmGroups.length===0}
           style={{background:saving?C.muted:C.green,color:"#fff",border:"none",
             borderRadius:12,padding:"15px",fontSize:16,fontWeight:800,cursor:saving?"not-allowed":"pointer",
             width:"100%",opacity:saving?0.7:1}}>
           {saving
             ? "⏳ Saving & assigning LRs…"
-            : `💾 Save ${readyGroups.length} Group${readyGroups.length>1?"s":""} (${readyGroups.reduce((s,g)=>s+g.diIds.length,0)} DIs)`}
+            : `Review & Save ${confirmGroups.length} Group${confirmGroups.length>1?"s":""} (${confirmGroups.reduce((s,g)=>s+g.diIds.length,0)} DIs)`}
         </button>
+      )}
+
+      {/* ── CONFIRMATION SCREEN ──────────────────────────────────────────────
+          Diesel is resolved ONE of two ways before this screen's own Save
+          button unlocks: an auto-attached match (locked, no editing), or an
+          explicit "No Diesel Request for this Trip" tap (logged, attributed,
+          no manager gate — per the agreed design). There is no third way
+          through, and no silent skip. */}
+      {showConfirmScreen && (
+        <Sheet title="Confirm before saving" onClose={()=>setShowConfirmScreen(false)}>
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <div style={{fontSize:12,color:C.muted}}>
+              {confirmGroups.filter(dieselResolved).length} of {confirmGroups.length} ready
+            </div>
+            {confirmGroups.map(g=>{
+              const groupItems = doneItems.filter(x=>g.diIds.includes(x.id));
+              const totalGross = groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0)*(+x.givenRate||0),0);
+              const _gVeh = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
+              const tafalVal = g.tafal!=="" ? +g.tafal : tafalAmountFor(_gVeh, employees, settings, g.assignedEmpId||"");
+              const dieselVal = noDieselGroupIds.has(g.id) ? 0 : (+g.diesel||0);
+              const net = totalGross-(+g.advance||0)-tafalVal-dieselVal-(+g.shortageRecovery||0)-(+g.loanRecovery||0);
+              const isMatched = !!g.dieselIndentNo.trim();
+              const isNoDieselConfirmed = noDieselGroupIds.has(g.id);
+              const needsDiesel = !manualDiesel && +g.diesel>0 || (!isMatched && !isNoDieselConfirmed);
+              return (
+                <div key={g.id} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                    <span style={{fontWeight:800,fontSize:14,color:C.text}}>🚛 {g.truckNo}</span>
+                    <span style={{fontSize:11,color:C.muted}}>{groupItems.length} DI · {groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0),0)} MT</span>
+                  </div>
+
+                  <div style={{display:"flex",flexDirection:"column",gap:5,marginBottom:10}}>
+                    <div style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:C.muted}}>
+                      <span style={{color:C.green}}>✓</span> {groupItems.map(x=>x.extracted?.diNo).filter(Boolean).join(", ")||"DI"} verified
+                    </div>
+                    <div style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:C.muted}}>
+                      <span style={{color:C.green}}>✓</span> LR will be assigned on save
+                    </div>
+                    {isMatched && (
+                      <div style={{display:"flex",alignItems:"center",gap:6,fontSize:12,fontWeight:700,
+                        background:C.green+"15",borderRadius:8,padding:"6px 8px",color:C.green}}>
+                        ✓ Diesel attached — Indent #{g.dieselIndentNo}, ₹{(+g.diesel||0).toLocaleString("en-IN")}
+                      </div>
+                    )}
+                    {!isMatched && isNoDieselConfirmed && (
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:12,fontWeight:700,
+                        background:C.muted+"15",borderRadius:8,padding:"6px 8px",color:C.muted}}>
+                        <span>✓ Confirmed: no diesel for this trip</span>
+                        <button onClick={()=>setNoDieselGroupIds(prev=>{const n=new Set(prev);n.delete(g.id);return n;})}
+                          style={{background:"none",border:"none",color:C.blue,fontSize:11,cursor:"pointer",textDecoration:"underline"}}>
+                          Undo
+                        </button>
+                      </div>
+                    )}
+                    {!isMatched && !isNoDieselConfirmed && (
+                      <div style={{background:C.orange+"15",borderRadius:8,padding:"8px"}}>
+                        <div style={{fontSize:12,fontWeight:700,color:C.orange,marginBottom:6}}>
+                          ⚠ No diesel request found for this truck
+                        </div>
+                        <button onClick={()=>setNoDieselGroupIds(prev=>new Set(prev).add(g.id))}
+                          style={{width:"100%",background:C.orange,color:"#fff",border:"none",borderRadius:8,
+                            padding:"8px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+                          No Diesel Request for this Trip
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  <div style={{borderTop:`1px solid ${C.border}`,paddingTop:8}}>
+                    <div style={{fontSize:10,color:C.muted,marginBottom:5,textTransform:"uppercase",letterSpacing:0.5}}>Est. net driver pay</div>
+                    {[
+                      {label:"Gross", val:totalGross},
+                      {label:"− Advance", val:-(+g.advance||0)},
+                      {label:"− TAFAL", val:-tafalVal},
+                      {label:"− Diesel", val:-dieselVal},
+                      {label:"− Shortage/loan", val:-((+g.shortageRecovery||0)+(+g.loanRecovery||0))},
+                    ].map(r=>(
+                      <div key={r.label} style={{display:"flex",justifyContent:"space-between",fontSize:12,padding:"2px 0"}}>
+                        <span style={{color:C.muted}}>{r.label}</span>
+                        <span style={{color:r.val<0?C.red:C.text}}>₹{r.val.toLocaleString("en-IN")}</span>
+                      </div>
+                    ))}
+                    <div style={{display:"flex",justifyContent:"space-between",borderTop:`1px solid ${C.border}`,marginTop:4,paddingTop:4}}>
+                      <span style={{fontSize:12,fontWeight:700,color:C.text}}>Net to driver</span>
+                      <span style={{fontSize:14,fontWeight:800,color:net>=0?C.green:C.red}}>₹{net.toLocaleString("en-IN")}</span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+
+            <button onClick={()=>{ setShowConfirmScreen(false); saveAll(); }}
+              disabled={!allDieselResolved || saving}
+              style={{width:"100%",background:(allDieselResolved&&!saving)?C.green:C.muted,color:"#fff",
+                border:"none",borderRadius:12,padding:"15px",fontSize:16,fontWeight:800,
+                cursor:(allDieselResolved&&!saving)?"pointer":"not-allowed"}}>
+              {allDieselResolved ? "Confirm and Save All" : "Resolve diesel for every trip above to continue"}
+            </button>
+          </div>
+        </Sheet>
       )}
 
       {items.length===0&&savedCount===0&&(
@@ -4771,7 +5438,7 @@ Rules:
 // No manual LR entry — LR is auto-assigned on save.
 // If truck has existing unsettled same-vehicle trips, offer to merge.
 // onConfirm(existingTripOrNull, driverPhone)
-function AskLRSheet({ extracted, trips, vehicles, employees=[], onConfirm, onCancel }) {
+function AskLRSheet({ extracted, trips, loanTrips=null, vehicles, employees=[], onConfirm, onCancel }) {
   const [driverPhone, setDriverPhone] = useState("");
   const [assignedEmpId, setAssignedEmpId] = useState("");
   const [selectedMerge, setSelectedMerge] = useState(null); // trip id to merge into, or "new"
@@ -4779,15 +5446,18 @@ function AskLRSheet({ extracted, trips, vehicles, employees=[], onConfirm, onCan
   const existingVehicle = vehicles ? vehicles.find(v => v.truckNo === truckNo) : null;
   const needsDriverPhone = !existingVehicle || !existingVehicle.driverPhone;
 
-  // Check for duplicate DI
+  // Check for duplicate DI — GR is not checked for duplicates, since the same
+  // GR number can legitimately repeat across separate trips/DIs.
   const scannedDiNo = (extracted.diNo||"").trim();
+  const scannedGrNo = (extracted.grNo||"").trim();
   const duplicateDI = scannedDiNo ? trips.find(t => {
     if(t.diLines&&t.diLines.length>0) return t.diLines.some(d=>d.diNo===scannedDiNo);
     return (t.diNo||"").split("+").map(s=>s.trim()).includes(scannedDiNo);
   }) : null;
+  const duplicateTrip = duplicateDI;
 
   // Find unsettled trips for this truck (same vehicle = merge candidates)
-  const mergeCandidates = !duplicateDI ? (trips||[]).filter(t =>
+  const mergeCandidates = !duplicateTrip ? (trips||[]).filter(t =>
     !t.driverSettled &&
     (t.truckNo===truckNo||t.truck===truckNo) &&
     t.type==="outbound"
@@ -4808,7 +5478,7 @@ function AskLRSheet({ extracted, trips, vehicles, employees=[], onConfirm, onCan
     return (selectedTrip.diNo||"").split("+").map(s=>s.trim()).includes(scannedDiNo);
   })();
 
-  const canConfirm = !duplicateDI && selectedMerge &&
+  const canConfirm = !duplicateTrip && selectedMerge &&
     !diAlreadyInSelected && !(needsDriverPhone&&!driverPhone.trim());
 
   return (
@@ -4826,12 +5496,13 @@ function AskLRSheet({ extracted, trips, vehicles, employees=[], onConfirm, onCan
       </div>
 
       {/* Vehicle pending balances */}
-      {existingVehicle && !duplicateDI && (()=>{
-        const ownerN2=(existingVehicle.ownerName||"").trim();
-        const ownerVs2=ownerN2?(vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerN2):[existingVehicle];
-        const loanBal=ownerVs2.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
+      {existingVehicle && !duplicateTrip && (()=>{
+        const _ls2=ownerLoanStatus(vehicles, existingVehicle, loanTrips||trips);
+        const ownerN2=_ls2.ownerName;
+        const ownerVs2=_ls2.ownerVehs;
+        const loanBal=_ls2.balance;
         const shortBal=(existingVehicle.shortageOwed||0)-(existingVehicle.shortageRecovered||0);
-        if(loanBal<=0&&shortBal<=0) return null;
+        if(loanBal<=0&&shortBal<=0&&_ls2.overRecovered<=0) return null;
         const loanLabel=ownerVs2.length>1?`OWNER LOAN BAL (${ownerVs2.length} vehs)`:"LOAN BALANCE";
         return (
           <div style={{background:`${C.orange}11`,border:`2px solid ${C.orange}66`,borderRadius:12,padding:"12px 14px"}}>
@@ -4839,23 +5510,33 @@ function AskLRSheet({ extracted, trips, vehicles, employees=[], onConfirm, onCan
             <div style={{display:"flex",gap:16,fontSize:12}}>
               {loanBal>0&&<div><div style={{color:C.red,fontWeight:700}}>₹{loanBal.toLocaleString("en-IN")}</div><div style={{color:C.muted,fontSize:10}}>{loanLabel}</div></div>}
               {shortBal>0&&<div><div style={{color:C.red,fontWeight:700}}>₹{shortBal.toLocaleString("en-IN")}</div><div style={{color:C.muted,fontSize:10}}>SHORTAGE BALANCE</div></div>}
+              {_ls2.overRecovered>0&&<div><div style={{color:C.red,fontWeight:700}}>₹{_ls2.overRecovered.toLocaleString("en-IN")}</div><div style={{color:C.muted,fontSize:10}}>OVER-RECOVERED</div></div>}
             </div>
+            {_ls2.overRecovered>0&&(
+              <div style={{color:C.red,fontSize:11,marginTop:6,fontWeight:600}}>
+                ⚠ ₹{_ls2.overRecovered.toLocaleString("en-IN")} more has been recovered than was lent — this is owed BACK to {ownerN2||"the owner"}. Do not deduct further loan on this trip.
+              </div>
+            )}
             <div style={{color:C.muted,fontSize:11,marginTop:6}}>Enter Shortage/Loan Recovery in the trip form.</div>
           </div>
         );
       })()}
 
       {/* Duplicate DI block */}
-      {duplicateDI && (
+      {duplicateTrip && (
         <div style={{background:C.red+"11",border:`1px solid ${C.red}44`,borderRadius:10,padding:"12px 14px"}}>
-          <div style={{color:C.red,fontWeight:800,fontSize:13,marginBottom:4}}>🚫 Duplicate DI — Already Exists!</div>
-          <div style={{color:C.muted,fontSize:12}}>DI <b style={{color:C.text}}>{scannedDiNo}</b> is already in LR <b style={{color:C.text}}>{duplicateDI.lrNo||"—"}</b> · {duplicateDI.truckNo} · {duplicateDI.qty}MT</div>
+          <div style={{color:C.red,fontWeight:800,fontSize:13,marginBottom:4}}>
+            🚫 Duplicate DI — Already Exists!
+          </div>
+          <div style={{color:C.muted,fontSize:12}}>
+            DI <b style={{color:C.text}}>{scannedDiNo}</b> is already in LR <b style={{color:C.text}}>{duplicateDI.lrNo||"—"}</b> · {duplicateDI.truckNo} · {duplicateDI.qty}MT
+          </div>
           <div style={{color:C.red,fontSize:11,marginTop:6,fontWeight:700}}>You cannot add the same DI number twice.</div>
         </div>
       )}
 
       {/* Merge choice — only if not dup */}
-      {!duplicateDI && (
+      {!duplicateTrip && (
         <div style={{background:C.bg,borderRadius:12,padding:"14px",border:`2px solid ${C.blue}44`}}>
           <div style={{color:C.blue,fontWeight:800,fontSize:13,marginBottom:10}}>
             📋 {mergeCandidates.length>0 ? "Add to existing trip or create new?" : "LR will be auto-assigned on save"}
@@ -4915,7 +5596,7 @@ function AskLRSheet({ extracted, trips, vehicles, employees=[], onConfirm, onCan
       )}
 
       {/* Driver phone */}
-      {!duplicateDI && needsDriverPhone && (
+      {!duplicateTrip && needsDriverPhone && (
         <div style={{background:`${C.orange}08`,border:`1px solid ${C.orange}44`,borderRadius:12,padding:"14px"}}>
           <div style={{color:C.orange,fontWeight:800,fontSize:13,marginBottom:8}}>📞 Driver Phone Required</div>
           <div style={{color:C.muted,fontSize:12,marginBottom:10}}>
@@ -4926,7 +5607,7 @@ function AskLRSheet({ extracted, trips, vehicles, employees=[], onConfirm, onCan
       )}
 
       {/* Employee assignment — optional, links trip to a driver/employee */}
-      {!duplicateDI && employees.length>0 && (
+      {!duplicateTrip && employees.length>0 && (
         <div>
           <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",marginBottom:6}}>
             👤 Assign Employee (optional)
@@ -4947,13 +5628,13 @@ function AskLRSheet({ extracted, trips, vehicles, employees=[], onConfirm, onCan
         </div>
       )}
 
-      {!duplicateDI&&(
+      {!duplicateTrip&&(
         <Btn onClick={()=>onConfirm(selectedTrip||null, driverPhone, assignedEmpId)} full color={C.blue}
           disabled={!canConfirm}>
           {selectedTrip ? "Continue → Merge into LR "+selectedTrip.lrNo : "Continue → Fill trip details"}
         </Btn>
       )}
-      <Btn onClick={onCancel} full outline color={C.muted}>{duplicateDI?"Close":"Cancel"}</Btn>
+      <Btn onClick={onCancel} full outline color={C.muted}>{duplicateTrip?"Close":"Cancel"}</Btn>
     </div>
   );
 }
@@ -6704,7 +7385,7 @@ function SealedInvoiceSheet({ trip, onMerge, onClose, embedded=false }) {
 
 
 // ─── TRIPS ────────────────────────────────────────────────────────────────────
-function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles, indents, setIndents, settings, tripType, user, log, driverPays, setDriverPays, employees, cashTransfers, setCashTransfers, allTripsLoaded, loadingAllTrips, loadAllTrips, dieselRequests=[], setDieselRequests}) {
+function Trips({trips, setTrips, loanTrips=null, fyTrips, selectedClient, vehicles, setVehicles, indents, setIndents, settings, tripType, user, log, driverPays, setDriverPays, employees, cashTransfers, setCashTransfers, allTripsLoaded, loadingAllTrips, loadAllTrips, dieselRequests=[], setDieselRequests, payments=[], invoiceRegistry=[], actionItems=[], setActionItems}) {
   const isIn = tripType === "inbound";
   const ac   = isIn ? C.teal : C.accent;
 
@@ -6831,13 +7512,9 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
   const onTruckChange = v => {
     const tn  = v.toUpperCase().trim();
     const veh = vehicles.find(x => x.truckNo===tn);
-    // Owner-level loan: compute auto loanRecovery from deductPerTrip capped at balance
-    const ownerNameT = (veh?.ownerName||"").trim();
-    const ownerVehsT = ownerNameT?(vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerNameT):(veh?[veh]:[]);
-    const ownerDeductT = ownerVehsT[0]?.deductPerTrip||0;
-    const ownerBalT = ownerVehsT.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0);
-    // If deductPerTrip is set: cap recovery at that amount. If not set but balance exists: recover full balance.
-    const autoLoanRecov = ownerBalT<=0 ? 0 : (ownerDeductT>0 ? Math.min(ownerDeductT, ownerBalT) : ownerBalT);
+    // Owner-level loan: deductPerTrip capped at the outstanding balance, or the
+    // whole balance when no per-trip amount is configured. Zero once repaid.
+    const autoLoanRecov = autoLoanRecoveryFor(vehicles, veh, loanTrips||trips);
     // Auto-fill shortage recovery from vehicle's outstanding shortage balance
     const _stxns = veh?.shortageTxns||[];
     const shortBal = Math.max(0,
@@ -7149,6 +7826,10 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       }
     }}
     const tn2 = (t.truckNo||"").toUpperCase().trim();
+    // Holds a vehicle created in THIS handler — `vehicles` is the render-time
+    // snapshot and won't contain it yet, so the ledger sync below would
+    // otherwise silently skip a brand-new truck.
+    let _justCreatedVeh = null;
     // Auto-create vehicle FIRST if not yet registered — so ledger update below finds it
     if (tn2 && !vehicles.find(v => v.truckNo === tn2)) {
       const nv = { id:uid(), truckNo:tn2, ownerName:f.ownerName||"", phone:"",
@@ -7158,6 +7839,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         shortageTxns:[], loanTxns:[], createdBy:user.username };
       setVehicles(p => [...(p||[]), nv]);
       DB.saveVehicle(nv).catch(e=>console.error("saveVehicle auto-create:",e));
+      _justCreatedVeh = nv;
       log("AUTO-CREATE VEHICLE", `${tn2} from trip save`);
     } else if(tn2 && f.ownerName?.trim()) {
       // If vehicle exists but ownerName was blank — persist it now
@@ -7169,12 +7851,21 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         log("VEHICLE OWNER SET", `${tn2} → ${f.ownerName.trim()}`);
       }
     }
-    // Reflect shortageRecovery / loanRecovery into vehicle ledger — strict sync
-    if(tn2 && (t.shortageRecovery>0 || t.loanRecovery>0)){
-      setVehicles(prev=>prev.map(veh=>{
-        if(veh.truckNo!==tn2) return veh;
-        return syncTripRecoveryToVehicle(veh, t);
-      }));
+    // Reflect shortageRecovery / loanRecovery into vehicle ledger — strict sync.
+    // Runs UNCONDITIONALLY (not only when the value is > 0): clearing a recovery
+    // to 0 must delete the matching ledger entry, and syncTripRecoveryToVehicle
+    // only does that if it actually runs. The old `> 0` gate meant "owner removes
+    // the loan recovery from the trip" left the ledger row behind forever.
+    if(tn2){
+      const _vehForSync = vehicles.find(veh=>veh.truckNo===tn2) || _justCreatedVeh;
+      if(_vehForSync){
+        const _updVeh = syncTripRecoveryToVehicle(_vehForSync, t);
+        setVehicles(prev=>prev.map(veh=>veh.truckNo===tn2?_updVeh:veh));
+        // Persist. Without this the sync lived in React state only and was
+        // wiped by the next 45s poll / page refresh, while the trip's own
+        // loanRecovery stayed saved — the exact source of the ledger drift.
+        DB.saveVehicle(_updVeh).catch(e=>console.error("saveVehicle trip recovery sync:",e));
+      }
     }
     // ── Auto-attach diesel request if dieselIndentNo was set from dropdown ──
     if (t.dieselIndentNo && typeof setDieselRequests === "function") {
@@ -7307,10 +7998,28 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     const prevTrip = trips.find(t=>t.id===editSheet.id);
     const tn3 = (editSheet.truckNo||"").toUpperCase().trim();
     if(tn3){
-      setVehicles(prev=>prev.map(veh=>{
-        if(veh.truckNo!==tn3) return veh;
-        return syncTripRecoveryToVehicle(veh, editSheet);
-      }));
+      const _vehForSync3 = vehicles.find(veh=>veh.truckNo===tn3);
+      if(_vehForSync3){
+        const _updVeh3 = syncTripRecoveryToVehicle(_vehForSync3, editSheet);
+        setVehicles(prev=>prev.map(veh=>veh.truckNo===tn3?_updVeh3:veh));
+        // Persist — the in-memory-only sync was why an owner clearing or
+        // lowering a loan recovery saw the trip change but the vehicle ledger
+        // keep the old entry after the next refresh.
+        DB.saveVehicle(_updVeh3).catch(e=>console.error("saveVehicle edit recovery sync:",e));
+      }
+      // If the truck was CHANGED on this edit, the previous truck still holds a
+      // ledger entry for this trip. Sync it against a zeroed copy so the entry
+      // is removed from the vehicle that no longer ran the trip.
+      const _prevTn = (prevTrip?.truckNo||"").toUpperCase().trim();
+      if(_prevTn && _prevTn!==tn3){
+        const _oldVeh = vehicles.find(veh=>veh.truckNo===_prevTn);
+        if(_oldVeh){
+          const _updOld = syncTripRecoveryToVehicle(_oldVeh, {...editSheet, loanRecovery:0, shortageRecovery:0});
+          setVehicles(prev=>prev.map(veh=>veh.truckNo===_prevTn?_updOld:veh));
+          DB.saveVehicle(_updOld).catch(e=>console.error("saveVehicle old-truck recovery cleanup:",e));
+          log("LEDGER MOVE", `LR:${editSheet.lrNo||"—"} recovery moved ${_prevTn} → ${tn3}`);
+        }
+      }
     }
     // Persist ownerName to vehicle master if it was blank
     if(tn3 && (editSheet.ownerName||"").trim()) {
@@ -7715,7 +8424,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       </div>
 
       <PillBar items={[
-        ...["All","Pending Bill","Yet to Bill","Billed","Paid"].map(s=>({id:s,label:s+(s!=="All"?` (${list.filter(t=>t.status===s).length})`:""),color:SC(s)})),
+        ...["All","Pending Bill","Partially Billed","Yet to Bill","Billed","Partially Paid","Paid"].map(s=>({id:s,label:s+(s!=="All"?` (${list.filter(t=>t.status===s).length})`:""),color:SC(s)})),
         {id:"Confirmation Email Received",
          label:`📤 Confirmed (${list.filter(t=>t.status==="Confirmation Email Received"&&t.orderType==="party").length})`,
          color:C.teal},
@@ -7908,10 +8617,16 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                       </div>
                     </div>
 
-                    {/* Status + invoice no + chevron */}
+                    {/* Status + invoice no + chevron — suppressed for clinker
+                        trips, which no longer carry a per-trip billing marker
+                        (clinker billing is aggregate-only now) */}
                     <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:4,flexShrink:0}}>
-                      <Badge label={t.status} color={SC(t.status)} />
-                      {t.invoiceNo && <span style={{fontSize:9,color:C.muted,fontFamily:"monospace"}}>{t.invoiceNo}</span>}
+                      {!(((t.grade||"").toLowerCase().includes("clinker") || ((t.consignee||"").toLowerCase().includes("patas") && (t.consignee||"").toLowerCase().includes("shree cement")))) && (
+                        <>
+                          <Badge label={t.status} color={SC(t.status)} />
+                          {t.invoiceNo && <span style={{fontSize:9,color:C.muted,fontFamily:"monospace"}}>{t.invoiceNo}</span>}
+                        </>
+                      )}
                       <span style={{color:C.muted,fontSize:12,transition:"transform 0.2s",
                         display:"inline-block",transform:isExpanded?"rotate(180deg)":"rotate(0deg)"}}>⌄</span>
                     </div>
@@ -7932,18 +8647,74 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                           <span style={{color:C.blue,fontWeight:700}}>LR: {t.lrNo||"—"}</span>
                           {t.grNo && <span style={{color:C.muted}}> · GR: {t.grNo}</span>}
                         </div>
-                        {/* DI numbers in bold */}
-                        {(t.diLines&&t.diLines.length>1) ? (
-                          <div style={{fontSize:11,marginTop:2,fontWeight:800,color:C.text}}>
-                            DI: {t.diLines.map(d=>d.diNo).filter(Boolean).join(" · ")}
+                        {/* DI numbers in bold — each shows its own billed/pending state AND
+                            its own invoice number for multi-DI trips (two DIs on one LR can
+                            legitimately be billed under two different invoices) */}
+                        {(t.diLines&&t.diLines.length>1) ? (() => {
+                          const knownUtrs = new Set((payments||[]).map(p=>p.utr).filter(Boolean));
+                          const paidButOrphaned = d => d.paid && d.utr && !knownUtrs.has(d.utr);
+                          // Cross-check against the independent invoice registry — only
+                          // warn on POSITIVE evidence (registry explicitly says 'deleted').
+                          // No warning if there's simply no registry entry at all, since
+                          // every invoice scanned before this table existed has none.
+                          const deletedInvNos = new Set((invoiceRegistry||[])
+                            .filter(inv=>inv.status==="deleted").map(inv=>inv.invoiceNo));
+                          const billedButOrphaned = d => d.billed && d.invoiceNo && deletedInvNos.has(d.invoiceNo);
+                          return (
+                        <div style={{fontSize:11,marginTop:2,display:"flex",flexWrap:"wrap",gap:6,alignItems:"center"}}>
+                            <span style={{fontWeight:800,color:C.text}}>DI:</span>
+                            {t.diLines.filter(d=>d.diNo).map((d,i)=>(
+                              <span key={d.diNo+i} style={{display:"inline-flex",flexDirection:"column",alignItems:"flex-start"}}>
+                                <span style={{display:"inline-flex",alignItems:"center",gap:3}}>
+                                  <span style={{fontWeight:800,color:C.text}}>{d.diNo}</span>
+                                  <span style={{fontSize:9,fontWeight:700,padding:"1px 5px",borderRadius:5,
+                                    color:"#fff",background:billedButOrphaned(d)?C.red:d.billed?C.blue:"#d97706"}}
+                                    title={billedButOrphaned(d)?"Invoice "+d.invoiceNo+" was deleted but this DI is still marked billed under it — the revert didn't fully save. Needs manual check.":undefined}>
+                                    {d.orderType==="party"?"Party ":"Godown "}{billedButOrphaned(d)?"⚠":d.billed?"✓":"⏳"}
+                                  </span>
+                                  {d.billed && (
+                                    <span style={{fontSize:9,fontWeight:700,padding:"1px 5px",borderRadius:5,
+                                      color:"#fff",background:paidButOrphaned(d)?C.red:d.paid?C.green:"#94a3b8"}}
+                                      title={paidButOrphaned(d)?"This DI is marked paid but its payment record (UTR "+d.utr+") no longer exists — likely a deleted advice that didn't fully revert. Needs manual check.":undefined}>
+                                      {paidButOrphaned(d)?"⚠ Paid?":d.paid?"💰 Paid":"⏳ Unpaid"}
+                                    </span>
+                                  )}
+                                </span>
+                                {d.billed && d.invoiceNo && (
+                                  <span style={{fontSize:9,color:C.muted,fontFamily:"monospace"}}>{d.invoiceNo}{d.paid && d.utr ? " · "+d.utr : ""}</span>
+                                )}
+                              </span>
+                            ))}
                           </div>
-                        ) : t.diNo ? (
+                          );
+                        })() : t.diNo ? (
                           <div style={{fontSize:11,marginTop:2,fontWeight:800,color:C.text}}>DI: {t.diNo}</div>
                         ) : null}
                         <div style={{color:C.muted,fontSize:11,marginTop:1}}>{t.from}→{t.to} · {t.date}</div>
+                        {(() => {
+                          // Assigned employee: direct trip assignment first, else the
+                          // truck's linked fleet manager (same resolution used for
+                          // missing-DI action items) — shown as a fallback label.
+                          const direct = t.assignedEmpId && (employees||[]).find(e=>e.id===t.assignedEmpId);
+                          const linked = !direct && (employees||[]).find(e=>(e.linkedTrucks||[]).some(tr=>String(tr).toUpperCase().trim()===String(t.truckNo||"").toUpperCase().trim()));
+                          const emp = direct || linked;
+                          if(!emp) return null;
+                          return (
+                            <div style={{fontSize:11,marginTop:1,color:C.purple,fontWeight:600}}>
+                              👤 {emp.name}{!direct?" (fleet mgr)":""}
+                            </div>
+                          );
+                        })()}
+                        {t.noDieselConfirmedBy && (
+                          <div style={{fontSize:11,marginTop:1,color:C.orange,fontWeight:600}}>
+                            ⛽ Uploader {t.noDieselConfirmedBy} confirmed "No Diesel"
+                          </div>
+                        )}
                       </div>
                       <div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0}}>
-                        <Badge label={t.status} color={SC(t.status)} />
+                        {!(((t.grade||"").toLowerCase().includes("clinker") || ((t.consignee||"").toLowerCase().includes("patas") && (t.consignee||"").toLowerCase().includes("shree cement")))) && (
+                          <Badge label={t.status} color={SC(t.status)} />
+                        )}
                         {t.driverSettled && user.role!=="owner" ? (
                           <div title="Trip is frozen — driver payment complete. Only Owner can edit."
                             style={{background:C.dim,borderRadius:8,color:C.muted+"66",padding:"5px 8px",
@@ -8346,13 +9117,14 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       {/* ── BATCH DI SCANNER SHEET ── */}
       {batchDISheet && (
         <Sheet title="📋 Add Trip — Scan GR / DI Copies" onClose={()=>setBatchDISheet(false)} noBackdropClose>
-          <BatchDIScanner
+          <BatchDIScanner loanTrips={loanTrips||trips}
             trips={trips} vehicles={vehicles} setVehicles={setVehicles}
             setTrips={setTrips} settings={settings} user={user} log={log}
             employees={employees||[]} cashTransfers={cashTransfers||[]} setCashTransfers={setCashTransfers}
             dieselRequests={dieselRequests||[]} setDieselRequests={setDieselRequests}
             onClose={()=>setBatchDISheet(false)}
-           manualDiesel={manualDiesel}
+            manualDiesel={manualDiesel}
+            actionItems={actionItems||[]} setActionItems={setActionItems}
                       />
         </Sheet>
       )}
@@ -8412,7 +9184,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
             <>
               {diConflict ? (
                 diConflict.askLR ? (
-                  <AskLRSheet extracted={diConflict.extracted} trips={trips} vehicles={vehicles}
+                  <AskLRSheet extracted={diConflict.extracted} trips={trips} loanTrips={loanTrips||trips} vehicles={vehicles}
                     employees={employees||[]}
                     onConfirm={onLRConfirmed} onCancel={()=>setDiConflict(null)} />
                 ) : (
@@ -8433,7 +9205,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                   ) : (
                     <TripForm f={f} ff={ff} isIn={isIn} ac={ac} vehicles={vehicles} settings={settings} employees={employees||[]} cashTransfers={cashTransfers||[]} recentDestinations={recentDestinations} recentGrades={recentGrades}
                       onTruckChange={onTruckChange} onSubmit={saveNew} submitLabel="Save Trip"
-                      user={user} wasScanned={wasScanned} trips={trips||[]} indents={indents||[]}
+                      user={user} wasScanned={wasScanned} trips={trips||[]} loanTrips={loanTrips||trips} indents={indents||[]}
                       dieselRequests={dieselRequests||[]} setDieselRequests={setDieselRequests}
                       manualLrMode={manualLrMode} manualDiesel={manualDiesel} />
                   )}
@@ -8531,7 +9303,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
               {/* Same DI conflict flow as godown — handles duplicate DI, LR entry, merge */}
               {diConflict ? (
                 diConflict.askLR ? (
-                  <AskLRSheet extracted={diConflict.extracted} trips={trips} vehicles={vehicles}
+                  <AskLRSheet extracted={diConflict.extracted} trips={trips} loanTrips={loanTrips||trips} vehicles={vehicles}
                     onConfirm={(existingTrip, driverPhone)=>{
                       // Carry party fields through confirm
                       onLRConfirmed(existingTrip, driverPhone);
@@ -8690,17 +9462,25 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                           setTrips(p=>[t,...(p||[])]);
                           log("ADD PARTY TRIP",`LR:${t.lrNo} ${t.truckNo}`);
                           const tn2=(t.truckNo||"").toUpperCase().trim();
+                          let _partyNewVeh=null;
                           if(tn2&&!vehicles.find(v=>v.truckNo===tn2)){
                             const nv={id:uid(),truckNo:tn2,ownerName:"",phone:"",driverName:"",driverPhone:"",
                               driverLicense:"",accountNo:"",ifsc:"",loan:0,loanRecovered:0,deductPerTrip:0,
                               tafalExempt:false,shortageOwed:0,shortageRecovered:0,shortageTxns:[],loanTxns:[],createdBy:user.username};
                             setVehicles(p=>[...(p||[]),nv]);
+                            DB.saveVehicle(nv).catch(e=>console.error("saveVehicle party auto-create:",e));
+                            _partyNewVeh=nv;
                           }
-                          if(tn2&&(t.loanRecovery>0||t.shortageRecovery>0)){
-                            setVehicles(prev=>prev.map(veh=>{
-                              if(veh.truckNo!==tn2) return veh;
-                              return syncTripRecoveryToVehicle(veh, t);
-                            }));
+                          // Unconditional strict sync + persist — see the trip-form
+                          // save path for why the `> 0` gate and the missing
+                          // DB.saveVehicle both had to go.
+                          if(tn2){
+                            const _pVehSync=vehicles.find(veh=>veh.truckNo===tn2)||_partyNewVeh;
+                            if(_pVehSync){
+                              const _pUpd=syncTripRecoveryToVehicle(_pVehSync, t);
+                              setVehicles(prev=>prev.map(veh=>veh.truckNo===tn2?_pUpd:veh));
+                              DB.saveVehicle(_pUpd).catch(e=>console.error("saveVehicle party recovery sync:",e));
+                            }
                           }
                           setAddSheet(false); setF(blankForm());
                           setOrderTypeStep(null); setPartyStep("docs");
@@ -8710,7 +9490,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                       }}
                       submitLabel="💾 Save Party Trip"
                       user={user} wasScanned={wasScanned}
-                      isParty={true} trips={trips||[]} indents={indents||[]} />
+                      isParty={true} trips={trips||[]} loanTrips={loanTrips||trips} indents={indents||[]} />
                   ) : (
                     <div style={{background:C.bg,border:`2px dashed ${C.border}`,borderRadius:14,
                       padding:"28px 20px",textAlign:"center",marginTop:8}}>
@@ -8829,7 +9609,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
             salesOfficerEmail={editSheet.salesOfficerEmail||""}
             partyNumber={editSheet.partyNumber||""}
             onPartyFieldChange={(k,v)=>setEditSheet(p=>({...p,[k]:v}))}
-            trips={trips||[]} indents={indents||[]}
+            trips={trips||[]} loanTrips={loanTrips||trips} indents={indents||[]}
             dieselRequests={dieselRequests||[]} setDieselRequests={setDieselRequests}
             manualLrMode={manualLrMode} manualDiesel={manualDiesel}
           />
@@ -9088,7 +9868,7 @@ function SearchableIndentSelect({options, value, truck, onSelect, onClear}) {
 }
 
 
-function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit, submitLabel, user, showStatus=false, wasScanned=false, isParty=false, partyDriverPhone="", salesOfficerPhone="", salesOfficerEmail="", partyNumber="", onPartyFieldChange, employees=[], cashTransfers=[], recentDestinations=[], recentGrades=[], trips=[], indents=[], dieselRequests=[], setDieselRequests, manualLrMode=false, manualDiesel=false}) {
+function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit, submitLabel, user, showStatus=false, wasScanned=false, isParty=false, partyDriverPhone="", salesOfficerPhone="", salesOfficerEmail="", partyNumber="", onPartyFieldChange, employees=[], cashTransfers=[], recentDestinations=[], recentGrades=[], trips=[], loanTrips=null, indents=[], dieselRequests=[], setDieselRequests, manualLrMode=false, manualDiesel=false}) {
   // Ensure each diLine has frRate — migrate from trip-level frRate if missing
   const normalizedDiLines = (f.diLines||[]).map(d => ({...d, frRate: d.frRate || +f.frRate || 0}));
   const fWithLines = normalizedDiLines.length > 1 ? {...f, diLines: normalizedDiLines} : f;
@@ -9444,9 +10224,9 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
             Loan Recovery ₹{user?.role!=="owner"&&<span style={{color:C.orange,fontSize:10,marginLeft:6}}>🔒 Owner-set</span>}
           </label>
           {(()=>{
-            const ownerN3 = (veh?.ownerName||"").trim();
-            const ownerVs3 = veh ? (ownerN3 ? (vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerN3) : [veh]) : [];
-            const loanBal = ownerVs3.length > 0 ? ownerVs3.reduce((s,x)=>s+Math.max(0,(x.loan||0)-(x.loanRecovered||0)),0) : null;
+            const _ls3 = veh ? ownerLoanStatus(vehicles, veh, loanTrips||trips) : null;
+            const ownerVs3 = _ls3 ? _ls3.ownerVehs : [];
+            const loanBal = ownerVs3.length > 0 ? _ls3.balance : null;
             const loanLabel = ownerVs3.length>1 ? `Owner pending (${ownerVs3.length} vehs)` : "Pending";
             const overLimit = loanBal !== null && (+f.loanRecovery||0) > loanBal;
             const isOwnerUser = user?.role==="owner";
@@ -9467,7 +10247,12 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
                   {overLimit?`⚠ Max allowed: ₹${loanBal.toLocaleString("en-IN")}`:`${loanLabel}: ₹${loanBal.toLocaleString("en-IN")}`}
                 </div>
               )}
-              {loanBal!==null&&loanBal===0&&<div style={{color:C.green,fontSize:11}}>✓ Loan fully cleared</div>}
+              {loanBal!==null&&loanBal===0&&_ls3.overRecovered<=0&&<div style={{color:C.green,fontSize:11}}>✓ Loan fully cleared</div>}
+              {loanBal!==null&&loanBal===0&&_ls3.overRecovered>0&&(
+                <div style={{color:C.red,fontSize:11,fontWeight:600}}>
+                  ⚠ Over-recovered by ₹{_ls3.overRecovered.toLocaleString("en-IN")} — owed back to the owner. Leave this at 0.
+                </div>
+              )}
             </>);
           })()}
         </div>
@@ -9869,7 +10654,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
 function Billing({trips, setTrips, fyTrips, selectedClient, user, log}) {
   const baseTrips = fyTrips || trips; // already role-filtered via sp
   const filteredTrips = selectedClient ? baseTrips.filter(t=>(t.client||getDEFAULT_CLIENT())===selectedClient) : baseTrips;
-  const pending = filteredTrips.filter(t => t.status==="Pending Bill");
+  const pending = filteredTrips.filter(isUnbilled);
   const billed  = filteredTrips.filter(t => t.status==="Billed");
   const paid    = filteredTrips.filter(t => t.status==="Paid");
   const [orderFilter, setOrderFilter] = useState("All"); // "All" | "godown" | "party"
@@ -10153,10 +10938,12 @@ function Settlement({trips, setTrips, vehicles, setVehicles, settlements, setSet
     // only, per calcNet's own comment — it must never be recorded as a separate
     // ledger entry alongside calc.loanRecovery, which is what was happening here
     // before and would double-count against calc.loanRecovery for the same trip.)
-    if (v) setVehicles(p => p.map(x => {
-      if (x.truckNo!==t.truckNo) return x;
-      return syncTripRecoveryToVehicle(x, t);
-    }));
+    if (v) {
+      const _updV = syncTripRecoveryToVehicle(v, t);
+      setVehicles(p => p.map(x => x.truckNo===t.truckNo ? _updV : x));
+      // Persist — settlement previously synced the ledger in memory only.
+      DB.saveVehicle(_updV).catch(e=>console.error("saveVehicle settle recovery sync:",e));
+    }
     log("SETTLEMENT", `LR:${t.lrNo} ${t.truckNo} — Net ${fmt(calc.net)}`);
     setSel(null); setNotes("");
   };
@@ -10909,6 +11696,187 @@ function PumpSlipScanner({ pumps, trips, user, onResults }) {
         </div>
       )}
       {error && <div style={{color:C.red,fontSize:12,marginTop:4}}>{error}</div>}
+    </div>
+  );
+}
+
+// ─── DIESEL RECEIPT SCAN — single-receipt upload confirmation (PumpPortal) ────
+// Alternative to PIN confirmation. Extracts vehicle/amount/date/pump from a
+// single receipt photo. If vehicle, pump name, and date all match the request,
+// auto-confirms (no image stored). If any mismatch, the image is stored and the
+// request stays "open" awaiting manager review in DieselMod.
+// Compresses/resizes a photo before it's sent anywhere. Phone camera photos are
+// often 3-8MB — over rural mobile data that turns both the AI scan call and the
+// storage upload into a multi-minute wait. Downscaling to ~1600px + JPEG ~0.75
+// keeps the receipt perfectly readable (by both a human and the AI) while
+// cutting typical file size by 80-95%.
+async function compressReceiptImage(file, maxDim = 1600, quality = 0.75) {
+  if (!file.type.startsWith("image/") || file.type === "image/svg+xml") return file;
+  try {
+    const img = await new Promise((res, rej) => {
+      const url = URL.createObjectURL(file);
+      const image = new Image();
+      image.onload = () => { URL.revokeObjectURL(url); res(image); };
+      image.onerror = () => { URL.revokeObjectURL(url); rej(new Error("Could not read image")); };
+      image.src = url;
+    });
+    let { width, height } = img;
+    if (width > maxDim || height > maxDim) {
+      const scale = maxDim / Math.max(width, height);
+      width = Math.round(width * scale);
+      height = Math.round(height * scale);
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = width; canvas.height = height;
+    canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+    const blob = await new Promise(res => canvas.toBlob(res, "image/jpeg", quality));
+    if (!blob || blob.size >= file.size) return file; // compression didn't help, keep original
+    return new File([blob], (file.name || "receipt").replace(/\.[^.]+$/, "") + ".jpg", { type: "image/jpeg" });
+  } catch {
+    return file; // any failure — fall back to the original file rather than blocking the upload
+  }
+}
+
+function DieselReceiptScan({ selected, pumps, dieselRequests=[], cashAmount, user, log, onBack, onConfirmed, onPendingReview }) {
+  const [state, setState] = useState("idle"); // idle|compressing|reading|scanning|uploading|saving|error
+  const [error, setError] = useState("");
+
+  const handleFile = async (file) => {
+    setError(""); setState("reading");
+    if (!file.type.startsWith("image/")) {
+      setError("Please upload an image (JPG/PNG) of the receipt."); setState("error"); return;
+    }
+    setState("compressing");
+    const compressed = await compressReceiptImage(file);
+    setState("reading");
+    const base64 = await new Promise((res,rej) => {
+      const r = new FileReader();
+      r.onload = () => res(r.result.split(",")[1]);
+      r.onerror = () => rej(new Error("Read failed"));
+      r.readAsDataURL(compressed);
+    });
+    setState("scanning");
+    try {
+      const resp = await fetch("/.netlify/functions/scan-diesel-receipt", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ base64, anthropicKey: RC.anthropicKey, mediaType: compressed.type }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || data.error) {
+        logScan("diesel_receipt_scan", false, 0);
+        setError(data.error || "Could not read the receipt. Please upload a clearer image.");
+        setState("error");
+        return;
+      }
+      logScan("diesel_receipt_scan", true, data._costInr||0);
+
+      // Duplicate receipt number check — a receipt can only be attached to one diesel request
+      if (data.receiptNo) {
+        const dup = dieselRequests.find(r => r.id !== selected.id && r.receiptNo && normReceiptNo(r.receiptNo) === normReceiptNo(data.receiptNo));
+        if (dup) {
+          setError(`Receipt #${data.receiptNo} is already attached to Indent #${dup.indentNo} (${dup.truckNo}) — status: ${dup.status.toUpperCase()}. This receipt can't be used again.`);
+          setState("error");
+          return;
+        }
+      }
+
+      const pump = pumps.find(p => p.id === selected.pumpId);
+      const vehicleMismatch = normVehicleNo(data.vehicleNo) !== normVehicleNo(selected.truckNo);
+      const pumpMismatch    = pump ? !pumpNamesMatch(data.pumpName, pump.name) : false;
+      const dateMismatch    = dieselDateMismatch(data.date, selected.date);
+      const anyMismatch     = vehicleMismatch || pumpMismatch || dateMismatch;
+
+      if (!anyMismatch) {
+        // Clean match → auto-confirm, override diesel amount, recalc total, no image stored
+        const origDiesel = selected.dieselAmount ?? selected.amount;
+        const origCash    = selected.cashAmount   ?? 0;
+        const confDiesel  = data.amount;
+        const confCash    = cashAmount;
+        const confTotal   = confDiesel + confCash;
+        const dieselChanged = confDiesel !== origDiesel;
+        const cashChanged   = confCash   !== origCash;
+        const updReq = {
+          ...selected,
+          status:              "confirmed",
+          dieselAmount:        confDiesel,
+          cashAmount:          confCash,
+          amount:              confTotal,
+          confirmedAmount:     confDiesel,
+          confirmedCash:       confCash,
+          confirmedReason:     dieselChanged||cashChanged ? "Confirmed via receipt scan" : null,
+          confirmedAt:         nowTs(),
+          confirmedBy:         user?.name || "",
+          pin:                 "****",
+          receiptNo:           data.receiptNo||"",
+          extractedVehicleNo:  data.vehicleNo,
+          extractedAmount:     data.amount,
+          extractedDate:       data.date,
+          extractedPumpName:   data.pumpName,
+          vehicleMismatch:     false,
+          pumpMismatch:        false,
+          dateMismatch:        false,
+          confirmationMethod:  "receipt_scan",
+          originalDieselAmount: dieselChanged ? origDiesel : selected.originalDieselAmount,
+          originalCashAmount:   cashChanged   ? origCash   : selected.originalCashAmount,
+        };
+        setState("saving");
+        await DB.saveDieselRequest(updReq);
+        log("PUMP CONFIRM", `Indent #${selected.indentNo} · ${selected.truckNo} · Receipt scan · Diesel ₹${confDiesel} Cash ₹${confCash} Total ₹${confTotal}${data.receiptNo?` · Receipt #${data.receiptNo}`:""}`);
+        onConfirmed(updReq, { changed: dieselChanged||cashChanged, dieselChanged, cashChanged, origDiesel, origCash });
+        return;
+      }
+
+      // Mismatch → store the image, save extracted data + flags, request stays "open"
+      setState("uploading");
+      const path = await DB.uploadDieselReceipt(selected.id, compressed);
+      const updReq = {
+        ...selected,
+        receiptImagePath:   path,
+        receiptNo:          data.receiptNo||"",
+        extractedVehicleNo: data.vehicleNo,
+        extractedAmount:    data.amount,
+        extractedDate:      data.date,
+        extractedPumpName:  data.pumpName,
+        vehicleMismatch, pumpMismatch, dateMismatch,
+        confirmationMethod: "receipt_scan",
+      };
+      setState("saving");
+      await DB.saveDieselRequest(updReq);
+      log("PUMP RECEIPT MISMATCH", `Indent #${selected.indentNo} · ${selected.truckNo} · Sent for manager review${vehicleMismatch?" · vehicle":""}${pumpMismatch?" · pump":""}${dateMismatch?" · date":""}`);
+      onPendingReview(updReq);
+    } catch(e) {
+      setError("Could not read receipt: " + e.message); setState("error");
+      logScan("diesel_receipt_scan", false, 0);
+    }
+  };
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      <button onClick={onBack} style={{background:"none",border:"none",color:C.muted,fontSize:13,cursor:"pointer",textAlign:"left",padding:0}}>← Back</button>
+      <div style={{background:C.card,borderRadius:12,padding:"14px 16px"}}>
+        <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:8,textTransform:"uppercase",letterSpacing:1}}>Uploading Receipt For</div>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:14}}>
+          <span style={{color:C.muted}}>Indent</span>
+          <span style={{fontWeight:700}}>#{selected.indentNo} · {selected.truckNo}</span>
+        </div>
+      </div>
+      {(state==="idle"||state==="error") && (
+        <FileSourcePicker onFile={handleFile} accept="image/*"
+          label="Take photo or upload receipt"
+          color={C.orange} icon="📷" />
+      )}
+      {(state==="compressing"||state==="reading"||state==="scanning"||state==="uploading"||state==="saving") && (
+        <div style={{border:`2px solid ${C.orange}44`,borderRadius:14,padding:"20px 16px",
+          textAlign:"center",background:C.bg,display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
+          <div style={{color:C.orange,fontWeight:800,fontSize:14}}>
+            {state==="compressing"?"🗜️ Shrinking image…":
+             state==="reading"?"📖 Loading image…":
+             state==="scanning"?"🤖 Reading receipt…":
+             state==="uploading"?"☁️ Uploading receipt…":"💾 Saving…"}
+          </div>
+        </div>
+      )}
+      {error && <div style={{color:C.red,fontSize:13,background:C.red+"11",borderRadius:8,padding:"10px 12px"}}>{error}</div>}
     </div>
   );
 }
@@ -11776,6 +12744,25 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
 // Dedicated view for pump_operator role — shows only open diesel requests
 // Pump operator can update amount + reason using driver's PIN
 // Once confirmed, PIN is invalidated and request is locked
+// ─── DIESEL RECEIPT-SCAN CONFIRMATION — shared matching helpers ──────────────
+// Used by both the PumpPortal upload flow and the DieselMod manager review screen.
+const normVehicleNo = v => String(v||"").replace(/[\s-]+/g,"").toUpperCase();
+const normPumpName  = s => String(s||"").toLowerCase().replace(/[^a-z0-9]/g,"");
+const normReceiptNo = s => String(s||"").trim().toUpperCase();
+const pumpNamesMatch = (extracted, stored) => {
+  const a = normPumpName(extracted), b = normPumpName(stored);
+  if (!a || !b) return false;
+  return a.includes(b) || b.includes(a); // substring either direction — receipts often print outlet+area, stored name may be shorter
+};
+const dieselDateMismatch = (extractedDate, requestDate) => {
+  if (!extractedDate || !requestDate) return true; // can't verify → treat as mismatch, send for review
+  const d1 = new Date(extractedDate+"T00:00:00");
+  const d2 = new Date(requestDate+"T00:00:00");
+  if (isNaN(d1) || isNaN(d2)) return true;
+  const diffDays = Math.abs(d1 - d2) / 86400000;
+  return diffDays > 1;
+};
+
 function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayments=[], user, log}) {
   const [activeTab,   setActiveTab]   = useState("open");   // open | history | payments
   const [lrSearch,    setLrSearch]    = useState("");
@@ -11785,8 +12772,10 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
   const [reason,       setReason]       = useState("");
   const [pinEntry,    setPinEntry]    = useState("");
   const [pinError,    setPinError]    = useState(false);
+  const [confirming,  setConfirming]  = useState(false); // true while a confirmation save is in flight — blocks re-entry and drives the loading UI
   const [confirmed,   setConfirmed]   = useState(null);
-  const [step,        setStep]        = useState("list"); // list | review | pin | done
+  const [pendingReview, setPendingReview] = useState(null); // receipt saved, mismatch found, awaiting manager
+  const [step,        setStep]        = useState("list"); // list | review | pin | receipt | done
 
   // History date filter
   const [histFrom,    setHistFrom]    = useState("");
@@ -11820,7 +12809,7 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
 
   const resetFlow = () => {
     setSelected(null); setNewDieselAmt(""); setNewCashAmt(""); setReason("");
-    setPinEntry(""); setPinError(false); setStep("list");
+    setPinEntry(""); setPinError(false); setConfirmed(null); setPendingReview(null); setStep("list");
   };
   const startEdit = (req) => {
     setSelected(req);
@@ -11831,16 +12820,19 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
     setPinEntry(""); setPinError(false); setStep("review");
   };
   const keyPress = (k) => {
+    if(confirming) return; // a confirmation is already saving — ignore all input until it resolves
     if(pinEntry.length >= 4) return;
     const next = pinEntry + k;
     setPinEntry(next); setPinError(false);
     if(next.length === 4) validatePin(next);
   };
-  const keyDel = () => { setPinEntry(p=>p.slice(0,-1)); setPinError(false); };
+  const keyDel = () => { if(confirming) return; setPinEntry(p=>p.slice(0,-1)); setPinError(false); };
 
   const validatePin = async (pin) => {
     if(!selected) return;
+    if(confirming) return; // extra safety net — should be unreachable given the keyPress guard above, but never allow two saves to overlap
     if(pin !== selected.pin) { setPinError(true); setPinEntry(""); return; }
+    setConfirming(true);
     // Resolve confirmed diesel and cash — fall back to original if operator left blank
     const origDiesel = selected.dieselAmount ?? selected.amount;
     const origCash   = selected.cashAmount   ?? 0;
@@ -11860,15 +12852,25 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
       confirmedCash:   confCash,     // explicit cash confirmation field
       confirmedReason: changed ? (reason||"Changed at pump") : null,
       confirmedAt:     nowTs(),
+      confirmedBy:     user?.name || "",
       pin:             "****",
       // Track originals for the "changed" display
       originalDieselAmount: changed ? origDiesel  : selected.originalDieselAmount,
       originalCashAmount:   changed ? origCash    : selected.originalCashAmount,
     };
+    try {
+      await DB.saveDieselRequest(updReq);
+    } catch(e) {
+      setConfirming(false);
+      setPinError(false);
+      setPinEntry("");
+      alert("Could not save confirmation: " + e.message + "\n\nThis usually means a database migration hasn't been run yet. Contact the app owner.");
+      return; // don't update local state or advance the step if the DB write failed
+    }
     setDieselRequests(p=>p.map(r=>r.id===selected.id ? updReq : r));
-    await DB.saveDieselRequest(updReq);
     log("PUMP CONFIRM",`Indent #${selected.indentNo} · ${selected.truckNo} · Diesel ₹${confDiesel} Cash ₹${confCash} Total ₹${confTotal}${changed?` (was Diesel ₹${origDiesel} Cash ₹${origCash})`:""}`)
     setConfirmed({...updReq, changed, dieselChanged, cashChanged, origDiesel, origCash});
+    setConfirming(false);
     setStep("done");
   };
 
@@ -11919,7 +12921,7 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
   <table>
     <thead>
       <tr>
-        <th>#</th><th>Truck</th><th>Date</th><th>Amount</th><th>Diesel</th><th>Cash</th><th>LR</th><th>Status</th>
+        <th>#</th><th>Truck</th><th>Date</th><th>Amount</th><th>Diesel</th><th>Cash</th><th>Receipt #</th><th>LR</th><th>Status</th>
       </tr>
     </thead>
     <tbody>
@@ -11933,6 +12935,7 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
           <td class="amount">&#8377;${(r.amount||0).toLocaleString("en-IN")}</td>
           <td>${r.dieselAmount ? "&#8377;"+r.dieselAmount.toLocaleString("en-IN") : "&#8212;"}</td>
           <td>${r.cashAmount   ? "&#8377;"+r.cashAmount.toLocaleString("en-IN")   : "&#8212;"}</td>
+          <td>${r.receiptNo||"&#8212;"}</td>
           <td>${r.lrNo||"&#8212;"}</td>
           <td class="${statusClass}">${r.status.toUpperCase()}</td>
         </tr>`;
@@ -12022,6 +13025,12 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
                         {req.cashAmount   ? <span style={{fontSize:12,color:C.muted}}>💵 <b style={{color:C.text}}>₹{req.cashAmount.toLocaleString("en-IN")}</b></span>   : null}
                       </div>
                     ) : null}
+                    {req.rejectedReason && !req.receiptImagePath && (
+                      <div style={{marginTop:6,background:C.red+"11",border:`1px solid ${C.red}44`,borderRadius:8,
+                        padding:"6px 10px",fontSize:11,color:C.red}}>
+                        ⚠ Receipt rejected by {req.rejectedBy||"manager"}: "{req.rejectedReason}" — please upload again
+                      </div>
+                    )}
                   </div>
                   <div style={{fontWeight:800,fontSize:18,color:C.text}}>{fmt(req.amount)}</div>
                 </div>
@@ -12119,6 +13128,55 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
             }} full color={C.teal}>
               Proceed to Driver PIN Verification →
             </Btn>
+            <Btn onClick={()=>{
+              const _c = newCashAmt !== "" ? +newCashAmt : (selected.cashAmount ?? 0);
+              const _cChanged = _c !== (selected.cashAmount ?? 0);
+              if(_cChanged && !reason){alert("Select a reason for the amount change");return;}
+              setStep("receipt");
+            }} full outline color={C.orange}>
+              📷 Upload Receipt Instead
+            </Btn>
+          </div>
+        )}
+
+        {step==="receipt" && selected && (
+          <DieselReceiptScan
+            selected={selected}
+            pumps={pumps}
+            dieselRequests={dieselRequests}
+            cashAmount={newCashAmt !== "" ? +newCashAmt : (selected.cashAmount ?? 0)}
+            user={user}
+            log={log}
+            onBack={()=>setStep("review")}
+            onConfirmed={(updReq, meta)=>{
+              setDieselRequests(p=>p.map(r=>r.id===updReq.id ? updReq : r));
+              setConfirmed({...updReq, ...meta});
+              setStep("done");
+            }}
+            onPendingReview={(updReq)=>{
+              setDieselRequests(p=>p.map(r=>r.id===updReq.id ? updReq : r));
+              setPendingReview(updReq);
+              setStep("receipt_pending");
+            }}
+          />
+        )}
+
+        {step==="receipt_pending" && pendingReview && (
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <div style={{background:C.orange+"11",border:`2px solid ${C.orange}`,borderRadius:14,padding:"24px 20px",textAlign:"center"}}>
+              <div style={{fontSize:44,marginBottom:8}}>📋</div>
+              <div style={{fontWeight:800,fontSize:18,color:C.orange,marginBottom:8}}>Sent for Manager Review</div>
+              <div style={{color:C.text,fontSize:13,marginBottom:10,textAlign:"left",background:C.card,borderRadius:10,padding:"10px 14px"}}>
+                {pendingReview.vehicleMismatch && <div>⚠ Vehicle number on receipt doesn't match request</div>}
+                {pendingReview.pumpMismatch && <div>⚠ Pump name on receipt doesn't match</div>}
+                {pendingReview.dateMismatch && <div>⚠ Date on receipt differs by more than 1 day</div>}
+              </div>
+              <div style={{color:C.muted,fontSize:12,marginBottom:16}}>
+                Indent #{pendingReview.indentNo} · {pendingReview.truckNo}<br/>
+                The receipt has been saved. This indent stays open until a manager reviews and approves it.
+              </div>
+              <Btn onClick={resetFlow} full color={C.teal}>← Back to Requests</Btn>
+            </div>
           </div>
         )}
 
@@ -12165,7 +13223,7 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
             <div style={{background:C.card,borderRadius:12,padding:"20px 16px",textAlign:"center"}}>
               <div style={{color:C.text,fontWeight:700,fontSize:14,marginBottom:4}}>Driver PIN Required</div>
               <div style={{color:C.muted,fontSize:12,marginBottom:20}}>
-                Ask the driver for his 4-digit PIN and type it below
+                {confirming ? "Saving your confirmation — please wait, do not re-enter the PIN" : "Ask the driver for his 4-digit PIN and type it below"}
               </div>
               <input
                 type="password"
@@ -12173,7 +13231,9 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
                 maxLength={4}
                 value={pinEntry}
                 autoFocus
+                disabled={confirming}
                 onChange={e=>{
+                  if(confirming) return;
                   const v = e.target.value.replace(/\D/g,"").slice(0,4);
                   setPinEntry(v);
                   setPinError(false);
@@ -12183,15 +13243,23 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
                 style={{
                   width:160,textAlign:"center",letterSpacing:12,
                   fontSize:32,fontWeight:800,padding:"14px 16px",
-                  background:C.bg,outline:"none",
+                  background:confirming?C.dim:C.bg,outline:"none",
                   border:`2px solid ${pinError?C.red:pinEntry.length>0?C.teal:C.border}`,
                   borderRadius:12,color:C.text,
                   boxSizing:"border-box",
                   WebkitTextSecurity:"disc",
-                  transition:"border-color 0.15s"
+                  transition:"border-color 0.15s",
+                  opacity:confirming?0.6:1,
+                  cursor:confirming?"not-allowed":"text",
                 }}
               />
-              {pinError && (
+              {confirming && (
+                <div style={{color:C.teal,fontWeight:700,fontSize:13,marginTop:12,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+                  <span style={{display:"inline-block",width:14,height:14,border:`2px solid ${C.teal}`,borderTopColor:"transparent",borderRadius:"50%",animation:"spin 0.7s linear infinite"}} />
+                  ⏳ Confirming…
+                </div>
+              )}
+              {pinError && !confirming && (
                 <div style={{color:C.red,fontWeight:700,fontSize:13,marginTop:12}}>
                   ❌ Incorrect PIN — try again
                 </div>
@@ -12218,6 +13286,7 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
               )}
               <div style={{color:C.muted,fontSize:12,marginBottom:16}}>
                 Indent #{confirmed.indentNo} · {confirmed.truckNo}<br/>This indent is now locked. PIN is no longer valid.
+                {confirmed.confirmationMethod==="receipt_scan" && <div style={{marginTop:4}}>📷 Confirmed via receipt scan{confirmed.receiptNo?` · Receipt #${confirmed.receiptNo}`:""}</div>}
               </div>
               <Btn onClick={()=>{ setConfirmed(null); setStep("list"); setActiveTab("open"); }} full color={C.teal}>← Back to Requests</Btn>
             </div>
@@ -12357,6 +13426,187 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
   );
 }
 
+// ─── DIESEL RECEIPT REVIEW CARD — owner/manager approval for mismatched scans ─
+function DieselReceiptReviewCard({ req, pumps, dieselRequests=[], user, log, viewOnly, onApproved }) {
+  const [imgUrl, setImgUrl] = useState(null);
+  const [imgError, setImgError] = useState(false);
+  const [zoomed, setZoomed] = useState(false);
+  const [vehicleNo, setVehicleNo] = useState(req.extractedVehicleNo || req.truckNo || "");
+  const [pumpId, setPumpId] = useState(()=>{
+    const byName = pumps.find(p => pumpNamesMatch(req.extractedPumpName, p.name));
+    return byName ? byName.id : (req.pumpId || "");
+  });
+  const [date, setDate] = useState(req.extractedDate || req.date || "");
+  const [approving, setApproving] = useState(false);
+  const [rejecting, setRejecting] = useState(false);
+  const [showRejectBox, setShowRejectBox] = useState(false);
+  const [rejectReason, setRejectReason] = useState("");
+
+  useEffect(()=>{
+    let live = true;
+    DB.getDieselReceiptUrl(req.receiptImagePath).then(url => { if(live) setImgUrl(url); })
+      .catch(()=> { if(live) setImgError(true); });
+    return ()=>{ live = false; };
+  }, [req.receiptImagePath]);
+
+  const approve = async () => {
+    if (!vehicleNo.trim()) { alert("Vehicle number is required"); return; }
+    if (!date) { alert("Date is required"); return; }
+    // Safety net — duplicate should already have been blocked at upload time, but re-check here too
+    if (req.receiptNo) {
+      const dup = dieselRequests.find(r => r.id !== req.id && r.receiptNo && normReceiptNo(r.receiptNo) === normReceiptNo(req.receiptNo));
+      if (dup) {
+        alert(`Receipt #${req.receiptNo} is already attached to Indent #${dup.indentNo} (${dup.truckNo}) — status: ${dup.status.toUpperCase()}. This receipt can't be approved for two requests.`);
+        return;
+      }
+    }
+    setApproving(true);
+    try {
+      const dieselAmount = req.extractedAmount ?? req.dieselAmount ?? req.amount;
+      const cashAmount   = req.cashAmount ?? 0;
+      const updReq = {
+        ...req,
+        truckNo: normVehicleNo(vehicleNo),
+        pumpId:  pumpId || req.pumpId,
+        date,
+        status:          "confirmed",
+        dieselAmount,
+        cashAmount,
+        amount:          dieselAmount + cashAmount,
+        confirmedAmount: dieselAmount,
+        confirmedCash:   cashAmount,
+        confirmedReason: "Approved after manager review (receipt scan)",
+        confirmedAt:     nowTs(),
+        confirmedBy:     user?.name || "",
+        pin:             "****",
+        vehicleMismatch: false,
+        pumpMismatch:    false,
+        dateMismatch:    false,
+        confirmationMethod: "receipt_scan",
+        reviewedBy:      user?.id || user?.name || "",
+        reviewedAt:      nowTs(),
+      };
+      await DB.saveDieselRequest(updReq);
+      log("DIESEL RECEIPT APPROVED", `Indent #${req.indentNo} · ${updReq.truckNo} · ₹${dieselAmount} by ${user?.name||"manager"}`);
+      onApproved(updReq);
+    } catch(e) {
+      alert("Could not save approval: " + e.message);
+    } finally {
+      setApproving(false);
+    }
+  };
+
+  const rejectReceipt = async () => {
+    if (!rejectReason.trim()) { alert("Add a short reason so the operator knows what to fix"); return; }
+    setRejecting(true);
+    try {
+      // Clear the receipt — request stays "open" so the operator can upload a fresh one (or use PIN, still valid)
+      const updReq = {
+        ...req,
+        receiptImagePath:   "",
+        receiptNo:          "",
+        extractedVehicleNo: "",
+        extractedAmount:    null,
+        extractedDate:      "",
+        extractedPumpName:  "",
+        vehicleMismatch:    false,
+        pumpMismatch:       false,
+        dateMismatch:       false,
+        confirmationMethod: "",
+        rejectedReason:     rejectReason.trim(),
+        rejectedBy:         user?.name || "",
+        rejectedAt:         nowTs(),
+      };
+      await DB.saveDieselRequest(updReq);
+      await DB.deleteDieselReceipt(req.receiptImagePath);
+      log("DIESEL RECEIPT REJECTED", `Indent #${req.indentNo} · ${req.truckNo} · Sent back for reupload by ${user?.name||"manager"} · "${rejectReason.trim()}"`);
+      onApproved(updReq);
+    } catch(e) {
+      alert("Could not reject: " + e.message);
+    } finally {
+      setRejecting(false);
+    }
+  };
+
+  return (
+    <div style={{background:C.card,borderRadius:12,padding:"14px 16px",border:`1.5px solid ${C.red}44`,display:"flex",flexDirection:"column",gap:10}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div style={{fontWeight:800,fontSize:14}}>Indent #{req.indentNo} · {req.truckNo}</div>
+        <div style={{fontSize:11,color:C.muted}}>{req.date}</div>
+      </div>
+      <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+        {req.vehicleMismatch && <span style={{background:C.red+"22",color:C.red,fontSize:11,fontWeight:700,borderRadius:6,padding:"3px 8px"}}>⚠ Vehicle mismatch</span>}
+        {req.pumpMismatch    && <span style={{background:C.red+"22",color:C.red,fontSize:11,fontWeight:700,borderRadius:6,padding:"3px 8px"}}>⚠ Pump mismatch</span>}
+        {req.dateMismatch    && <span style={{background:C.red+"22",color:C.red,fontSize:11,fontWeight:700,borderRadius:6,padding:"3px 8px"}}>⚠ Date mismatch</span>}
+      </div>
+
+      {imgUrl && (
+        <div style={{position:"relative"}}>
+          <img src={imgUrl} alt="Receipt" onClick={()=>setZoomed(true)}
+            style={{width:"100%",maxHeight:320,objectFit:"contain",borderRadius:8,background:C.bg,cursor:"zoom-in"}} />
+          <div onClick={()=>setZoomed(true)}
+            style={{position:"absolute",bottom:8,right:8,background:"rgba(0,0,0,0.65)",color:"#fff",
+              fontSize:11,fontWeight:700,borderRadius:6,padding:"4px 9px",cursor:"pointer"}}>
+            🔍 Tap to zoom
+          </div>
+        </div>
+      )}
+      {imgError && <div style={{color:C.muted,fontSize:12}}>Could not load receipt image.</div>}
+
+      {zoomed && imgUrl && (
+        <div onClick={()=>setZoomed(false)}
+          style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.9)",zIndex:9999,
+            display:"flex",alignItems:"center",justifyContent:"center",padding:16,cursor:"zoom-out"}}>
+          <img src={imgUrl} alt="Receipt (zoomed)"
+            style={{maxWidth:"100%",maxHeight:"100%",objectFit:"contain",touchAction:"pinch-zoom"}} />
+          <button onClick={()=>setZoomed(false)}
+            style={{position:"absolute",top:16,right:16,background:"rgba(255,255,255,0.15)",color:"#fff",
+              border:"none",borderRadius:8,width:36,height:36,fontSize:18,cursor:"pointer"}}>✕</button>
+        </div>
+      )}
+
+      <div style={{background:C.bg,borderRadius:10,padding:"10px 12px",display:"flex",flexDirection:"column",gap:8}}>
+        <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Correct & Approve</div>
+        <Field label="Vehicle No" value={vehicleNo} onChange={v=>setVehicleNo(v.toUpperCase())} />
+        <Field label="Pump" value={pumpId} onChange={setPumpId}
+          opts={[{v:"",l:"— select pump —"}, ...pumps.map(p=>({v:p.id,l:p.name}))]} />
+        <Field label="Date" value={date} onChange={setDate} type="date" />
+        <div style={{fontSize:12,color:C.muted}}>
+          ⛽ Diesel from receipt: <b style={{color:C.text}}>₹{(req.extractedAmount ?? req.dieselAmount ?? req.amount)?.toLocaleString("en-IN")}</b>
+          {" "}(overrides request — not editable here)
+        </div>
+      </div>
+
+      {!viewOnly && !showRejectBox && (
+        <div style={{display:"flex",gap:8}}>
+          <Btn onClick={approve} full color={C.green} disabled={approving}>
+            {approving ? "Saving…" : "✓ Approve & Confirm"}
+          </Btn>
+          <Btn onClick={()=>setShowRejectBox(true)} outline color={C.red} disabled={approving}>
+            ✕ Reject
+          </Btn>
+        </div>
+      )}
+
+      {!viewOnly && showRejectBox && (
+        <div style={{background:C.red+"11",border:`1.5px solid ${C.red}44`,borderRadius:10,padding:"10px 12px",display:"flex",flexDirection:"column",gap:8}}>
+          <div style={{color:C.red,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Reject & Send Back for Reupload</div>
+          <Field label="Reason (shown to operator)" value={rejectReason} onChange={setRejectReason}
+            placeholder="e.g. Photo too blurry, amount not visible…" />
+          <div style={{display:"flex",gap:8}}>
+            <Btn onClick={rejectReceipt} full color={C.red} disabled={rejecting || !rejectReason.trim()}>
+              {rejecting ? "Rejecting…" : "✕ Confirm Reject"}
+            </Btn>
+            <Btn onClick={()=>{setShowRejectBox(false); setRejectReason("");}} outline color={C.muted} disabled={rejecting}>
+              Cancel
+            </Btn>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, driverPays, setDriverPays, user, log, viewOnly=false, dieselRequests=[], setDieselRequests, settings}) {
   const [view,        setView]        = useState("requests");
   const [pumpSheet,   setPumpSheet]   = useState(false);
@@ -12370,6 +13620,9 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
   const [payPaidTo,   setPayPaidTo]   = useState("");
   const [payNote,     setPayNote]     = useState("");
   const [expandPump,  setExpandPump]  = useState(null);
+  const [editPumpNameId, setEditPumpNameId] = useState(null);
+  const [editPumpName, setEditPumpName] = useState("");
+  const [savingPumpName, setSavingPumpName] = useState(false);
   const [filterFrom,  setFilterFrom]  = useState("");
   const [filterTo,    setFilterTo]    = useState("");
   const [showFilter,  setShowFilter]  = useState(false);
@@ -12427,6 +13680,10 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
   // Only truly confirmed = confirmed:true AND has a valid linked trip
   const confirmedIndents = Array.from(_confirmedMap.values())
     .filter(i => i.confirmed && i.tripId && trips.some(t => t.id === i.tripId));
+  // Diesel requests with a receipt uploaded that has a vehicle/pump/date mismatch —
+  // stay "open" and wait here for owner/manager review + approval.
+  const pendingReceiptReviews = (dieselRequests||[]).filter(r => r.receiptImagePath && r.status === "open");
+
   // Indents with no matching trip — flagged for owner
   const unmatchedIndents = indents.filter(i => i.unmatched);
   // Red alerts = unmatched + truck mismatch + amount mismatch + indent mismatch + confirmed but no trip
@@ -12998,6 +14255,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
 
       <PillBar items={[
         {id:"requests", label:`Requests (${(dieselRequests||[]).filter(r=>r.status!=="attached").length})`, color:C.teal},
+        ...(pendingReceiptReviews.length>0 ? [{id:"review", label:`📷 Review (${pendingReceiptReviews.length})`, color:C.red}] : []),
         {id:"pumps",    label:"By Pump",   color:C.orange},
         ...(user.role==="owner"?[{id:"payments", label:`Payments (${(pumpPayments||[]).length})`, color:C.green}]:[]),
         {id:"indents",  label:`Indents (${confirmedIndents.length})`, color:C.blue},
@@ -13005,6 +14263,21 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
         ...(user.role==="owner"?[{id:"reconcile", label:"🔍 Reconcile", color:C.red}]:[]),
         {id:"history",  label:"Alerts", color:C.muted},
       ]} active={view} onSelect={setView} />
+
+      {/* ── RECEIPT REVIEW VIEW — mismatches flagged by the scan, manager corrects & approves ── */}
+      {view==="review" && (
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          {pendingReceiptReviews.length===0 && (
+            <div style={{textAlign:"center",color:C.muted,padding:48,fontSize:14}}>No receipts awaiting review</div>
+          )}
+          {pendingReceiptReviews.map(req => (
+            <DieselReceiptReviewCard key={req.id} req={req} pumps={pumps} dieselRequests={dieselRequests} user={user} log={log}
+              viewOnly={viewOnly}
+              onApproved={updReq => setDieselRequests(p=>p.map(r=>r.id===updReq.id?updReq:r))}
+            />
+          ))}
+        </div>
+      )}
 
       {/* ── PAYMENTS VIEW ── */}
       {view==="payments" && (
@@ -13100,14 +14373,49 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                 border:`1.5px solid ${p.pending>0?C.red+"44":C.green+"44"}`}}>
 
                 {/* Pump header — tap to expand */}
-                <div style={{padding:"14px 16px",cursor:"pointer"}}
-                  onClick={()=>setExpandPump(isExpanded?null:p.id)}>
+                <div style={{padding:"14px 16px"}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
-                    <div>
-                      <div style={{fontWeight:800,fontSize:15}}>{p.name}</div>
+                    <div onClick={()=> editPumpNameId!==p.id && setExpandPump(isExpanded?null:p.id)}
+                      style={{flex:1,minWidth:0,cursor:editPumpNameId===p.id?"default":"pointer"}}>
+                      {editPumpNameId===p.id ? (
+                        <div onClick={e=>e.stopPropagation()} style={{display:"flex",gap:6,alignItems:"center"}}>
+                          <input autoFocus value={editPumpName} onChange={e=>setEditPumpName(e.target.value)}
+                            style={{background:C.bg,border:`1.5px solid ${C.teal}`,borderRadius:8,color:C.text,
+                              padding:"7px 10px",fontSize:14,fontWeight:700,outline:"none",flex:1,minWidth:0}} />
+                          <button disabled={savingPumpName||!editPumpName.trim()} onClick={async ()=>{
+                              const nm = editPumpName.trim();
+                              if(!nm){ return; }
+                              setSavingPumpName(true);
+                              try {
+                                const updated = {...p, name: nm};
+                                await DB.savePump(updated);
+                                setPumps(prev => prev.map(x => x.id===p.id ? {...x, name: nm} : x));
+                                log("EDIT PUMP NAME", `${p.name} → ${nm}`);
+                                setEditPumpNameId(null);
+                              } catch(e) { alert("Could not save: "+e.message); }
+                              finally { setSavingPumpName(false); }
+                            }}
+                            style={{background:C.green,color:"#fff",border:"none",borderRadius:8,padding:"7px 12px",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+                            {savingPumpName?"…":"✓"}
+                          </button>
+                          <button onClick={()=>setEditPumpNameId(null)}
+                            style={{background:"none",border:`1.5px solid ${C.border}`,borderRadius:8,padding:"7px 10px",fontSize:13,cursor:"pointer",color:C.muted}}>
+                            ✕
+                          </button>
+                        </div>
+                      ) : (
+                        <div style={{display:"flex",alignItems:"center",gap:6}}>
+                          <div style={{fontWeight:800,fontSize:15}}>{p.name}</div>
+                          {user.role==="owner" && (
+                            <button onClick={e=>{e.stopPropagation(); setEditPumpNameId(p.id); setEditPumpName(p.name); setExpandPump(p.id);}}
+                              style={{background:"none",border:"none",color:C.muted,fontSize:13,cursor:"pointer",padding:"2px 4px"}}
+                              title="Edit pump name">✎</button>
+                          )}
+                        </div>
+                      )}
                       <div style={{color:C.muted,fontSize:12,marginTop:2}}>{p.pIndents.length} confirmed indents</div>
                     </div>
-                    <div style={{textAlign:"right"}}>
+                    <div style={{textAlign:"right"}} onClick={()=> editPumpNameId!==p.id && setExpandPump(isExpanded?null:p.id)}>
                       <div style={{fontSize:11,color:C.muted}}>Pending to Credit</div>
                       <div style={{color:p.pending>0?C.red:C.green,fontWeight:800,fontSize:20}}>
                         {fmt(Math.max(0,p.pending))}
@@ -13115,7 +14423,8 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                     </div>
                   </div>
                   {/* Mini balance bar */}
-                  <div style={{marginTop:10,display:"flex",gap:10,fontSize:12}}>
+                  <div style={{marginTop:10,display:"flex",gap:10,fontSize:12,cursor:"pointer"}}
+                    onClick={()=> editPumpNameId!==p.id && setExpandPump(isExpanded?null:p.id)}>
                     <span style={{color:C.muted}}>Total Owed: <b style={{color:C.text}}>{fmt(p.totalOwed)}</b></span>
                     <span style={{color:C.muted}}>Paid: <b style={{color:C.green}}>{fmt(p.totalPaid)}</b></span>
                     <span style={{color:C.muted,marginLeft:"auto"}}>{isExpanded?"▲":"▼"}</span>
@@ -13284,21 +14593,27 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
           if (drCashAmt === "") { alert("Cash amount is required — enter 0 if no cash is being given"); return; }
           if (!drPumpId)       { alert("Select a Petrol Pump — it is mandatory for diesel requests"); return; }
           const pin = genUniquePinForTruck(drTruckNo);
-          const req = {
-            id:uid(), indentNo:nextNo,
+          const buildRecord = (indentNo) => ({
+            id:uid(), indentNo,
             truckNo:drTruckNo.trim().toUpperCase(),
             pumpId:drPumpId||null,
             amount:totalAmt,
             dieselAmount: dieselComp,
             cashAmount:   cashComp,
             date:today(), pin, status:"open",
-            confirmedAmount:null, confirmedReason:null, confirmedAt:null,
-            tripId:null, lrNo:null,
             requestedBy: user.username,
             createdBy:user.username, createdAt:nowTs(),
-          };
+          });
+          // Atomic claim — retries with a fresh number if another device/tab
+          // took this one first (race condition fix). nextNo here is just a
+          // starting guess; the DB is the actual source of truth on conflict.
+          const result = await DB.createDieselRequestSafe(buildRecord, nextNo);
+          if(!result.success) {
+            alert("Could not create diesel request: " + result.error);
+            return;
+          }
+          const req = result.record;
           setDieselRequests(p=>[req,...(p||[])]);
-          await DB.saveDieselRequest(req);
           // Auto-create vehicle if truck is new (truckNo only, no phone required here)
           const tn = req.truckNo;
           if(tn && typeof setVehicles==="function" && !(vehicles||[]).find(v=>v.truckNo===tn)) {
@@ -13709,6 +15024,13 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                       {req.status==="confirmed" && (
                         <div style={{color:C.teal,fontSize:11,marginTop:2}}>
                           ✓ Confirmed by pump — PIN invalidated
+                          {(req.confirmedBy||req.receiptNo) && (
+                            <div style={{marginTop:2,color:C.text}}>
+                              {req.confirmedBy && <span>Confirmed by: <b>{req.confirmedBy}</b></span>}
+                              {req.confirmedBy && req.receiptNo && <span>{" · "}</span>}
+                              {req.receiptNo && <span>Receipt #: <b>{req.receiptNo}</b></span>}
+                            </div>
+                          )}
                           {(req.originalDieselAmount!=null||req.originalCashAmount!=null) && (
                             <div style={{marginTop:2}}>
                               {req.originalDieselAmount!=null && req.originalDieselAmount!==req.dieselAmount && (
@@ -15301,7 +16623,7 @@ function DeductPerTripField({ownerVehs, ownerTruckNos, ownerDeductPerTrip, setVe
 }
 
 // ─── VEHICLES ─────────────────────────────────────────────────────────────────
-function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log, settings, setSettings, employees=[]}) {
+function Vehicles({trips, setTrips, loanTrips=null, vehicles, setVehicles, driverPays, user, log, settings, setSettings, employees=[]}) {
   const isOwner = user.role === "owner";
   const [sheet,    setSheet]    = useState(false);
   const [editId,   setEditId]   = useState(null);
@@ -15380,11 +16702,13 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
     const totalPaid = pays.reduce((s,p)=>s+(p.amount||0),0);
     const ownerNamePDF = (v.ownerName||"").trim();
     const ownerVehsPDF = ownerNamePDF ? (vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerNamePDF) : [v];
-    const ownerLoanGivenPDF = ownerVehsPDF.reduce((s,x)=>s+(x.loan||0),0);
-    // Calculate recovered from actual trip data — not stored field which can drift
-    const ownerTruckNos = new Set(ownerVehsPDF.map(x=>x.truckNo));
-    const ownerLoanRecovPDF = (trips||[]).filter(t=>ownerTruckNos.has(t.truckNo)).reduce((s,t)=>s+(t.loanRecovery||0),0);
-    const loanBal = ownerLoanGivenPDF - ownerLoanRecovPDF;
+    const _lsPDF = ownerLoanStatus(vehicles, v, loanTrips||trips);
+    const ownerLoanGivenPDF = _lsPDF.given;
+    const ownerLoanRecovPDF = _lsPDF.recovered;
+    // Outstanding never goes below zero; anything taken beyond the loan is
+    // reported separately as over-recovery rather than as a negative balance.
+    const loanBal = _lsPDF.balance;
+    const loanOver = _lsPDF.overRecovered;
     const isMultiVehOwner = ownerVehsPDF.length > 1;
     // Calculate shortage recovered from trips
     const vShortRecovPDF = vtrips.reduce((s,t)=>s+(t.shortageRecovery||0),0);
@@ -15512,6 +16836,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
       <tr><th>${isMultiVehOwner?"Owner Total Loan Given":"Total Loan Given"}</th><td>₹${fmt(ownerLoanGivenPDF)}</td></tr>
       <tr><th>Recovered</th><td>₹${fmt(ownerLoanRecovPDF)}</td></tr>
       <tr><th style="color:#dc2626">Balance Due</th><td style="font-weight:800;color:${loanBal>0?"#dc2626":"#15803d"}">₹${fmt(loanBal)}</td></tr>
+      ${loanOver>0?`<tr><th style="color:#b45309">Over-Recovered (owed back)</th><td style="font-weight:800;color:#b45309">₹${fmt(loanOver)}</td></tr>`:""}
       ${isMultiVehOwner?`<tr><th>This Vehicle Given</th><td>₹${fmt(v.loan||0)}</td></tr><tr><th>This Vehicle Recovered</th><td>₹${fmt(vLoanRecovPDF)}</td></tr>`:""}
       <tr><th>Deduct / Trip</th><td>₹${fmt(v.deductPerTrip||0)}</td></tr>
     </table>
@@ -15548,9 +16873,11 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
     const truckNos = new Set(ownerVehs.map(v=>v.truckNo));
     const ownerTrips = (trips||[]).filter(t=>truckNos.has(t.truckNo));
     const ownerPays = (driverPays||[]).filter(p=>truckNos.has(p.truckNo));
-    const totalLoan = ownerVehs.reduce((s,v)=>s+(v.loan||0),0);
-    const totalRecov = ownerTrips.reduce((s,t)=>s+(t.loanRecovery||0),0);
-    const loanBal = Math.max(0, totalLoan - totalRecov);
+    const _lsOwner = ownerLoanStatus(vehicles, ownerVehs[0], loanTrips||trips);
+    const totalLoan = _lsOwner.given;
+    const totalRecov = _lsOwner.recovered;
+    const loanBal = _lsOwner.balance;
+    const loanOver = _lsOwner.overRecovered;
     const totalShortOwed = ownerVehs.reduce((s,v)=>s+(v.shortageOwed||0),0);
     const totalShortRecov = ownerTrips.reduce((s,t)=>s+(t.shortageRecovery||0),0);
     const shortBal = Math.max(0, totalShortOwed - totalShortRecov);
@@ -15566,7 +16893,12 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
       const vPaid = ownerPays.filter(p=>p.truckNo===v.truckNo).reduce((s,p)=>s+(p.amount||0),0);
       const vLoanRecov = vTrips.reduce((s,t)=>s+(t.loanRecovery||0),0);
       const vShortRecov = vTrips.reduce((s,t)=>s+(t.shortageRecovery||0),0);
-      const vLoanBal = Math.max(0,(v.loan||0)-vLoanRecov);
+      // Per-vehicle LOAN and RECOVERED stay per-vehicle (they show WHERE each
+      // amount sits), but the balance is an owner-level fact — a loan given on
+      // one truck and recovered on another is still one loan. Showing
+      // max(0, thisVehicleLoan − thisVehicleRecovered) made the lending truck
+      // look unpaid while the recovering truck's surplus vanished.
+      const vLoanBal = ownerLoanStatus(vehicles, v, loanTrips||trips).balance;
       const vShortBal = Math.max(0,(v.shortageOwed||0)-vShortRecov);
       return '<tr>'
         +'<td class="l b">'+v.truckNo+'</td>'
@@ -15693,6 +17025,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
       <div class="kpi"><div class="label">Vehicles</div><div class="value">${ownerVehs.length}</div></div>
       <div class="kpi"><div class="label">Total Trips</div><div class="value">${ownerTrips.length}</div></div>
       <div class="kpi"><div class="label">Loan Balance</div><div class="value" style="color:${loanBal>0?"#dc2626":"#16a34a"}">${fmt(loanBal)}</div></div>
+      ${loanOver>0?`<div class="kpi" style="background:#fff7ed;border-color:#f59e0b66"><div class="label">Over-Recovered (owed back)</div><div class="value" style="color:#b45309">${fmt(loanOver)}</div></div>`:""}
       <div class="kpi"><div class="label">Shortage Bal.</div><div class="value" style="color:${shortBal>0?"#dc2626":"#16a34a"}">${fmt(shortBal)}</div></div>
       <div class="kpi"><div class="label">Total Paid</div><div class="value" style="color:#16a34a">${fmt(totalPaid)}</div></div>
     </div>
@@ -16571,10 +17904,12 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
         const seenOwners = new Set();
         return filtered.map(v=>{
         const ownerName2 = (v.ownerName||"").trim();
-        const ownerVehs2 = ownerName2 ? (vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerName2) : [v];
-        const ownerLoanG2 = ownerVehs2.reduce((s,x)=>s+(x.loan||0),0);
-        const ownerLoanR2 = ownerVehs2.reduce((s,x)=>s+(x.loanRecovered||0),0);
-        const ownerBal2 = ownerLoanG2 - ownerLoanR2;
+        const _ls2 = ownerLoanStatus(vehicles, v, loanTrips||trips);
+        const ownerVehs2 = _ls2.ownerVehs.length ? _ls2.ownerVehs : [v];
+        const ownerLoanG2 = _ls2.given;
+        const ownerLoanR2 = _ls2.recovered;
+        const ownerBal2 = _ls2.balance;
+        const ownerOver2 = _ls2.overRecovered;
         const vBal=(v.loan||0)-(v.loanRecovered||0); // per-vehicle
         const isFirstOfOwner = ownerName2 ? !seenOwners.has(ownerName2) : true;
         if(ownerName2) seenOwners.add(ownerName2);
@@ -16591,7 +17926,9 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                 <div style={{color:C.muted,fontSize:12}}>{v.ownerName||"—"}{v.phone?` · ${v.phone}`:""}</div>
               </div>
               <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:4}}>
-                <Badge label={ownerBal2>0?"Loan Due":"Clear"} color={ownerBal2>0?C.red:C.green} />
+                <Badge
+                  label={ownerBal2>0?"Loan Due":ownerOver2>0?`Over-recovered ₹${fmt(ownerOver2)}`:"Clear"}
+                  color={ownerBal2>0?C.red:ownerOver2>0?C.orange:C.green} />
                 {isTafalExempt(v, employees)&&<Badge label={v.tafalExempt?"TAFAL Exempt":"TAFAL Exempt (assigned to employee)"} color={C.muted} />}
                 {isOwner ? (
                 <button onClick={()=>{setF({
@@ -18041,21 +19378,24 @@ const SearchBar = ({value,onChange,placeholder}) => (
   </div>
 );
 
-function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, setVehicles, gstReleases, setGstReleases, expenses, setExpenses, user, log}) {
+function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, setVehicles, gstReleases, setGstReleases, expenses, setExpenses, user, log, employees=[], actionItems=[], setActionItems, invoiceRegistry=[], setInvoiceRegistry, clinkerBills=[], setClinkerBills}) {
 
   const [activeTab,   setActiveTab]   = useState("overview");
   const [scanResult,  setScanResult]  = useState(null);
   const [scanning,    setScanning]    = useState(false);
   const [scanError,   setScanError]   = useState(null);
+  const [applyingInvoice, setApplyingInvoice] = useState(false);
   const [showAlert,   setShowAlert]   = useState(true);
   const [newExp,      setNewExp]      = useState({tripId:"", label:"", amount:""});
   // Clinker Bill state
   const [showClinkerBill, setShowClinkerBill] = useState(false);
   const [clinkerBill, setClinkerBill] = useState({
-    invoiceNo:"", invoiceDate:"", rate:"", tons:"", gstPct:"5", isPrevFY:false,
+    invoiceNo:"", invoiceDate:"", gstPct:"5", isPrevFY:false,
+    rateLines: [{rate:"", tons:""}], // multiple rate slabs within one invoice — e.g. 200 MT @ ₹1000, 100 MT @ ₹1100
   });
-  const [manualClinkerSelect, setManualClinkerSelect] = useState(false);
-  const [manualClinkerIds,    setManualClinkerIds]    = useState([]);
+  // Manual selection is per rate-line now (each line needs its own trip set,
+  // since different lines bill at different rates) — keyed by line index.
+  const [savingClinkerBill,  setSavingClinkerBill]    = useState(false);
   const [searchInv,   setSearchInv]   = useState("");
   const [searchAdv,   setSearchAdv]   = useState("");
   const [searchShort, setSearchShort] = useState("");
@@ -18147,20 +19487,49 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
   const shreeInvoices = useMemo(() => {
     const map = {};
     const isValidDate = d => /^\d{4}-\d{2}-\d{2}$/.test(d);
-    payTrips.filter(t=>t.billedToShree&&t.invoiceNo).forEach(t => {
-      if(!map[t.invoiceNo]) {
-        const isClinkerPrev = (t.batchId||"").startsWith("CLINKER-PREVFY-");
-        const clinkerPrevFYNum = isClinkerPrev ? parseInt((t.batchId||"").split("CLINKER-PREVFY-")[1]||"0") : null;
-        map[t.invoiceNo] = {
-          invoiceNo:t.invoiceNo, invoiceDate:parseDD(t.invoiceDate||""), totalAmt:0, trips:[], status:"billed",
-          prevFY: isClinkerPrev || t.prevFY || t.grParticulars?.prevFY || false,
-          prevFYLabel: isClinkerPrev ? FY_LABEL(clinkerPrevFYNum) : (t.prevFYLabel||t.grParticulars?.prevFYLabel||""),
-          clinkerInvoice: isClinkerPrev || t.grParticulars?.clinkerPlaceholder || false,
-        };
+    const ensureInvoice = (invNo, dateSample, sampleTrip) => {
+      if(map[invNo]) return;
+      const isClinkerPrev = (sampleTrip.batchId||"").startsWith("CLINKER-PREVFY-");
+      const clinkerPrevFYNum = isClinkerPrev ? parseInt((sampleTrip.batchId||"").split("CLINKER-PREVFY-")[1]||"0") : null;
+      map[invNo] = {
+        invoiceNo:invNo, invoiceDate:parseDD(dateSample||""), totalAmt:0, trips:[], diCount:0, status:"billed",
+        prevFY: isClinkerPrev || sampleTrip.prevFY || sampleTrip.grParticulars?.prevFY || false,
+        prevFYLabel: isClinkerPrev ? FY_LABEL(clinkerPrevFYNum) : (sampleTrip.prevFYLabel||sampleTrip.grParticulars?.prevFYLabel||""),
+        clinkerInvoice: isClinkerPrev || sampleTrip.grParticulars?.clinkerPlaceholder || false,
+      };
+    };
+    payTrips.forEach(t => {
+      const lines = t.diLines||[];
+      if(lines.length > 0) {
+        // Multi-DI trip: one entry per BILLED diLine, grouped under THAT
+        // line's OWN invoice number and using ONLY that line's own billed
+        // amount — never the trip's combined billedToShree, which would
+        // double-count a sibling DI billed under a completely different
+        // invoice (this was the actual reported bug: SKLC744's invoice-67
+        // total included an amount from a DI that isn't even on invoice 67).
+        lines.filter(d=>d.billed && d.invoiceNo).forEach(d => {
+          ensureInvoice(d.invoiceNo, d.invoiceDate, t);
+          map[d.invoiceNo].trips.push({...t,
+            id: t.id+"__"+normalizeDI(d.diNo), // unique key per DI line, not per trip
+            diNo: d.diNo, grNo: d.grNo||t.grNo, qty: d.qty||t.qty,
+            billedToShree: d.billedAmt||0, invoiceNo: d.invoiceNo, invoiceDate: d.invoiceDate,
+          });
+          map[d.invoiceNo].totalAmt += Number(d.billedAmt||0);
+          map[d.invoiceNo].diCount += 1;
+          // Use the diLine's OWN paid flag — NOT trip-level t.paymentDate,
+          // which is shared/"most recent" across all DIs on this trip and
+          // would incorrectly mark THIS invoice paid just because a sibling
+          // DI (billed under a different invoice) was paid separately.
+          if(d.paid) map[d.invoiceNo].status = "paid";
+        });
+      } else if(t.billedToShree && t.invoiceNo) {
+        // Single-DI trip: unchanged, one DI = one invoice always.
+        ensureInvoice(t.invoiceNo, t.invoiceDate, t);
+        map[t.invoiceNo].trips.push(t);
+        map[t.invoiceNo].totalAmt += Number(t.billedToShree||0);
+        map[t.invoiceNo].diCount += 1;
+        if(t.paymentDate) map[t.invoiceNo].status = "paid";
       }
-      map[t.invoiceNo].trips.push(t);
-      map[t.invoiceNo].totalAmt += Number(t.billedToShree||0);
-      if(t.paymentDate) map[t.invoiceNo].status = "paid";
     });
     // If invoiceDate is invalid/missing, use earliest trip date as fallback
     Object.values(map).forEach(inv => {
@@ -18171,6 +19540,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     });
     return Object.values(map).sort((a,b)=>(b.invoiceDate||"").localeCompare(a.invoiceDate||""));
   }, [trips, payClient, payMaterial]);
+
 
   const shreeTrips = payTrips.filter(t=>t.billedToShree)
     .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
@@ -18382,7 +19752,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     const stGr = (st.grNo||"").trim();
     let expectedAmt = 0;
 
-    if((trip.diLines||[]).length > 1) {
+    if((trip.diLines||[]).length > 0) {
       // ── Multi-DI trip: compute per-DI expected = DI qty × DI frRate ──────────
       const diLine = stDi
         ? trip.diLines.find(d=>(d.diNo||"").trim()===stDi)
@@ -18406,7 +19776,11 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
           if(totalQty > 0 && totalBilled > 0) {
             expectedAmt = Math.round((diLine.qty||0) / totalQty * totalBilled);
           } else {
-            return {ok:true, diff:0, invoiceAmt, expectedAmt:invoiceAmt, note:"unverifiable"};
+            // Genuinely can't compute an expected amount (no per-DI rate, no
+            // trip-level rate, no existing billedToShree to split). Do NOT
+            // silently accept this as "fine" — flag it for owner review with
+            // a distinct note instead of creating zero visibility.
+            return {ok:false, diff:null, invoiceAmt, expectedAmt:0, note:"unverifiable"};
           }
         }
       } else {
@@ -18419,11 +19793,11 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     }
 
     const diff = invoiceAmt - expectedAmt;
-    const ok = Math.abs(diff) < 2; // ₹2 rounding tolerance
+    const ok = diff === 0; // exact match required — no tolerance
     return {ok, diff, invoiceAmt, expectedAmt};
   };
 
-  const applyInvoiceScan = () => {
+  const applyInvoiceScan = async () => {
     if(!scanResult || scanResult.type!=="invoice") return;
     const invNo = scanResult.invoiceNo;
     const invDate = parseDD(scanResult.invoiceDate);
@@ -18433,14 +19807,53 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                        : chosenMaterial==="Raw Material" ? "inbound"
                        : null;
 
-    // Block if invoice already saved
-    if((trips||[]).some(t=>t.invoiceNo===invNo)) {
-      setScanError("Invoice "+invNo+" is already scanned and saved. No changes made.");
+    // CRITICAL: fetch the full, authoritative trip list directly from the DB
+    // rather than trusting the client-side `trips` state. `trips` is loaded
+    // via a 90-day window by default (see DB.getTrips) — an invoice can
+    // legitimately cover older DIs (e.g. a delayed billing cycle), and the
+    // review screen can show them as correctly matched (if `trips` happened
+    // to be fuller at that render) while the actual apply step later runs
+    // against a smaller/reset `trips` array, silently skipping them. This
+    // was a real bug: trips confirmed "✓ matched" on the review screen never
+    // got billed because they weren't in the array `setTrips` mapped over.
+    setApplyingInvoice(true);
+    let authoritativeTrips;
+    try {
+      authoritativeTrips = await DB.getTripsAll();
+    } catch(e) {
+      setApplyingInvoice(false);
+      setScanError("Could not load the full trip list to apply this invoice safely: "+e.message+". Please check your connection and try again.");
+      return;
+    }
+    setApplyingInvoice(false);
+
+    // Block only when EVERY line on this invoice is already fully resolved —
+    // either billed onto a trip/DI-line, or already sitting as an open action
+    // item. A PARTIALLY processed invoice (some lines billed, one genuinely
+    // missing) must still be re-scannable so the remaining line gets its
+    // action item created — re-billing already-billed lines is harmless
+    // (same invoiceNo/date/amount gets written again).
+    const scTripsForDupeCheck = scanResult.trips||[];
+    const lineAlreadyResolved = (st) => {
+      const m = matchInvoiceLine(st, authoritativeTrips);
+      if(m) {
+        const t = m.trip;
+        if((t.diLines||[]).length > 0) {
+          const stDi = normalizeDI(st.diNo), stGr = normalizeDI(st.grNo);
+          const dl = t.diLines.find(d => (stDi && normalizeDI(d.diNo)===stDi) || (!stDi && stGr && normalizeDI(d.grNo)===stGr));
+          if(dl?.billed && dl.invoiceNo===invNo) return true;
+        } else if(t.invoiceNo===invNo) return true;
+      }
+      return (actionItems||[]).some(ai=>ai.invoiceNo===invNo && ai.status==="open" && normalizeDI(ai.diNo)===normalizeDI(st.diNo));
+    };
+    if(scTripsForDupeCheck.length>0 && scTripsForDupeCheck.every(lineAlreadyResolved)) {
+      setScanError("Invoice "+invNo+" is already fully processed. No changes made.");
       return;
     }
 
     const scTrips = scanResult.trips||[];
-    const allTrips = trips||[];
+    const allTrips = authoritativeTrips;
+    const ts = nowTs();
 
     // Separate unmatched into prevFY vs current FY (check TRIP dates only, not invoice date)
     const unmatched = scTrips.filter(st => !matchInvoiceLine(st, allTrips));
@@ -18450,26 +19863,13 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     });
     const currentFYUnmatched = unmatched.filter(st => !prevFYUnmatched.includes(st));
 
-    // Block if any current FY trips are missing in DB
-    if(currentFYUnmatched.length > 0) {
-      const details = currentFYUnmatched.map(st =>
-        "DI: "+(st.diNo||"---")+" / GR: "+(st.grNo||"---")+" / Rs."+Number(st.frtAmt||0).toLocaleString("en-IN")
-      ).join("\n");
-      setScanError(
-        currentFYUnmatched.length+" trip"+(currentFYUnmatched.length>1?"s":"")+" not found in your Trips:\n\n"+
-        details+"\n\nAdd these trips first, then scan invoice again."
-      );
-      return;
-    }
-
-    // Save prevFY placeholder records (if any) then continue to process matched trips
+    // Save prevFY placeholder records (if any) — unchanged: these are genuinely
+    // out-of-scope trips from a closed FY, not "employee hasn't uploaded the DI yet".
     if(prevFYUnmatched.length > 0) {
       const parsedInvDate = parseDD(scanResult.invoiceDate || "");
-      // Safe FY label from trip date (avoid NaN if invoice date is missing)
       const firstTripDate = parseDD(prevFYUnmatched[0].date||"");
       const sampleFY = firstTripDate ? getFY(firstTripDate) : null;
       const fyLabel = sampleFY ? FY_LABEL(sampleFY) : "Previous FY";
-      const ts = nowTs();
       const prevFYTrips = prevFYUnmatched.map(st => ({
         id: (typeof crypto!=="undefined"&&crypto.randomUUID)?crypto.randomUUID():"prevfy_"+(st.diNo||Date.now())+"_"+Math.random().toString(36).slice(2,8),
         prevFY: true, prevFYLabel: fyLabel,
@@ -18480,76 +19880,183 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         qty: st.qty||0, frRate: st.frRate||0,
         billedToShree: Number(st.frtAmt||0),
         status: "Billed", billedBy: "scan", billedAt: ts, shreeStatus: "billed",
-        date: invDate||parsedInvDate||ts.slice(0,10), // invoice date (current FY) so it shows in billing tab
-        tripDate: parseDD(st.date||""), // original DI trip date preserved for reference
+        date: invDate||parsedInvDate||ts.slice(0,10),
+        tripDate: parseDD(st.date||""),
         lrNo: "", orderType: "outbound", client: chosenClient||"", type: "outbound",
       }));
       setTrips(prev => [...prev, ...prevFYTrips]);
       Promise.all(prevFYTrips.map(t => DB.saveTrip(t).catch(e => console.error("saveTrip prevFY:",e))));
       log && log("PrevFY "+prevFYTrips.length+" DIs saved under "+invNo+" ("+fyLabel+")");
-      // Do NOT return here - fall through to process any matched current-year trips
     }
 
-    // Check amount mismatches — distinguish hard mismatches from unverifiable multi-DI lines
-    const mismatches = scTrips.filter(st=>{
-      const m = matchInvoiceLine(st, allTrips);
-      if(!m) return false;
-      const check = checkAmount(st, m.trip);
-      return !check.ok && !check.note; // skip "unverifiable" and "unmatched-di" notes
-    });
-    const unverifiable = scTrips.filter(st=>{
-      const m = matchInvoiceLine(st, allTrips);
-      if(!m) return false;
-      const check = checkAmount(st, m.trip);
-      return check.note === "unverifiable"; // multi-DI without frRate per line
-    });
+    // ── Current-FY DIs missing from the app → action item, does NOT block the invoice.
+    // Employee resolved via most recent trip on this truck; brand-new truck = owner-only.
+    // Skip any line that already has an open action item for this exact DI+invoice
+    // (re-scanning a partially-processed invoice must not create duplicates).
+    const missingActionItems = currentFYUnmatched
+      .filter(st => !(actionItems||[]).some(ai=>ai.type==="missing_di" && ai.status==="open"
+        && ai.invoiceNo===invNo && normalizeDI(ai.diNo)===normalizeDI(st.diNo)))
+      .map(st => {
+        const truckNo = String(st.truckNo||"").replace(/\s+/g,"").toUpperCase();
+        const empId = resolveEmpForTruck(truckNo, allTrips); // "" = owner-only/unassigned
+        return {
+          id: uid()+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
+          type: "missing_di", status: "open",
+          diNo: normalizeDI(st.diNo), grNo: normalizeDI(st.grNo), truckNo,
+          invoiceNo: invNo, invoiceDate: invDate,
+          invoiceAmt: Number(st.frtAmt||0), expectedAmt: 0,
+          empId, tripId: "",
+          note: "",
+          createdAt: ts,
+        };
+      });
 
-    if(mismatches.length > 0) {
-      const details = mismatches.map(st=>{
-        const m = matchInvoiceLine(st, allTrips);
-        const {invoiceAmt, expectedAmt} = checkAmount(st, m.trip);
-        return "DI "+(st.diNo||st.grNo)+": invoice ₹"+invoiceAmt.toLocaleString("en-IN")+" vs trip ₹"+expectedAmt.toLocaleString("en-IN");
-      }).join("\n");
-      setScanError("Amount mismatch on "+mismatches.length+" line(s):\n\n"+details+"\n\nFix the trip freight rate first, then scan again.");
-      return;
-    }
+    // ── Bill every matched line. Multi-DI trips: bill only the matching diLine
+    // (partial billing). Single-DI trips: bill the trip directly. Either way the
+    // INVOICE's own amount is what gets saved — no rejection on mismatch.
+    // Computed against `authoritativeTrips` (fresh from DB), NOT the possibly-
+    // incomplete `trips` prop — see note above.
+    let billedCount = 0;
+    const mismatchActionItems = [];
+    const conflictActionItems = [];
+    const updatedTripsMap = new Map();
+    const pushMismatchIfAny = (st, t, check) => {
+      if(check.ok) return;
+      if(check.note==="unmatched-di") return; // defensive fallback, nothing to report
+      mismatchActionItems.push({
+        id: uid()+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
+        type: "amount_mismatch", status: "open",
+        diNo: normalizeDI(st.diNo||t.diNo), grNo: normalizeDI(st.grNo||t.grNo), truckNo: t.truckNo||"",
+        invoiceNo: invNo, invoiceDate: invDate,
+        invoiceAmt: check.invoiceAmt, expectedAmt: check.expectedAmt,
+        empId: "", tripId: t.id,
+        note: check.note==="unverifiable" ? "Could not verify — no per-DI or trip freight rate on file to check against" : "",
+        createdAt: ts,
+      });
+    };
+    authoritativeTrips.forEach(t=>{
+      // Find EVERY scanned invoice line matching this trip — a multi-DI trip
+      // can have more than one of its own DIs on the SAME invoice, and every
+      // one must get billed.
+      const lineMatches = scTrips.filter(st => matchInvoiceLine(st, [t]));
+      if(lineMatches.length===0) return;
 
-    // Warn about unverifiable multi-DI lines but allow proceeding
-    if(unverifiable.length > 0) {
-      const diNos = unverifiable.map(st=>st.diNo||st.grNo).join(", ");
-      const proceed = window.confirm(
-        `⚠ ${unverifiable.length} DI line(s) in this invoice belong to multi-DI trips where per-DI freight rate is not stored:\n${diNos}\n\nCannot verify individual DI amounts. The invoice total will still be saved correctly.\n\nProceed anyway?`
-      );
-      if(!proceed) return;
-    }
-
-    // All matched and amounts OK — apply
-    let matched = 0;
-    const updatedTrips = [];
-    setTrips(prev=>prev.map(t=>{
-      const lineMatch = scTrips.reduce((found, st) => {
-        if(found) return found;
-        const r = matchInvoiceLine(st, [t]);
-        return r ? {st, via:r.via} : null;
-      }, null);
-      if(lineMatch) {
-        matched++;
-        const updated = {...t, invoiceNo:invNo, invoiceDate:invDate,
-          status:"Billed", billedBy:"scan", billedAt:nowTs(),
-          shreeStatus:"billed",
+      let updated;
+      let anyChange = false;
+      if((t.diLines||[]).length > 0) {
+        // ── Multi-DI trip: bill every matching diLine ───────────────────────────
+        let newDiLines = t.diLines;
+        lineMatches.forEach(st => {
+          const invoiceAmt = Number(st.frtAmt||0);
+          const stDi = normalizeDI(st.diNo);
+          const stGr = normalizeDI(st.grNo);
+          const target = newDiLines.find(d =>
+            (stDi && normalizeDI(d.diNo)===stDi) || (!stDi && stGr && normalizeDI(d.grNo)===stGr));
+          // A single DI must never be billed under two different invoice numbers.
+          if(target?.billed && target.invoiceNo && target.invoiceNo!==invNo) {
+            conflictActionItems.push({
+              id: uid()+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
+              type: "duplicate_di", status: "open",
+              diNo: normalizeDI(st.diNo||target.diNo), grNo: normalizeDI(st.grNo||target.grNo), truckNo: t.truckNo||"",
+              invoiceNo: invNo, invoiceDate: invDate,
+              invoiceAmt, expectedAmt: target.billedAmt||0,
+              note: `Already billed under ${target.invoiceNo} — now also appears on ${invNo}`,
+              empId: "", tripId: t.id,
+              createdAt: ts,
+            });
+            return;
+          }
+          const check = checkAmount(st, t); // checked against the ORIGINAL trip, per line
+          newDiLines = newDiLines.map(d => {
+            const dMatches = (stDi && normalizeDI(d.diNo)===stDi) || (!stDi && stGr && normalizeDI(d.grNo)===stGr);
+            if(!dMatches) return d;
+            return {...d, billed:true, invoiceNo:invNo, invoiceDate:invDate, billedAmt:invoiceAmt};
+          });
+          billedCount++;
+          anyChange = true;
+          pushMismatchIfAny(st, t, check);
+        });
+        if(!anyChange) return;
+        updated = {...t, diLines:newDiLines,
+          invoiceNo:invNo, invoiceDate:invDate,
+          ...(chosenClient ? {client:chosenClient} : {}),
+          ...(typeOverride  ? {type:typeOverride}   : {})};
+        updated.status = tripBillingStatus(updated);
+        updated.billedToShree = tripBilledAmount(updated);
+        if(updated.status==="Billed") { updated.billedBy="scan"; updated.billedAt=ts; updated.shreeStatus="billed"; }
+      } else {
+        // ── Single-DI trip: only one line can ever match; bill at trip level ────
+        const st = lineMatches[0];
+        if(t.status==="Billed" && t.invoiceNo && t.invoiceNo!==invNo) {
+          conflictActionItems.push({
+            id: uid()+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
+            type: "duplicate_di", status: "open",
+            diNo: normalizeDI(st.diNo||t.diNo), grNo: normalizeDI(st.grNo||t.grNo), truckNo: t.truckNo||"",
+            invoiceNo: invNo, invoiceDate: invDate,
+            invoiceAmt: Number(st.frtAmt||0), expectedAmt: t.billedToShree||0,
+            note: `Already billed under ${t.invoiceNo} — now also appears on ${invNo}`,
+            empId: "", tripId: t.id,
+            createdAt: ts,
+          });
+          return;
+        }
+        const check = checkAmount(st, t);
+        const invoiceAmt = Number(st.frtAmt||0);
+        updated = {...t, invoiceNo:invNo, invoiceDate:invDate,
+          status:"Billed", billedBy:"scan", billedAt:ts, shreeStatus:"billed",
           ...(chosenClient ? {client:chosenClient} : {}),
           ...(typeOverride  ? {type:typeOverride}   : {}),
-          // Always ensure billedToShree is set — fall back to qty×frRate
-          billedToShree: Number(lineMatch.st.frtAmt||0) || Number(t.billedToShree||0) || (t.qty||0)*(t.frRate||0)};
-        updatedTrips.push(updated);
-        return updated;
+          billedToShree: invoiceAmt || Number(t.billedToShree||0) || (t.qty||0)*(t.frRate||0)};
+        billedCount++;
+        pushMismatchIfAny(st, t, check);
       }
-      return t;
-    }));
-    // Persist each updated trip to DB
+
+      updatedTripsMap.set(t.id, updated);
+    });
+
+    // Merge results into React state: update whichever of these trips are
+    // currently loaded client-side, AND append any that were billed but
+    // weren't loaded (so they're immediately visible without a manual
+    // reload — this is exactly the case that silently failed before).
+    setTrips(prev => {
+      const prevIds = new Set((prev||[]).map(t=>t.id));
+      const merged = (prev||[]).map(t => updatedTripsMap.get(t.id) || t);
+      const additions = [...updatedTripsMap.values()].filter(t => !prevIds.has(t.id));
+      return [...merged, ...additions];
+    });
+
+    const updatedTrips = [...updatedTripsMap.values()];
     Promise.all(updatedTrips.map(t => DB.saveTrip(t).catch(e=>console.error("saveTrip invoice scan:",e))))
-      .then(()=>console.log(`Invoice ${invNo}: ${matched} trips saved to DB`));
-    log && log("Invoice "+invNo+" scanned — "+matched+" trip(s) marked Billed · "+chosenClient+" · "+chosenMaterial);
+      .then(()=>console.log(`Invoice ${invNo}: ${billedCount} DI line(s) billed`));
+
+    if(billedCount > 0 && setInvoiceRegistry) {
+      const existing = (invoiceRegistry||[]).find(inv=>inv.invoiceNo===invNo);
+      const regEntry = {
+        id: invNo, invoiceNo: invNo, invoiceDate: invDate,
+        client: chosenClient || existing?.client || "", material: chosenMaterial || existing?.material || "",
+        totalAmt: Number(scanResult.totalAmount||0) || existing?.totalAmt || 0,
+        diCount: billedCount + (existing?.status==="active" ? (existing?.diCount||0) : 0),
+        status: "active",
+        createdAt: existing?.createdAt || ts, createdBy: existing?.createdBy || (user?.name||""),
+        deletedAt: "", deletedBy: "",
+      };
+      setInvoiceRegistry(prev => [regEntry, ...(prev||[]).filter(inv=>inv.invoiceNo!==invNo)]);
+      DB.saveInvoiceRegistry(regEntry).catch(e=>console.error("saveInvoiceRegistry:",e));
+    }
+
+    const allNewActionItems = [...missingActionItems, ...mismatchActionItems, ...conflictActionItems];
+    if(allNewActionItems.length > 0 && setActionItems) {
+      setActionItems(prev => [...allNewActionItems, ...(prev||[])]);
+      Promise.all(allNewActionItems.map(ai => DB.saveActionItem(ai).catch(e=>console.error("saveActionItem:",e))));
+    }
+
+    const parts = [];
+    if(billedCount>0) parts.push(billedCount+" DI line(s) billed");
+    if(missingActionItems.length>0) parts.push(missingActionItems.length+" DI(s) missing — action item created");
+    if(mismatchActionItems.length>0) parts.push(mismatchActionItems.length+" amount mismatch(es) flagged");
+    if(conflictActionItems.length>0) parts.push(conflictActionItems.length+" DI(s) already billed elsewhere — conflict flagged, not overwritten");
+    log && log("Invoice "+invNo+" scanned — "+(parts.join(", ")||"no changes")+" · "+chosenClient+" · "+chosenMaterial);
+
     setScanResult(null);
     setScanClient("");
     setScanMaterial("Cement");
@@ -18566,7 +20073,10 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     const allInvList=scanResult.invoices||[], shorts=scanResult.shortages||[], exps=scanResult.expenses||[];
 
     // Separate credit entries (freight invoices we have) from debit entries (expenses/penalties)
-    const savedInvoiceNos = new Set((trips||[]).filter(t=>t.invoiceNo).map(t=>t.invoiceNo.trim()));
+    const savedInvoiceNos = new Set((trips||[]).flatMap(t => [
+      t.invoiceNo,
+      ...(t.diLines||[]).map(d=>d.invoiceNo),
+    ].filter(Boolean).map(s=>s.trim())));
     const invList = allInvList.filter(i => {
       const n = (i.invoiceNo||"").trim();
       return n && savedInvoiceNos.has(n);
@@ -18632,8 +20142,37 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     // Apply trip updates — mark paid, attach shreeShortage
     const paidTrips = [];
     const paidTripObjects = [];
+    const matchInvNos = new Set(invListFull.map(i=>(i.invoiceNo||i._matchInv||"").trim()).filter(Boolean));
     setTrips(prev=>prev.map(t=>{
-      if(invListFull.some(i=>(i.invoiceNo||i._matchInv||"").trim()===t.invoiceNo)){
+      if((t.diLines||[]).length > 0) {
+        // ── Multi-DI trip: pay only the diLine(s) whose OWN invoice is on
+        // this advice — a trip whose DIs were billed across two invoices
+        // must be payable in two separate steps, exactly like billing.
+        const matchingLines = t.diLines.filter(d=>d.billed && !d.paid && matchInvNos.has((d.invoiceNo||"").trim()));
+        if(matchingLines.length===0) return t;
+        const lrKey=(t.lrNo||t.lr||"").trim();
+        const short=shorts.find(s=>(s.lrNo||"").trim()===lrKey);
+        const newDiLines = t.diLines.map(d => matchingLines.includes(d)
+          ? {...d, paid:true, paidAmount:d.billedAmt||0, paymentDate:pDate, utr} : d);
+        const updated = {...t, diLines:newDiLines,
+          shortage: short ? (t.shortage||0)+Number(short.tonnes||0) : t.shortage,
+          shreeShortage:short?{tonnes:Number(short.tonnes||0),deduction:Number(short.deduction||0)}:t.shreeShortage};
+        updated.status = tripBillingStatus(updated);
+        updated.paidAmount = tripPaidAmount(updated);
+        // Trip-level utr/paymentDate mirror the MOST RECENT payment touching
+        // this trip — same "last write wins" convention already used for
+        // invoiceNo/invoiceDate, for the same legacy-view-compatibility reason.
+        updated.utr = utr; updated.paymentDate = pDate;
+        updated.shreeStatus = updated.status==="Paid" ? "paid" : updated.status==="Partially Paid" ? "partially_paid" : updated.shreeStatus;
+        // Only clean up party files once the trip is FULLY paid — a
+        // partially-paid multi-DI trip still has outstanding DIs that may
+        // need those files for reference.
+        if(updated.status==="Paid" && t.orderType==="party" && t.id) paidTrips.push(t.id);
+        paidTripObjects.push(updated);
+        return updated;
+      }
+      // ── Single-DI trip: unchanged ────────────────────────────────────────────
+      if(matchInvNos.has((t.invoiceNo||"").trim())){
         const lrKey=(t.lrNo||t.lr||"").trim();
         const short=shorts.find(s=>(s.lrNo||"").trim()===lrKey);
         if(t.orderType==="party" && t.id) paidTrips.push(t.id);
@@ -18772,12 +20311,74 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
   // delete (owner only)
   const deleteInvoice = async (invoiceNo) => {
     if(!window.confirm(`Delete invoice ${invoiceNo}? This will unmark all its trips.`)) return;
-    const updated = (trips||[]).map(t=>t.invoiceNo===invoiceNo
-      ?{...t,invoiceNo:"",invoiceDate:"",billedToShree:0,shreeStatus:"pending"}:t);
+    const updated = (trips||[]).map(t => {
+      const hasDiLineMatch = (t.diLines||[]).some(d=>d.invoiceNo===invoiceNo);
+      if(t.invoiceNo!==invoiceNo && !hasDiLineMatch) return t;
+      if((t.diLines||[]).length > 0) {
+        // Revert only the diLine(s) billed under THIS invoice — a trip billed
+        // across two invoices (one per DI) keeps the other DI's billing intact.
+        const newDiLines = t.diLines.map(d => d.invoiceNo===invoiceNo
+          ? {...d, billed:false, invoiceNo:"", invoiceDate:"", billedAmt:0} : d);
+        const reverted = {...t, diLines:newDiLines};
+        reverted.status = tripBillingStatus(reverted);
+        reverted.billedToShree = tripBilledAmount(reverted);
+        // Trip-level invoiceNo/invoiceDate must reflect whichever invoice STILL
+        // bills this trip after the revert — clearing it only when NOTHING
+        // remains billed is wrong; if another diLine is still billed under a
+        // DIFFERENT invoice, the trip must show THAT invoice, not the deleted
+        // one it was stuck showing before (this was the actual bug: a trip
+        // stayed associated with a deleted invoice whenever it had another
+        // diLine still billed elsewhere).
+        const stillBilled = newDiLines.filter(d=>d.billed);
+        if(stillBilled.length === 0) {
+          reverted.invoiceNo=""; reverted.invoiceDate=""; reverted.shreeStatus="pending";
+        } else {
+          const latest = stillBilled.slice().sort((a,b)=>(b.invoiceDate||"").localeCompare(a.invoiceDate||""))[0];
+          reverted.invoiceNo = latest.invoiceNo;
+          reverted.invoiceDate = latest.invoiceDate;
+        }
+        return reverted;
+      }
+      return {...t,invoiceNo:"",invoiceDate:"",billedToShree:0,shreeStatus:"pending",status:"Pending Bill"};
+    });
     setTrips(updated);
-    // Persist each reverted trip to DB
-    for(const t of updated.filter(t=>t.shreeStatus==="pending"&&!t.invoiceNo)){
-      try { await DB.saveTrip(t); } catch(e){ console.error("revert trip:",e); }
+    // Persist every trip that was actually touched by this revert (whether it
+    // went fully back to Pending Bill, or just lost one diLine while another
+    // DI on the same trip stays billed under a different invoice).
+    const touchedIds = new Set((trips||[])
+      .filter(t => t.invoiceNo===invoiceNo || (t.diLines||[]).some(d=>d.invoiceNo===invoiceNo))
+      .map(t=>t.id));
+    const failedReverts = [];
+    for(const t of updated.filter(t=>touchedIds.has(t.id))){
+      try { await DB.saveTrip(t); } catch(e){
+        console.error("revert trip:",e);
+        failedReverts.push(t.lrNo||t.lr||t.id);
+      }
+    }
+    if(failedReverts.length>0) {
+      alert(`⚠ Invoice ${invoiceNo} was removed from view, but ${failedReverts.length} trip(s) failed to save the revert to the database: ${failedReverts.join(", ")}. Reloading the app may show them as still billed/paid — please retry deleting this invoice, or check your connection.`);
+    }
+    // Soft-delete the registry entry (status flips to 'deleted', row is kept)
+    // so any diLine that failed to revert above still has something
+    // independent to be flagged against — this is the whole point of the
+    // registry existing.
+    if(setInvoiceRegistry) {
+      const nowTs2 = nowTs();
+      setInvoiceRegistry(prev => (prev||[]).map(inv => inv.invoiceNo===invoiceNo
+        ? {...inv, status:"deleted", deletedAt:nowTs2, deletedBy:user?.name||""} : inv));
+      const regEntry = (invoiceRegistry||[]).find(inv=>inv.invoiceNo===invoiceNo);
+      if(regEntry) {
+        DB.saveInvoiceRegistry({...regEntry, status:"deleted", deletedAt:nowTs2, deletedBy:user?.name||""})
+          .catch(e=>console.error("saveInvoiceRegistry delete:",e));
+      }
+    }
+    // Cascade-delete any action items tied to this invoice — both a still-open
+    // missing_di (the DI was never uploaded, and now the invoice it belonged to
+    // is gone) and any amount_mismatch flag referencing it no longer apply.
+    const orphanedActionItems = (actionItems||[]).filter(ai=>ai.invoiceNo===invoiceNo);
+    if(orphanedActionItems.length>0 && setActionItems) {
+      setActionItems(prev=>(prev||[]).filter(ai=>ai.invoiceNo!==invoiceNo));
+      orphanedActionItems.forEach(ai => DB.deleteActionItem(ai.id).catch(e=>console.error("deleteActionItem cascade:",e)));
     }
     log && log(`Invoice ${invoiceNo} deleted by ${user?.name}`);
   };
@@ -18785,14 +20386,49 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     if(!window.confirm(`Delete payment advice UTR ${utr}? This will revert trips to Billed status.`)) return;
     // Remove payment record from local state
     setPayments(prev=>prev.filter(p=>p.id!==id));
-    // Revert trips to Billed
-    const revertedTrips = (trips||[]).map(t=>t.utr===utr
-      ?{...t,paidAmount:0,paymentDate:"",utr:"",shreeStatus:"billed",shreeShortage:null}:t);
+    // Revert trips paid under THIS utr
+    const revertedTrips = (trips||[]).map(t => {
+      const hasDiLineMatch = (t.diLines||[]).some(d=>d.utr===utr);
+      if(t.utr!==utr && !hasDiLineMatch) return t;
+      if((t.diLines||[]).length > 0) {
+        // Revert only the diLine(s) paid under THIS utr — a trip paid across
+        // two payment advices (one per DI/invoice) keeps the other DI's
+        // payment intact, mirroring deleteInvoice's per-diLine revert.
+        const newDiLines = t.diLines.map(d => d.utr===utr
+          ? {...d, paid:false, paidAmount:0, paymentDate:"", utr:""} : d);
+        const reverted = {...t, diLines:newDiLines, shreeShortage:null};
+        reverted.status = tripBillingStatus(reverted);
+        reverted.paidAmount = tripPaidAmount(reverted);
+        const stillPaid = newDiLines.filter(d=>d.paid);
+        if(stillPaid.length === 0) {
+          reverted.utr=""; reverted.paymentDate="";
+        } else {
+          const latest = stillPaid.slice().sort((a,b)=>(b.paymentDate||"").localeCompare(a.paymentDate||""))[0];
+          reverted.utr = latest.utr;
+          reverted.paymentDate = latest.paymentDate;
+        }
+        reverted.shreeStatus = reverted.status==="Paid" ? "paid"
+          : reverted.status==="Partially Paid" ? "partially_paid"
+          : (reverted.status==="Billed"||reverted.status==="Partially Billed") ? "billed" : "pending";
+        return reverted;
+      }
+      return {...t,paidAmount:0,paymentDate:"",utr:"",shreeStatus:"billed",shreeShortage:null,status:"Billed"};
+    });
     setTrips(revertedTrips);
     // Persist to DB
     try { await DB.deletePayment(id); } catch(e){ console.error("delete payment:",e); }
-    for(const t of revertedTrips.filter(t=>t.shreeStatus==="billed"&&!t.utr)){
-      try { await DB.saveTrip(t); } catch(e){ console.error("revert trip:",e); }
+    const touchedIds = new Set((trips||[])
+      .filter(t => t.utr===utr || (t.diLines||[]).some(d=>d.utr===utr))
+      .map(t=>t.id));
+    const failedReverts = [];
+    for(const t of revertedTrips.filter(t=>touchedIds.has(t.id))){
+      try { await DB.saveTrip(t); } catch(e){
+        console.error("revert trip:",e);
+        failedReverts.push(t.lrNo||t.lr||t.id);
+      }
+    }
+    if(failedReverts.length>0) {
+      alert(`⚠ Payment advice UTR ${utr} was removed from view, but ${failedReverts.length} trip(s) failed to save the revert to the database: ${failedReverts.join(", ")}. Reloading the app may show them as still paid — please retry deleting this advice, or check your connection.`);
     }
     // Also remove any gstReleases recorded for this UTR
     if(setGstReleases) {
@@ -18811,6 +20447,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
   const Pill = ({status,shortage}) => {
     const c={pending:{bg:C.bg,col:C.muted,txt:"Pending"},
              billed:{bg:C.green+"11",col:C.green,txt:"Billed"},
+             partially_paid:{bg:"#d9770611",col:"#d97706",txt:"Partially Paid"},
              paid:{bg:C.blue+"11",col:C.blue,txt:"Paid"}}[status]||{bg:C.bg,col:C.muted,txt:"Pending"};
     return <span style={{display:"inline-flex",alignItems:"center",gap:3}}>
       <span style={{background:c.bg,color:c.col,border:`1px solid ${c.col}40`,borderRadius:4,padding:"2px 7px",fontSize:10,fontWeight:700}}>{c.txt}</span>
@@ -18911,6 +20548,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
           {id:"gst",       label:"GST Hold",  badge:gstHoldPending>0?gstHoldItems.filter(g=>g.balance>0).length:null},
           {id:"gstpay",    label:"GST Recon", badge:null},
           {id:"profit",    label:"Profit",    badge:null},
+          ...(isOwner ? [{id:"action_items", label:"Action Items", badge:(actionItems||[]).filter(ai=>ai.status==="open").length||null}] : []),
         ].map(t=>(
           <button key={t.id} onClick={()=>setActiveTab(t.id)} style={{
             background:"none",border:"none",padding:"11px 14px",cursor:"pointer",
@@ -18935,124 +20573,70 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         {/* ══ CLINKER BILL SHEET ══════════════════════════════════════════════ */}
         {showClinkerBill && isOwner && (()=>{
           const cb = clinkerBill;
-          const rate   = Number(cb.rate||0);
-          const tons   = Number(cb.tons||0);
+          const rateLines = cb.rateLines && cb.rateLines.length ? cb.rateLines : [{rate:"",tons:""}];
           const gstPct = Number(cb.gstPct||0);
           const prevFYNum   = currentFY() - 1;
-          const prevFYLabel = FY_LABEL(prevFYNum); // e.g. "FY 2024–25"
+          const prevFYLabel = FY_LABEL(prevFYNum);
 
-          // Clinker trips: to contains "patas" AND grParticulars.goods contains "clinker"
-          const allClinkerTrips = (trips||[]).filter(t => {
-            const toMatch    = (t.to||"").toLowerCase().includes("patas");
-            const goodsMatch = (t.grParticulars?.goods||"").toLowerCase().includes("clinker");
-            const notBilled  = !t.invoiceNo;
-            return toMatch && goodsMatch && notBilled;
-          }).sort((a,b) => (a.date||"").localeCompare(b.date||"")); // oldest first
-
-          // Auto-select: pick oldest trips until qty matches tons
-          let running = 0;
-          const autoSelected = [];
-          for(const t of allClinkerTrips) {
-            if(running >= tons) break;
-            autoSelected.push(t.id);
-            running += Number(t.qty||0);
-          }
-
-          // In manual mode use manualClinkerIds, otherwise use autoSelected
-          const selectedIds   = manualClinkerSelect ? manualClinkerIds : autoSelected;
-          const selectedTrips = allClinkerTrips.filter(t => selectedIds.includes(t.id));
-          const selectedTons  = selectedTrips.reduce((s,t) => s + Number(t.qty||0), 0);
-
-          // Compute amounts based on SELECTED tons (not entered tons)
-          const taxable = rate * selectedTons;
-          const cgst    = taxable * gstPct / 200;
-          const sgst    = taxable * gstPct / 200;
-          const total   = taxable + cgst + sgst;
-
-          const autoTonsMatch = tons > 0 && Math.abs(
-            (allClinkerTrips.filter(t=>autoSelected.includes(t.id)).reduce((s,t)=>s+Number(t.qty||0),0)) - tons
-          ) < 0.01;
-
-          // Allow ±0.5 MT tolerance
-          const tonsMatch = tons > 0 && Math.abs(selectedTons - tons) <= 0.5;
-          // For prevFY bills: skip tons matching — just need invoice no, date, rate, and at least one trip
-          const canSave   = cb.invoiceNo.trim() && cb.invoiceDate && rate > 0 && (tonsMatch || cb.isPrevFY);
-
-          const handleSaveClinkerBill = () => {
-            if(!canSave) return;
-            const invNo   = cb.invoiceNo.trim();
-            const invDate = cb.invoiceDate;
-            const updatedTrips = [];
-
-            if(selectedTrips.length === 0 && cb.isPrevFY) {
-              // No trips selected — create one synthetic placeholder trip to anchor the invoice
-              const enteredTons  = tons;
-              const enteredTotal = rate * enteredTons; // billedToShree = taxable amount
-              const _plId = uid();
-              const placeholder = mkTrip({
-                id:            _plId,
-                lrNo:          "CLK-" + _plId.slice(0,8).toUpperCase(),
-                truckNo:       "CLINKER-BILL",
-                invoiceNo:     invNo,
-                invoiceDate:   invDate,
-                billedToShree: enteredTotal,
-                qty:           enteredTons,
-                frRate:        rate,
-                givenRate:     rate,
-                to:            "Patas",
-                grade:         "Clinker",
-                status:        "Billed",
-                billedBy:      user.username,
-                billedAt:      nowTs(),
-                shreeStatus:   "billed",
-                client:        "Shree Cement Kodla",
-                type:          "outbound",
-                date:          invDate,
-                batchId:       "CLINKER-PREVFY-" + prevFYNum,
-                grParticulars: { goods:"Clinker", prevFY:true, prevFYLabel, clinkerPlaceholder:true,
-                                 gstPct, taxable:enteredTotal, total:enteredTotal*(1+gstPct/100) },
-              });
-              // Save to DB first, then reload trips so placeholder enters state via normal load path
-              // (avoids race condition where dbSetTrips delete-logic removes placeholder)
-              DB.saveTrip(placeholder).then(r => {
-                if(r && r.success === false) {
-                  alert("⚠ Clinker bill DB save failed: " + (r.error || JSON.stringify(r)));
-                  return;
-                }
-                // Add to in-memory state using functional updater to get latest prev
-                setTrips(prev => {
-                  if(prev.find(t=>t.id===placeholder.id)) return prev; // already added
-                  return [...prev, placeholder];
-                });
-                log && log("CLINKER BILL (prevFY placeholder) " + invNo + " · " + enteredTons + " MT · ₹" + enteredTotal.toLocaleString("en-IN"));
-              }).catch(e => alert("⚠ Clinker bill DB save failed: " + e.message));
-            } else {
-              setTrips(prev => prev.map(t => {
-                if(!selectedIds.includes(t.id)) return t;
-                const billedAmt = Number(t.qty||0) * rate;
-                const updated = {
-                  ...t,
-                  invoiceNo:   invNo,
-                  invoiceDate: invDate,
-                  billedToShree: billedAmt,
-                  status:      "Billed",
-                  billedBy:    user.username,
-                  billedAt:    nowTs(),
-                  shreeStatus: "billed",
-                  client:      t.client || "Shree Cement Kodla",
-                  ...(cb.isPrevFY ? {prevFY:true, prevFYLabel} : {}),
-                };
-                updatedTrips.push(updated);
-                return updated;
-              }));
-              Promise.all(updatedTrips.map(t => DB.saveTrip(t).catch(e => console.error("saveTrip clinker bill:", e))));
-              log && log("CLINKER BILL " + invNo + " · " + selectedTrips.length + " trips · " + selectedTons.toFixed(2) + " MT · ₹" + total.toLocaleString("en-IN"));
+          // ── Aggregate ledger — NOT tied to individual trips ─────────────────
+          // "Clinker trips" = grade is Clinker, or consignee matches the
+          // Patas plant pattern. No per-trip billed marker anymore; unbilled
+          // tons is a pure subtraction.
+          const allClinkerTripsEver = (trips||[]).filter(t => {
+            const grade = (t.grade||"").toLowerCase();
+            const consignee = (t.consignee||"").toLowerCase();
+            return grade.includes("clinker") || (consignee.includes("patas") && consignee.includes("shree cement"));
+          });
+          const totalClinkerTons = allClinkerTripsEver.reduce((s,t)=>s+Number(t.qty||0),0);
+          const activeBills = (clinkerBills||[]).filter(b=>b.status==="active");
+          const billedTons    = activeBills.reduce((s,b)=>s+Number(b.totalTons||0),0);
+          const billedRevenue = activeBills.reduce((s,b)=>s+Number(b.taxableAmount||0),0); // taxable only, GST excluded — GST is pass-through, not margin
+          const unbilledTons  = totalClinkerTons - billedTons;
+          // Profit = sum of each clinker trip's own margin, using the Shree
+          // Rate / Driver Rate already entered per DI on the trip itself
+          // (Edit Trip → "Rates per DI") — NOT derived from the bills ledger,
+          // since a bill no longer links to specific trips. Each DI's margin
+          // = qty × (Shree Rate − Driver Rate); summed across all DIs/trips.
+          const clinkerTripProfit = allClinkerTripsEver.reduce((s,t) => {
+            if((t.diLines||[]).length > 0) {
+              return s + t.diLines.reduce((ds,d)=>ds+(d.qty||0)*((d.frRate||0)-(d.givenRate||0)), 0);
             }
-            setShowClinkerBill(false);
-            setClinkerBill({invoiceNo:"", invoiceDate:"", rate:"", tons:"", gstPct:"5", isPrevFY:false});
-            setManualClinkerSelect(false);
-            setManualClinkerIds([]);
-            setActiveTab("invoices");
+            return s + (t.qty||0)*((t.frRate||0)-(t.givenRate||0));
+          }, 0);
+          const estProfit = clinkerTripProfit;
+
+          const grandTons = rateLines.reduce((s,l)=>s+Number(l.tons||0),0);
+          const taxable   = rateLines.reduce((s,l)=>s+Number(l.rate||0)*Number(l.tons||0),0);
+          const cgst      = taxable * gstPct / 200;
+          const sgst      = taxable * gstPct / 200;
+          const total     = taxable + cgst + sgst;
+
+          const anyRateSet = rateLines.some(l=>Number(l.rate||0)>0 && Number(l.tons||0)>0);
+          const canSave = cb.invoiceNo.trim() && cb.invoiceDate && anyRateSet;
+
+          const handleSaveClinkerBill = async () => {
+            if(!canSave || savingClinkerBill) return;
+            setSavingClinkerBill(true);
+            const bill = {
+              id: uid()+Date.now().toString(36),
+              invoiceNo: cb.invoiceNo.trim(), invoiceDate: cb.invoiceDate,
+              rateLines: rateLines.map(l=>({rate:Number(l.rate||0), tons:Number(l.tons||0)})),
+              gstPct, taxableAmount: taxable, totalAmount: total, totalTons: grandTons,
+              status: "active", isPrevFY: cb.isPrevFY, prevFYLabel: cb.isPrevFY ? prevFYLabel : "",
+              createdAt: nowTs(), createdBy: user.username,
+            };
+            try {
+              await DB.saveClinkerBill(bill);
+              setClinkerBills(prev => [bill, ...(prev||[])]);
+              log && log("CLINKER BILL " + bill.invoiceNo + " · " + grandTons.toFixed(2) + " MT · ₹" + total.toLocaleString("en-IN"));
+              setShowClinkerBill(false);
+              setClinkerBill({invoiceNo:"", invoiceDate:"", gstPct:"5", isPrevFY:false, rateLines:[{rate:"",tons:""}]});
+              setActiveTab("invoices");
+            } catch(e) {
+              alert("⚠ Clinker bill save failed: " + e.message);
+            } finally {
+              setSavingClinkerBill(false);
+            }
           };
 
           return (
@@ -19066,32 +20650,54 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   <div style={{fontSize:11,color:C.muted}}>GSTIN: 27AACCS8796G2ZQ</div>
                 </div>
 
+                {/* Unbilled tons + profit summary */}
+                <div style={{background:C.blue+"0d",border:`1px solid ${C.blue}33`,borderRadius:10,padding:"10px 14px"}}>
+                  <div style={{fontSize:10,color:C.blue,fontWeight:700,letterSpacing:1,marginBottom:8}}>CLINKER TONNAGE LEDGER</div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                    <div>
+                      <div style={{fontSize:18,fontWeight:800,color:C.text}}>{totalClinkerTons.toFixed(2)}</div>
+                      <div style={{fontSize:10,color:C.muted}}>Total tons logged (all time)</div>
+                    </div>
+                    <div>
+                      <div style={{fontSize:18,fontWeight:800,color:C.green}}>{billedTons.toFixed(2)}</div>
+                      <div style={{fontSize:10,color:C.muted}}>Billed tons ({activeBills.length} bill{activeBills.length!==1?"s":""})</div>
+                    </div>
+                    <div>
+                      <div style={{fontSize:18,fontWeight:800,color:unbilledTons<0?C.red:C.orange}}>{unbilledTons.toFixed(2)}</div>
+                      <div style={{fontSize:10,color:C.muted}}>Unbilled tons remaining</div>
+                    </div>
+                    <div>
+                      <div style={{fontSize:18,fontWeight:800,color:estProfit>=0?C.green:C.red}}>₹{estProfit.toLocaleString("en-IN",{maximumFractionDigits:0})}</div>
+                      <div style={{fontSize:10,color:C.muted}}>Profit (all clinker trips)</div>
+                    </div>
+                  </div>
+                  {unbilledTons<0 && (
+                    <div style={{marginTop:8,fontSize:11,color:C.red,fontWeight:700}}>
+                      ⚠ Billed tons exceed total tons logged — check for a duplicate/incorrect bill, or trips that haven't been entered yet.
+                    </div>
+                  )}
+                  <div style={{marginTop:8,fontSize:9,color:C.muted,fontStyle:"italic"}}>
+                    Sum of each trip's own margin — qty × (Shree Rate − Driver Rate), from the rates entered per DI on each trip — across every clinker trip ever logged.
+                  </div>
+                </div>
+
                 {/* Previous FY toggle */}
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
                   background:cb.isPrevFY?C.orange+"11":C.bg,
                   border:`1.5px solid ${cb.isPrevFY?C.orange:C.border}`,
                   borderRadius:10,padding:"10px 14px"}}>
                   <div>
-                    <div style={{fontWeight:700,fontSize:12,color:cb.isPrevFY?C.orange:C.text}}>
-                      {cb.isPrevFY ? `📅 Saving as ${prevFYLabel}` : "📅 Financial Year"}
-                    </div>
-                    <div style={{fontSize:11,color:C.muted,marginTop:2}}>
-                      {cb.isPrevFY
-                        ? `Invoice will be tagged as ${prevFYLabel} — trips get prevFY flag`
-                        : `Current FY: ${FY_LABEL(currentFY())}`}
-                    </div>
+                    <div style={{fontSize:12,fontWeight:700,color:cb.isPrevFY?C.orange:C.text}}>Mark as Previous FY bill</div>
+                    <div style={{fontSize:10,color:C.muted}}>{prevFYLabel} — for record-keeping only</div>
                   </div>
                   <button onClick={()=>setClinkerBill(p=>({...p,isPrevFY:!p.isPrevFY}))}
-                    style={{flexShrink:0,marginLeft:12,padding:"6px 14px",borderRadius:8,fontWeight:700,
-                      fontSize:11,cursor:"pointer",
-                      border:`1.5px solid ${cb.isPrevFY?C.orange:C.border}`,
-                      background:cb.isPrevFY?C.orange:C.dim,
-                      color:cb.isPrevFY?"#fff":C.muted}}>
-                    {cb.isPrevFY ? `${prevFYLabel} ✓` : "Save as Prev FY"}
+                    style={{width:44,height:24,borderRadius:12,border:"none",cursor:"pointer",
+                      background:cb.isPrevFY?C.orange:C.dim,position:"relative"}}>
+                    <div style={{width:18,height:18,borderRadius:9,background:"#fff",position:"absolute",top:3,
+                      left:cb.isPrevFY?23:3,transition:"left 0.15s"}} />
                   </button>
                 </div>
 
-                {/* Invoice details */}
                 <div style={{display:"flex",gap:10}}>
                   <div style={{flex:1}}>
                     <Field label="Invoice No" value={cb.invoiceNo}
@@ -19103,16 +20709,39 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   </div>
                 </div>
 
-                {/* Rate and Tons */}
-                <div style={{display:"flex",gap:10}}>
-                  <div style={{flex:1}}>
-                    <Field label="Rate ₹/MT" value={cb.rate} type="number"
-                      onChange={v=>setClinkerBill(p=>({...p,rate:v}))} placeholder="e.g. 450" />
-                  </div>
-                  <div style={{flex:1}}>
-                    <Field label="Total Tons (MT)" value={cb.tons} type="number"
-                      onChange={v=>setClinkerBill(p=>({...p,tons:v}))} placeholder="e.g. 1200" />
-                  </div>
+                {/* Rate lines — each is its own tonnage slab at its own rate,
+                    e.g. 200 MT @ ₹1000, 100 MT @ ₹1100 within one invoice */}
+                <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                  <div style={{fontSize:10,color:C.muted,fontWeight:700,letterSpacing:1}}>RATE LINES</div>
+                  {rateLines.map((line, idx) => (
+                    <div key={idx} style={{display:"flex",gap:8,alignItems:"flex-end"}}>
+                      <div style={{flex:1}}>
+                        <Field label={`Rate ${idx+1} ₹/MT`} value={line.rate} type="number"
+                          onChange={v=>setClinkerBill(p=>({...p, rateLines: p.rateLines.map((l,i)=>i===idx?{...l,rate:v}:l)}))}
+                          placeholder="e.g. 1000" />
+                      </div>
+                      <div style={{flex:1}}>
+                        <Field label={`Tons ${idx+1} (MT)`} value={line.tons} type="number"
+                          onChange={v=>setClinkerBill(p=>({...p, rateLines: p.rateLines.map((l,i)=>i===idx?{...l,tons:v}:l)}))}
+                          placeholder="e.g. 200" />
+                      </div>
+                      {rateLines.length>1 && (
+                        <button onClick={()=>setClinkerBill(p=>({...p, rateLines: p.rateLines.filter((_,i)=>i!==idx)}))}
+                          style={{flexShrink:0,padding:"9px 12px",borderRadius:8,border:`1px solid ${C.red}44`,
+                            background:C.red+"11",color:C.red,fontWeight:700,cursor:"pointer",marginBottom:1}}>✕</button>
+                      )}
+                    </div>
+                  ))}
+                  <button onClick={()=>setClinkerBill(p=>({...p, rateLines:[...p.rateLines, {rate:"",tons:""}]}))}
+                    style={{alignSelf:"flex-start",fontSize:11,fontWeight:700,padding:"6px 12px",borderRadius:8,
+                      border:`1.5px solid ${C.blue}`,background:C.blue+"11",color:C.blue,cursor:"pointer"}}>
+                    + Add Another Rate Line
+                  </button>
+                  {grandTons > unbilledTons + 0.5 && grandTons>0 && (
+                    <div style={{fontSize:11,color:C.orange,fontWeight:700}}>
+                      ⚠ This bill's {grandTons.toFixed(2)} MT is more than the {unbilledTons.toFixed(2)} MT currently unbilled — double-check before saving.
+                    </div>
+                  )}
                 </div>
 
                 {/* GST % */}
@@ -19143,136 +20772,167 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   </div>
                 )}
 
-                {/* Trip selector */}
-                <div style={{background:C.bg,borderRadius:10,padding:"10px 14px"}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-                    <div style={{fontSize:10,color:C.muted,fontWeight:700,letterSpacing:1}}>
-                      CLINKER TRIPS (To: Patas · Goods: Clinker · Unbilled)
-                    </div>
-                    {/* Manual select toggle — only shown when auto fails */}
-                    {allClinkerTrips.length>0 && !autoTonsMatch && tons>0 && (
-                      <button onClick={()=>{
-                        if(manualClinkerSelect){
-                          setManualClinkerSelect(false);
-                          setManualClinkerIds([]);
-                        } else {
-                          setManualClinkerSelect(true);
-                          setManualClinkerIds([...autoSelected]); // start with auto as base
-                        }
-                      }} style={{fontSize:10,fontWeight:700,padding:"3px 10px",borderRadius:6,
-                        cursor:"pointer",border:`1.5px solid ${manualClinkerSelect?C.orange:C.blue}`,
-                        background:manualClinkerSelect?C.orange+"22":C.blue+"11",
-                        color:manualClinkerSelect?C.orange:C.blue}}>
-                        {manualClinkerSelect?"✕ Exit Manual":"✎ Select Manually"}
-                      </button>
-                    )}
-                  </div>
-                  {allClinkerTrips.length === 0 ? (
-                    <div style={{color:C.muted,fontSize:12,fontStyle:"italic",padding:"8px 0"}}>
-                      No unbilled clinker trips to Patas found.
-                    </div>
-                  ) : (
-                    <>
-                      <div style={{fontSize:11,color:C.muted,marginBottom:8}}>
-                        {allClinkerTrips.length} eligible trip{allClinkerTrips.length!==1?"s":""} · Sorted oldest first
-                        {manualClinkerSelect
-                          ? <span style={{color:C.orange,fontWeight:700}}> · Manual selection mode — tap to toggle</span>
-                          : <span> · Auto-selected to match tons</span>}
-                      </div>
-                      {/* Tons match indicator */}
-                      <div style={{
-                        background: tonsMatch ? C.green+"11" : tons>0 ? C.orange+"11" : C.bg,
-                        border: `1px solid ${tonsMatch ? C.green : tons>0 ? C.orange : C.border}`,
-                        borderRadius:8, padding:"8px 12px", marginBottom:8,
-                        display:"flex", justifyContent:"space-between", alignItems:"center",
-                      }}>
-                        <span style={{fontSize:12,color:tonsMatch?C.green:C.orange,fontWeight:700}}>
-                          {!tons>0 ? "Enter tons to auto-select trips"
-                            : tonsMatch
-                              ? `✓ Tons within ±0.5 MT (selected ${selectedTons.toFixed(2)} MT)`
-                              : `⚠ Selected ${selectedTons.toFixed(2)} MT — need ${tons} MT (±0.5 MT)`}
-                        </span>
-                        <span style={{fontSize:12,fontWeight:800,color:tonsMatch?C.green:C.text}}>
-                          {selectedTrips.length} trip{selectedTrips.length!==1?"s":""} · {selectedTons.toFixed(2)} MT
-                        </span>
-                      </div>
-                      {/* Trip list */}
-                      <div style={{maxHeight:280,overflowY:"auto",display:"flex",flexDirection:"column",gap:4}}>
-                        {allClinkerTrips.map((t,idx)=>{
-                          const isSel = selectedIds.includes(t.id);
-                          const manualToggle = () => {
-                            if(!manualClinkerSelect) return;
-                            setManualClinkerIds(prev =>
-                              prev.includes(t.id) ? prev.filter(id=>id!==t.id) : [...prev, t.id]
-                            );
-                          };
-                          return (
-                            <div key={t.id}
-                              onClick={manualClinkerSelect ? manualToggle : undefined}
-                              style={{
-                                background: isSel ? C.green+"11" : C.card,
-                                border: `1.5px solid ${isSel ? C.green : C.border}`,
-                                borderRadius:7, padding:"7px 10px",
-                                cursor: manualClinkerSelect ? "pointer" : "default",
-                                transition:"border-color 0.1s,background 0.1s",
-                              }}>
-                              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                                <div>
-                                  <span style={{fontFamily:"monospace",fontSize:11,color:C.blue,fontWeight:700}}>
-                                    {t.lrNo||"—"}
-                                  </span>
-                                  <span style={{fontSize:10,color:C.muted,marginLeft:8}}>{t.date}</span>
-                                  <span style={{fontSize:10,color:C.muted,marginLeft:8}}>{t.truckNo}</span>
-                                </div>
-                                <div style={{display:"flex",alignItems:"center",gap:8}}>
-                                  <span style={{fontSize:12,fontWeight:700,color:C.text}}>{t.qty} MT</span>
-                                  <span style={{
-                                    fontSize:9,fontWeight:800,padding:"2px 6px",borderRadius:4,
-                                    background: isSel ? C.green+"22" : C.dim,
-                                    color: isSel ? C.green : C.muted,
-                                  }}>{isSel ? "✓" : manualClinkerSelect ? "TAP" : `#${idx+1}`}</span>
-                                </div>
-                              </div>
-                              <div style={{fontSize:10,color:C.muted,marginTop:2}}>
-                                {t.grParticulars?.goods||t.grade||"—"}
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                      {!tonsMatch && tons > 0 && (
-                        <div style={{marginTop:6,fontSize:11,
-                          color: Math.abs(selectedTons-tons)<=0.5 ? C.green : C.red,
-                          fontWeight:700}}>
-                          {Math.abs(selectedTons-tons)<=0.5
-                            ? `✓ Within tolerance (diff: ${Math.abs(selectedTons-tons).toFixed(2)} MT)`
-                            : selectedTons < tons
-                              ? `⚠ ${(tons-selectedTons).toFixed(2)} MT short — ${manualClinkerSelect?"select more trips":"use Manual Select"}`
-                              : `⚠ ${(selectedTons-tons).toFixed(2)} MT over — ${manualClinkerSelect?"deselect some trips":"use Manual Select"}`}
-                        </div>
-                      )}
-                    </>
-                  )}
-                </div>
-
                 {/* Save */}
-                {!canSave && tons>0 && rate>0 && cb.invoiceNo && cb.invoiceDate && (
+                {!canSave && (grandTons>0 || anyRateSet || cb.invoiceNo || cb.invoiceDate) && (
                   <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:8,
                     padding:"8px 12px",fontSize:11,color:C.orange,fontWeight:700}}>
-                    {!tonsMatch ? `⚠ Selected ${selectedTons} MT does not match ${tons} MT. Adjust tons or check available trips.` : ""}
-                    {!cb.invoiceNo.trim() ? "Enter Invoice No." : ""}
-                    {!cb.invoiceDate ? " Enter Invoice Date." : ""}
+                    {!cb.invoiceNo.trim() && "Enter Invoice No. "}
+                    {!cb.invoiceDate && "Enter Invoice Date. "}
+                    {!anyRateSet && "Enter at least one rate line with both rate and tons. "}
                   </div>
                 )}
                 <Btn onClick={handleSaveClinkerBill}
-                  full color={canSave ? C.green : C.muted}
-                  style={{opacity: canSave ? 1 : 0.5, cursor: canSave ? "pointer" : "not-allowed"}}>
-                  {canSave
-                    ? `✓ Save Bill — ${selectedTrips.length} trip${selectedTrips.length!==1?"s":""} · ${selectedTons.toFixed(2)} MT · ₹${total.toLocaleString("en-IN",{maximumFractionDigits:0})}`
-                    : "Fill all fields and match tons (±0.5 MT) to save"}
+                  full color={(canSave && !savingClinkerBill) ? C.green : C.muted}
+                  style={{opacity: (canSave && !savingClinkerBill) ? 1 : 0.5, cursor: (canSave && !savingClinkerBill) ? "pointer" : "not-allowed"}}>
+                  {savingClinkerBill
+                    ? "Saving… please wait"
+                    : canSave
+                      ? `✓ Save Bill — ${grandTons.toFixed(2)} MT · ₹${total.toLocaleString("en-IN",{maximumFractionDigits:0})}`
+                      : "Fill invoice details and at least one rate line to save"}
                 </Btn>
               </div>
             </Sheet>
+          );
+        })()}
+
+        {activeTab==="action_items"&&isOwner&&(()=>{
+          const empName = id => (employees||[]).find(e=>e.id===id)?.name || (id ? "Unknown employee" : "Unassigned / new truck");
+          const open = (actionItems||[]).filter(ai=>ai.status==="open").sort((a,b)=>(b.createdAt||"").localeCompare(a.createdAt||""));
+          const resolved = (actionItems||[]).filter(ai=>ai.status==="done").sort((a,b)=>(b.resolvedAt||"").localeCompare(a.resolvedAt||""));
+          const missing = open.filter(ai=>ai.type==="missing_di");
+          const mismatch = open.filter(ai=>ai.type==="amount_mismatch");
+          const conflict = open.filter(ai=>ai.type==="duplicate_di");
+          const noDiesel = open.filter(ai=>ai.type==="no_diesel_confirmed");
+
+          const dismiss = (ai) => {
+            if(!window.confirm("Dismiss this action item? This does not bill anything — use this only if you've resolved it manually.")) return;
+            setActionItems(prev=>(prev||[]).filter(x=>x.id!==ai.id));
+            DB.deleteActionItem(ai.id).catch(e=>console.error("deleteActionItem dismiss:",e));
+            log && log("Dismissed action item — "+ai.type+" · DI "+ai.diNo);
+          };
+
+          return (
+            <div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:16}}>
+                <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.border}`}}>
+                  <div style={{fontSize:20,fontWeight:800,color:C.red}}>{missing.length}</div>
+                  <div style={{fontSize:11,color:C.muted}}>Missing DIs (open)</div>
+                </div>
+                <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.border}`}}>
+                  <div style={{fontSize:20,fontWeight:800,color:"#d97706"}}>{mismatch.length}</div>
+                  <div style={{fontSize:11,color:C.muted}}>Amount mismatches (open)</div>
+                </div>
+                <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.border}`}}>
+                  <div style={{fontSize:20,fontWeight:800,color:C.purple}}>{conflict.length}</div>
+                  <div style={{fontSize:11,color:C.muted}}>DI on 2+ invoices (open)</div>
+                </div>
+                <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.border}`}}>
+                  <div style={{fontSize:20,fontWeight:800,color:C.orange}}>{noDiesel.length}</div>
+                  <div style={{fontSize:11,color:C.muted}}>No-diesel confirmations</div>
+                </div>
+              </div>
+
+              <div style={{fontSize:12,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:8}}>
+                🚨 Missing DIs — waiting on employee upload
+              </div>
+              {missing.length===0 && <div style={{color:C.muted,fontSize:13,marginBottom:16}}>None open.</div>}
+              <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:20}}>
+                {missing.map(ai=>(
+                  <div key={ai.id} style={{background:C.card,borderRadius:10,padding:"11px 14px",border:`1px solid ${C.red}44`}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                      <div>
+                        <div style={{fontWeight:800,fontSize:14}}>DI: {ai.diNo||"—"} {ai.grNo && <span style={{color:C.muted,fontWeight:400}}>· GR: {ai.grNo}</span>}</div>
+                        <div style={{fontSize:12,color:C.muted,marginTop:2}}>Truck: {ai.truckNo||"—"} · Invoice #{ai.invoiceNo} · {ai.invoiceDate||"—"} · {fmt(ai.invoiceAmt)}</div>
+                        <div style={{fontSize:12,marginTop:4,fontWeight:700,color:ai.empId?C.blue:C.orange}}>
+                          Assigned to: {empName(ai.empId)}
+                        </div>
+                      </div>
+                      <button onClick={()=>dismiss(ai)} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,fontSize:11,padding:"4px 8px",cursor:"pointer"}}>Dismiss</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div style={{fontSize:12,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:8}}>
+                ⚠ Amount mismatches — invoice differed from expected DI amount
+              </div>
+              {mismatch.length===0 && <div style={{color:C.muted,fontSize:13,marginBottom:16}}>None open.</div>}
+              <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:20}}>
+                {mismatch.map(ai=>{
+                  const diff = ai.invoiceAmt - ai.expectedAmt;
+                  return (
+                    <div key={ai.id} style={{background:C.card,borderRadius:10,padding:"11px 14px",border:`1px solid #d9770644`}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                        <div>
+                          <div style={{fontWeight:800,fontSize:14}}>DI: {ai.diNo||"—"} {ai.grNo && <span style={{color:C.muted,fontWeight:400}}>· GR: {ai.grNo}</span>}</div>
+                          <div style={{fontSize:12,color:C.muted,marginTop:2}}>Truck: {ai.truckNo||"—"} · Invoice #{ai.invoiceNo} · {ai.invoiceDate||"—"}</div>
+                          <div style={{fontSize:12,marginTop:4,fontWeight:700}}>
+                            Invoice: {fmt(ai.invoiceAmt)} vs Expected: {fmt(ai.expectedAmt)}
+                            <span style={{color:diff<0?C.red:C.green,marginLeft:6}}>({diff<0?"":"+"}{fmt(diff)})</span>
+                          </div>
+                          <div style={{fontSize:11,color:C.muted,marginTop:2}}>Already billed at the invoice amount — this is a review flag only.</div>
+                        </div>
+                        <button onClick={()=>dismiss(ai)} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,fontSize:11,padding:"4px 8px",cursor:"pointer"}}>Dismiss</button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div style={{fontSize:12,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:8}}>
+                🔁 Same DI on multiple invoices — not overwritten, needs manual review
+              </div>
+              {conflict.length===0 && <div style={{color:C.muted,fontSize:13,marginBottom:16}}>None open.</div>}
+              <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:20}}>
+                {conflict.map(ai=>(
+                  <div key={ai.id} style={{background:C.card,borderRadius:10,padding:"11px 14px",border:`1px solid ${C.purple}44`}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                      <div>
+                        <div style={{fontWeight:800,fontSize:14}}>DI: {ai.diNo||"—"} {ai.grNo && <span style={{color:C.muted,fontWeight:400}}>· GR: {ai.grNo}</span>}</div>
+                        <div style={{fontSize:12,color:C.muted,marginTop:2}}>Truck: {ai.truckNo||"—"}</div>
+                        <div style={{fontSize:12,marginTop:4,fontWeight:700,color:C.purple}}>{ai.note}</div>
+                        <div style={{fontSize:11,color:C.muted,marginTop:2}}>The original billing was kept as-is — this invoice's line for this DI was skipped.</div>
+                      </div>
+                      <button onClick={()=>dismiss(ai)} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,fontSize:11,padding:"4px 8px",cursor:"pointer"}}>Dismiss</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div style={{fontSize:12,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:8}}>
+                ⛽ No-diesel confirmations — logged for your records, not a gate
+              </div>
+              {noDiesel.length===0 && <div style={{color:C.muted,fontSize:13,marginBottom:16}}>None open.</div>}
+              <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:20}}>
+                {noDiesel.map(ai=>(
+                  <div key={ai.id} style={{background:C.card,borderRadius:10,padding:"11px 14px",border:`1px solid ${C.orange}44`}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                      <div>
+                        <div style={{fontWeight:800,fontSize:14}}>DI: {ai.diNo||"—"} {ai.grNo && <span style={{color:C.muted,fontWeight:400}}>· GR: {ai.grNo}</span>}</div>
+                        <div style={{fontSize:12,color:C.muted,marginTop:2}}>Truck: {ai.truckNo||"—"} · Assigned: {empName(ai.empId)}</div>
+                        <div style={{fontSize:12,marginTop:4,fontWeight:700,color:C.orange}}>{ai.note}</div>
+                      </div>
+                      <button onClick={()=>dismiss(ai)} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,fontSize:11,padding:"4px 8px",cursor:"pointer"}}>Dismiss</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {resolved.length>0 && (
+                <>
+                  <div style={{fontSize:12,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:8}}>
+                    ✓ Recently resolved
+                  </div>
+                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                    {resolved.slice(0,20).map(ai=>(
+                      <div key={ai.id} style={{fontSize:12,color:C.muted,padding:"6px 10px",background:C.bg,borderRadius:8}}>
+                        DI {ai.diNo} · {ai.type==="missing_di"?"uploaded":"reviewed"} · {ai.resolvedAt||"—"}
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
           );
         })()}
 
@@ -19282,7 +20942,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
               {[
                 {label:"Shree Trips",     val:shreeTrips.length,                                                               col:C.blue},
                 {label:"Pending Billing", val:shreeTrips.filter(t=>!t.shreeStatus||t.shreeStatus==="pending").length,          col:C.orange},
-                {label:"Billed / Paid",   val:`${shreeTrips.filter(t=>t.shreeStatus==="billed").length} / ${shreeTrips.filter(t=>t.shreeStatus==="paid").length}`, col:C.green},
+                {label:"Billed / Paid",   val:`${shreeTrips.filter(t=>t.shreeStatus==="billed").length} / ${shreeTrips.filter(t=>t.shreeStatus==="paid"||t.shreeStatus==="partially_paid").length}`, col:C.green},
                 {label:"Shortage Alerts", val:allShortages.length,                                                             col:C.red},
               ].map(c=>(
                 <div key={c.label} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,padding:"12px 14px"}}>
@@ -19352,6 +21012,35 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                         <span>{scanResult.invoiceDate||"—"}</span>
                         <span style={{color:"#1565c0",fontWeight:700}}>₹{fmtINR(scanResult.totalAmount)}</span>
                       </div>
+                      {(() => {
+                        // Sanity check: the invoice's own printed grand total vs the sum of
+                        // what was actually extracted per line. These SHOULD always agree —
+                        // if they don't, at least one line was misread by the scan (e.g. a
+                        // quantity read as a different digit), even if that line's amount
+                        // happens to look internally consistent (qty × rate matches what was
+                        // read, just not what the document actually says). Per-line amount
+                        // checks against trip data can't catch this on their own.
+                        const lines = scanResult.trips||[];
+                        const sumOfLines = lines.reduce((s,st)=>s+Number(st.frtAmt||0),0);
+                        const printedTotal = Number(scanResult.totalAmount||0);
+                        const diff = sumOfLines - printedTotal;
+                        if(printedTotal>0 && Math.abs(diff)>=1) {
+                          return (
+                            <div style={{background:"#fef2f2",border:`1.5px solid ${C.red}`,borderRadius:8,
+                              padding:"10px 12px",marginBottom:10,fontSize:12}}>
+                              <div style={{color:C.red,fontWeight:800}}>
+                                ⚠ Line items don't add up to the invoice's own total
+                              </div>
+                              <div style={{color:"#7a1f1f",marginTop:3}}>
+                                Sum of scanned lines: ₹{fmtINR(sumOfLines)} · Invoice states: ₹{fmtINR(printedTotal)}
+                                {" "}(diff ₹{fmtINR(Math.abs(diff))}). At least one line was likely misread —
+                                check quantities/amounts below against the original PDF before applying.
+                              </div>
+                            </div>
+                          );
+                        }
+                        return null;
+                      })()}
                       {/* Per-line: editable DI/GR + identity match + amount check */}
                       {(scanResult.trips||[]).map((st,i)=>{
                         const m   = matchInvoiceLine(st, trips||[]);
@@ -19439,7 +21128,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                             )}
                             {!trip && diOk && (
                               <div style={{color:"#c67c00",fontSize:10,marginTop:2}}>
-                                ↳ Go to Trips tab, add this trip (DI: {st.diNo}) first, then scan invoice again
+                                ↳ Not in system yet — saving will create an action item for the assigned employee to upload this DI (or the owner, if the truck can't be resolved)
                               </div>
                             )}
                           </div>
@@ -19453,11 +21142,26 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                         const noTrip      = lines.length - identityOk;
                         const amtMismatch = identityOk - amtOk;
                         const allOk       = noTrip===0 && amtMismatch===0 && identityOk===lines.length;
-                        const allUnmatched = noTrip===lines.length && lines.length>0;
-                        // Mixed: some matched + some unmatched all from prevFY
-                        const prevFYCount = lines.filter(st=>{ const d=parseDD(st.date||""); return d&&getFY(d)<currentFY()&&!matchInvoiceLine(st,trips||[]); }).length;
-                        const mixedPrevFY = noTrip>0 && noTrip<lines.length && prevFYCount===noTrip;
-                        const alreadySaved = (trips||[]).some(t=>t.invoiceNo===scanResult.invoiceNo);
+                        // Missing DIs and amount mismatches no longer block saving — both now
+                        // create an action item (missing_di → assigned employee/owner;
+                        // amount_mismatch → owner-only) while the invoice still gets applied.
+                        // "Already saved" only means EVERY line is already resolved (billed or
+                        // logged) — a partially-processed invoice must stay re-scannable so the
+                        // remaining unresolved line(s) can still get their action item created.
+                        const lineAlreadyResolvedPreview = (st) => {
+                          const m = matchInvoiceLine(st, trips||[]);
+                          if(m) {
+                            const t = m.trip;
+                            if((t.diLines||[]).length > 0) {
+                              const stDi = normalizeDI(st.diNo), stGr = normalizeDI(st.grNo);
+                              const dl = t.diLines.find(d => (stDi && normalizeDI(d.diNo)===stDi) || (!stDi && stGr && normalizeDI(d.grNo)===stGr));
+                              if(dl?.billed && dl.invoiceNo===scanResult.invoiceNo) return true;
+                            } else if(t.invoiceNo===scanResult.invoiceNo) return true;
+                          }
+                          return (actionItems||[]).some(ai=>ai.invoiceNo===scanResult.invoiceNo && ai.status==="open" && normalizeDI(ai.diNo)===normalizeDI(st.diNo));
+                        };
+                        const alreadySaved = lines.length>0 && lines.every(lineAlreadyResolvedPreview);
+                        const canApply = lines.length>0 && !alreadySaved && scanClient && scanMaterial;
                         return (<>
                           <div style={{marginTop:8,padding:"8px 0",display:"flex",gap:12,flexWrap:"wrap",
                             fontSize:11,borderTop:`1px solid ${C.border}`}}>
@@ -19465,14 +21169,14 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                               ? <span style={{color:"#1b6e3a",fontWeight:700}}>✓ All {lines.length} trips matched — ready to apply</span>
                               : <>
                                   <span style={{color:"#1b6e3a"}}>{amtOk} matched</span>
-                                  {amtMismatch>0 && <span style={{color:"#c67c00"}}>⚠ {amtMismatch} amount mismatch</span>}
-                                  {noTrip>0 && <span style={{color:"#b91c1c"}}>✗ {noTrip} trip not in system — add to Trips tab first</span>}
+                                  {amtMismatch>0 && <span style={{color:"#c67c00"}}>⚠ {amtMismatch} amount mismatch — will bill at invoice amount + flag owner</span>}
+                                  {noTrip>0 && <span style={{color:"#b91c1c"}}>ℹ {noTrip} DI not in system — will create action item(s) instead of blocking</span>}
                                 </>}
                           </div>
                           {alreadySaved && (
                             <div style={{background:"#fef2f2",border:"1px solid #ff6b6b44",borderRadius:8,
                               padding:"8px 12px",color:"#b91c1c",fontSize:12,fontWeight:700}}>
-                              ⚠ Invoice {scanResult.invoiceNo} is already saved. Scanning again will not change anything.
+                              ⚠ Invoice {scanResult.invoiceNo} is already saved or logged. Scanning again will not change anything.
                             </div>
                           )}
                           {/* Client + Material override */}
@@ -19503,19 +21207,17 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                           )}
                           <div style={{display:"flex",gap:8,marginTop:8}}>
                             <button onClick={applyInvoiceScan}
-                              disabled={(!allOk&&!allUnmatched&&!mixedPrevFY)||alreadySaved||!scanClient||!scanMaterial}
+                              disabled={!canApply||applyingInvoice}
                               style={{flex:1,
-                                background:(allOk||allUnmatched||mixedPrevFY)&&!alreadySaved&&scanClient&&scanMaterial
-                                  ?(allUnmatched||mixedPrevFY)?C.orange:C.green:C.dim,
-                                color:(allOk||allUnmatched||mixedPrevFY)&&!alreadySaved&&scanClient&&scanMaterial?"#000":"#666",
+                                background:(canApply&&!applyingInvoice)?(allOk?C.green:C.orange):C.dim,
+                                color:(canApply&&!applyingInvoice)?"#000":"#666",
                                 border:"none",borderRadius:6,padding:"10px",fontWeight:700,
-                                cursor:(allOk||allUnmatched||mixedPrevFY)&&!alreadySaved&&scanClient&&scanMaterial?"pointer":"not-allowed",fontSize:13}}>
-                              {alreadySaved ? "Already Saved"
+                                cursor:(canApply&&!applyingInvoice)?"pointer":"not-allowed",fontSize:13}}>
+                              {applyingInvoice ? "Loading full trip list…"
+                                : alreadySaved ? "Already Saved"
                                 : !scanClient||!scanMaterial ? "Select client & material first"
                                 : allOk ? "✓ Apply — Mark Billed"
-                                : allUnmatched ? "📅 Save as Previous FY Invoice"
-                                : mixedPrevFY ? "📅 Apply (includes Prev FY trips)"
-                                : "Fix issues above first"}
+                                : "✓ Apply — Bill matched, log the rest as action items"}
                             </button>
                             <button onClick={()=>setScanResult(null)}
                               style={{background:"#e8f0fa",color:C.muted,border:"1px solid #ccddf0",borderRadius:6,
@@ -19570,7 +21272,10 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                         </div>
                       )}
                       {(()=>{
-                        const savedInvoiceNos = new Set((trips||[]).filter(t=>t.invoiceNo).map(t=>t.invoiceNo.trim()));
+                        const savedInvoiceNos = new Set((trips||[]).flatMap(t => [
+                          t.invoiceNo,
+                          ...(t.diLines||[]).map(d=>d.invoiceNo),
+                        ].filter(Boolean).map(s=>s.trim())));
                         // Separate credit entries (freight invoices) from debit entries (expenses/penalties)
                         const creditInvs = (scanResult.invoices||[]).filter(i=>{
                           const n=(i.invoiceNo||"").trim();
@@ -19861,6 +21566,56 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
               {filteredInvoices.length} of {shreeInvoices.length} invoice{shreeInvoices.length!==1?"s":""}
               {searchInv&&` · "${searchInv}"`}{(invFrom||invTo)?" (date filtered)":""}
             </div>
+            {/* ── Clinker bills — aggregate ledger, separate from cement DI
+                invoices above. No trip breakdown since bills aren't tied to
+                specific trips anymore. ── */}
+            {(()=>{
+              const q = searchInv.toLowerCase();
+              const activeClinkerBills = (clinkerBills||[]).filter(b=>b.status==="active"
+                && (!q || (b.invoiceNo||"").toLowerCase().includes(q)))
+                .sort((a,b)=>(b.invoiceDate||"").localeCompare(a.invoiceDate||""));
+              if(activeClinkerBills.length===0) return null;
+              const deleteClinkerBillHandler = async (bill) => {
+                if(!window.confirm(`Delete clinker bill ${bill.invoiceNo}? Its ${Number(bill.totalTons||0).toFixed(2)} MT will return to the unbilled pool.`)) return;
+                const updated = {...bill, status:"deleted", deletedAt:nowTs(), deletedBy:user?.name||""};
+                setClinkerBills(prev=>(prev||[]).map(b=>b.id===bill.id?updated:b));
+                try { await DB.saveClinkerBill(updated); }
+                catch(e) { alert("⚠ Failed to delete clinker bill: "+e.message); }
+              };
+              return (
+                <div style={{marginBottom:16}}>
+                  <div style={{fontSize:11,color:"#9333ea",fontWeight:700,marginBottom:8}}>
+                    🪨 CLINKER BILLS ({activeClinkerBills.length})
+                  </div>
+                  <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                    {activeClinkerBills.map(b=>(
+                      <div key={b.id} style={{background:C.card,border:`1px solid ${"#9333ea"}44`,borderRadius:10,padding:"10px 14px"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                          <div>
+                            <div style={{fontWeight:800,fontSize:14,color:C.text}}>{b.invoiceNo}</div>
+                            <div style={{fontSize:11,color:C.muted,marginTop:2}}>
+                              {fmtDate(b.invoiceDate)} · {Number(b.totalTons||0).toFixed(2)} MT
+                              {b.isPrevFY && <span style={{color:C.orange}}> · {b.prevFYLabel}</span>}
+                            </div>
+                            <div style={{fontSize:11,color:C.muted,marginTop:2}}>
+                              {(b.rateLines||[]).map((l,i)=>`${Number(l.tons||0).toFixed(2)} MT @ ₹${l.rate}`).join(" + ")}
+                            </div>
+                          </div>
+                          <button onClick={()=>deleteClinkerBillHandler(b)}
+                            style={{background:C.red+"11",border:`1px solid ${C.red}44`,borderRadius:8,
+                              color:C.red,fontSize:11,padding:"5px 9px",cursor:"pointer"}}>🗑</button>
+                        </div>
+                        <div style={{display:"flex",justifyContent:"space-between",marginTop:8,paddingTop:8,
+                          borderTop:`1px solid ${C.border}`}}>
+                          <span style={{fontSize:11,color:C.muted}}>Taxable ₹{Number(b.taxableAmount||0).toLocaleString("en-IN")} + {b.gstPct}% GST</span>
+                          <span style={{fontSize:13,fontWeight:800,color:"#9333ea"}}>₹{Number(b.totalAmount||0).toLocaleString("en-IN",{maximumFractionDigits:0})}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
             {filteredInvoices.length===0
               ? (() => {
                   const allShreeInvoiceTrips = (displayTrips||[]).filter(t=>t.billedToShree&&t.invoiceNo);
@@ -19905,9 +21660,18 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                         </div>
                         <div style={{display:"flex",gap:10,fontSize:11,color:C.muted,flexWrap:"wrap"}}>
                           <span>{fmtDate(inv.invoiceDate)}</span>
-                          <span>{inv.trips.length} trip{inv.trips.length!==1?"s":""}</span>
+                          <span>{inv.trips.length} trip{inv.trips.length!==1?"s":""} · {inv.diCount||inv.trips.length} DI{(inv.diCount||inv.trips.length)!==1?"s":""}</span>
                           <span style={{color:"#1565c0",fontWeight:700}}>₹{fmtINR(inv.totalAmt)}</span>
                         </div>
+                        {(() => {
+                          const regEntry = (invoiceRegistry||[]).find(r=>r.invoiceNo===inv.invoiceNo);
+                          if(regEntry?.status!=="deleted") return null;
+                          return (
+                            <div style={{marginTop:4,fontSize:11,color:C.red,fontWeight:700}}>
+                              ⚠ This invoice was deleted ({fmtDate(regEntry.deletedAt?.slice(0,10))}) but {inv.trips.length} trip(s) are still showing billed under it — a revert likely failed to save. Re-delete or check manually.
+                            </div>
+                          );
+                        })()}
                       </div>
                       <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
                         {isOwner&&(
@@ -20652,7 +22416,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   </div>
                 </div>
                 <div style={{textAlign:"right",fontSize:11,color:C.muted}}>
-                  <div>{shreeTrips.filter(t=>t.shreeStatus==="paid").length} paid trips</div>
+                  <div>{shreeTrips.filter(t=>t.shreeStatus==="paid"||t.shreeStatus==="partially_paid").length} paid/partially-paid trips</div>
                   <div>{shreeTrips.filter(t=>t.shreeShortage).length} with shortages</div>
                 </div>
               </div>
@@ -20766,6 +22530,10 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
     ? t.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
     : (t.qty||0)*(t.givenRate||0);
   // Release pouch hold once confirmation/sealed invoice is uploaded (mergedPdfPath = both upload + merge done)
+  // Pouch is released ONLY when the sealed invoice/confirmation is actually
+  // uploaded — no other condition unlocks it. A trip being marked settled by
+  // the owner does not release the pouch; it closes the trip out entirely
+  // (see the bulk "Mark Settled" action, which zeroes pouchBalance directly).
   const _hasMerged = !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received");
   const _pouchHold = (t.orderType==="party"&&!_hasMerged) ? (t.pouchBalance||0) : 0;
   const _deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)+(t.shortageRecovery||0)+(t.loanRecovery||0)+_pouchHold;
@@ -21584,6 +23352,12 @@ const DIESEL_GATE_TXT = {
 
 function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, vehicles, setVehicles, employees, setEmployees, cashTransfers, setCashTransfers, paymentRequests=[], setPaymentRequests, indents=[], dieselRequests=[], setDieselRequests, user, log, viewOnly=false, setTab}) {
   const [filter,    setFilter]    = useState("unpaid");
+  // Party-order sub-filter + bulk "mark settled" (owner only) — for party trips
+  // whose sealed invoice never arrived, where the owner already paid manually
+  // outside the normal request flow and needs to close them out in bulk.
+  const [orderTypeFilter, setOrderTypeFilter] = useState("all"); // all | party | godown
+  const [selectMode,      setSelectMode]      = useState(false);
+  const [selectedTripIds, setSelectedTripIds] = useState(new Set());
   const [paySheet,  setPaySheet]  = useState(null);
   const [payReqSheet,   setPayReqSheet]   = useState(null); // trip for request payment
   // ── Diesel-confirmation gate ────────────────────────────────────────────────
@@ -21598,6 +23372,19 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
 
   const requestPaymentGuarded = (checkTrips, openWith) => {
     const list = Array.isArray(checkTrips) ? checkTrips : [checkTrips];
+    // A settled trip normally can't have anything else requested for it — EXCEPT
+    // a party trip that settled on its main balance while the invoice was still
+    // unmerged, then later got its invoice uploaded: the pouch only unlocks on
+    // that upload, so this is the one legitimate case where a genuinely new,
+    // unpaid amount can exist on an already-"settled" trip. Don't block that.
+    const hasGenuinePouchClaim = (t) => {
+      const hasMerged = !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received");
+      return t.orderType==="party" && hasMerged && (t.pouchBalance||0)>0;
+    };
+    if (list.some(t => t.driverSettled && !hasGenuinePouchClaim(t))) {
+      alert("This trip is already marked as settled — no further payment can be requested for it.");
+      return;
+    }
     const needsCheck = list.filter(t => !((t.dieselIndentNo||"").trim()) && !t.noDieselConfirmed);
     if (needsCheck.length === 0) { setPayReqSheet(openWith); return; }
     setDieselGateQueue(needsCheck);
@@ -21672,8 +23459,13 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
     return {...t, gross, netDue, paidSoFar, balance, veh};
   });
 
-  const unpaidTrips  = tripWithBalance.filter(t=>t.balance>0);
-  const paidTrips    = tripWithBalance.filter(t=>t.balance<=0 && t.netDue>0);
+  // driverSettled is authoritative — once set, a trip is Paid and cannot show as
+  // Unpaid regardless of what the balance math says (e.g. a manual bulk-settle
+  // where the owner asserts it's covered even if paidSoFar wasn't recorded to
+  // exactly match). Previously this filtered on balance alone, so a settled
+  // trip with any residual computed balance still showed up as fully requestable.
+  const unpaidTrips  = tripWithBalance.filter(t=>t.balance>0 && !t.driverSettled);
+  const paidTrips    = tripWithBalance.filter(t=>(t.balance<=0 || t.driverSettled) && t.netDue>0);
 
   // "My Requests" — trips in last 4 days where employee has NOT yet sent a payment request
   // (non-owners only; helps employee know which trips still need a request)
@@ -21729,34 +23521,49 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
   // eslint-disable-next-line
   }, [JSON.stringify(tripWithBalance.map(t=>({id:t.id,balance:t.balance,settled:t.driverSettled})))]);
 
-  // Close out any PENDING request whose OWN trip already has balance=0 — each
-  // request is judged independently by its own trip's balance, not by whether
-  // some other request on the same LR happens to be done (a trip can validly
-  // have one done request for a partial amount and a separate, still-owed
-  // pending request for the remainder — that second one must stay pending).
-  // Catches the historical backlog (requests left stale before every settlement
-  // path was wired to call markRequestsDoneForLR), not just new settlements.
+  // Close out any PENDING request whose OWN trip already has balance=0, OR
+  // whose trip is marked driverSettled (authoritative — a settled trip closes
+  // out its requests regardless of what the balance math shows, same rule as
+  // the Unpaid/Paid tab filtering and requestPaymentGuarded) — EXCEPT when the
+  // trip has a genuine, still-owed party pouch claim (sealed invoice/confirmation
+  // uploaded, pouch balance >0, not yet paid). That's the one case where a
+  // request can be legitimately pending even though the main balance looks
+  // settled: the pouch only unlocks on invoice upload, which can happen after
+  // the main portion was already fully paid off.
+  // Catches the historical backlog — trips settled (individually or via
+  // bulk-settle) before this request-closing behavior existed, not just new
+  // settlements.
   // IMPORTANT: checks against the full `trips` prop, not `tripWithBalance` (which
   // is built from `fyTrips || trips` — scoped to whatever FY/client filter is
   // currently active in the UI). A stale request for a trip outside the
   // currently-viewed FY would otherwise never be found and never get closed.
   React.useEffect(() => {
-    const balanceForLR = (lrNo) => {
-      const t = (trips||[]).find(x=>x.lrNo && x.lrNo===lrNo);
-      if(!t) return null;
+    const tripForLR = (lrNo) => (trips||[]).find(x=>x.lrNo && x.lrNo===lrNo) || null;
+    const hasGenuinePouchClaim = (t) => {
+      const hasMerged = !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received");
+      return t.orderType==="party" && hasMerged && (t.pouchBalance||0)>0;
+    };
+    const balanceForTrip = (t) => {
       const gross = (t.diLines&&t.diLines.length>1)
         ? t.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
         : (t.qty||0)*(t.givenRate||0);
+      // Pouch counts toward netDue once merged — same rule as RequestPaymentSheet
+      // — so a fully-paid main balance doesn't mask a genuinely outstanding pouch.
+      const hasMerged = !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received");
+      const pouchHold = (t.orderType==="party" && !hasMerged) ? (t.pouchBalance||0) : 0;
       const deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)
-        +((t.shortage||0)*(t.givenRate||0))+(t.shortageRecovery||0)+(t.loanRecovery||0);
+        +((t.shortage||0)*(t.givenRate||0))+(t.shortageRecovery||0)+(t.loanRecovery||0)+pouchHold;
       const netDue = Math.max(0, gross - deducts);
       const paidSoFar = (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
       return Math.max(0, netDue - paidSoFar);
     };
     const stalePending = (paymentRequests||[]).filter(r => {
       if(r.status!=="pending") return false;
-      const bal = balanceForLR(r.lrNo);
-      return bal!==null && bal<=0;
+      const t = tripForLR(r.lrNo);
+      if(!t) return false;
+      if(hasGenuinePouchClaim(t)) return false; // never auto-close a live pouch claim
+      if(t.driverSettled) return true; // authoritative — closed regardless of balance
+      return balanceForTrip(t) <= 0;
     });
     if(stalePending.length===0) return;
     setPaymentRequests(prev=>(prev||[]).map(r=>{
@@ -21766,7 +23573,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
       return done;
     }));
   // eslint-disable-next-line
-  }, [JSON.stringify((paymentRequests||[]).map(r=>r.id+r.status)), JSON.stringify((trips||[]).map(t=>({lr:t.lrNo,id:t.id}))), driverPays]);
+  }, [JSON.stringify((paymentRequests||[]).map(r=>r.id+r.status)), JSON.stringify((trips||[]).map(t=>({lr:t.lrNo,id:t.id,settled:t.driverSettled}))), driverPays]);
 
   // Auto-settle: called after any payment save — marks trip settled if balance reaches 0
   const autoSettle = (tripId, extraAmount) => {
@@ -22101,6 +23908,61 @@ This will auto-recover in the next trip.`);
             width:"100%",boxSizing:"border-box"}} />
       )}
 
+      {/* Order-type filter + bulk "mark settled" — owner only, Unpaid/Paid tabs only */}
+      {user.role==="owner" && (filter==="unpaid"||filter==="paid") && (
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          <div style={{display:"flex",gap:6}}>
+            {["all","party","godown"].map(o=>(
+              <button key={o} onClick={()=>setOrderTypeFilter(o)}
+                style={{padding:"6px 14px",borderRadius:8,fontSize:12,fontWeight:700,cursor:"pointer",
+                  background:orderTypeFilter===o?C.accent+"22":"transparent",
+                  border:`1.5px solid ${orderTypeFilter===o?C.accent:C.border}`,
+                  color:orderTypeFilter===o?C.accent:C.muted}}>
+                {o==="all"?"All Orders":o==="party"?"🤝 Party":"🏭 Godown"}
+              </button>
+            ))}
+          </div>
+          {filter==="unpaid" && (
+            <div style={{display:"flex",gap:8,alignItems:"center"}}>
+              <button onClick={()=>{setSelectMode(m=>!m); setSelectedTripIds(new Set());}}
+                style={{padding:"6px 14px",borderRadius:8,fontSize:12,fontWeight:700,cursor:"pointer",
+                  background:selectMode?C.purple+"22":"transparent",
+                  border:`1.5px solid ${selectMode?C.purple:C.border}`,
+                  color:selectMode?C.purple:C.muted}}>
+                {selectMode?"✓ Selecting…":"☑ Select Multiple"}
+              </button>
+              {selectMode && selectedTripIds.size>0 && (
+                <Btn onClick={()=>{
+                  const count = selectedTripIds.size;
+                  if(!window.confirm(`Mark ${count} trip${count>1?"s":""} as fully settled (Paid)?\n\nThis is for trips already paid manually outside the normal flow — it closes them out completely, including their party pouch balance and any pending payment requests, so no further payment can be requested for them.`)) return;
+                  const settledLRs = new Set();
+                  setTrips(prev => prev.map(t => {
+                    if(!selectedTripIds.has(t.id)) return t;
+                    if(t.lrNo) settledLRs.add(t.lrNo);
+                    const updated = {...t, driverSettled:true, settledBy:user.username, netPaid:t.netDue||0, pouchBalance:0};
+                    DB.saveTrip(updated).catch(e=>console.error("saveTrip bulk settle:",e));
+                    return updated;
+                  }));
+                  // Close out any still-pending payment request tied to these trips —
+                  // the balance is zeroed now, so a dangling "Pending" request would
+                  // otherwise sit unresolved forever.
+                  setPaymentRequests(prev => (prev||[]).map(r => {
+                    if(r.status!=="pending" || !settledLRs.has(r.lrNo)) return r;
+                    const done = {...r, status:"done", paidAt:today(), paidBy:user.username};
+                    DB.savePaymentRequest(done).catch(e=>console.error("savePaymentRequest bulk settle:",e));
+                    return done;
+                  }));
+                  log("BULK MARK SETTLED", `${count} trip(s) marked fully paid`);
+                  setSelectedTripIds(new Set()); setSelectMode(false);
+                }} sm color={C.green}>
+                  ✓ Mark {selectedTripIds.size} as Settled
+                </Btn>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ── PAYMENT HISTORY TAB ── */}
       {filter==="history" && (
         <div style={{display:"flex",flexDirection:"column",gap:10}}>
@@ -22263,7 +24125,10 @@ This will auto-recover in the next trip.`);
       {/* ── TRIP LIST (unpaid / paid / all / myreqs) ── */}
       {filter!=="history" && filter!=="requests" && filter!=="byemp" && (()=>{
         const base = filter==="myreqs"?myReqTrips:filter==="unpaid"?unpaidTrips:filter==="paid"?paidTrips:tripWithBalance;
-        const shown = histLR ? base.filter(t=>(t.lrNo+t.truckNo).toLowerCase().includes(histLR.toLowerCase())) : base;
+        const orderFiltered = (filter==="unpaid"||filter==="paid") && orderTypeFilter!=="all"
+          ? base.filter(t=>orderTypeFilter==="party" ? t.orderType==="party" : (!t.orderType||t.orderType==="godown"))
+          : base;
+        const shown = histLR ? orderFiltered.filter(t=>(t.lrNo+t.truckNo).toLowerCase().includes(histLR.toLowerCase())) : orderFiltered;
         return (<>
           {filter==="myreqs" && (
             <div style={{background:C.orange+"11",border:`1px solid ${C.orange}33`,borderRadius:10,
@@ -22273,9 +24138,15 @@ This will auto-recover in the next trip.`);
             </div>
           )}
           {shown.map(t=>(
-        <div key={t.id} style={{background:C.card,borderRadius:14,padding:"14px 16px",borderLeft:`4px solid ${t.balance>0?C.accent:C.green}`,marginBottom:8}}>
+        <div key={t.id} style={{background:C.card,borderRadius:14,padding:"14px 16px",borderLeft:`4px solid ${selectedTripIds.has(t.id)?C.purple:t.balance>0?C.accent:C.green}`,marginBottom:8}}>
           <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
-            <div>
+            <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
+              {filter==="unpaid" && selectMode && (
+                <input type="checkbox" checked={selectedTripIds.has(t.id)} onChange={()=>setSelectedTripIds(prev=>{
+                  const n=new Set(prev); if(n.has(t.id)) n.delete(t.id); else n.add(t.id); return n;
+                })} style={{width:18,height:18,marginTop:3,flexShrink:0}} />
+              )}
+              <div>
               <div style={{fontWeight:800,fontSize:14}}>{t.truckNo}</div>
               <div style={{color:C.blue,fontSize:12}}>LR: {t.lrNo||"—"}</div>
               <div style={{color:C.muted,fontSize:11}}>{t.from}→{t.to} · {t.qty}MT · {t.date}</div>
@@ -22294,6 +24165,7 @@ This will auto-recover in the next trip.`);
                 );
                 return null;
               })()}
+            </div>
             </div>
             <div style={{textAlign:"right"}}>
               {t.balance>0
@@ -22390,11 +24262,24 @@ This will auto-recover in the next trip.`);
             </div>
           )}
           <div style={{display:"flex",gap:8,marginTop:4}}>
-            {t.balance>0&&!viewOnly&&(
+            {t.balance>0&&!viewOnly&&!t.driverSettled&&(
               <Btn onClick={()=>{setPaySheet(t);setPf({amount:String(t.balance),utr:"",date:today(),paidTo:"",notes:""});}} full sm color={C.green}>+ Record Payment</Btn>
             )}
-            {t.balance>0&&(
+            {t.balance>0&&!t.driverSettled&&(
               <Btn onClick={()=>requestPaymentGuarded(t, t)} sm outline color={C.purple}>📋 Request Payment</Btn>
+            )}
+            {/* A trip can settle on its main balance before the sealed invoice/
+                confirmation is ever uploaded — the pouch only unlocks on that
+                upload, so this is the one case a "settled" trip can still have a
+                genuine, unpaid amount. t.balance itself won't reflect this (it's
+                never pouch-aware), so this checks pouchBalance directly instead. */}
+            {t.driverSettled && t.orderType==="party" && (t.pouchBalance||0)>0 && !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received") && (
+              <Btn onClick={()=>requestPaymentGuarded(t, t)} sm outline color={C.purple}>📋 Request Payment</Btn>
+            )}
+            {t.balance>0&&t.driverSettled&&(
+              <div style={{flex:1,background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:8,padding:"8px 10px",fontSize:11,color:C.orange,fontWeight:600}}>
+                ⚠ Marked settled with {fmt(t.balance)} unaccounted for — no further requests allowed on this trip.
+              </div>
             )}
           </div>
         </div>
@@ -23088,7 +24973,7 @@ function DailyOps({trips, vehicles, employees, dieselRequests=[], activity=[], u
   const partyToday   = dayTrips.filter(t => t.orderType==="party");
 
   // ── STAGE 5: Bill submission ───────────────────────────────────────────────
-  const pendingBills = (trips||[]).filter(t => t.status==="Pending Bill" && t.type==="outbound");
+  const pendingBills = (trips||[]).filter(t => isUnbilled(t) && t.type==="outbound");
   const billedToday  = (trips||[]).filter(t => t.status==="Billed" && (t.billedDate||"")===viewDate);
   const paidTrips    = (trips||[]).filter(t => t.paymentStatus==="Paid" && t.type==="outbound");
 
@@ -24267,6 +26152,178 @@ table{width:100%;border-collapse:collapse;margin:12px 0}th,td{border:1px solid #
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function UnbilledOversight({trips, fyTrips, selectedFY, clinkerBills=[], user}) {
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo]     = useState("");
+  const isClinker = t => {
+    const grade = (t.grade||"").toLowerCase();
+    const consignee = (t.consignee||"").toLowerCase();
+    return grade.includes("clinker") || (consignee.includes("patas") && consignee.includes("shree cement"));
+  };
+  // Godown/Party are FY-scoped, matching every other screen in the app —
+  // this was a real bug: it previously used the raw, unfiltered trips prop,
+  // so pre-FY trips (e.g. March 2026 under an "FY 2026-27" view) leaked in.
+  const fyScoped = fyTrips || trips || [];
+  const godownAll = fyScoped.filter(t => isUnbilled(t) && (!t.orderType||t.orderType==="godown") && !isClinker(t));
+  const partyAll  = fyScoped.filter(t => isUnbilled(t) && t.orderType==="party" && !isClinker(t));
+  // Clinker is deliberately ALL-TIME (a running ledger, not a per-FY figure —
+  // "total tons logged (all time)" is the established design from the
+  // clinker billing feature itself). Kept separate from the FY toggle above
+  // on purpose; flagged here in case that's not actually what you want.
+  const clinkerAllTrips = (trips||[]).filter(isClinker);
+  const clinkerTotalValue = clinkerAllTrips.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
+  const clinkerBilledAmt = (clinkerBills||[]).filter(b=>b.status==="active").reduce((s,b)=>s+Number(b.taxableAmount||0),0);
+  const clinkerUnbilledAmt = Math.max(0, clinkerTotalValue - clinkerBilledAmt);
+  const clinkerTotalTons = clinkerAllTrips.reduce((s,t)=>s+(t.qty||0),0);
+  const clinkerBilledTons = (clinkerBills||[]).filter(b=>b.status==="active").reduce((s,b)=>s+Number(b.totalTons||0),0);
+  const clinkerUnbilledTons = Math.max(0, clinkerTotalTons - clinkerBilledTons);
+
+  const godownAmt = godownAll.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
+  const partyAmt  = partyAll.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
+
+  // ── Stale godown trips — purely informational, no dismiss/resolve state.
+  // Recomputed live every time this tab renders; disappears on its own once
+  // the trip is billed. 15 days is measured from the TRIP'S OWN date.
+  const todayMs = Date.now();
+  const daysSince = d => d ? Math.floor((todayMs - new Date(d).getTime()) / 86400000) : 0;
+  const staleRows = [];
+  godownAll.forEach(t => {
+    if(dateFrom && (t.date||"") < dateFrom) return;
+    if(dateTo   && (t.date||"") > dateTo)   return;
+    const lines = t.diLines||[];
+    if(lines.length > 0) {
+      lines.forEach(d => {
+        if(d.billed) return;
+        const days = daysSince(t.date);
+        if(days >= 15) staleRows.push({diNo:d.diNo||"—", date:t.date, truckNo:t.truckNo, qty:d.qty||t.qty, days});
+      });
+    } else {
+      const days = daysSince(t.date);
+      if(days >= 15) staleRows.push({diNo:t.diNo||"—", date:t.date, truckNo:t.truckNo, qty:t.qty, days});
+    }
+  });
+  staleRows.sort((a,b)=>b.days-a.days);
+
+  const printReport = () => {
+    const section = (title, rows, amt) => `
+      <div class="section">${title} — ${rows.length} trip${rows.length!==1?"s":""} · ₹${amt.toLocaleString("en-IN",{maximumFractionDigits:0})}</div>
+      <table><thead><tr><th>LR</th><th>Date</th><th>Truck</th><th>MT</th><th>Amount</th></tr></thead><tbody>
+      ${rows.slice().sort((a,b)=>(a.date||"").localeCompare(b.date||"")).map(t=>
+        `<tr><td>${t.lrNo||"—"}</td><td>${t.date||"—"}</td><td>${t.truckNo||"—"}</td><td>${t.qty||0}</td><td>₹${((t.qty||0)*(t.frRate||0)).toLocaleString("en-IN",{maximumFractionDigits:0})}</td></tr>`
+      ).join("")}
+      </tbody></table>`;
+    const html = `
+      <h2>Unbilled Trips Report</h2>
+      <div style="color:#666;font-size:11px;margin-bottom:10px">Generated ${new Date().toLocaleString("en-IN")}</div>
+      ${section("Godown", godownAll, godownAmt)}
+      ${section("Party", partyAll, partyAmt)}
+      <div class="section">Clinker — ${clinkerUnbilledTons.toFixed(2)} MT unbilled · ₹${clinkerUnbilledAmt.toLocaleString("en-IN",{maximumFractionDigits:0})}</div>
+      <div style="font-size:11px;color:#666;margin-bottom:10px">Clinker billing is aggregate-only (no per-trip breakdown). Total logged: ${clinkerTotalTons.toFixed(2)} MT · Already billed: ${clinkerBilledTons.toFixed(2)} MT.</div>
+      ${staleRows.length>0 ? `
+        <div class="section" style="color:#b91c1c">⚠ Godown Trips Unloaded &gt;15 Days — ${staleRows.length}</div>
+        <table><thead><tr><th>DI No</th><th>Date</th><th>Vehicle</th><th>MT</th><th>Days</th></tr></thead><tbody>
+        ${staleRows.map(r=>`<tr><td>${r.diNo}</td><td>${r.date||"—"}</td><td>${r.truckNo||"—"}</td><td>${r.qty||0}</td><td>${r.days}</td></tr>`).join("")}
+        </tbody></table>` : ""}
+    `;
+    const w = window.open("","_blank");
+    w.document.write("<!DOCTYPE html><html><head><title>Unbilled Trips Report</title><style>"+
+      "body{font-family:Arial,sans-serif;padding:20px;font-size:11px}"+
+      "table{width:100%;border-collapse:collapse;margin-bottom:16px}"+
+      "th,td{border:1px solid #ccc;padding:4px 7px;text-align:left}"+
+      "th{background:#f0f0f0;font-size:10px;text-transform:uppercase}"+
+      ".section{margin-top:16px;font-weight:bold;font-size:13px;border-bottom:2px solid #333;padding-bottom:3px;margin-bottom:6px}"+
+      "</style></head><body onload='window.print()'>"+html+"</body></html>");
+    w.document.close();
+  };
+
+  return (
+    <div style={{padding:16,display:"flex",flexDirection:"column",gap:16}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div>
+          <div style={{fontSize:18,fontWeight:800,color:C.text}}>Unbilled Oversight</div>
+          <div style={{fontSize:11,color:C.muted}}>Godown/Party: {selectedFY?FY_LABEL(selectedFY):"current FY"} · Clinker: all-time ledger</div>
+        </div>
+        <button onClick={printReport}
+          style={{background:C.orange+"15",border:`1.5px solid ${C.orange}`,borderRadius:8,
+            color:C.orange,fontWeight:700,fontSize:12,padding:"8px 14px",cursor:"pointer"}}>
+          📄 Generate PDF Report
+        </button>
+      </div>
+
+      {/* Date range filter — applies to the stale-godown table and the PDF export */}
+      <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
+        <div style={{flex:1}}>
+          <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>FROM</div>
+          <input type="date" value={dateFrom} onChange={e=>setDateFrom(e.target.value)}
+            style={{width:"100%",padding:"7px 10px",borderRadius:8,border:`1px solid ${C.border}`,fontSize:12}} />
+        </div>
+        <div style={{flex:1}}>
+          <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>TO</div>
+          <input type="date" value={dateTo} onChange={e=>setDateTo(e.target.value)}
+            style={{width:"100%",padding:"7px 10px",borderRadius:8,border:`1px solid ${C.border}`,fontSize:12}} />
+        </div>
+        {(dateFrom||dateTo) && (
+          <button onClick={()=>{setDateFrom("");setDateTo("");}}
+            style={{padding:"7px 10px",borderRadius:8,border:`1px solid ${C.border}`,background:C.bg,
+              color:C.muted,fontSize:11,cursor:"pointer"}}>Clear</button>
+        )}
+      </div>
+
+      {/* Unbilled by party/godown/clinker — same numbers as the Dashboard card */}
+      <div style={{display:"flex",flexDirection:"column",gap:8}}>
+        {[
+          {label:"🏭 Godown", count:godownAll.length, amt:godownAmt},
+          {label:"🤝 Party",  count:partyAll.length,  amt:partyAmt},
+        ].map(x=>(
+          <div key={x.label} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,
+            padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span style={{fontWeight:700,fontSize:13,color:C.text}}>{x.label}</span>
+            <span style={{fontSize:12,color:C.muted}}>{x.count} trip{x.count!==1?"s":""} · {fmt(x.amt)}</span>
+          </div>
+        ))}
+        <div style={{background:C.card,border:`1px solid ${"#9333ea"}44`,borderRadius:10,
+          padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{fontWeight:700,fontSize:13,color:"#9333ea"}}>🪨 Clinker</span>
+          <span style={{fontSize:12,color:C.muted}}>{clinkerUnbilledTons.toFixed(2)} MT · {fmt(clinkerUnbilledAmt)}</span>
+        </div>
+      </div>
+
+      {/* Stale godown trips — crisp, purely informational, live every render */}
+      <div>
+        <div style={{fontSize:13,fontWeight:800,color:staleRows.length>0?C.red:C.text,marginBottom:8}}>
+          ⚠ Godown Trips Unloaded &gt;15 Days {staleRows.length>0 && `(${staleRows.length})`}
+        </div>
+        {staleRows.length===0 ? (
+          <div style={{color:C.muted,fontSize:13,fontStyle:"italic"}}>None — nothing stuck past 15 days right now.</div>
+        ) : (
+          <div style={{overflowX:"auto"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+              <thead>
+                <tr style={{background:C.red+"11"}}>
+                  {["DI No","Date","Vehicle","MT"].map(h=>(
+                    <th key={h} style={{padding:"6px 8px",textAlign:"left",fontSize:10,fontWeight:700,
+                      color:C.red,textTransform:"uppercase",borderBottom:`2px solid ${C.red}33`}}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {staleRows.map((r,i)=>(
+                  <tr key={i} style={{borderBottom:`1px solid ${C.border}`}}>
+                    <td style={{padding:"6px 8px",fontWeight:700,color:C.text}}>{r.diNo}</td>
+                    <td style={{padding:"6px 8px",color:C.muted}}>{r.date||"—"}</td>
+                    <td style={{padding:"6px 8px",color:C.muted}}>{r.truckNo||"—"}</td>
+                    <td style={{padding:"6px 8px",fontWeight:700,color:C.text}}>{r.qty}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

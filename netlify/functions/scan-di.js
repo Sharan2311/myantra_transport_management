@@ -201,11 +201,15 @@ exports.handler = async (event) => {
         }
       }
 
-      // Check we got at least diNo or grNo — otherwise likely wrong document
-      if (!parsed.diNo && !parsed.grNo) {
+      // Both DI and GR numbers are mandatory — a trip saved with either missing
+      // breaks downstream duplicate-detection (which keys off these fields).
+      const missing = [];
+      if (!parsed.diNo) missing.push("DI No");
+      if (!parsed.grNo) missing.push("GR No");
+      if (missing.length) {
         return {
           statusCode: 200,
-          body: JSON.stringify({ error: "Could not find DI or GR number in document. Please check the file and try again." })
+          body: JSON.stringify({ error: `Could not clearly read: ${missing.join(" and ")}. Please retake a clearer photo/scan — these fields are mandatory and can't be left blank.` })
         };
       }
 
