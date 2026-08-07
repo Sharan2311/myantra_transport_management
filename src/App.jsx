@@ -240,15 +240,28 @@ const syncTripRecoveryToVehicle = (veh, trip) => {
 //
 // IMPORTANT: pass the FULL trips array, never an FY- or client-filtered one — a
 // loan spans financial years and a filtered list understates what was recovered.
-const ownerLoanStatus = (vehicles, veh, trips) => {
+const ownerLoanStatus = (vehicles, veh) => {
   const ownerName = (veh?.ownerName||"").trim();
   const ownerVehs = ownerName
     ? (vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerName)
     : (veh ? [veh] : []);
-  const truckNos  = new Set(ownerVehs.map(x=>x.truckNo));
-  const given     = ownerVehs.reduce((s,x)=>s+(+x.loan||0),0);
-  const recovered = (trips||[]).reduce((s,t)=>truckNos.has(t.truckNo)?s+(+t.loanRecovery||0):s, 0);
-  const net       = given - recovered;
+  // GIVEN comes from the vehicle's own `loan` field. It is maintained by every
+  // path that lends money — the Loan sheet, and the automatic overpayment->loan
+  // conversion, which adjusts `loan` without always writing a matching ledger
+  // row. Summing "given" ledger rows would therefore UNDERSTATE what was lent.
+  const given = ownerVehs.reduce((s,x)=>s+(+x.loan||0),0);
+  // RECOVERED comes from the LEDGER, not from trips. A trip's loanRecovery
+  // field can hold an amount that was never actually kept back — the edit form
+  // used to auto-apply deduct/trip to trips that had already been paid in full
+  // (SGNC176, SGNC113, SGNC044, SGNC032 on AP21TZ1669), which inflated the
+  // trip-side total by 10,000 against money the driver had already received.
+  // The ledger only ever gains a row when a recovery is really booked, and it
+  // is the record the owner can audit and correct entry by entry.
+  const recovered = ownerVehs
+    .flatMap(x=>x.loanTxns||[])
+    .filter(tx=>tx.type==="recovery")
+    .reduce((s,tx)=>s+(+tx.amount||0), 0);
+  const net = given - recovered;
   return {
     ownerVehs,
     ownerName,
@@ -263,10 +276,21 @@ const ownerLoanStatus = (vehicles, veh, trips) => {
   };
 };
 
+// Has any money already gone out against this trip? Deductions may only be
+// auto-applied BEFORE the driver is paid. Once a payment exists, an automatic
+// loan/shortage recovery would retroactively lower a net pay that has already
+// been settled, making a correctly-paid trip look overpaid. That is exactly
+// what happened to SGNC176/113/044/032 on AP21TZ1669: each was paid its full
+// net, then re-opened for an unrelated edit, and the edit sheet silently
+// pre-filled deduct/trip on the way in.
+const tripHasPayments = (driverPays, trip) =>
+  (driverPays||[]).some(p => p.tripId===trip?.id ||
+    (trip?.lrNo && p.lrNo===trip.lrNo && !p.tripId));
+
 // How much loan to auto-fill on a new trip. Zero once the loan is repaid.
 // deductPerTrip 0 means "recover the whole outstanding balance on this trip".
-const autoLoanRecoveryFor = (vehicles, veh, trips) => {
-  const {balance, deductPerTrip} = ownerLoanStatus(vehicles, veh, trips);
+const autoLoanRecoveryFor = (vehicles, veh) => {
+  const {balance, deductPerTrip} = ownerLoanStatus(vehicles, veh);
   if(balance <= 0) return 0;
   return deductPerTrip > 0 ? Math.min(deductPerTrip, balance) : balance;
 };
@@ -1960,11 +1984,6 @@ function AppMain() {
 
   const sp = {
     trips: roleTrips, setTrips:dbSetTrips,
-    // Unfiltered by client. Loan math MUST use this: a loan is one debt for the
-    // owner, but their trips can span clients (e.g. Shree Kodla + Guntur), so a
-    // client-scoped `roleTrips` understates what was recovered and would let the
-    // autofill deduct against a loan that is already fully repaid.
-    loanTrips: trips,
     fyTrips: roleFyTrips, selectedFY, setSelectedFY,
     selectedClient, setSelectedClient,
     vehicles, setVehicles:dbSetVehicles,
@@ -3089,7 +3108,7 @@ const lookupPincode = async (pincode) => {
   return null;
 };
 
-function BatchDIScanner({ trips, loanTrips=null, vehicles, setVehicles, setTrips, settings, user, log, onClose, employees=[], cashTransfers=[], setCashTransfers, dieselRequests=[], setDieselRequests, manualDiesel=false, actionItems=[], setActionItems }) {
+function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user, log, onClose, employees=[], cashTransfers=[], setCashTransfers, dieselRequests=[], setDieselRequests, manualDiesel=false, actionItems=[], setActionItems }) {
   // Party pouch deduction for a vehicle: exempt → 0, per-vehicle override → that,
   // else the owner's global rate (settings.pouchPerTrip), else ₹700 fallback.
   const pouchAmt = (veh) => veh?.pouchExempt ? 0 : (veh?.pouchOverride!=null ? veh.pouchOverride : (settings?.pouchPerTrip ?? 700));
@@ -3410,7 +3429,7 @@ Rules:
       const client = firstItem?.extracted?.client || getDEFAULT_CLIENT();
       // Auto loan recovery from owner's deductPerTrip, capped at balance
       const vehG = (vehicles||[]).find(v=>v.truckNo===truckNo);
-      const autoLoanG = autoLoanRecoveryFor(vehicles, vehG, loanTrips||trips);
+      const autoLoanG = autoLoanRecoveryFor(vehicles, vehG);
       // Auto-fill shortage recovery
       const _stxnsG = vehG?.shortageTxns||[];
       const shortBalG = Math.max(0,
@@ -3477,7 +3496,7 @@ Rules:
         const updated = prev.map(x => x.id===gid ? {...x, diIds:x.diIds.filter(id=>id!==itemId)} : x);
         const item = doneItems.find(x=>x.id===itemId);
         const vehT2 = (vehicles||[]).find(v=>v.truckNo===(item?.extracted?.truckNo||"").toUpperCase().trim());
-        const autoLR2 = autoLoanRecoveryFor(vehicles, vehT2, loanTrips||trips);
+        const autoLR2 = autoLoanRecoveryFor(vehicles, vehT2);
         const shortBal2 = Math.max(0,(()=>{const t=vehT2?.shortageTxns||[];return t.filter(x=>x.type==="shortage").reduce((s,x)=>s+(x.amount||0),0)-t.filter(x=>x.type==="recovery").reduce((s,x)=>s+(x.amount||0),0);})());
         const shortDed2 = vehT2?.shortageDeductPerTrip||0;
         const autoSR2 = shortBal2<=0?0:(shortDed2>0?Math.min(shortDed2,shortBal2):shortBal2);
@@ -5438,7 +5457,7 @@ Rules:
 // No manual LR entry — LR is auto-assigned on save.
 // If truck has existing unsettled same-vehicle trips, offer to merge.
 // onConfirm(existingTripOrNull, driverPhone)
-function AskLRSheet({ extracted, trips, loanTrips=null, vehicles, employees=[], onConfirm, onCancel }) {
+function AskLRSheet({ extracted, trips, vehicles, employees=[], onConfirm, onCancel }) {
   const [driverPhone, setDriverPhone] = useState("");
   const [assignedEmpId, setAssignedEmpId] = useState("");
   const [selectedMerge, setSelectedMerge] = useState(null); // trip id to merge into, or "new"
@@ -5497,7 +5516,7 @@ function AskLRSheet({ extracted, trips, loanTrips=null, vehicles, employees=[], 
 
       {/* Vehicle pending balances */}
       {existingVehicle && !duplicateTrip && (()=>{
-        const _ls2=ownerLoanStatus(vehicles, existingVehicle, loanTrips||trips);
+        const _ls2=ownerLoanStatus(vehicles, existingVehicle);
         const ownerN2=_ls2.ownerName;
         const ownerVs2=_ls2.ownerVehs;
         const loanBal=_ls2.balance;
@@ -7385,7 +7404,7 @@ function SealedInvoiceSheet({ trip, onMerge, onClose, embedded=false }) {
 
 
 // ─── TRIPS ────────────────────────────────────────────────────────────────────
-function Trips({trips, setTrips, loanTrips=null, fyTrips, selectedClient, vehicles, setVehicles, indents, setIndents, settings, tripType, user, log, driverPays, setDriverPays, employees, cashTransfers, setCashTransfers, allTripsLoaded, loadingAllTrips, loadAllTrips, dieselRequests=[], setDieselRequests, payments=[], invoiceRegistry=[], actionItems=[], setActionItems}) {
+function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles, indents, setIndents, settings, tripType, user, log, driverPays, setDriverPays, employees, cashTransfers, setCashTransfers, allTripsLoaded, loadingAllTrips, loadAllTrips, dieselRequests=[], setDieselRequests, payments=[], invoiceRegistry=[], actionItems=[], setActionItems}) {
   const isIn = tripType === "inbound";
   const ac   = isIn ? C.teal : C.accent;
 
@@ -7514,7 +7533,7 @@ function Trips({trips, setTrips, loanTrips=null, fyTrips, selectedClient, vehicl
     const veh = vehicles.find(x => x.truckNo===tn);
     // Owner-level loan: deductPerTrip capped at the outstanding balance, or the
     // whole balance when no per-trip amount is configured. Zero once repaid.
-    const autoLoanRecov = autoLoanRecoveryFor(vehicles, veh, loanTrips||trips);
+    const autoLoanRecov = autoLoanRecoveryFor(vehicles, veh);
     // Auto-fill shortage recovery from vehicle's outstanding shortage balance
     const _stxns = veh?.shortageTxns||[];
     const shortBal = Math.max(0,
@@ -7829,7 +7848,6 @@ function Trips({trips, setTrips, loanTrips=null, fyTrips, selectedClient, vehicl
     // Holds a vehicle created in THIS handler — `vehicles` is the render-time
     // snapshot and won't contain it yet, so the ledger sync below would
     // otherwise silently skip a brand-new truck.
-    let _justCreatedVeh = null;
     // Auto-create vehicle FIRST if not yet registered — so ledger update below finds it
     if (tn2 && !vehicles.find(v => v.truckNo === tn2)) {
       const nv = { id:uid(), truckNo:tn2, ownerName:f.ownerName||"", phone:"",
@@ -7839,7 +7857,6 @@ function Trips({trips, setTrips, loanTrips=null, fyTrips, selectedClient, vehicl
         shortageTxns:[], loanTxns:[], createdBy:user.username };
       setVehicles(p => [...(p||[]), nv]);
       DB.saveVehicle(nv).catch(e=>console.error("saveVehicle auto-create:",e));
-      _justCreatedVeh = nv;
       log("AUTO-CREATE VEHICLE", `${tn2} from trip save`);
     } else if(tn2 && f.ownerName?.trim()) {
       // If vehicle exists but ownerName was blank — persist it now
@@ -7856,16 +7873,14 @@ function Trips({trips, setTrips, loanTrips=null, fyTrips, selectedClient, vehicl
     // to 0 must delete the matching ledger entry, and syncTripRecoveryToVehicle
     // only does that if it actually runs. The old `> 0` gate meant "owner removes
     // the loan recovery from the trip" left the ledger row behind forever.
+    // setVehicles here is dbSetVehicles, which persists every changed vehicle,
+    // so no explicit DB.saveVehicle is needed. Use the FUNCTIONAL form: this
+    // handler can update the same vehicle more than once (auto-create above,
+    // overpayment->loan below), and building from the render-time `vehicles`
+    // snapshot would make the later write silently discard the earlier one.
     if(tn2){
-      const _vehForSync = vehicles.find(veh=>veh.truckNo===tn2) || _justCreatedVeh;
-      if(_vehForSync){
-        const _updVeh = syncTripRecoveryToVehicle(_vehForSync, t);
-        setVehicles(prev=>prev.map(veh=>veh.truckNo===tn2?_updVeh:veh));
-        // Persist. Without this the sync lived in React state only and was
-        // wiped by the next 45s poll / page refresh, while the trip's own
-        // loanRecovery stayed saved — the exact source of the ledger drift.
-        DB.saveVehicle(_updVeh).catch(e=>console.error("saveVehicle trip recovery sync:",e));
-      }
+      setVehicles(prev=>prev.map(veh=>
+        veh.truckNo!==tn2 ? veh : syncTripRecoveryToVehicle(veh, t)));
     }
     // ── Auto-attach diesel request if dieselIndentNo was set from dropdown ──
     if (t.dieselIndentNo && typeof setDieselRequests === "function") {
@@ -7998,28 +8013,19 @@ function Trips({trips, setTrips, loanTrips=null, fyTrips, selectedClient, vehicl
     const prevTrip = trips.find(t=>t.id===editSheet.id);
     const tn3 = (editSheet.truckNo||"").toUpperCase().trim();
     if(tn3){
-      const _vehForSync3 = vehicles.find(veh=>veh.truckNo===tn3);
-      if(_vehForSync3){
-        const _updVeh3 = syncTripRecoveryToVehicle(_vehForSync3, editSheet);
-        setVehicles(prev=>prev.map(veh=>veh.truckNo===tn3?_updVeh3:veh));
-        // Persist — the in-memory-only sync was why an owner clearing or
-        // lowering a loan recovery saw the trip change but the vehicle ledger
-        // keep the old entry after the next refresh.
-        DB.saveVehicle(_updVeh3).catch(e=>console.error("saveVehicle edit recovery sync:",e));
-      }
-      // If the truck was CHANGED on this edit, the previous truck still holds a
-      // ledger entry for this trip. Sync it against a zeroed copy so the entry
-      // is removed from the vehicle that no longer ran the trip.
+      // Functional form — this handler also writes to the same vehicle in the
+      // overpayment->loan block further down.
       const _prevTn = (prevTrip?.truckNo||"").toUpperCase().trim();
-      if(_prevTn && _prevTn!==tn3){
-        const _oldVeh = vehicles.find(veh=>veh.truckNo===_prevTn);
-        if(_oldVeh){
-          const _updOld = syncTripRecoveryToVehicle(_oldVeh, {...editSheet, loanRecovery:0, shortageRecovery:0});
-          setVehicles(prev=>prev.map(veh=>veh.truckNo===_prevTn?_updOld:veh));
-          DB.saveVehicle(_updOld).catch(e=>console.error("saveVehicle old-truck recovery cleanup:",e));
-          log("LEDGER MOVE", `LR:${editSheet.lrNo||"—"} recovery moved ${_prevTn} → ${tn3}`);
-        }
-      }
+      setVehicles(prev=>prev.map(veh=>{
+        if(veh.truckNo===tn3) return syncTripRecoveryToVehicle(veh, editSheet);
+        // If the truck was CHANGED on this edit, the previous truck still holds
+        // a ledger entry for this trip. Sync it against a zeroed copy so the
+        // entry leaves the vehicle that no longer ran the trip.
+        if(_prevTn && _prevTn!==tn3 && veh.truckNo===_prevTn)
+          return syncTripRecoveryToVehicle(veh, {...editSheet, loanRecovery:0, shortageRecovery:0});
+        return veh;
+      }));
+      if(_prevTn && _prevTn!==tn3) log("LEDGER MOVE", `LR:${editSheet.lrNo||"—"} recovery moved ${_prevTn} → ${tn3}`);
     }
     // Persist ownerName to vehicle master if it was blank
     if(tn3 && (editSheet.ownerName||"").trim()) {
@@ -8736,8 +8742,9 @@ function Trips({trips, setTrips, loanTrips=null, fyTrips, selectedClient, vehicl
                             // Suggest loanRecovery/shortageRecovery from the vehicle's
                             // deduct/trip setting ONLY when this trip currently has none
                             // set (0/blank) — never overwrite an amount you already
-                            // customized on this specific trip.
-                            if(!t.driverSettled) {
+                            // customized on this specific trip — AND only while no
+                            // payment has been recorded against it. See tripHasPayments.
+                            if(!t.driverSettled && !tripHasPayments(driverPays, t)) {
                               const veh = (vehicles||[]).find(x=>x.truckNo===t.truckNo);
                               if(veh) {
                                 if(!(+t.loanRecovery>0)) {
@@ -8794,6 +8801,10 @@ function Trips({trips, setTrips, loanTrips=null, fyTrips, selectedClient, vehicl
                       {/* Warn if loan deduction not yet applied on this trip */}
                       {(()=>{
                         if(t.loanRecovery>0||t.driverSettled) return null;
+                        // Never prompt to apply a recovery once the driver has been
+                        // paid — acting on it would push net pay below what he has
+                        // already received and manufacture a phantom overpayment.
+                        if(tripHasPayments(driverPays, t)) return null;
                         // Don't warn on trips saved today — recovery may have just been applied
                         if((t.createdAt||t.date||"").slice(0,10)===todayStr) return null;
                         const ownerName=(v?.ownerName||"").trim();
@@ -9117,7 +9128,7 @@ function Trips({trips, setTrips, loanTrips=null, fyTrips, selectedClient, vehicl
       {/* ── BATCH DI SCANNER SHEET ── */}
       {batchDISheet && (
         <Sheet title="📋 Add Trip — Scan GR / DI Copies" onClose={()=>setBatchDISheet(false)} noBackdropClose>
-          <BatchDIScanner loanTrips={loanTrips||trips}
+          <BatchDIScanner
             trips={trips} vehicles={vehicles} setVehicles={setVehicles}
             setTrips={setTrips} settings={settings} user={user} log={log}
             employees={employees||[]} cashTransfers={cashTransfers||[]} setCashTransfers={setCashTransfers}
@@ -9184,7 +9195,7 @@ function Trips({trips, setTrips, loanTrips=null, fyTrips, selectedClient, vehicl
             <>
               {diConflict ? (
                 diConflict.askLR ? (
-                  <AskLRSheet extracted={diConflict.extracted} trips={trips} loanTrips={loanTrips||trips} vehicles={vehicles}
+                  <AskLRSheet extracted={diConflict.extracted} trips={trips} vehicles={vehicles}
                     employees={employees||[]}
                     onConfirm={onLRConfirmed} onCancel={()=>setDiConflict(null)} />
                 ) : (
@@ -9205,7 +9216,7 @@ function Trips({trips, setTrips, loanTrips=null, fyTrips, selectedClient, vehicl
                   ) : (
                     <TripForm f={f} ff={ff} isIn={isIn} ac={ac} vehicles={vehicles} settings={settings} employees={employees||[]} cashTransfers={cashTransfers||[]} recentDestinations={recentDestinations} recentGrades={recentGrades}
                       onTruckChange={onTruckChange} onSubmit={saveNew} submitLabel="Save Trip"
-                      user={user} wasScanned={wasScanned} trips={trips||[]} loanTrips={loanTrips||trips} indents={indents||[]}
+                      user={user} wasScanned={wasScanned} trips={trips||[]} indents={indents||[]}
                       dieselRequests={dieselRequests||[]} setDieselRequests={setDieselRequests}
                       manualLrMode={manualLrMode} manualDiesel={manualDiesel} />
                   )}
@@ -9303,7 +9314,7 @@ function Trips({trips, setTrips, loanTrips=null, fyTrips, selectedClient, vehicl
               {/* Same DI conflict flow as godown — handles duplicate DI, LR entry, merge */}
               {diConflict ? (
                 diConflict.askLR ? (
-                  <AskLRSheet extracted={diConflict.extracted} trips={trips} loanTrips={loanTrips||trips} vehicles={vehicles}
+                  <AskLRSheet extracted={diConflict.extracted} trips={trips} vehicles={vehicles}
                     onConfirm={(existingTrip, driverPhone)=>{
                       // Carry party fields through confirm
                       onLRConfirmed(existingTrip, driverPhone);
@@ -9462,25 +9473,17 @@ function Trips({trips, setTrips, loanTrips=null, fyTrips, selectedClient, vehicl
                           setTrips(p=>[t,...(p||[])]);
                           log("ADD PARTY TRIP",`LR:${t.lrNo} ${t.truckNo}`);
                           const tn2=(t.truckNo||"").toUpperCase().trim();
-                          let _partyNewVeh=null;
                           if(tn2&&!vehicles.find(v=>v.truckNo===tn2)){
                             const nv={id:uid(),truckNo:tn2,ownerName:"",phone:"",driverName:"",driverPhone:"",
                               driverLicense:"",accountNo:"",ifsc:"",loan:0,loanRecovered:0,deductPerTrip:0,
                               tafalExempt:false,shortageOwed:0,shortageRecovered:0,shortageTxns:[],loanTxns:[],createdBy:user.username};
                             setVehicles(p=>[...(p||[]),nv]);
-                            DB.saveVehicle(nv).catch(e=>console.error("saveVehicle party auto-create:",e));
-                            _partyNewVeh=nv;
                           }
-                          // Unconditional strict sync + persist — see the trip-form
-                          // save path for why the `> 0` gate and the missing
-                          // DB.saveVehicle both had to go.
+                          // Unconditional strict sync — runs even when the value
+                          // is 0 so clearing a recovery removes its ledger entry.
                           if(tn2){
-                            const _pVehSync=vehicles.find(veh=>veh.truckNo===tn2)||_partyNewVeh;
-                            if(_pVehSync){
-                              const _pUpd=syncTripRecoveryToVehicle(_pVehSync, t);
-                              setVehicles(prev=>prev.map(veh=>veh.truckNo===tn2?_pUpd:veh));
-                              DB.saveVehicle(_pUpd).catch(e=>console.error("saveVehicle party recovery sync:",e));
-                            }
+                            setVehicles(prev=>prev.map(veh=>
+                              veh.truckNo!==tn2 ? veh : syncTripRecoveryToVehicle(veh, t)));
                           }
                           setAddSheet(false); setF(blankForm());
                           setOrderTypeStep(null); setPartyStep("docs");
@@ -9490,7 +9493,7 @@ function Trips({trips, setTrips, loanTrips=null, fyTrips, selectedClient, vehicl
                       }}
                       submitLabel="💾 Save Party Trip"
                       user={user} wasScanned={wasScanned}
-                      isParty={true} trips={trips||[]} loanTrips={loanTrips||trips} indents={indents||[]} />
+                      isParty={true} trips={trips||[]} indents={indents||[]} />
                   ) : (
                     <div style={{background:C.bg,border:`2px dashed ${C.border}`,borderRadius:14,
                       padding:"28px 20px",textAlign:"center",marginTop:8}}>
@@ -9609,7 +9612,7 @@ function Trips({trips, setTrips, loanTrips=null, fyTrips, selectedClient, vehicl
             salesOfficerEmail={editSheet.salesOfficerEmail||""}
             partyNumber={editSheet.partyNumber||""}
             onPartyFieldChange={(k,v)=>setEditSheet(p=>({...p,[k]:v}))}
-            trips={trips||[]} loanTrips={loanTrips||trips} indents={indents||[]}
+            trips={trips||[]} indents={indents||[]}
             dieselRequests={dieselRequests||[]} setDieselRequests={setDieselRequests}
             manualLrMode={manualLrMode} manualDiesel={manualDiesel}
           />
@@ -9868,7 +9871,7 @@ function SearchableIndentSelect({options, value, truck, onSelect, onClear}) {
 }
 
 
-function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit, submitLabel, user, showStatus=false, wasScanned=false, isParty=false, partyDriverPhone="", salesOfficerPhone="", salesOfficerEmail="", partyNumber="", onPartyFieldChange, employees=[], cashTransfers=[], recentDestinations=[], recentGrades=[], trips=[], loanTrips=null, indents=[], dieselRequests=[], setDieselRequests, manualLrMode=false, manualDiesel=false}) {
+function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit, submitLabel, user, showStatus=false, wasScanned=false, isParty=false, partyDriverPhone="", salesOfficerPhone="", salesOfficerEmail="", partyNumber="", onPartyFieldChange, employees=[], cashTransfers=[], recentDestinations=[], recentGrades=[], trips=[], indents=[], dieselRequests=[], setDieselRequests, manualLrMode=false, manualDiesel=false}) {
   // Ensure each diLine has frRate — migrate from trip-level frRate if missing
   const normalizedDiLines = (f.diLines||[]).map(d => ({...d, frRate: d.frRate || +f.frRate || 0}));
   const fWithLines = normalizedDiLines.length > 1 ? {...f, diLines: normalizedDiLines} : f;
@@ -10224,7 +10227,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
             Loan Recovery ₹{user?.role!=="owner"&&<span style={{color:C.orange,fontSize:10,marginLeft:6}}>🔒 Owner-set</span>}
           </label>
           {(()=>{
-            const _ls3 = veh ? ownerLoanStatus(vehicles, veh, loanTrips||trips) : null;
+            const _ls3 = veh ? ownerLoanStatus(vehicles, veh) : null;
             const ownerVs3 = _ls3 ? _ls3.ownerVehs : [];
             const loanBal = ownerVs3.length > 0 ? _ls3.balance : null;
             const loanLabel = ownerVs3.length>1 ? `Owner pending (${ownerVs3.length} vehs)` : "Pending";
@@ -10938,12 +10941,8 @@ function Settlement({trips, setTrips, vehicles, setVehicles, settlements, setSet
     // only, per calcNet's own comment — it must never be recorded as a separate
     // ledger entry alongside calc.loanRecovery, which is what was happening here
     // before and would double-count against calc.loanRecovery for the same trip.)
-    if (v) {
-      const _updV = syncTripRecoveryToVehicle(v, t);
-      setVehicles(p => p.map(x => x.truckNo===t.truckNo ? _updV : x));
-      // Persist — settlement previously synced the ledger in memory only.
-      DB.saveVehicle(_updV).catch(e=>console.error("saveVehicle settle recovery sync:",e));
-    }
+    if (v) setVehicles(p => p.map(x =>
+      x.truckNo!==t.truckNo ? x : syncTripRecoveryToVehicle(x, t)));
     log("SETTLEMENT", `LR:${t.lrNo} ${t.truckNo} — Net ${fmt(calc.net)}`);
     setSel(null); setNotes("");
   };
@@ -16623,7 +16622,7 @@ function DeductPerTripField({ownerVehs, ownerTruckNos, ownerDeductPerTrip, setVe
 }
 
 // ─── VEHICLES ─────────────────────────────────────────────────────────────────
-function Vehicles({trips, setTrips, loanTrips=null, vehicles, setVehicles, driverPays, user, log, settings, setSettings, employees=[]}) {
+function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log, settings, setSettings, employees=[]}) {
   const isOwner = user.role === "owner";
   const [sheet,    setSheet]    = useState(false);
   const [editId,   setEditId]   = useState(null);
@@ -16702,7 +16701,7 @@ function Vehicles({trips, setTrips, loanTrips=null, vehicles, setVehicles, drive
     const totalPaid = pays.reduce((s,p)=>s+(p.amount||0),0);
     const ownerNamePDF = (v.ownerName||"").trim();
     const ownerVehsPDF = ownerNamePDF ? (vehicles||[]).filter(x=>(x.ownerName||"").trim()===ownerNamePDF) : [v];
-    const _lsPDF = ownerLoanStatus(vehicles, v, loanTrips||trips);
+    const _lsPDF = ownerLoanStatus(vehicles, v);
     const ownerLoanGivenPDF = _lsPDF.given;
     const ownerLoanRecovPDF = _lsPDF.recovered;
     // Outstanding never goes below zero; anything taken beyond the loan is
@@ -16873,7 +16872,7 @@ function Vehicles({trips, setTrips, loanTrips=null, vehicles, setVehicles, drive
     const truckNos = new Set(ownerVehs.map(v=>v.truckNo));
     const ownerTrips = (trips||[]).filter(t=>truckNos.has(t.truckNo));
     const ownerPays = (driverPays||[]).filter(p=>truckNos.has(p.truckNo));
-    const _lsOwner = ownerLoanStatus(vehicles, ownerVehs[0], loanTrips||trips);
+    const _lsOwner = ownerLoanStatus(vehicles, ownerVehs[0]);
     const totalLoan = _lsOwner.given;
     const totalRecov = _lsOwner.recovered;
     const loanBal = _lsOwner.balance;
@@ -16898,7 +16897,7 @@ function Vehicles({trips, setTrips, loanTrips=null, vehicles, setVehicles, drive
       // one truck and recovered on another is still one loan. Showing
       // max(0, thisVehicleLoan − thisVehicleRecovered) made the lending truck
       // look unpaid while the recovering truck's surplus vanished.
-      const vLoanBal = ownerLoanStatus(vehicles, v, loanTrips||trips).balance;
+      const vLoanBal = ownerLoanStatus(vehicles, v).balance;
       const vShortBal = Math.max(0,(v.shortageOwed||0)-vShortRecov);
       return '<tr>'
         +'<td class="l b">'+v.truckNo+'</td>'
@@ -17904,7 +17903,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
         const seenOwners = new Set();
         return filtered.map(v=>{
         const ownerName2 = (v.ownerName||"").trim();
-        const _ls2 = ownerLoanStatus(vehicles, v, loanTrips||trips);
+        const _ls2 = ownerLoanStatus(vehicles, v);
         const ownerVehs2 = _ls2.ownerVehs.length ? _ls2.ownerVehs : [v];
         const ownerLoanG2 = _ls2.given;
         const ownerLoanR2 = _ls2.recovered;
