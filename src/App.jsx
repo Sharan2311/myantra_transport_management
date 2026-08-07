@@ -16647,6 +16647,57 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
   const [ownerReportSheet, setOwnerReportSheet] = useState(null);
   const [reconcileResults, setReconcileResults] = useState(null); // array of candidates, or null if closed
   const [reconcileSelected, setReconcileSelected] = useState(new Set());
+  // Per-row repair DIRECTION. "ledger" = write the ledger to match the trip
+  // (the trip is right; its entry was lost). "trip" = write the trip to match
+  // the ledger (the ledger is right; the trip's field was never a real
+  // recovery). Both happen in practice and only the owner knows which, so the
+  // choice is per row and defaults to neither being assumed correct.
+  const [reconcileDir, setReconcileDir] = useState(new Map());
+
+  // Every trip's loan/shortage recovery must have a matching vehicle ledger
+  // entry. Scanned continuously rather than only when the Fix button is
+  // pressed, so a divergence is visible on the vehicle card the moment it
+  // appears instead of sitting unnoticed until someone thinks to check.
+  // Three cases per trip: "add" (field set, no entry), "correct" (entry exists
+  // but the amount differs or is duplicated), "remove" (field is 0, entry
+  // remains).
+  const ledgerMismatches = React.useMemo(() => {
+    const findings = [];
+    (trips||[]).forEach(t => {
+      const tn = (t.truckNo||"").toUpperCase().trim();
+      const veh = (vehicles||[]).find(v=>v.truckNo===tn);
+      if(!veh) return;
+      const findMine = (txns) => (txns||[]).filter(tx=>tx.type==="recovery" &&
+        (tx.tripId===t.id || (!tx.tripId && t.lrNo && tx.lrNo===t.lrNo)));
+
+      const newLR = +t.loanRecovery||0;
+      const loanMatches = findMine(veh.loanTxns);
+      const loanCurrent = loanMatches.reduce((s,x)=>s+(+x.amount||0),0);
+      let loan = null;
+      if(newLR<=0 && loanMatches.length>0) loan = {action:"remove", current:loanCurrent, target:0};
+      else if(newLR>0 && (loanMatches.length!==1 || +loanMatches[0].amount!==newLR))
+        loan = {action:loanMatches.length===0?"add":"correct", current:loanCurrent, target:newLR};
+
+      const newSR = +t.shortageRecovery||0;
+      const shortMatches = findMine(veh.shortageTxns);
+      const shortCurrent = shortMatches.reduce((s,x)=>s+(+x.amount||0),0);
+      let shortage = null;
+      if(newSR<=0 && shortMatches.length>0) shortage = {action:"remove", current:shortCurrent, target:0};
+      else if(newSR>0 && (shortMatches.length!==1 || +shortMatches[0].amount!==newSR))
+        shortage = {action:shortMatches.length===0?"add":"correct", current:shortCurrent, target:newSR};
+
+      if(loan || shortage) findings.push({truckNo:tn, lrNo:t.lrNo, date:t.date, tripId:t.id,
+        settled:!!t.driverSettled,
+        paid:(driverPays||[]).some(p=>p.tripId===t.id || (t.lrNo && p.lrNo===t.lrNo && !p.tripId)),
+        loan, shortage});
+    });
+    return findings;
+  }, [trips, vehicles, driverPays]);
+  const mismatchByTruck = React.useMemo(() => {
+    const m = new Map();
+    ledgerMismatches.forEach(x => m.set(x.truckNo, (m.get(x.truckNo)||0)+1));
+    return m;
+  }, [ledgerMismatches]);
   // Multi-account form state (for vehicle add/edit sheet)
   const [showAddAcc,  setShowAddAcc]  = useState(false);
   const [newAccForm,  setNewAccForm]  = useState({name:"",accountNo:"",ifsc:""});
@@ -17125,50 +17176,16 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
             </Btn>
           )}
           {isOwner && (
-            <Btn sm outline color={C.purple} onClick={()=>{
-              // Strict rule: each trip's loan/shortage recovery ledger entry must
-              // exactly mirror that trip's current loanRecovery/shortageRecovery
-              // field — same logic as syncTripRecoveryToVehicle, run here as a
-              // dry-run diagnostic so nothing is changed until you review and pick.
-              // Three possible issues per trip: "add" (field is set, no entry
-              // exists), "correct" (an entry exists but the amount is wrong, or
-              // there's more than one), "remove" (field is 0 but an entry still
-              // exists — most likely a later edit/waiver that the ledger never
-              // picked up).
-              const findings = []; // {truckNo, lrNo, date, tripId, settled, loan, shortage}
-              (trips||[]).forEach(t => {
-                const tn = (t.truckNo||"").toUpperCase().trim();
-                const veh = (vehicles||[]).find(v=>v.truckNo===tn);
-                if(!veh) return;
-                const findMine = (txns) => (txns||[]).filter(tx=>tx.type==="recovery" &&
-                  (tx.tripId===t.id || (!tx.tripId && t.lrNo && tx.lrNo===t.lrNo)));
-
-                const newLR = +t.loanRecovery||0;
-                const loanMatches = findMine(veh.loanTxns);
-                const loanCurrent = loanMatches.reduce((s,x)=>s+(+x.amount||0),0);
-                let loan = null;
-                if(newLR<=0 && loanMatches.length>0) loan = {action:"remove", current:loanCurrent, target:0};
-                else if(newLR>0 && (loanMatches.length!==1 || +loanMatches[0].amount!==newLR))
-                  loan = {action:loanMatches.length===0?"add":"correct", current:loanCurrent, target:newLR};
-
-                const newSR = +t.shortageRecovery||0;
-                const shortMatches = findMine(veh.shortageTxns);
-                const shortCurrent = shortMatches.reduce((s,x)=>s+(+x.amount||0),0);
-                let shortage = null;
-                if(newSR<=0 && shortMatches.length>0) shortage = {action:"remove", current:shortCurrent, target:0};
-                else if(newSR>0 && (shortMatches.length!==1 || +shortMatches[0].amount!==newSR))
-                  shortage = {action:shortMatches.length===0?"add":"correct", current:shortCurrent, target:newSR};
-
-                if(loan || shortage) findings.push({truckNo:tn, lrNo:t.lrNo, date:t.date, tripId:t.id, settled:!!t.driverSettled, loan, shortage});
-              });
-              if(findings.length===0){
+            <Btn sm outline color={ledgerMismatches.length>0?C.red:C.purple} onClick={()=>{
+              if(ledgerMismatches.length===0){
                 alert("✅ Every trip's loan/shortage recovery exactly matches its vehicle ledger — nothing to fix.");
                 return;
               }
-              setReconcileResults(findings);
+              setReconcileResults(ledgerMismatches);
               setReconcileSelected(new Set()); // opt-in — nothing pre-selected
+              setReconcileDir(new Map());      // no direction assumed
             }}>
-              🔧 Fix Missing Recoveries
+              🔧 Fix Missing Recoveries{ledgerMismatches.length>0?` (${ledgerMismatches.length})`:""}
             </Btn>
           )}
         </div>
@@ -17939,6 +17956,10 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                 <Badge
                   label={ownerBal2>0?"Loan Due":ownerOver2>0?`Over-recovered ₹${fmt(ownerOver2)}`:"Clear"}
                   color={ownerBal2>0?C.red:ownerOver2>0?C.orange:C.green} />
+                {/* Ledger/trip divergence, visible without running the scan. */}
+                {(mismatchByTruck.get(v.truckNo)||0)>0 && (
+                  <Badge label={`⚠ ${mismatchByTruck.get(v.truckNo)} trip${mismatchByTruck.get(v.truckNo)>1?"s":""} out of sync`} color={C.red} />
+                )}
                 {isTafalExempt(v, employees)&&<Badge label={v.tafalExempt?"TAFAL Exempt":"TAFAL Exempt (assigned to employee)"} color={C.muted} />}
                 {isOwner ? (
                 <button onClick={()=>{setF({
@@ -18307,28 +18328,73 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                         Shortage: ledger ₹{m.shortage.current.toLocaleString("en-IN")} → trip says ₹{m.shortage.target.toLocaleString("en-IN")}
                       </div>
                     )}
+                    {/* Which side is true? Only the owner knows, so ask. */}
+                    <div style={{display:"flex",gap:6,marginTop:6,alignItems:"center",flexWrap:"wrap"}}
+                         onClick={e=>e.preventDefault()}>
+                      {[["ledger","Ledger ← trip","Trip is right — write the missing entry"],
+                        ["trip","Trip ← ledger","Ledger is right — clear the trip's field"]].map(([k,lbl,tip])=>{
+                        const on = (reconcileDir.get(i)||"ledger")===k;
+                        return (
+                          <button key={k} title={tip}
+                            onClick={e=>{e.preventDefault();e.stopPropagation();
+                              setReconcileDir(prev=>{const n=new Map(prev);n.set(i,k);return n;});}}
+                            style={{background:on?(k==="trip"?C.orange+"22":C.purple+"22"):"none",
+                              border:`1px solid ${on?(k==="trip"?C.orange:C.purple):C.border}`,
+                              color:on?(k==="trip"?C.orange:C.purple):C.muted,
+                              borderRadius:6,padding:"3px 8px",fontSize:10,fontWeight:on?700:400,cursor:"pointer"}}>
+                            {lbl}
+                          </button>
+                        );
+                      })}
+                      {m.paid && (reconcileDir.get(i)||"ledger")==="trip" && (
+                        <span style={{color:C.red,fontSize:10,fontWeight:600}}>
+                          ⚠ already paid — changes net due
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </label>
                 );
               })}
             </div>
             <Btn onClick={()=>{
-              const toApply = reconcileResults.filter((_,i)=>reconcileSelected.has(i));
-              if(toApply.length===0){ setReconcileResults(null); return; }
+              const picked = reconcileResults
+                .map((m,i)=>({m, dir:reconcileDir.get(i)||"ledger"}))
+                .filter((_,i)=>reconcileSelected.has(i));
+              if(picked.length===0){ setReconcileResults(null); return; }
+              const toLedger = picked.filter(x=>x.dir==="ledger").map(x=>x.m);
+              const toTrip   = picked.filter(x=>x.dir==="trip").map(x=>x.m);
+
+              // Direction "trip": the ledger is right and the trip's field was
+              // never a real recovery. Rewrite the trip to the ledger's amount
+              // FIRST, so the ledger sync below sees the corrected trip and
+              // doesn't immediately put the entry back.
+              const tripFixes = new Map(); // tripId -> patched trip
+              toTrip.forEach(m => {
+                const t = trips.find(x=>x.id===m.tripId);
+                if(!t) return;
+                const patched = {...t,
+                  ...(m.loan     ? {loanRecovery:     m.loan.current}     : {}),
+                  ...(m.shortage ? {shortageRecovery: m.shortage.current} : {})};
+                tripFixes.set(t.id, patched);
+              });
+              if(tripFixes.size>0){
+                setTrips(prev=>prev.map(t=>tripFixes.get(t.id)||t));
+              }
+
               setVehicles(prev => prev.map(veh => {
-                const mine = toApply.filter(m=>m.truckNo===veh.truckNo);
+                const mine = toLedger.filter(m=>m.truckNo===veh.truckNo);
                 if(mine.length===0) return veh;
                 let upd = veh;
                 mine.forEach(m => {
                   const t = trips.find(x=>x.id===m.tripId);
                   if(t) upd = syncTripRecoveryToVehicle(upd, t);
                 });
-                DB.saveVehicle(upd).catch(e=>console.error("saveVehicle reconcile:",e));
                 return upd;
               }));
-              log("RECONCILE LEDGER", `Fixed ${toApply.length} selected trip${toApply.length>1?"s":""}`);
-              alert(`✅ Fixed ${toApply.length} selected trip${toApply.length>1?"s":""} in the vehicle ledger.`);
-              setReconcileResults(null); setReconcileSelected(new Set());
+              log("RECONCILE LEDGER", `${toLedger.length} ledger entr${toLedger.length===1?"y":"ies"} written, ${toTrip.length} trip field${toTrip.length===1?"":"s"} cleared to match ledger`);
+              alert(`✅ Done.\n\n${toLedger.length} ledger entr${toLedger.length===1?"y":"ies"} written to match the trip.\n${toTrip.length} trip field${toTrip.length===1?"":"s"} corrected to match the ledger.`);
+              setReconcileResults(null); setReconcileSelected(new Set()); setReconcileDir(new Map());
             }} full disabled={reconcileSelected.size===0} color={C.purple}>
               Apply {reconcileSelected.size} Selected Fix{reconcileSelected.size===1?"":"es"}
             </Btn>
