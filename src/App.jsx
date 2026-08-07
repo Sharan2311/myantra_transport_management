@@ -3777,6 +3777,15 @@ Rules:
     // If DI date is empty fall back to today
     const safeTripDate = (diDate) => diDate || today();
 
+    // Running vehicle state for THIS batch run. `vehicles` is a render-time
+    // snapshot that cannot change while this async loop runs, so two groups on
+    // the same truck would each build their ledger update from the ORIGINAL
+    // vehicle — the second DB.saveVehicle then overwrites the first, dropping
+    // one recovery entry while both trips keep their loanRecovery. Carrying the
+    // updated vehicle forward here makes each group build on the previous one.
+    const _vehWork = new Map();
+    const _vehBase = (truckNo) => _vehWork.get(truckNo) || (vehicles||[]).find(veh=>veh.truckNo===truckNo);
+
     for(const g of readyGroups) {
       const groupItems = doneItems.filter(x=>g.diIds.includes(x.id));
       const primary    = groupItems[0];
@@ -4074,9 +4083,10 @@ Rules:
         // exactly. Unconditional: a group whose recovery was edited down to 0
         // before saving must also have any stale ledger entry removed.
         {
-          const _veh0 = (vehicles||[]).find(veh=>veh.truckNo===truckNo);
+          const _veh0 = _vehBase(truckNo);
           if(_veh0) {
             const upd = syncTripRecoveryToVehicle(_veh0, trip);
+            _vehWork.set(truckNo, upd);
             setVehicles(prev=>prev.map(veh=>veh.truckNo===truckNo?upd:veh));
             // Awaited, not fire-and-forget — a batch of un-awaited background
             // writes queuing up before the next group's getNextLR call was
@@ -4292,9 +4302,10 @@ Rules:
         // Loan/shortage ledger — strict sync to match this trip's recovery fields
         // exactly. Unconditional, same reasoning as the single-DI path above.
         {
-          const _veh1 = (vehicles||[]).find(veh=>veh.truckNo===truckNo);
+          const _veh1 = _vehBase(truckNo);
           if(_veh1) {
             const upd = syncTripRecoveryToVehicle(_veh1, trip);
+            _vehWork.set(truckNo, upd);
             setVehicles(prev=>prev.map(veh=>veh.truckNo===truckNo?upd:veh));
             try { await DB.saveVehicle(upd); } catch(e) { console.error("saveVehicle batch multi-DI recovery:",e); }
           }
