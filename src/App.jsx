@@ -324,6 +324,20 @@ const getFYRange = (fy) => ({
 const currentFY = () => getFY(today());
 const FY_LABEL  = fy => `FY ${fy-1}–${String(fy).slice(2)}`; // "FY 2025–26"
 
+// ─── EXPENSE CATEGORIES ───────────────────────────────────────────────────────
+// Two buckets, each with its own fixed category list. "Shortage" is
+// deliberately NOT in PA_DEBIT_CATEGORIES — it's never written as a
+// mye_expenses row. Its total is always computed live from each vehicle's
+// shortageTxns ledger (the same source of truth the vehicle card and the
+// loan/shortage reconcile flow already use), so there's exactly one place
+// shortage amounts live and no second copy that can drift out of sync.
+const PA_DEBIT_CATEGORIES = ["Rent","Rebidding Charges","SD Deposit","Electricity","Penalties","TDS","Miscellaneous"];
+const MYANTRA_EXPENSE_CATEGORIES = ["Salary","Office Expenses","Miscellaneous"];
+// Categories shown on the dashboard for the Payment Advice Debits bucket —
+// includes "Shortage" for display purposes only (its total is computed live,
+// never stored), listed first since it's usually the largest/most tracked.
+const PA_DEBIT_DASHBOARD_CATEGORIES = ["Shortage", ...PA_DEBIT_CATEGORIES];
+
 
 
 // ─── FEATURE PLANS ───────────────────────────────────────────────────────────
@@ -19784,7 +19798,28 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
             // Cleanup
             fetch(`${_aUrl}/rest/v1/scan_results?id=eq.${jobId}`,{method:"DELETE",headers:_hdrs}).catch(()=>{});
             if(job.status==="error"||result.error) { setScanError(result.error||"Scan failed"); logScan("shree_scan",false,0); }
-            else { setScanResult({...result,type:scanType}); logScan("shree_scan",true,result._costInr||0); }
+            else {
+              // Fold the advice's own "expenses" line items (Rent/Electricity/
+              // Penalty/etc — things with no invoice number of their own) into
+              // the SAME unmatched-invoice review checklist as everything else.
+              // Previously these auto-saved silently with category "other" and
+              // no human ever saw them; now every debit line goes through one
+              // reviewable list and none of them save without a chosen category.
+              const expenseLines = (result.expenses||[]).map((e,i) => ({
+                invoiceNo: "EXPLINE-"+i,
+                invDate: null,
+                totalAmt: Math.abs(Number(e.amount||0)),
+                _fromExpenseLine: true,
+                _categoryHint: PA_DEBIT_CATEGORIES.includes(e.categoryHint) ? e.categoryHint : null,
+                _remark: e.description||"",
+              }));
+              const merged = {
+                ...result,
+                invoices: [...(result.invoices||[]), ...expenseLines],
+                expenses: [], // fully absorbed into `invoices` above — nothing left unreviewed
+              };
+              setScanResult({...merged,type:scanType}); logScan("shree_scan",true,result._costInr||0);
+            }
             scanDone=true; break;
           }
         } catch(_) {}
@@ -20162,7 +20197,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
       setScanError(`UTR ${utr} was already recorded on ${dupPayment.paymentDate||dupPayment.date||"—"}. This payment is already in the system — discard this scan.`);
       return;
     }
-    const allInvList=scanResult.invoices||[], shorts=scanResult.shortages||[], exps=scanResult.expenses||[];
+    const allInvList=scanResult.invoices||[], shorts=scanResult.shortages||[];
 
     // Separate credit entries (freight invoices we have) from debit entries (expenses/penalties)
     const savedInvoiceNos = new Set((trips||[]).flatMap(t => [
@@ -20178,26 +20213,36 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
       return n && !savedInvoiceNos.has(n);
     });
 
-    // Save ONLY entries user explicitly marked as Debit Note
-    const confirmedDebitEntries = debitEntries.filter(d => d._tag === "debit");
+    // Save ONLY entries user explicitly marked as Debit Note AND gave a category to.
+    // Every debit — whether it started as an unmatched invoice or one of the
+    // advice's own bare expense lines (Rent/Electricity/etc, folded in as
+    // _fromExpenseLine entries when the scan result was first received) — goes
+    // through this one path now, tagged with source:"payment_advice" and a
+    // category from the fixed list, never a free-text guess.
+    const confirmedDebitEntries = debitEntries.filter(d => d._tag === "debit" && d._category);
     if(confirmedDebitEntries.length > 0 && setExpenses) {
       const debitExps = confirmedDebitEntries.map(d => ({
         id: "EXP"+Date.now()+Math.random().toString(36).slice(2,6),
         date: pDate || new Date().toISOString().slice(0,10),
-        label: (d._remark||"").trim() || `Debit Note ${d.invoiceNo}`,
+        label: (d._remark||"").trim() || `${d._category} — ${d._fromExpenseLine ? "Payment Advice" : d.invoiceNo}`,
         amount: Math.abs(Number(d.totalAmt||d.paymentAmt||0)),
-        category: "debit_note",
-        notes: `Invoice: ${d.invoiceNo} · UTR:${utr}`,
+        category: d._category,
+        source: "payment_advice",
+        notes: d._fromExpenseLine ? `UTR:${utr}` : `Invoice: ${d.invoiceNo} · UTR:${utr}`,
         utr, createdBy: user?.name||"", createdAt: new Date().toISOString()
       }));
       setExpenses(prev=>[...(Array.isArray(prev)?prev:[]),...debitExps]);
       log && log("DEBIT EXPENSES: "+debitExps.length+" entries from UTR:"+utr);
     }
 
-    // Save shortage entries to vehicle shortage balance
-    const shortageEntries = debitEntries.filter(d => d._tag === "shortage" && d._truckNo);
-    if(shortageEntries.length > 0) {
-      shortageEntries.forEach(d => {
+    // Shortage entries — split by whether a truck was picked during review.
+    const shortageEntriesAll   = debitEntries.filter(d => d._tag === "shortage");
+    const shortageEntriesTruck = shortageEntriesAll.filter(d => d._truckNo);
+    const shortageEntriesOpen  = shortageEntriesAll.filter(d => !d._truckNo);
+
+    // Truck already known — write straight into that vehicle's ledger, same as before.
+    if(shortageEntriesTruck.length > 0) {
+      shortageEntriesTruck.forEach(d => {
         const veh = (vehicles||[]).find(v=>v.truckNo===d._truckNo);
         if(!veh) return;
         const amount = Math.abs(Number(d.totalAmt||d.paymentAmt||0));
@@ -20216,6 +20261,27 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         }));
         log && log(`SHORTAGE from PA: ${d._truckNo} ₹${fmt(amount)} LR:${d._lrNo||"—"} UTR:${utr}`);
       });
+    }
+
+    // Truck not known at review time — don't drop the amount, and don't block
+    // saving the rest of the advice on it either. Create an open Action Item
+    // instead; it's picked up in the Action Items tab with a truck-picker,
+    // and stays visible (badged on login) until someone assigns it.
+    if(shortageEntriesOpen.length > 0 && setActionItems) {
+      const openItems = shortageEntriesOpen.map(d => ({
+        id: "AI"+Date.now()+Math.random().toString(36).slice(2,6),
+        type: "unassigned_shortage",
+        status: "open",
+        amount: Math.abs(Number(d.totalAmt||d.paymentAmt||0)),
+        lrNo: d._lrNo||"",
+        invoiceNo: utr, // reference field — carries the UTR so it's traceable to the advice
+        invoiceDate: pDate||"",
+        note: d._fromExpenseLine ? "From payment advice — no truck identified at review time" : `From unmatched invoice ${d.invoiceNo} — no truck identified at review time`,
+        createdAt: new Date().toISOString(),
+      }));
+      setActionItems(prev=>[...openItems, ...(prev||[])]);
+      openItems.forEach(ai => DB.saveActionItem(ai).catch(e=>console.error("saveActionItem unassigned_shortage:",e)));
+      log && log(`SHORTAGE (unassigned): ${openItems.length} entr${openItems.length===1?"y":"ies"} saved as open Action Item(s), UTR:${utr}`);
     }
 
     // Invoice-match entries — treat as matched freight invoices
@@ -20288,7 +20354,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     const pa={id:"PA"+Date.now(), utr, paymentDate:pDate,
       totalPaid:Number(scanResult.totalPaid||0), totalBilled:Number(scanResult.totalBilled||0),
       tdsDeducted:Number(scanResult.tdsDeducted||0), holdAmount:Number(scanResult.holdAmount||0),
-      invoices:invList, shortages:shorts, penalties:scanResult.penalties||[], expenses:exps};
+      invoices:invList, shortages:shorts, penalties:scanResult.penalties||[], expenses:[]};
 
     // Detect GST releases BEFORE adding pa to payments state
     // Build held map from EXISTING payments only (not including pa yet)
@@ -20344,30 +20410,11 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
 
     setPayments(prev=>[...(prev||[]),pa]);
 
-    // Save expenses — skip entirely if this UTR already has expenses saved
-    if(exps.length>0&&setExpenses){
-      // Check manual expenses for same UTR
-      const utrAlreadyInManual = (Array.isArray(expenses)?expenses:[])
-        .some(e => e.notes && e.notes.includes("UTR:"+utr));
-      // Check shree payment advice expenses (stored inside payments) for same UTR
-      const utrAlreadyInPayments = (payments||[])
-        .some(p => p.utr===utr && (p.expenses||[]).length>0);
-      if(utrAlreadyInManual || utrAlreadyInPayments) {
-        log && log("EXPENSE SKIP: UTR "+utr+" already has expenses saved — skipping duplicate");
-      } else {
-        const newExps = exps.map(exp=>({
-          id:"EXP"+Date.now()+Math.random().toString(36).slice(2,6),
-          date:pDate||new Date().toISOString().slice(0,10),
-          label:exp.description||exp.ref||"Shree Expense",
-          amount:Math.abs(Number(exp.amount||0)),  // abs() handles negative amounts like "590.00-"
-          category:exp.category||"other",
-          notes:"UTR:"+utr,
-          createdBy:user?.name||"",
-          createdAt:new Date().toISOString()
-        }));
-        setExpenses(prev=>[...(Array.isArray(prev)?prev:[]),...newExps]);
-      }
-    }
+    // NOTE: the advice's own "expenses" line items (Rent/Electricity/Penalty/etc)
+    // are no longer auto-saved here. They were folded into `debitEntries` above
+    // (as _fromExpenseLine rows) back when the scan result was first received,
+    // so they've already been through the same reviewed, categorized save path
+    // as confirmedDebitEntries — nothing left to silently apply at this point.
 
     // Push shortages to vehicle shortage ledger (linked to LR)
     if(shorts.length>0&&setVehicles){
@@ -20396,7 +20443,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
       }));
     }
 
-    log && log("Payment advice UTR "+utr+" applied — "+shorts.length+" shortage(s), "+exps.length+" expense(s), hold ₹"+Number(scanResult.holdAmount||0).toLocaleString("en-IN"));
+    log && log("Payment advice UTR "+utr+" applied — "+shorts.length+" shortage(s), "+confirmedDebitEntries.length+" expense(s), hold ₹"+Number(scanResult.holdAmount||0).toLocaleString("en-IN"));
     setScanResult(null);
   };
 
@@ -20895,12 +20942,33 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
           const mismatch = open.filter(ai=>ai.type==="amount_mismatch");
           const conflict = open.filter(ai=>ai.type==="duplicate_di");
           const noDiesel = open.filter(ai=>ai.type==="no_diesel_confirmed");
+          const unassignedShort = open.filter(ai=>ai.type==="unassigned_shortage");
 
           const dismiss = (ai) => {
             if(!window.confirm("Dismiss this action item? This does not bill anything — use this only if you've resolved it manually.")) return;
             setActionItems(prev=>(prev||[]).filter(x=>x.id!==ai.id));
             DB.deleteActionItem(ai.id).catch(e=>console.error("deleteActionItem dismiss:",e));
-            log && log("Dismissed action item — "+ai.type+" · DI "+ai.diNo);
+            log && log("Dismissed action item — "+ai.type+(ai.diNo?" · DI "+ai.diNo:""));
+          };
+
+          // Assign a deferred shortage to a truck — writes the vehicle ledger
+          // entry (same shape as the immediate-assign path in the scan review)
+          // then closes the action item, same as any other resolution here.
+          const assignShortage = (ai, truckNo, lrNo) => {
+            if(!truckNo) { alert("Pick a truck first."); return; }
+            const veh = (vehicles||[]).find(v=>v.truckNo===truckNo);
+            if(!veh) return;
+            const txn = {id:uid(), type:"shortage", date:ai.invoiceDate||today(),
+              qty:0, lrNo:lrNo||ai.lrNo||"", amount:ai.amount||0,
+              note:`Payment advice UTR:${ai.invoiceNo} (assigned later via Action Items)`};
+            const updated = {...veh,
+              shortageOwed:(veh.shortageOwed||0)+(ai.amount||0),
+              shortageTxns:[...(veh.shortageTxns||[]),txn]};
+            setVehicles(p=>p.map(x=>x.truckNo===truckNo?updated:x));
+            DB.saveVehicle(updated).catch(e=>console.error("saveVehicle shortage assign:",e));
+            setActionItems(prev=>(prev||[]).filter(x=>x.id!==ai.id));
+            DB.deleteActionItem(ai.id).catch(e=>console.error("deleteActionItem assign:",e));
+            log && log(`SHORTAGE ASSIGNED: ${truckNo} ₹${fmt(ai.amount||0)} · UTR:${ai.invoiceNo}`);
           };
 
           return (
@@ -20922,6 +20990,39 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   <div style={{fontSize:20,fontWeight:800,color:C.orange}}>{noDiesel.length}</div>
                   <div style={{fontSize:11,color:C.muted}}>No-diesel confirmations</div>
                 </div>
+                <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.border}`}}>
+                  <div style={{fontSize:20,fontWeight:800,color:C.red}}>{unassignedShort.length}</div>
+                  <div style={{fontSize:11,color:C.muted}}>Shortages awaiting a truck</div>
+                </div>
+              </div>
+
+              <div style={{fontSize:12,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:8}}>
+                ⚠ Shortages from payment advices — no truck picked yet
+              </div>
+              {unassignedShort.length===0 && <div style={{color:C.muted,fontSize:13,marginBottom:16}}>None open.</div>}
+              <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:20}}>
+                {unassignedShort.map(ai=>{
+                  const allTrucks = (vehicles||[]).map(v=>({v:v.truckNo,l:v.truckNo+(v.ownerName?` · ${v.ownerName}`:"")}));
+                  return (
+                    <div key={ai.id} style={{background:C.card,borderRadius:10,padding:"11px 14px",border:`1px solid ${C.red}44`}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
+                        <div>
+                          <div style={{fontWeight:800,fontSize:14,color:C.red}}>₹{fmt(ai.amount||0)}{ai.lrNo?` · LR ${ai.lrNo}`:""}</div>
+                          <div style={{fontSize:12,color:C.muted,marginTop:2}}>UTR: {ai.invoiceNo||"—"} · {ai.invoiceDate||"—"}</div>
+                          <div style={{fontSize:11,color:C.muted,marginTop:2}}>{ai.note}</div>
+                        </div>
+                        <button onClick={()=>dismiss(ai)} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,fontSize:11,padding:"4px 8px",cursor:"pointer"}}>Dismiss</button>
+                      </div>
+                      <select onChange={e=>{ if(e.target.value) assignShortage(ai, e.target.value); }}
+                        defaultValue=""
+                        style={{width:"100%",background:C.bg,border:`1.5px solid ${C.red}`,
+                          borderRadius:6,padding:"7px 10px",fontSize:12,color:C.text,outline:"none"}}>
+                        <option value="">— Assign to Truck —</option>
+                        {allTrucks.map(t=><option key={t.v} value={t.v}>{t.l}</option>)}
+                      </select>
+                    </div>
+                  );
+                })}
               </div>
 
               <div style={{fontSize:12,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:8}}>
@@ -21401,10 +21502,20 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                               {debitInvs.map((d,i)=>{
                                 const tag = d._tag; // "debit"|"shortage"|"invoice"|"skip"
                                 const amt = Math.abs(Number(d.totalAmt||d.paymentAmt||0));
+                                const isExpLine = !!d._fromExpenseLine;
                                 const tagBtn = (label, val, color) => (
                                   <button onClick={()=>setScanResult(prev=>prev&&({...prev,
-                                    invoices:(prev.invoices||[]).map(inv=>
-                                      inv.invoiceNo===d.invoiceNo?{...inv,_tag:tag===val?undefined:val,_remark:"",_lrNo:"",_truckNo:"",_sdpt:""}:inv)}))}
+                                    invoices:(prev.invoices||[]).map(inv=>{
+                                      if(inv.invoiceNo!==d.invoiceNo) return inv;
+                                      const nextTag = tag===val?undefined:val;
+                                      return {...inv, _tag:nextTag, _lrNo:"", _truckNo:"", _sdpt:"",
+                                        // Keep the AI-extracted description as the starting remark for
+                                        // expense-line entries instead of wiping it on every tag change.
+                                        _remark: isExpLine ? (inv._remark||"") : "",
+                                        // Pre-fill the category dropdown from the AI's guess the first
+                                        // time this row is tagged Debit — still fully overridable.
+                                        _category: nextTag==="debit" ? (inv._category||inv._categoryHint||"") : inv._category};
+                                    })}))}
                                     style={{flex:1,padding:"6px 4px",borderRadius:7,cursor:"pointer",fontWeight:700,fontSize:10,
                                       background:tag===val?color:"transparent",
                                       border:`1.5px solid ${color}`,color:tag===val?"#fff":color}}>
@@ -21416,26 +21527,38 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                                     marginBottom:8,border:`1.5px solid ${
                                       tag==="debit"?C.red:tag==="shortage"?C.orange:tag==="invoice"?C.teal:tag==="skip"?C.muted:C.border}`}}>
                                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-                                      <span style={{fontWeight:700,fontSize:12,color:C.text}}>{d.invoiceNo}</span>
+                                      <span style={{fontWeight:700,fontSize:12,color:C.text}}>{isExpLine ? (d._remark||"Expense line") : d.invoiceNo}</span>
                                       <span style={{fontWeight:800,color:C.orange,fontFamily:"monospace"}}>₹{fmtINR(amt)}</span>
                                     </div>
                                     {d.invDate&&<div style={{fontSize:10,color:C.muted,marginBottom:6}}>Date: {d.invDate}</div>}
-                                    {/* 4 choice buttons */}
+                                    {/* Expense lines (Rent/Electricity/etc from the advice's own line
+                                        items) never had an invoice number to begin with, so "Invoice
+                                        match" and treating them as a freight invoice make no sense —
+                                        only Debit Note / Skip apply. */}
                                     <div style={{display:"flex",gap:6,marginBottom:tag&&tag!=="skip"?8:0}}>
                                       {tagBtn("💸 Debit Note","debit",C.red)}
-                                      {tagBtn("⚠ Shortage","shortage",C.orange)}
-                                      {tagBtn("🧾 Invoice","invoice",C.teal)}
+                                      {!isExpLine && tagBtn("⚠ Shortage","shortage",C.orange)}
+                                      {!isExpLine && tagBtn("🧾 Invoice","invoice",C.teal)}
                                       {tagBtn("✕ Skip","skip","#9ca3af")}
                                     </div>
 
-                                    {/* DEBIT NOTE — remark */}
+                                    {/* DEBIT NOTE — category (required) + remark (optional label) */}
                                     {tag==="debit" && (
-                                      <input placeholder="Remark (e.g. Safety penalty, Electricity…)"
-                                        value={d._remark||""} onChange={e=>setScanResult(prev=>prev&&({...prev,
-                                          invoices:(prev.invoices||[]).map(inv=>inv.invoiceNo===d.invoiceNo?{...inv,_remark:e.target.value}:inv)}))}
-                                        style={{width:"100%",boxSizing:"border-box",background:C.bg,
-                                          border:`1.5px solid ${d._remark?C.green:C.red}`,
-                                          borderRadius:6,padding:"7px 10px",fontSize:12,color:C.text,outline:"none"}}/>
+                                      <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                                        <select value={d._category||""} onChange={e=>setScanResult(prev=>prev&&({...prev,
+                                            invoices:(prev.invoices||[]).map(inv=>inv.invoiceNo===d.invoiceNo?{...inv,_category:e.target.value}:inv)}))}
+                                          style={{width:"100%",background:C.bg,border:`1.5px solid ${d._category?C.green:C.red}`,
+                                            borderRadius:6,padding:"7px 10px",fontSize:12,color:C.text,outline:"none"}}>
+                                          <option value="">— Select Category (required) —</option>
+                                          {PA_DEBIT_CATEGORIES.map(c=><option key={c} value={c}>{c}</option>)}
+                                        </select>
+                                        <input placeholder="Remark / description (optional)"
+                                          value={d._remark||""} onChange={e=>setScanResult(prev=>prev&&({...prev,
+                                            invoices:(prev.invoices||[]).map(inv=>inv.invoiceNo===d.invoiceNo?{...inv,_remark:e.target.value}:inv)}))}
+                                          style={{width:"100%",boxSizing:"border-box",background:C.bg,
+                                            border:`1.5px solid ${C.border}`,
+                                            borderRadius:6,padding:"7px 10px",fontSize:12,color:C.text,outline:"none"}}/>
+                                      </div>
                                     )}
 
                                     {/* SHORTAGE — truck + LR + deduct per trip */}
@@ -21453,9 +21576,14 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                                             invoices:(prev.invoices||[]).map(inv=>inv.invoiceNo===d.invoiceNo?{...inv,_truckNo:e.target.value,_lrNo:""}:inv)}))}
                                             style={{width:"100%",background:C.bg,border:`1.5px solid ${d._truckNo?C.orange:C.border}`,
                                               borderRadius:6,padding:"7px 10px",fontSize:12,color:C.text,outline:"none"}}>
-                                            <option value="">— Select Truck —</option>
+                                            <option value="">— Select Truck (or leave blank to assign later) —</option>
                                             {allTrucks.map(t=><option key={t.v} value={t.v}>{t.l}</option>)}
                                           </select>
+                                          {!d._truckNo && (
+                                            <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:6,padding:"6px 10px",fontSize:11,color:C.orange}}>
+                                              ⚠ No truck picked — this ₹{fmtINR(amt)} will still save when you Apply, as an open Action Item reminding you to assign it to a truck later.
+                                            </div>
+                                          )}
                                           {d._truckNo && (
                                             <select value={d._lrNo||""} onChange={e=>setScanResult(prev=>prev&&({...prev,
                                               invoices:(prev.invoices||[]).map(inv=>inv.invoiceNo===d.invoiceNo?{...inv,_lrNo:e.target.value}:inv)}))}
@@ -21517,10 +21645,14 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                             </div>
                           )}
                           {(()=>{
-                            const confirmedDebitCount   = debitInvs.filter(d=>d._tag==="debit").length;
-                            const confirmedShortCount   = debitInvs.filter(d=>d._tag==="shortage"&&d._truckNo).length;
+                            // Debit Note now requires a category pick, not just any tag — a
+                            // row tagged "debit" with no category chosen isn't confirmed yet.
+                            const confirmedDebitCount   = debitInvs.filter(d=>d._tag==="debit"&&d._category).length;
+                            // Shortage no longer requires a truck to count as confirmed — a
+                            // truck-less shortage still saves, as a deferred Action Item.
+                            const confirmedShortCount   = debitInvs.filter(d=>d._tag==="shortage").length;
                             const confirmedInvCount     = debitInvs.filter(d=>d._tag==="invoice"&&d._matchInv).length;
-                            const pendingDecision       = debitInvs.filter(d=>!d._tag).length;
+                            const pendingDecision       = debitInvs.filter(d=>!d._tag || (d._tag==="debit"&&!d._category)).length;
                             const canApplyNow = !dupUtr && (creditInvs.length>0||confirmedDebitCount>0||confirmedShortCount>0||confirmedInvCount>0);
                             const applyLabel = dupUtr ? "Already Saved"
                               : `✓ Apply${(creditInvs.length+confirmedInvCount)>0?" — Mark "+(creditInvs.length+confirmedInvCount)+" Invoice"+((creditInvs.length+confirmedInvCount)>1?"s":"")+" Paid":""}${confirmedDebitCount>0?" + "+confirmedDebitCount+" Debit Note"+(confirmedDebitCount>1?"s":""):""}${confirmedShortCount>0?" + "+confirmedShortCount+" Shortage"+(confirmedShortCount>1?"s":""):""}`;
@@ -24713,62 +24845,133 @@ This will auto-recover in the next trip.`);
 }
 
 // ─── EXPENSES LEDGER ──────────────────────────────────────────────────────────
-function ExpensesLedger({expenses, setExpenses, payments, user, log}) {
+function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], actionItems=[], user, log}) {
   const [sheet, setSheet] = useState(false);
-  const [f, setF] = useState({date:today(),label:"",amount:"",category:"Office",notes:"",utr:""});
+  const [f, setF] = useState({date:today(),label:"",amount:"",category:MYANTRA_EXPENSE_CATEGORIES[0],notes:"",utr:""});
   const ff = k => v => setF(p=>({...p,[k]:v}));
 
-  const cats = ["Office","Shortage","Other Deduction","Diesel","Repairs","Salary","Government Fee","Other"];
+  // Which bucket is active — "payment_advice" | "myantra"
+  const [bucket, setBucket] = useState("payment_advice");
+  const [catFilter, setCatFilter] = useState(new Set()); // empty = all categories shown
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo,   setDateTo]   = useState("");
+  const [fyFilter, setFyFilter] = useState(""); // "" = no FY filter, else a fy number
 
-  // Merge manual expenses (flat DB array) + Shree payment advice expenses
-  const shreeExps = (payments||[]).flatMap(pa =>
-    (pa.expenses||[]).map(e=>({
-      id: "shree-"+pa.utr+"-"+(e.ref||e.description||"").slice(0,8),
-      date: pa.paymentDate||pa.date||"",
-      label: e.description||e.ref||"Shree Expense",
-      amount: Math.abs(Number(e.amount||0)),
-      category: e.category||"other",
-      notes: "UTR:"+pa.utr,
-      createdBy: "shree_scan",
-      source: "shree",
-    }))
-  );
   const manualExps = Array.isArray(expenses) ? expenses : [];
-  const allExps = [...manualExps, ...shreeExps].sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+  const bucketCats = bucket==="payment_advice" ? PA_DEBIT_DASHBOARD_CATEGORIES : MYANTRA_EXPENSE_CATEGORIES;
 
-  const totalExp = allExps.reduce((s,e)=>s+(e.amount||0),0);
+  // Apply date/FY filter FIRST (shared across the category breakdown and the
+  // entries list below) — category filter only narrows the entries list, so
+  // the breakdown box always reflects the full picture for the date range.
+  const inRange = dateStr => {
+    if(!dateStr) return true; // undated rows always shown, never silently hidden
+    if(fyFilter) { const r=getFYRange(+fyFilter); if(dateStr<r.from||dateStr>r.to) return false; }
+    if(dateFrom && dateStr<dateFrom) return false;
+    if(dateTo   && dateStr>dateTo)   return false;
+    return true;
+  };
+  const dateFilteredExps = manualExps.filter(e => e.source===bucket && inRange(e.date||""));
 
-  // Group by category
+  // Shortage total for the Payment Advice bucket is read LIVE from every
+  // vehicle's shortageTxns ledger — never written as a mye_expenses row (see
+  // PA_DEBIT_CATEGORIES comment above). Filtered by the same date range.
+  const liveShortageTotal = bucket==="payment_advice" ? (vehicles||[]).reduce((sum,v)=>{
+    const txns = (v.shortageTxns||[]).filter(t=>inRange(t.date||""));
+    const owed = txns.filter(t=>t.type==="shortage"||t.type==="recorded").reduce((s,t)=>s+(t.amount||0),0);
+    const recovered = txns.filter(t=>t.type==="recovery").reduce((s,t)=>s+(t.amount||0),0);
+    return sum + owed - recovered;
+  }, 0) : 0;
+  const unassignedShortTotal = bucket==="payment_advice"
+    ? (actionItems||[]).filter(ai=>ai.type==="unassigned_shortage"&&ai.status==="open"&&inRange(ai.invoiceDate||"")).reduce((s,ai)=>s+(ai.amount||0),0)
+    : 0;
+
   const byCat = {};
-  allExps.forEach(e=>{
-    const cat = e.category||"other";
-    if(!byCat[cat]) byCat[cat]=0;
-    byCat[cat]+=e.amount||0;
+  bucketCats.forEach(c=>{ byCat[c]=0; });
+  dateFilteredExps.forEach(e=>{
+    const cat = bucketCats.includes(e.category) ? e.category : "Miscellaneous";
+    byCat[cat] = (byCat[cat]||0) + (e.amount||0);
+  });
+  if(bucket==="payment_advice") byCat["Shortage"] = liveShortageTotal;
+
+  const totalExp = Object.values(byCat).reduce((s,v)=>s+v,0);
+
+  const displayedEntries = dateFilteredExps
+    .filter(e => catFilter.size===0 || catFilter.has(e.category))
+    .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+
+  const toggleCat = c => setCatFilter(prev=>{
+    const n=new Set(prev); if(n.has(c)) n.delete(c); else n.add(c); return n;
   });
 
   return (
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-        <div style={{color:C.red,fontWeight:800,fontSize:16}}>🧮 Expenses Ledger</div>
-        <Btn onClick={()=>setSheet(true)} sm outline color={C.red}>+ Add</Btn>
+        <div style={{color:C.red,fontWeight:800,fontSize:16}}>🧮 Expense Dashboard</div>
+        {bucket==="myantra" && <Btn onClick={()=>setSheet(true)} sm outline color={C.red}>+ Add</Btn>}
       </div>
-      <KPI icon="💸" label="Total Expenses" value={fmt(totalExp)} color={C.red} />
 
-      {/* Category summary */}
+      {/* Bucket switch */}
+      <div style={{display:"flex",gap:8}}>
+        {[["payment_advice","💳 Payment Advice Debits"],["myantra","🏢 M Yantra Expenses"]].map(([k,l])=>(
+          <button key={k} onClick={()=>{setBucket(k);setCatFilter(new Set());}}
+            style={{flex:1,padding:"9px 6px",borderRadius:8,cursor:"pointer",fontWeight:700,fontSize:12,
+              background:bucket===k?C.red:"transparent",border:`1.5px solid ${C.red}`,color:bucket===k?"#fff":C.red}}>
+            {l}
+          </button>
+        ))}
+      </div>
+
+      <KPI icon="💸" label={bucket==="payment_advice"?"Total Payment Advice Debits":"Total M Yantra Expenses"} value={fmt(totalExp)} color={C.red} />
+
+      {/* Date / FY filters */}
+      <div style={{background:C.card,borderRadius:12,padding:"12px 14px",display:"flex",flexDirection:"column",gap:8}}>
+        <div style={{display:"flex",gap:8}}>
+          {[currentFY(),currentFY()-1,currentFY()-2].map(fy=>(
+            <button key={fy} onClick={()=>{setFyFilter(fyFilter===String(fy)?"":String(fy));setDateFrom("");setDateTo("");}}
+              style={{flex:1,padding:"6px 4px",borderRadius:7,cursor:"pointer",fontWeight:700,fontSize:11,
+                background:fyFilter===String(fy)?C.accent:"transparent",border:`1px solid ${fyFilter===String(fy)?C.accent:C.border}`,
+                color:fyFilter===String(fy)?"#fff":C.muted}}>
+              {FY_LABEL(fy)}
+            </button>
+          ))}
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <Field label="From" value={dateFrom} onChange={v=>{setDateFrom(v);setFyFilter("");}} type="date" half />
+          <Field label="To"   value={dateTo}   onChange={v=>{setDateTo(v);setFyFilter("");}}   type="date" half />
+        </div>
+        {(fyFilter||dateFrom||dateTo) && (
+          <button onClick={()=>{setFyFilter("");setDateFrom("");setDateTo("");}}
+            style={{background:"none",border:"none",color:C.muted,fontSize:11,cursor:"pointer",textAlign:"left",padding:0}}>
+            ✕ Clear date filter
+          </button>
+        )}
+      </div>
+
+      {/* Category summary — tap a category to filter the list below */}
       <div style={{background:C.card,borderRadius:12,padding:"14px 16px"}}>
         <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>By Category</div>
         {Object.entries(byCat).sort((a,b)=>b[1]-a[1]).map(([cat,amt])=>(
-          <div key={cat} style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:`1px solid ${C.border}22`}}>
-            <span style={{color:C.text,fontSize:13}}>{cat}</span>
+          <div key={cat} onClick={()=>cat!=="Shortage"&&toggleCat(cat)}
+            style={{display:"flex",justifyContent:"space-between",padding:"6px 4px",borderBottom:`1px solid ${C.border}22`,
+              cursor:cat==="Shortage"?"default":"pointer",
+              background:catFilter.has(cat)?C.red+"11":"transparent",borderRadius:4}}>
+            <span style={{color:C.text,fontSize:13}}>
+              {cat}
+              {cat==="Shortage" && <span style={{color:C.muted,fontSize:10,marginLeft:6}}>(live from vehicle ledgers)</span>}
+            </span>
             <span style={{color:C.red,fontWeight:700}}>{fmt(amt)}</span>
           </div>
         ))}
-        {Object.keys(byCat).length===0&&<div style={{color:C.muted,fontSize:13}}>No expenses yet</div>}
+        {bucket==="payment_advice" && unassignedShortTotal>0 && (
+          <div style={{marginTop:8,background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:8,padding:"6px 10px",fontSize:11,color:C.orange}}>
+            ⚠ ₹{fmt(unassignedShortTotal)} of that Shortage total is still unassigned to a truck — see Action Items.
+          </div>
+        )}
       </div>
 
-      {/* All entries */}
+      {/* Entries */}
       <div style={{display:"flex",flexDirection:"column",gap:8}}>
-        {allExps.map(e=>(
+        {displayedEntries.map(e=>(
           <div key={e.id} style={{background:C.card,borderRadius:12,padding:"11px 14px",borderLeft:`4px solid ${C.red}`,display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
             <div>
               <div style={{fontWeight:700,fontSize:13}}>{e.label}</div>
@@ -24780,18 +24983,19 @@ function ExpensesLedger({expenses, setExpenses, payments, user, log}) {
             <div style={{color:C.red,fontWeight:800,fontSize:15}}>{fmt(e.amount)}</div>
           </div>
         ))}
-        {allExps.length===0&&<div style={{textAlign:"center",color:C.muted,padding:32}}>No expenses recorded yet</div>}
+        {displayedEntries.length===0 && bucket==="payment_advice" && <div style={{textAlign:"center",color:C.muted,padding:32}}>No categorized debits yet — these come from scanning a payment advice and choosing a category per line.</div>}
+        {displayedEntries.length===0 && bucket==="myantra" && <div style={{textAlign:"center",color:C.muted,padding:32}}>No expenses recorded yet</div>}
       </div>
 
       {sheet&&(
-        <Sheet title="Add Expense" onClose={()=>setSheet(false)}>
+        <Sheet title="Add M Yantra Expense" onClose={()=>setSheet(false)}>
           <div style={{display:"flex",flexDirection:"column",gap:13}}>
             <div style={{display:"flex",gap:10}}>
               <Field label="Date" value={f.date} onChange={ff("date")} type="date" half />
               <Field label="Amount ₹" value={f.amount} onChange={ff("amount")} type="number" half />
             </div>
             <Field label="Description" value={f.label} onChange={ff("label")} placeholder="e.g. Office electricity bill" />
-            <Field label="Category" value={f.category} onChange={ff("category")} opts={cats.map(c=>({v:c,l:c}))} />
+            <Field label="Category" value={f.category} onChange={ff("category")} opts={MYANTRA_EXPENSE_CATEGORIES.map(c=>({v:c,l:c}))} />
             <Field label="Notes" value={f.notes} onChange={ff("notes")} placeholder="Optional" />
             <Field label="UTR / Ref No" value={f.utr} onChange={ff("utr")} placeholder="Optional — e.g. 1527531918" />
             <div style={{color:C.muted,fontSize:12}}>Recording as: <b style={{color:ROLES[user.role]?.color}}>{user.name}</b></div>
@@ -24800,21 +25004,17 @@ function ExpensesLedger({expenses, setExpenses, payments, user, log}) {
               if(!f.amount||+f.amount<=0) { alert("Enter a valid amount."); return; }
               if(f.utr.trim()) {
                 const utrLower = f.utr.trim().toLowerCase();
-                // Check manual expenses
                 const dupManual = (Array.isArray(expenses)?expenses:[])
                   .some(e => e.utr && e.utr.trim().toLowerCase()===utrLower);
-                // Check shree payment-advice expenses (notes field contains "UTR:XXXX")
-                const dupShree = (payments||[])
-                  .some(p => p.utr && p.utr.trim().toLowerCase()===utrLower && (p.expenses||[]).length>0);
-                if(dupManual||dupShree) {
+                if(dupManual) {
                   alert("⚠️ An expense with UTR \"" + f.utr.trim() + "\" already exists.\nDuplicate not saved.");
                   return;
                 }
               }
-              const e={...f,id:uid(),amount:+f.amount,utr:f.utr.trim(),createdBy:user.username,createdAt:nowTs()};
+              const e={...f,id:uid(),amount:+f.amount,utr:f.utr.trim(),source:"myantra",createdBy:user.username,createdAt:nowTs()};
               setExpenses(prev=>[e,...(prev||[])]);
               log("EXPENSE",`${e.label} — ${fmt(e.amount)}${e.utr?" · UTR:"+e.utr:""}`);
-              setF({date:today(),label:"",amount:"",category:"Office",notes:"",utr:""});
+              setF({date:today(),label:"",amount:"",category:MYANTRA_EXPENSE_CATEGORIES[0],notes:"",utr:""});
               setSheet(false);
             }} full color={C.red}>Save Expense</Btn>
           </div>
