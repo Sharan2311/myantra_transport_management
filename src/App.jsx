@@ -17585,6 +17585,19 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                   borderRadius:8,padding:"6px 10px",fontSize:12,color:C.text,outline:"none"}}/>
                 <span style={{color:C.muted,fontSize:11}}>applies to all vehicles unless overridden below</span>
               </div>
+              <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:8}}>
+                <span style={{color:C.muted,fontSize:12,flexShrink:0}}>8-day deadline starts from</span>
+                <input type="date" value={settings?.pouchDeadlineStartDate || ""} onChange={e=>{
+                  const v = e.target.value;
+                  setSettings(p=>{
+                    const updated={...(p||{}),pouchDeadlineStartDate: v};
+                    DB.saveSettings(updated).catch(err=>console.error("saveSettings pouchDeadlineStartDate:",err));
+                    return updated;
+                  });
+                }} style={{background:C.card,border:`1.5px solid ${C.border}`,
+                  borderRadius:8,padding:"6px 10px",fontSize:12,color:C.text,outline:"none"}}/>
+                <span style={{color:C.muted,fontSize:11}}>trips before this date are fully exempt from the payment block & reminder</span>
+              </div>
               <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
                 <button onClick={()=>setF(p=>({...p,pouchExempt:!p.pouchExempt,pouchOverride:""}))}
                   style={{padding:"6px 14px",borderRadius:8,border:`1.5px solid ${f.pouchExempt?C.red:C.border}`,
@@ -19469,6 +19482,17 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
             return upd;
           }));
         };
+        // Defaults ON for every employee — owner opts specific people OUT.
+        // undefined/null (not-yet-migrated employees) counts as enforced.
+        const enforced = emp.pouchDeadlineEnforced !== false;
+        const togglePouchDeadline = () => {
+          setEmployees(prev => prev.map(x => {
+            if(x.id!==trucksSheet) return x;
+            const upd = {...x, pouchDeadlineEnforced: !(x.pouchDeadlineEnforced !== false)};
+            DB.saveEmployee(upd).catch(err=>console.error("saveEmployee pouchDeadlineEnforced:",err));
+            return upd;
+          }));
+        };
         return (
           <Sheet title={`🔗 Linked Trucks — ${emp.name}`} onClose={()=>setTrucksSheet(null)}>
             <div style={{display:"flex",flexDirection:"column",gap:13}}>
@@ -19492,6 +19516,26 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
               </div>
               <div style={{background:C.teal+"11",border:`1px solid ${C.teal}33`,borderRadius:10,padding:"10px 14px",color:C.teal,fontSize:12}}>
                 Priority order: employee exempt (above) → vehicle's own Exempt toggle → vehicle's own override amount → global TAFAL rate.
+              </div>
+
+              {/* Return Pouch / Confirmation 8-day deadline — separate feature,
+                  separate toggle. Defaults ON: this employee IS subject to the
+                  payment-request block unless the owner turns it off here. */}
+              <div style={{background:enforced?C.orange+"11":C.bg,border:`1.5px solid ${enforced?C.orange:C.border}`,borderRadius:10,padding:"12px 14px"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10}}>
+                  <div>
+                    <div style={{fontWeight:800,fontSize:13,color:enforced?C.orange:C.text}}>Return Pouch Deadline — {emp.name}</div>
+                    <div style={{color:C.muted,fontSize:11,marginTop:2}}>
+                      {enforced ? "If any party trip on this employee's trucks is 8+ days old without pouch/confirmation, payment requests are blocked (owner can still act)" : "Off — this employee is exempt from the 8-day payment-request block"}
+                    </div>
+                  </div>
+                  <button onClick={togglePouchDeadline}
+                    style={{padding:"7px 16px",borderRadius:8,border:`1.5px solid ${enforced?C.orange:C.border}`,
+                      background:enforced?C.orange+"22":"transparent",color:enforced?C.orange:C.muted,
+                      fontWeight:700,fontSize:12,cursor:"pointer",flexShrink:0}}>
+                    {enforced?"✓ Enforced":"Off"}
+                  </button>
+                </div>
               </div>
               {(vehicles||[]).length===0 && <div style={{color:C.muted,fontSize:13,textAlign:"center",padding:20}}>No vehicles added yet</div>}
               {(vehicles||[]).map(v => (
