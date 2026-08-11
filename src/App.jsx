@@ -2383,7 +2383,7 @@ function AppMain() {
   );
 }
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
-function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pumps, pumpPayments, driverPays, cashTransfers, activity, settings, setTab, user, selectedFY, selectedClient, actionItems=[], clinkerBills=[]}) {
+function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pumps, pumpPayments, driverPays, cashTransfers, activity, settings, setSettings, setTab, user, selectedFY, selectedClient, actionItems=[], clinkerBills=[]}) {
   const [dashMonth, setDashMonth] = useState(""); // "YYYY-MM" or "" = all
   const [uncreditedOpen, setUncreditedOpen] = useState(false);
   const [creditedOpen,   setCreditedOpen]   = useState(false);
@@ -2536,6 +2536,32 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
           <button onClick={()=>setTab("trips")}   style={{flex:1,background:C.accent+"22",border:`1.5px solid ${C.accent}`,color:C.accent,borderRadius:12,padding:"12px 6px",fontSize:13,fontWeight:700,cursor:"pointer"}}>🚚 + Cement</button>
           {user.role!=="fleet_manager" && <button onClick={()=>setTab("inbound")} style={{flex:1,background:C.teal+"22",  border:`1.5px solid ${C.teal}`,  color:C.teal,  borderRadius:12,padding:"12px 6px",fontSize:13,fontWeight:700,cursor:"pointer"}}>🏭 + RM Trip</button>}
           {can(user,"diesel") && <button onClick={()=>setTab("diesel")} style={{flex:1,background:C.orange+"22",border:`1.5px solid ${C.orange}`,color:C.orange,borderRadius:12,padding:"12px 6px",fontSize:13,fontWeight:700,cursor:"pointer"}}>⛽ Indent</button>}
+        </div>
+      )}
+
+      {/* ── Return Pouch Deadline — owner-only global setting. Lives here     ── */}
+      {/* rather than per-vehicle in Vehicles, since it applies to every       */}
+      {/* employee/vehicle at once, not something you'd tune per truck.        */}
+      {user.role==="owner" && (
+        <div style={{background:C.orange+"11",border:`1.5px solid ${C.orange}44`,borderRadius:12,padding:"12px 14px"}}>
+          <div style={{fontSize:11,color:C.orange,fontWeight:700,marginBottom:8,textTransform:"uppercase",letterSpacing:1}}>
+            📋 Return Pouch Deadline (Owner) — applies to all employees
+          </div>
+          <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+            <span style={{color:C.muted,fontSize:12,flexShrink:0}}>8-day deadline starts from</span>
+            <input type="date" value={settings?.pouchDeadlineStartDate || ""} onChange={e=>{
+              const v = e.target.value;
+              setSettings(p=>{
+                const updated={...(p||{}),pouchDeadlineStartDate: v};
+                DB.saveSettings(updated).catch(err=>console.error("saveSettings pouchDeadlineStartDate:",err));
+                return updated;
+              });
+            }} style={{background:C.card,border:`1.5px solid ${C.border}`,
+              borderRadius:8,padding:"6px 10px",fontSize:12,color:C.text,outline:"none"}}/>
+          </div>
+          <div style={{color:C.muted,fontSize:11,marginTop:6}}>
+            Party trips dated before this are fully exempt from the payment block & login reminder — for every employee. Turn enforcement off for an individual employee instead in Employees → Linked Trucks.
+          </div>
         </div>
       )}
 
@@ -17673,19 +17699,6 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                 }} style={{width:100,background:C.card,border:`1.5px solid ${C.border}`,
                   borderRadius:8,padding:"6px 10px",fontSize:12,color:C.text,outline:"none"}}/>
                 <span style={{color:C.muted,fontSize:11}}>applies to all vehicles unless overridden below</span>
-              </div>
-              <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:8}}>
-                <span style={{color:C.muted,fontSize:12,flexShrink:0}}>8-day deadline starts from</span>
-                <input type="date" value={settings?.pouchDeadlineStartDate || ""} onChange={e=>{
-                  const v = e.target.value;
-                  setSettings(p=>{
-                    const updated={...(p||{}),pouchDeadlineStartDate: v};
-                    DB.saveSettings(updated).catch(err=>console.error("saveSettings pouchDeadlineStartDate:",err));
-                    return updated;
-                  });
-                }} style={{background:C.card,border:`1.5px solid ${C.border}`,
-                  borderRadius:8,padding:"6px 10px",fontSize:12,color:C.text,outline:"none"}}/>
-                <span style={{color:C.muted,fontSize:11}}>trips before this date are fully exempt from the payment block & reminder</span>
               </div>
               <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
                 <button onClick={()=>setF(p=>({...p,pouchExempt:!p.pouchExempt,pouchOverride:""}))}
