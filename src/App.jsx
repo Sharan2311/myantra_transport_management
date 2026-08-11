@@ -2415,6 +2415,7 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   const [unbilledClinkerOpen, setUnbilledClinkerOpen] = useState(false);
   const [billedClinkerOpen,   setBilledClinkerOpen]   = useState(false);
   const [pouchLang, setPouchLang] = useState("en"); // for the Return Pouch reminder banner below
+  const [announceLang, setAnnounceLang] = useState("en"); // for the one-week policy announcement banner
 
   const allFyTrips = fyTrips || trips;
   // Apply client filter then month filter
@@ -2801,6 +2802,33 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
                 </div>
               ))}
             </div>
+          </div>
+        );
+      })()}
+
+      {/* ── One-week policy announcement — every non-owner employee, ── */}
+      {/* 2026-08-11 through 2026-08-18. Not tied to overdue trips at all — */}
+      {/* this is a blanket heads-up about the new rule, shown regardless   */}
+      {/* of whether this specific employee has anything outstanding.      */}
+      {user.role!=="owner" && today()>=POUCH_ANNOUNCEMENT_START && today()<=POUCH_ANNOUNCEMENT_END && (() => {
+        const at = POUCH_ANNOUNCEMENT_TXT[announceLang] || POUCH_ANNOUNCEMENT_TXT.en;
+        return (
+          <div style={{background:C.blue+"18",border:`2px solid ${C.blue}`,borderRadius:14,padding:"14px 16px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,flexWrap:"wrap",gap:6}}>
+              <div style={{color:C.blue,fontSize:14,fontWeight:900,textTransform:"uppercase",letterSpacing:0.5}}>{at.title}</div>
+              <div style={{display:"flex",gap:4}}>
+                {Object.entries(POUCH_ANNOUNCEMENT_TXT).map(([code,txt])=>(
+                  <button key={code} onClick={()=>setAnnounceLang(code)}
+                    style={{padding:"3px 8px",borderRadius:6,fontSize:10,fontWeight:700,cursor:"pointer",
+                      background:announceLang===code?C.blue+"33":"transparent",border:`1px solid ${announceLang===code?C.blue:C.border}`,
+                      color:announceLang===code?C.blue:C.muted}}>
+                    {txt.langLabel}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div style={{color:C.text,fontSize:13,lineHeight:1.5,marginBottom:8}}>{at.body}</div>
+            <div style={{color:C.muted,fontSize:11}}>{at.footer}</div>
           </div>
         );
       })()}
@@ -24093,6 +24121,41 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPaym
 }
 
 // ─── Return Pouch / Confirmation Deadline Gate — translations ────────────────
+// ─── Return Pouch Deadline Policy Announcement — one-week homepage banner ────
+// Per explicit request: shown to every non-owner employee, 2026-08-11 through
+// 2026-08-18 inclusive (one week from the day this was requested), then it
+// stops appearing on its own — no toggle needed, no settings entry to clean
+// up later. Non-dismissible for the week, since the point is guaranteed
+// visibility of a policy change, not a once-and-forget notice.
+const POUCH_ANNOUNCEMENT_START = "2026-08-11";
+const POUCH_ANNOUNCEMENT_END   = "2026-08-18";
+const POUCH_ANNOUNCEMENT_TXT = {
+  en: {
+    langLabel: "English",
+    title: "📢 Return Pouch / Confirmation — New Rule",
+    body: <>Starting <b>10 August 2026</b>, the Return Pouch / Confirmation email for any party trip must be submitted within <b>7 days</b> of the trip date. If not submitted in time, you will not be able to request further payments for any trip — only the owner can request payment until it's resolved.</>,
+    footer: "Please cooperate — this is to speed up party billing. Pending party billing currently stands at more than ₹45 lakhs.",
+  },
+  kn: {
+    langLabel: "ಕನ್ನಡ",
+    title: "📢 ರಿಟರ್ನ್ ಪೌಚ್ / ಖಚಿತಪಡಿಸುವಿಕೆ — ಹೊಸ ನಿಯಮ",
+    body: <><b>10 ಆಗಸ್ಟ್ 2026</b> ರಿಂದ, ಯಾವುದೇ ಪಾರ್ಟಿ ಟ್ರಿಪ್‌ಗೆ ರಿಟರ್ನ್ ಪೌಚ್ / ಖಚಿತಪಡಿಸುವಿಕೆ ಇಮೇಲ್ ಅನ್ನು ಟ್ರಿಪ್ ದಿನಾಂಕದಿಂದ <b>7 ದಿನಗಳ</b> ಒಳಗೆ ಸಲ್ಲಿಸಬೇಕು. ಸಮಯಕ್ಕೆ ಸಲ್ಲಿಸದಿದ್ದರೆ, ನೀವು ಯಾವುದೇ ಟ್ರಿಪ್‌ಗೆ ಮತ್ತಷ್ಟು ಪಾವತಿ ವಿನಂತಿಸಲು ಸಾಧ್ಯವಾಗುವುದಿಲ್ಲ — ಇದನ್ನು ಪರಿಹರಿಸುವವರೆಗೆ ಮಾಲೀಕರು ಮಾತ್ರ ಪಾವತಿ ವಿನಂತಿಸಬಹುದು.</>,
+    footer: "ದಯವಿಟ್ಟು ಸಹಕರಿಸಿ — ಇದು ಪಾರ್ಟಿ ಬಿಲ್ಲಿಂಗ್ ಅನ್ನು ವೇಗಗೊಳಿಸಲು. ಬಾಕಿ ಪಾರ್ಟಿ ಬಿಲ್ಲಿಂಗ್ ಪ್ರಸ್ತುತ ₹45 ಲಕ್ಷಕ್ಕಿಂತ ಹೆಚ್ಚಿದೆ.",
+  },
+  te: {
+    langLabel: "తెలుగు",
+    title: "📢 రిటర్న్ పౌచ్ / నిర్ధారణ — కొత్త నియమం",
+    body: <><b>10 ఆగస్టు 2026</b> నుండి, ఏదైనా పార్టీ ట్రిప్ కోసం రిటర్న్ పౌచ్ / నిర్ధారణ ఇమెయిల్‌ను ట్రిప్ తేదీ నుండి <b>7 రోజుల్లో</b> సమర్పించాలి. సమయానికి సమర్పించకపోతే, మీరు ఏ ట్రిప్‌కైనా తదుపరి చెల్లింపులు అభ్యర్థించలేరు — ఇది పరిష్కారమయ్యే వరకు యజమాని మాత్రమే చెల్లింపు అభ్యర్థించగలరు.</>,
+    footer: "దయచేసి సహకరించండి — ఇది పార్టీ బిల్లింగ్‌ను వేగవంతం చేయడానికి. పెండింగ్ పార్టీ బిల్లింగ్ ప్రస్తుతం ₹45 లక్షల కంటే ఎక్కువగా ఉంది.",
+  },
+  mr: {
+    langLabel: "मराठी",
+    title: "📢 रिटर्न पाउच / पुष्टीकरण — नवीन नियम",
+    body: <><b>10 ऑगस्ट 2026</b> पासून, कोणत्याही पार्टी ट्रिपसाठी रिटर्न पाउच / पुष्टीकरण ईमेल ट्रिप तारखेपासून <b>7 दिवसांच्या</b> आत सादर करणे आवश्यक आहे. वेळेत सादर न केल्यास, तुम्ही कोणत्याही ट्रिपसाठी पुढील पेमेंटची विनंती करू शकणार नाही — हे सुटेपर्यंत फक्त मालक पेमेंटची विनंती करू शकतील.</>,
+    footer: "कृपया सहकार्य करा — हे पार्टी बिलिंग वेगवान करण्यासाठी आहे. प्रलंबित पार्टी बिलिंग सध्या ₹45 लाखांपेक्षा जास्त आहे.",
+  },
+};
+
 const POUCH_GATE_TXT = {
   en: {
     langLabel: "English",
