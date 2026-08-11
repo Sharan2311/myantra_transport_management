@@ -24872,15 +24872,16 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], actionIte
   };
   const dateFilteredExps = manualExps.filter(e => e.source===bucket && inRange(e.date||""));
 
-  // Shortage total for the Payment Advice bucket is read LIVE from every
-  // vehicle's shortageTxns ledger — never written as a mye_expenses row (see
-  // PA_DEBIT_CATEGORIES comment above). Filtered by the same date range.
-  const liveShortageTotal = bucket==="payment_advice" ? (vehicles||[]).reduce((sum,v)=>{
+  // Shortage total is read LIVE from every vehicle's shortageTxns ledger —
+  // never written as a mye_expenses row (see PA_DEBIT_CATEGORIES comment
+  // above). Computed unconditionally (not gated to the active bucket) since
+  // the combined grand total below needs it regardless of which bucket is showing.
+  const liveShortageTotal = (vehicles||[]).reduce((sum,v)=>{
     const txns = (v.shortageTxns||[]).filter(t=>inRange(t.date||""));
     const owed = txns.filter(t=>t.type==="shortage"||t.type==="recorded").reduce((s,t)=>s+(t.amount||0),0);
     const recovered = txns.filter(t=>t.type==="recovery").reduce((s,t)=>s+(t.amount||0),0);
     return sum + owed - recovered;
-  }, 0) : 0;
+  }, 0);
   const unassignedShortTotal = bucket==="payment_advice"
     ? (actionItems||[]).filter(ai=>ai.type==="unassigned_shortage"&&ai.status==="open"&&inRange(ai.invoiceDate||"")).reduce((s,ai)=>s+(ai.amount||0),0)
     : 0;
@@ -24895,6 +24896,10 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], actionIte
 
   const totalExp = Object.values(byCat).reduce((s,v)=>s+v,0);
 
+  const paTotal = manualExps.filter(e=>e.source==="payment_advice"&&inRange(e.date||"")).reduce((s,e)=>s+(e.amount||0),0);
+  const myTotal = manualExps.filter(e=>e.source==="myantra"&&inRange(e.date||"")).reduce((s,e)=>s+(e.amount||0),0);
+  const grandTotal = paTotal + liveShortageTotal + myTotal;
+
   const displayedEntries = dateFilteredExps
     .filter(e => catFilter.size===0 || catFilter.has(e.category))
     .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
@@ -24903,12 +24908,24 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], actionIte
     const n=new Set(prev); if(n.has(c)) n.delete(c); else n.add(c); return n;
   });
 
+  const deleteExpense = (e) => {
+    if(!window.confirm(`Delete "${e.label}" — ₹${fmt(e.amount)}? This can't be undone.`)) return;
+    setExpenses(prev=>(prev||[]).filter(x=>x.id!==e.id));
+    DB.deleteExpense(e.id).catch(err=>console.error("deleteExpense:",err));
+    log && log("EXPENSE DELETED", `${e.label} — ${fmt(e.amount)} · ${e.category}`);
+  };
+
   return (
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div style={{color:C.red,fontWeight:800,fontSize:16}}>🧮 Expense Dashboard</div>
         {bucket==="myantra" && <Btn onClick={()=>setSheet(true)} sm outline color={C.red}>+ Add</Btn>}
       </div>
+
+      {/* Grand total — combined across both buckets, respects the date/FY
+          filter below but not the bucket switch or category filter, so it's
+          always a true "at a glimpse" figure for whatever period is selected. */}
+      <KPI icon="🧾" label={`Total Expenses${(fyFilter||dateFrom||dateTo)?" (filtered period)":" (all time)"}`} value={fmt(grandTotal)} color={C.text} />
 
       {/* Bucket switch */}
       <div style={{display:"flex",gap:8}}>
@@ -24947,14 +24964,12 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], actionIte
         )}
       </div>
 
-      {/* Category summary — tap a category to filter the list below */}
+      {/* Category summary — informational totals, always shows the full
+          picture for the date range regardless of the filter below */}
       <div style={{background:C.card,borderRadius:12,padding:"14px 16px"}}>
         <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>By Category</div>
         {Object.entries(byCat).sort((a,b)=>b[1]-a[1]).map(([cat,amt])=>(
-          <div key={cat} onClick={()=>cat!=="Shortage"&&toggleCat(cat)}
-            style={{display:"flex",justifyContent:"space-between",padding:"6px 4px",borderBottom:`1px solid ${C.border}22`,
-              cursor:cat==="Shortage"?"default":"pointer",
-              background:catFilter.has(cat)?C.red+"11":"transparent",borderRadius:4}}>
+          <div key={cat} style={{display:"flex",justifyContent:"space-between",padding:"6px 4px",borderBottom:`1px solid ${C.border}22`}}>
             <span style={{color:C.text,fontSize:13}}>
               {cat}
               {cat==="Shortage" && <span style={{color:C.muted,fontSize:10,marginLeft:6}}>(live from vehicle ledgers)</span>}
@@ -24969,9 +24984,40 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], actionIte
         )}
       </div>
 
+      {/* Filter by category — explicit multi-select, narrows the entries list
+          below only. Shortage is excluded here since it's never a stored
+          mye_expenses row, so there's nothing in the entries list to filter to. */}
+      <div style={{background:C.card,borderRadius:12,padding:"12px 14px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+          <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Filter by Category</div>
+          {catFilter.size>0 && (
+            <button onClick={()=>setCatFilter(new Set())}
+              style={{background:"none",border:"none",color:C.red,fontSize:11,fontWeight:700,cursor:"pointer",padding:0}}>
+              ✕ Clear ({catFilter.size})
+            </button>
+          )}
+        </div>
+        <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+          {bucketCats.filter(c=>c!=="Shortage").map(cat=>{
+            const on = catFilter.has(cat);
+            return (
+              <button key={cat} onClick={()=>toggleCat(cat)}
+                style={{padding:"6px 12px",borderRadius:20,cursor:"pointer",fontWeight:700,fontSize:11,
+                  background:on?C.red:"transparent",border:`1.5px solid ${on?C.red:C.border}`,
+                  color:on?"#fff":C.text}}>
+                {cat}{byCat[cat]>0?` · ${fmt(byCat[cat])}`:""}
+              </button>
+            );
+          })}
+        </div>
+        {catFilter.size===0 && <div style={{color:C.muted,fontSize:11,marginTop:6}}>No filter selected — showing all categories below.</div>}
+      </div>
+
       {/* Entries */}
       <div style={{display:"flex",flexDirection:"column",gap:8}}>
-        {displayedEntries.map(e=>(
+        {displayedEntries.map(e=>{
+          const canDelete = bucket==="myantra" && user?.role==="owner";
+          return (
           <div key={e.id} style={{background:C.card,borderRadius:12,padding:"11px 14px",borderLeft:`4px solid ${C.red}`,display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
             <div>
               <div style={{fontWeight:700,fontSize:13}}>{e.label}</div>
@@ -24980,9 +25026,18 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], actionIte
               {e.notes&&<div style={{color:C.muted,fontSize:11}}>{e.notes}</div>}
               {e.createdBy&&<div style={{color:ROLES[e.createdBy]?.color||C.muted,fontSize:11}}>by {e.createdBy}</div>}
             </div>
-            <div style={{color:C.red,fontWeight:800,fontSize:15}}>{fmt(e.amount)}</div>
+            <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:6}}>
+              <div style={{color:C.red,fontWeight:800,fontSize:15}}>{fmt(e.amount)}</div>
+              {canDelete && (
+                <button onClick={()=>deleteExpense(e)}
+                  style={{background:"none",border:`1px solid ${C.border}`,borderRadius:6,color:C.muted,fontSize:10,padding:"3px 7px",cursor:"pointer"}}>
+                  🗑 Delete
+                </button>
+              )}
+            </div>
           </div>
-        ))}
+          );
+        })}
         {displayedEntries.length===0 && bucket==="payment_advice" && <div style={{textAlign:"center",color:C.muted,padding:32}}>No categorized debits yet — these come from scanning a payment advice and choosing a category per line.</div>}
         {displayedEntries.length===0 && bucket==="myantra" && <div style={{textAlign:"center",color:C.muted,padding:32}}>No expenses recorded yet</div>}
       </div>
