@@ -24845,7 +24845,7 @@ This will auto-recover in the next trip.`);
 }
 
 // ─── EXPENSES LEDGER ──────────────────────────────────────────────────────────
-function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], actionItems=[], user, log}) {
+function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], trips=[], employees=[], actionItems=[], user, log}) {
   const [sheet, setSheet] = useState(false);
   const [f, setF] = useState({date:today(),label:"",amount:"",category:MYANTRA_EXPENSE_CATEGORIES[0],notes:"",utr:""});
   const ff = k => v => setF(p=>({...p,[k]:v}));
@@ -24856,6 +24856,11 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], actionIte
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo,   setDateTo]   = useState("");
   const [fyFilter, setFyFilter] = useState(""); // "" = no FY filter, else a fy number
+  // Drilling into the Shortage category opens a dedicated recovery dashboard,
+  // sharing the SAME date/FY filter state above rather than duplicating it —
+  // whatever period you were looking at carries straight through.
+  const [showShortageDash, setShowShortageDash] = useState(false);
+  const [employeeFilter, setEmployeeFilter] = useState(""); // "" = all employees, else empId ("unassigned" is a valid value too)
 
   const manualExps = Array.isArray(expenses) ? expenses : [];
   const bucketCats = bucket==="payment_advice" ? PA_DEBIT_DASHBOARD_CATEGORIES : MYANTRA_EXPENSE_CATEGORIES;
@@ -24886,6 +24891,35 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], actionIte
     ? (actionItems||[]).filter(ai=>ai.type==="unassigned_shortage"&&ai.status==="open"&&inRange(ai.invoiceDate||"")).reduce((s,ai)=>s+(ai.amount||0),0)
     : 0;
 
+  // ── Shortage recovery breakdown — by vehicle and by employee ──────────────
+  // "To recover" = owed minus recovered, computed ONLY from txns whose date
+  // falls inside the current inRange() filter — so switching FY genuinely
+  // scopes the figure to shortages recorded in that FY, not a running
+  // all-time balance that happens to be displayed under an FY label.
+  // Employee attribution uses the same convention as TAFAL/wallet assignment
+  // elsewhere in the app (resolveEmpForTruck: most recent trip's assignedEmpId
+  // for that truck) rather than per-transaction trip lookup, so one vehicle
+  // maps to one employee consistently across the whole dashboard.
+  const shortageByVehicle = (vehicles||[]).map(v=>{
+    const txns = (v.shortageTxns||[]).filter(t=>inRange(t.date||""));
+    const owed = txns.filter(t=>t.type==="shortage"||t.type==="recorded").reduce((s,t)=>s+(t.amount||0),0);
+    const recovered = txns.filter(t=>t.type==="recovery").reduce((s,t)=>s+(t.amount||0),0);
+    return { truckNo:v.truckNo, ownerName:v.ownerName||"", empId:resolveEmpForTruck(v.truckNo, trips), owed, recovered, net:owed-recovered };
+  }).filter(x=>x.owed>0||x.recovered>0);
+
+  const shortageByEmployee = {};
+  shortageByVehicle.forEach(x=>{
+    const key = x.empId||"unassigned";
+    if(!shortageByEmployee[key]) shortageByEmployee[key] = {empId:key, owed:0, recovered:0, net:0, trucks:[]};
+    shortageByEmployee[key].owed += x.owed;
+    shortageByEmployee[key].recovered += x.recovered;
+    shortageByEmployee[key].net += x.net;
+    shortageByEmployee[key].trucks.push(x.truckNo);
+  });
+  const shortageByEmployeeList = Object.values(shortageByEmployee).sort((a,b)=>b.net-a.net);
+  const topEmployee = shortageByEmployeeList[0];
+  const topVehicle = [...shortageByVehicle].sort((a,b)=>b.net-a.net)[0];
+
   const byCat = {};
   bucketCats.forEach(c=>{ byCat[c]=0; });
   dateFilteredExps.forEach(e=>{
@@ -24914,6 +24948,118 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], actionIte
     DB.deleteExpense(e.id).catch(err=>console.error("deleteExpense:",err));
     log && log("EXPENSE DELETED", `${e.label} — ${fmt(e.amount)} · ${e.category}`);
   };
+
+  // ── Shortage Recovery Dashboard — reached by clicking the Shortage row ────
+  if(showShortageDash) {
+    const empName = id => id==="unassigned" ? "Unassigned / no trip history" : ((employees||[]).find(e=>e.id===id)?.name || id);
+    const filteredEmpRows = employeeFilter ? shortageByEmployeeList.filter(x=>x.empId===employeeFilter) : shortageByEmployeeList;
+    const filteredVehRows = (employeeFilter ? shortageByVehicle.filter(x=>(x.empId||"unassigned")===employeeFilter) : shortageByVehicle)
+      .sort((a,b)=>b.net-a.net);
+    const filteredTotal = filteredVehRows.reduce((s,x)=>s+x.net,0);
+
+    return (
+      <div style={{display:"flex",flexDirection:"column",gap:12}}>
+        <button onClick={()=>{setShowShortageDash(false);setEmployeeFilter("");}}
+          style={{alignSelf:"flex-start",background:"none",border:`1px solid ${C.border}`,borderRadius:8,
+            color:C.muted,fontSize:12,padding:"5px 10px",cursor:"pointer"}}>
+          ← Back to Expense Dashboard
+        </button>
+        <div style={{color:C.red,fontWeight:800,fontSize:16}}>⚠ Shortage Recovery Dashboard</div>
+
+        {/* Same date/FY filter state as the Expense Dashboard — carries
+            straight through from wherever you clicked in from. */}
+        <div style={{background:C.card,borderRadius:12,padding:"12px 14px",display:"flex",flexDirection:"column",gap:8}}>
+          <div style={{display:"flex",gap:8}}>
+            {[currentFY(),currentFY()-1,currentFY()-2].map(fy=>(
+              <button key={fy} onClick={()=>{setFyFilter(fyFilter===String(fy)?"":String(fy));setDateFrom("");setDateTo("");}}
+                style={{flex:1,padding:"6px 4px",borderRadius:7,cursor:"pointer",fontWeight:700,fontSize:11,
+                  background:fyFilter===String(fy)?C.accent:"transparent",border:`1px solid ${fyFilter===String(fy)?C.accent:C.border}`,
+                  color:fyFilter===String(fy)?"#fff":C.muted}}>
+                {FY_LABEL(fy)}
+              </button>
+            ))}
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <Field label="From" value={dateFrom} onChange={v=>{setDateFrom(v);setFyFilter("");}} type="date" half />
+            <Field label="To"   value={dateTo}   onChange={v=>{setDateTo(v);setFyFilter("");}}   type="date" half />
+          </div>
+          {(fyFilter||dateFrom||dateTo) && (
+            <button onClick={()=>{setFyFilter("");setDateFrom("");setDateTo("");}}
+              style={{background:"none",border:"none",color:C.muted,fontSize:11,cursor:"pointer",textAlign:"left",padding:0}}>
+              ✕ Clear date filter
+            </button>
+          )}
+          <div style={{color:C.muted,fontSize:10}}>
+            {fyFilter ? `Only shortages recorded during ${FY_LABEL(+fyFilter)} are counted below — not a running all-time balance.` : "No FY selected — showing all-time shortage activity."}
+          </div>
+        </div>
+
+        {/* Employee filter — new for this dashboard */}
+        <div>
+          <select value={employeeFilter} onChange={e=>setEmployeeFilter(e.target.value)}
+            style={{width:"100%",background:C.bg,border:`1.5px solid ${employeeFilter?C.blue:C.border}`,
+              borderRadius:8,padding:"9px 10px",fontSize:12,color:C.text,outline:"none"}}>
+            <option value="">— All Employees —</option>
+            {shortageByEmployeeList.map(x=><option key={x.empId} value={x.empId}>{empName(x.empId)}</option>)}
+          </select>
+        </div>
+
+        <KPI icon="⚠" label={employeeFilter?`To Recover — ${empName(employeeFilter)}`:"Total To Recover"} value={fmt(filteredTotal)} color={C.red} />
+
+        {!employeeFilter && topEmployee && (
+          <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.red}44`}}>
+            <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>Highest — Employee</div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontWeight:700,fontSize:14}}>{empName(topEmployee.empId)}</span>
+              <span style={{color:C.red,fontWeight:800,fontSize:16}}>{fmt(topEmployee.net)}</span>
+            </div>
+          </div>
+        )}
+        {topVehicle && (
+          <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.red}44`}}>
+            <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>Highest — Vehicle</div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontWeight:700,fontSize:14}}>{topVehicle.truckNo}{topVehicle.ownerName?` · ${topVehicle.ownerName}`:""}</span>
+              <span style={{color:C.red,fontWeight:800,fontSize:16}}>{fmt(topVehicle.net)}</span>
+            </div>
+          </div>
+        )}
+
+        {/* By employee */}
+        {!employeeFilter && (
+          <div style={{background:C.card,borderRadius:12,padding:"14px 16px"}}>
+            <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>By Employee</div>
+            {filteredEmpRows.map(x=>(
+              <div key={x.empId} onClick={()=>setEmployeeFilter(x.empId)}
+                style={{display:"flex",justifyContent:"space-between",padding:"7px 4px",borderBottom:`1px solid ${C.border}22`,cursor:"pointer"}}>
+                <span style={{fontSize:13}}>{empName(x.empId)} <span style={{color:C.muted,fontSize:10}}>({x.trucks.length} truck{x.trucks.length>1?"s":""})</span></span>
+                <span style={{color:C.red,fontWeight:700}}>{fmt(x.net)}</span>
+              </div>
+            ))}
+            {filteredEmpRows.length===0 && <div style={{color:C.muted,fontSize:13}}>No shortage activity in this period.</div>}
+          </div>
+        )}
+
+        {/* By vehicle */}
+        <div style={{background:C.card,borderRadius:12,padding:"14px 16px"}}>
+          <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>By Vehicle</div>
+          {filteredVehRows.map(x=>(
+            <div key={x.truckNo} style={{display:"flex",justifyContent:"space-between",padding:"7px 4px",borderBottom:`1px solid ${C.border}22`}}>
+              <span style={{fontSize:13}}>{x.truckNo}{x.ownerName?` · ${x.ownerName}`:""} <span style={{color:C.muted,fontSize:10}}>· {empName(x.empId||"unassigned")}</span></span>
+              <span style={{color:C.red,fontWeight:700}}>{fmt(x.net)}</span>
+            </div>
+          ))}
+          {filteredVehRows.length===0 && <div style={{color:C.muted,fontSize:13}}>No shortage activity in this period.</div>}
+        </div>
+
+        {unassignedShortTotal>0 && (
+          <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:10,padding:"10px 14px",fontSize:12,color:C.orange}}>
+            ⚠ ₹{fmt(unassignedShortTotal)} more is sitting as open Action Items with no truck picked yet — not counted above since it isn't attributed to a vehicle or employee. See Action Items to assign.
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
@@ -24968,15 +25114,20 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], actionIte
           picture for the date range regardless of the filter below */}
       <div style={{background:C.card,borderRadius:12,padding:"14px 16px"}}>
         <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>By Category</div>
-        {Object.entries(byCat).sort((a,b)=>b[1]-a[1]).map(([cat,amt])=>(
-          <div key={cat} style={{display:"flex",justifyContent:"space-between",padding:"6px 4px",borderBottom:`1px solid ${C.border}22`}}>
+        {Object.entries(byCat).sort((a,b)=>b[1]-a[1]).map(([cat,amt])=>{
+          const clickable = cat==="Shortage";
+          return (
+          <div key={cat} onClick={()=>clickable&&setShowShortageDash(true)}
+            style={{display:"flex",justifyContent:"space-between",padding:"6px 4px",borderBottom:`1px solid ${C.border}22`,
+              cursor:clickable?"pointer":"default", borderRadius:4}}>
             <span style={{color:C.text,fontSize:13}}>
               {cat}
-              {cat==="Shortage" && <span style={{color:C.muted,fontSize:10,marginLeft:6}}>(live from vehicle ledgers)</span>}
+              {cat==="Shortage" && <span style={{color:C.blue,fontSize:10,marginLeft:6}}>→ recovery dashboard</span>}
             </span>
             <span style={{color:C.red,fontWeight:700}}>{fmt(amt)}</span>
           </div>
-        ))}
+          );
+        })}
         {bucket==="payment_advice" && unassignedShortTotal>0 && (
           <div style={{marginTop:8,background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:8,padding:"6px 10px",fontSize:11,color:C.orange}}>
             ⚠ ₹{fmt(unassignedShortTotal)} of that Shortage total is still unassigned to a truck — see Action Items.
