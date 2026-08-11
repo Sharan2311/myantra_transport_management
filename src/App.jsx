@@ -12976,7 +12976,15 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
   const mergeSelectedPouchPDFs = async () => {
     if(mailRows.length===0){alert("Select at least one DI row first.");return;}
     const uniqueTrips = [...new Map(mailRows.map(r=>[r.trip.id, r.trip])).values()];
-    const missing = uniqueTrips.filter(t => !(t.mergedPdfPath||t.sealedInvoicePath||t.confirmPdfPath));
+    // Pure Return Pouch/Confirmation only — sealedInvoicePath/confirmPdfPath is
+    // the standalone document as uploaded. mergedPdfPath is a DIFFERENT thing:
+    // uploadSealedForTrip auto-merges sealed+GR+Invoice together into one PDF
+    // when all three exist, for a different use case (a complete trip record).
+    // Using that here would silently pull GR/Invoice pages into what's supposed
+    // to be just the confirmation — only fall back to it if the standalone
+    // document genuinely isn't available any other way.
+    const pouchPathFor = t => t.sealedInvoicePath || t.confirmPdfPath || t.mergedPdfPath || "";
+    const missing = uniqueTrips.filter(t => !pouchPathFor(t));
     if(missing.length>0) {
       if(!window.confirm(`${missing.length} of ${uniqueTrips.length} selected trip(s) have no Return Pouch/Confirmation document uploaded yet (${missing.map(t=>t.lrNo||t.truckNo).join(", ")}).\n\nMerge the ${uniqueTrips.length-missing.length} that do have one?`)) return;
     }
@@ -12984,7 +12992,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
     try {
       const buffers = [];
       for (const t of uniqueTrips) {
-        const path = t.mergedPdfPath || t.sealedInvoicePath || t.confirmPdfPath;
+        const path = pouchPathFor(t);
         if(!path) continue;
         try {
           const buf = String(path).startsWith("http")
