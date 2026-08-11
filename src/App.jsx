@@ -124,6 +124,29 @@ const tripPaidAmount = (trip) => {
   return lines.reduce((s,d)=>s + (d.paid ? (d.paidAmount||0) : 0), 0);
 };
 
+// Normalizes a trip's DI lines to one shape regardless of whether it uses the
+// multi-DI diLines[] array or the older flat single-DI fields — so any UI that
+// needs per-DI status (e.g. the Party Portal table) doesn't need to special-case
+// both shapes. Each row's own billed/paid decides its status independently;
+// grouping multiple rows under one trip is the caller's job, not this helper's.
+const diRowsFor = (trip) => {
+  const lines = trip.diLines||[];
+  if(lines.length > 0) return lines.map(d => ({
+    diNo: d.diNo||"", grNo: d.grNo||"", qty: d.qty||0, bags: d.bags||0,
+    billed: !!d.billed, invoiceNo: d.invoiceNo||"", invoiceDate: d.invoiceDate||"",
+    billedAmt: d.billedAmt||0,
+    paid: !!d.paid, paidAmount: d.paidAmount||0, utr: d.utr||"", paymentDate: d.paymentDate||"",
+  }));
+  // Single-DI trip using the flat fields directly
+  return [{
+    diNo: trip.diNo||"", grNo: trip.grNo||"", qty: trip.qty||0, bags: trip.bags||0,
+    billed: !!trip.invoiceNo, invoiceNo: trip.invoiceNo||"", invoiceDate: trip.invoiceDate||"",
+    billedAmt: trip.billedToShree||((trip.qty||0)*(trip.givenRate||0)),
+    paid: trip.status==="Paid", paidAmount: trip.paidAmount||0, utr: trip.utr||"", paymentDate: trip.paymentDate||"",
+  }];
+};
+const diRowStatus = d => d.paid ? "Paid" : d.billed ? "Billed" : "Not Billed";
+
 // Resolve which employee is responsible for a truck when a DI/trip doesn't exist
 // yet in the app: use the most recent trip (by date) for that truck number and
 // its assignedEmpId. Returns "" (owner-only / unassigned) if the truck has no
@@ -12431,6 +12454,13 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
   const [searchQ,      setSearchQ]     = useState("");
   const [dateFrom,     setDateFrom]    = useState("");
   const [dateTo,       setDateTo]      = useState("");
+  // New table filters — independent of the workflow-stage tabs above.
+  // billStatusFilter works at the DI-LINE level (a multi-DI trip can have
+  // some lines Paid and some Not Billed at once; filtering hides only the
+  // non-matching lines within a group, not the whole trip).
+  const [billStatusFilter, setBillStatusFilter] = useState("all"); // all | not_billed | billed | paid
+  const [confirmFilter,    setConfirmFilter]    = useState("all"); // all | received | not_received
+  const [rowUploadingId,   setRowUploadingId]   = useState(""); // per-row inline upload spinner
 
   const roles      = (user?.role||"").split(",").map(r=>r.trim());
   const isOwner    = ["owner","manager"].includes(user?.role);
@@ -12623,6 +12653,30 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
 
   const cardProps = {selected, toggle, isOwner, isPartyMgr, employees, openFile, undoEmailSent, undoAssign};
 
+  // Trip-level "confirmation received" — same signal that already releases
+  // the pouch hold elsewhere in the app (_hasMerged), just named for this view.
+  const confirmReceived = t => !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received");
+
+  // Build grouped, DI-line-filtered table rows. billStatusFilter narrows which
+  // DI SUB-ROWS show within a trip group (a trip stays visible if at least one
+  // of its lines matches); confirmFilter narrows at the trip level, since the
+  // confirmation document is uploaded once per trip, not once per DI.
+  const tableGroups = activeList
+    .filter(t => confirmFilter==="all" || (confirmFilter==="received")===confirmReceived(t))
+    .map(t => {
+      const allRows = diRowsFor(t);
+      const rows = billStatusFilter==="all" ? allRows
+        : allRows.filter(d => diRowStatus(d) === (billStatusFilter==="not_billed"?"Not Billed":billStatusFilter==="billed"?"Billed":"Paid"));
+      return {trip:t, rows};
+    })
+    .filter(g => g.rows.length>0);
+
+  const uploadReturnPouch = async (tripId, file) => {
+    setRowUploadingId(tripId);
+    try { await uploadSealedForTrip(tripId, file); }
+    finally { setRowUploadingId(""); }
+  };
+
   return(
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
       <div>
@@ -12664,6 +12718,27 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
         <input type="date" value={dateTo} onChange={e=>setDateTo(e.target.value)}
           style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,color:C.text,padding:"9px 8px",fontSize:12,outline:"none"}}/>
         {(dateFrom||dateTo)&&<button onClick={()=>{setDateFrom("");setDateTo("");}} style={{background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:14,fontWeight:700}}>✕</button>}
+      </div>
+
+      {/* Billing status (DI-line level) + Confirmation filters */}
+      <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+        {[["all","All"],["not_billed","Not Billed"],["billed","Billed"],["paid","Paid"]].map(([k,l])=>(
+          <button key={k} onClick={()=>setBillStatusFilter(k)}
+            style={{padding:"5px 11px",borderRadius:16,cursor:"pointer",fontWeight:700,fontSize:11,
+              background:billStatusFilter===k?C.teal:"transparent",border:`1.5px solid ${C.teal}`,
+              color:billStatusFilter===k?"#fff":C.teal}}>
+            {l}
+          </button>
+        ))}
+        <span style={{width:1,background:C.border,margin:"2px 4px"}} />
+        {[["all","All"],["received","✓ Confirmed"],["not_received","Not Confirmed"]].map(([k,l])=>(
+          <button key={k} onClick={()=>setConfirmFilter(k)}
+            style={{padding:"5px 11px",borderRadius:16,cursor:"pointer",fontWeight:700,fontSize:11,
+              background:confirmFilter===k?C.purple:"transparent",border:`1.5px solid ${C.purple}`,
+              color:confirmFilter===k?"#fff":C.purple}}>
+            {l}
+          </button>
+        ))}
       </div>
 
       {selected.size>0&&(
@@ -12758,15 +12833,102 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
         </div>
       )}
 
-      {activeList.length===0
+      {tableGroups.length===0
         ?<div style={{textAlign:"center",color:C.muted,padding:40}}>
             <div style={{fontSize:32,marginBottom:10}}>{"📭"}</div>
             <div style={{fontSize:14,fontWeight:600,color:C.text,marginBottom:6}}>
-              {"No trips in this status"}
+              {"No trips match the current filters"}
             </div>
             {!isPartyMgr&&activeTab==="pending"&&<div style={{fontSize:12,color:C.muted}}>The Party Manager will assign trips to you for followup.</div>}
           </div>
-        :<div style={{display:"flex",flexDirection:"column",gap:8}}>{activeList.map(t=><PartyTripCard key={t.id} t={t} {...cardProps}/>)}</div>
+        :<div style={{overflowX:"auto"}}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:900}}>
+            <thead>
+              <tr style={{textAlign:"left",color:C.muted,fontSize:10,textTransform:"uppercase",letterSpacing:0.5,borderBottom:`2px solid ${C.border}`}}>
+                <th style={{padding:"6px 8px"}}><input type="checkbox" checked={selected.size===activeList.length&&activeList.length>0} onChange={toggleAll}/></th>
+                <th style={{padding:"6px 8px"}}>Date</th>
+                <th style={{padding:"6px 8px"}}>LR / Truck</th>
+                <th style={{padding:"6px 8px"}}>To</th>
+                <th style={{padding:"6px 8px"}}>DI</th>
+                <th style={{padding:"6px 8px"}}>Status</th>
+                <th style={{padding:"6px 8px"}}>GR</th>
+                <th style={{padding:"6px 8px"}}>Invoice</th>
+                <th style={{padding:"6px 8px"}}>Return Pouch / Confirmation</th>
+                <th style={{padding:"6px 8px"}}>Merged PDF</th>
+                <th style={{padding:"6px 8px",textAlign:"right"}}>Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tableGroups.map(({trip:t, rows})=>{
+                const grPath  = t.grFilePath || (t.diLines||[]).find(d=>d.grFilePath)?.grFilePath;
+                const invPath = t.invoiceFilePath || (t.diLines||[]).find(d=>d.invoiceFilePath)?.invoiceFilePath;
+                const confirmed = confirmReceived(t);
+                const rowUploading = rowUploadingId===t.id;
+                return rows.map((d,i)=>(
+                  <tr key={t.id+"-"+i} style={{borderBottom: i===rows.length-1 ? `1px solid ${C.border}` : `1px dashed ${C.border}44`}}>
+                    {i===0 && (
+                      <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top"}}>
+                        <input type="checkbox" checked={selected.has(t.id)} onChange={()=>toggle(t.id)}/>
+                      </td>
+                    )}
+                    {i===0 && <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",whiteSpace:"nowrap"}}>{t.date}</td>}
+                    {i===0 && (
+                      <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top"}}>
+                        <div style={{fontWeight:700}}>{t.lrNo||"—"}</div>
+                        <div style={{color:C.muted,fontSize:11}}>{t.truckNo}</div>
+                      </td>
+                    )}
+                    {i===0 && <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top"}}>{t.to||"—"}</td>}
+                    <td style={{padding:"6px 8px",fontFamily:"monospace",fontSize:11}}>{d.diNo||"—"}{d.qty?<div style={{color:C.muted,fontFamily:"inherit"}}>{d.qty}MT{d.bags?` · ${d.bags} bags`:""}</div>:null}</td>
+                    <td style={{padding:"6px 8px"}}>
+                      {(()=>{ const st=diRowStatus(d); const c = st==="Paid"?C.green:st==="Billed"?C.teal:C.orange;
+                        return <Badge label={st} color={c} />; })()}
+                      {d.invoiceNo && <div style={{color:C.muted,fontSize:10,marginTop:2,fontFamily:"monospace"}}>{d.invoiceNo}</div>}
+                    </td>
+                    {i===0 && (
+                      <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top"}}>
+                        {grPath
+                          ? <button onClick={e=>openFile(grPath,e)} style={{background:"none",border:`1px solid ${C.blue}`,borderRadius:6,color:C.blue,fontSize:11,padding:"3px 8px",cursor:"pointer"}}>📄 View</button>
+                          : <span style={{color:C.muted,fontSize:11}}>—</span>}
+                      </td>
+                    )}
+                    {i===0 && (
+                      <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top"}}>
+                        {invPath
+                          ? <button onClick={e=>openFile(invPath,e)} style={{background:"none",border:`1px solid ${C.blue}`,borderRadius:6,color:C.blue,fontSize:11,padding:"3px 8px",cursor:"pointer"}}>📄 View</button>
+                          : <span style={{color:C.muted,fontSize:11}}>—</span>}
+                      </td>
+                    )}
+                    {i===0 && (
+                      <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top"}}>
+                        {confirmed ? (
+                          <span onClick={t.sealedInvoicePath?e=>openFile(t.sealedInvoicePath,e):undefined}
+                            style={{color:C.green,fontWeight:700,fontSize:11,cursor:t.sealedInvoicePath?"pointer":"default"}}>✓ Received</span>
+                        ) : (
+                          <label style={{display:"inline-flex",alignItems:"center",gap:4,background:C.orange,borderRadius:6,padding:"4px 9px",
+                            cursor:rowUploading?"not-allowed":"pointer",color:"#fff",fontWeight:700,fontSize:10}}>
+                            {rowUploading?"⏳":"⬆"} Upload
+                            <input type="file" accept=".pdf,image/*" style={{display:"none"}} disabled={rowUploading}
+                              onChange={e=>{if(e.target.files[0]) uploadReturnPouch(t.id, e.target.files[0]);}}/>
+                          </label>
+                        )}
+                      </td>
+                    )}
+                    {i===0 && (
+                      <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top"}}>
+                        {t.mergedPdfPath
+                          ? <button onClick={async()=>{try{const url=await getSignedUrl(t.mergedPdfPath,3600);const a=document.createElement("a");a.href=url;a.download="MergedConfirmation_"+(t.lrNo||t.id)+".pdf";a.target="_blank";document.body.appendChild(a);a.click();document.body.removeChild(a);}catch(e){alert("Download failed: "+e.message);}}}
+                              style={{background:"none",border:`1px solid ${C.green}`,borderRadius:6,color:C.green,fontSize:11,padding:"3px 8px",cursor:"pointer"}}>⬇ PDF</button>
+                          : <span style={{color:C.muted,fontSize:11}}>—</span>}
+                      </td>
+                    )}
+                    <td style={{padding:"6px 8px",textAlign:"right",fontWeight:700}}>{d.billedAmt>0?fmt(d.billedAmt):(d.qty&&t.givenRate?fmt(d.qty*t.givenRate):"—")}</td>
+                  </tr>
+                ));
+              })}
+            </tbody>
+          </table>
+        </div>
       }
     </div>
   );
