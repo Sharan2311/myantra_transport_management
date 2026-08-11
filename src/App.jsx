@@ -24877,14 +24877,33 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], trips=[],
   };
   const dateFilteredExps = manualExps.filter(e => e.source===bucket && inRange(e.date||""));
 
+  // Resolve a shortage/recovery txn to its trip (via lrNo) so filtering and
+  // attribution use the TRIP's date/employee, not the txn's own recorded-date
+  // — a shortage can be typed into the ledger long after the trip happened,
+  // so its entry-date has nothing to do with which FY it actually belongs to.
+  // A txn with no resolvable trip can't be checked against any FY at all, so
+  // it's never excluded by the date filter — it's surfaced separately instead
+  // (see NO_TRIP_KEY below) rather than silently attributed to whichever
+  // employee happens to be that truck's most recent driver.
+  const linkedTripFor = t => {
+    if(!t.lrNo) return null;
+    const key = String(t.lrNo).trim();
+    return (trips||[]).find(tr => String(tr.lrNo||"").trim() === key) || null;
+  };
+  const NO_TRIP_KEY = "no_trip_linked";
+
   // Shortage total is read LIVE from every vehicle's shortageTxns ledger —
   // never written as a mye_expenses row (see PA_DEBIT_CATEGORIES comment
   // above). Computed unconditionally (not gated to the active bucket) since
   // the combined grand total below needs it regardless of which bucket is showing.
   const liveShortageTotal = (vehicles||[]).reduce((sum,v)=>{
-    const txns = (v.shortageTxns||[]).filter(t=>inRange(t.date||""));
-    const owed = txns.filter(t=>t.type==="shortage"||t.type==="recorded").reduce((s,t)=>s+(t.amount||0),0);
-    const recovered = txns.filter(t=>t.type==="recovery").reduce((s,t)=>s+(t.amount||0),0);
+    let owed=0, recovered=0;
+    (v.shortageTxns||[]).forEach(t=>{
+      const trip = linkedTripFor(t);
+      const inPeriod = trip ? inRange(trip.date||"") : true;
+      if(!inPeriod) return;
+      if(t.type==="recovery") recovered += t.amount||0; else owed += t.amount||0;
+    });
     return sum + owed - recovered;
   }, 0);
   const unassignedShortTotal = bucket==="payment_advice"
@@ -24892,32 +24911,43 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], trips=[],
     : 0;
 
   // ── Shortage recovery breakdown — by vehicle and by employee ──────────────
-  // "To recover" = owed minus recovered, computed ONLY from txns whose date
-  // falls inside the current inRange() filter — so switching FY genuinely
-  // scopes the figure to shortages recorded in that FY, not a running
-  // all-time balance that happens to be displayed under an FY label.
-  // Employee attribution uses the same convention as TAFAL/wallet assignment
-  // elsewhere in the app (resolveEmpForTruck: most recent trip's assignedEmpId
-  // for that truck) rather than per-transaction trip lookup, so one vehicle
-  // maps to one employee consistently across the whole dashboard.
   const shortageByVehicle = (vehicles||[]).map(v=>{
-    const txns = (v.shortageTxns||[]).filter(t=>inRange(t.date||""));
-    const owed = txns.filter(t=>t.type==="shortage"||t.type==="recorded").reduce((s,t)=>s+(t.amount||0),0);
-    const recovered = txns.filter(t=>t.type==="recovery").reduce((s,t)=>s+(t.amount||0),0);
-    return { truckNo:v.truckNo, ownerName:v.ownerName||"", empId:resolveEmpForTruck(v.truckNo, trips), owed, recovered, net:owed-recovered };
+    let owed=0, recovered=0, noTripLinkedNet=0, lastLinkedEmpId="", hadLinkedTxn=false, hadUnlinkedTxn=false;
+    (v.shortageTxns||[]).forEach(t=>{
+      const trip = linkedTripFor(t);
+      const inPeriod = trip ? inRange(trip.date||"") : true; // unlinked = never excluded
+      if(!inPeriod) return;
+      const amt = t.amount||0;
+      if(t.type==="recovery") recovered += amt; else owed += amt;
+      if(trip) { hadLinkedTxn = true; lastLinkedEmpId = trip.assignedEmpId || lastLinkedEmpId; }
+      else { hadUnlinkedTxn = true; noTripLinkedNet += (t.type==="recovery") ? -amt : amt; }
+    });
+    const empId = hadLinkedTxn ? (lastLinkedEmpId || resolveEmpForTruck(v.truckNo, trips))
+                : hadUnlinkedTxn ? NO_TRIP_KEY
+                : resolveEmpForTruck(v.truckNo, trips);
+    return { truckNo:v.truckNo, ownerName:v.ownerName||"", empId, owed, recovered, net:owed-recovered, noTripLinkedNet };
   }).filter(x=>x.owed>0||x.recovered>0);
 
+
   const shortageByEmployee = {};
-  shortageByVehicle.forEach(x=>{
-    const key = x.empId||"unassigned";
-    if(!shortageByEmployee[key]) shortageByEmployee[key] = {empId:key, owed:0, recovered:0, net:0, trucks:[]};
-    shortageByEmployee[key].owed += x.owed;
-    shortageByEmployee[key].recovered += x.recovered;
-    shortageByEmployee[key].net += x.net;
-    shortageByEmployee[key].trucks.push(x.truckNo);
+  (vehicles||[]).forEach(v=>{
+    (v.shortageTxns||[]).forEach(t=>{
+      const trip = linkedTripFor(t);
+      const inPeriod = trip ? inRange(trip.date||"") : true;
+      if(!inPeriod) return;
+      const key = trip ? (trip.assignedEmpId || "unassigned") : NO_TRIP_KEY;
+      if(!shortageByEmployee[key]) shortageByEmployee[key] = {empId:key, owed:0, recovered:0, net:0, trucks:new Set()};
+      const amt = t.amount||0;
+      if(t.type==="recovery") shortageByEmployee[key].recovered += amt; else shortageByEmployee[key].owed += amt;
+      shortageByEmployee[key].net = shortageByEmployee[key].owed - shortageByEmployee[key].recovered;
+      shortageByEmployee[key].trucks.add(v.truckNo);
+    });
   });
-  const shortageByEmployeeList = Object.values(shortageByEmployee).sort((a,b)=>b.net-a.net);
-  const topEmployee = shortageByEmployeeList[0];
+  const shortageByEmployeeList = Object.values(shortageByEmployee)
+    .map(x=>({...x, trucks:[...x.trucks]}))
+    .filter(x=>x.owed>0||x.recovered>0)
+    .sort((a,b)=>b.net-a.net);
+  const topEmployee = shortageByEmployeeList.find(x=>x.empId!==NO_TRIP_KEY);
   const topVehicle = [...shortageByVehicle].sort((a,b)=>b.net-a.net)[0];
 
   const byCat = {};
@@ -24951,7 +24981,9 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], trips=[],
 
   // ── Shortage Recovery Dashboard — reached by clicking the Shortage row ────
   if(showShortageDash) {
-    const empName = id => id==="unassigned" ? "Unassigned / no trip history" : ((employees||[]).find(e=>e.id===id)?.name || id);
+    const empName = id => id===NO_TRIP_KEY ? "⚠ No trip linked"
+      : id==="unassigned" ? "Trip linked, but no employee assigned"
+      : ((employees||[]).find(e=>e.id===id)?.name || id);
     const filteredEmpRows = employeeFilter ? shortageByEmployeeList.filter(x=>x.empId===employeeFilter) : shortageByEmployeeList;
     const filteredVehRows = (employeeFilter ? shortageByVehicle.filter(x=>(x.empId||"unassigned")===employeeFilter) : shortageByVehicle)
       .sort((a,b)=>b.net-a.net);
@@ -24990,7 +25022,7 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], trips=[],
             </button>
           )}
           <div style={{color:C.muted,fontSize:10}}>
-            {fyFilter ? `Only shortages recorded during ${FY_LABEL(+fyFilter)} are counted below — not a running all-time balance.` : "No FY selected — showing all-time shortage activity."}
+            {fyFilter ? `Only shortages whose LINKED TRIP falls in ${FY_LABEL(+fyFilter)} are counted — not the date the shortage was entered into the ledger. Entries with no trip link are always shown, in their own category.` : "No FY selected — showing all-time shortage activity."}
           </div>
         </div>
 
@@ -25044,9 +25076,14 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], trips=[],
         <div style={{background:C.card,borderRadius:12,padding:"14px 16px"}}>
           <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>By Vehicle</div>
           {filteredVehRows.map(x=>(
-            <div key={x.truckNo} style={{display:"flex",justifyContent:"space-between",padding:"7px 4px",borderBottom:`1px solid ${C.border}22`}}>
-              <span style={{fontSize:13}}>{x.truckNo}{x.ownerName?` · ${x.ownerName}`:""} <span style={{color:C.muted,fontSize:10}}>· {empName(x.empId||"unassigned")}</span></span>
-              <span style={{color:C.red,fontWeight:700}}>{fmt(x.net)}</span>
+            <div key={x.truckNo} style={{padding:"7px 4px",borderBottom:`1px solid ${C.border}22`}}>
+              <div style={{display:"flex",justifyContent:"space-between"}}>
+                <span style={{fontSize:13}}>{x.truckNo}{x.ownerName?` · ${x.ownerName}`:""} <span style={{color:x.empId===NO_TRIP_KEY?C.orange:C.muted,fontSize:10}}>· {empName(x.empId||"unassigned")}</span></span>
+                <span style={{color:C.red,fontWeight:700}}>{fmt(x.net)}</span>
+              </div>
+              {x.noTripLinkedNet>0 && x.empId!==NO_TRIP_KEY && (
+                <div style={{color:C.orange,fontSize:10,marginTop:2}}>⚠ includes ₹{fmt(x.noTripLinkedNet)} with no trip linked — not FY-verified</div>
+              )}
             </div>
           ))}
           {filteredVehRows.length===0 && <div style={{color:C.muted,fontSize:13}}>No shortage activity in this period.</div>}
