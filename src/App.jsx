@@ -24891,6 +24891,13 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], trips=[],
     return (trips||[]).find(tr => String(tr.lrNo||"").trim() === key) || null;
   };
   const NO_TRIP_KEY = "no_trip_linked";
+  // A txn with no resolvable trip can't be checked against any FY at all —
+  // there's no trip date to test. Per explicit instruction: such a txn must
+  // NEVER be counted under a selected FY/date filter (only linked trips that
+  // actually fall in that period belong there). It only contributes to the
+  // figure when NO filter is active at all — i.e. the true "complete total".
+  const filterActive = !!(fyFilter || dateFrom || dateTo);
+  const txnInPeriod = t => { const trip = linkedTripFor(t); return trip ? inRange(trip.date||"") : !filterActive; };
 
   // Shortage total is read LIVE from every vehicle's shortageTxns ledger —
   // never written as a mye_expenses row (see PA_DEBIT_CATEGORIES comment
@@ -24899,9 +24906,7 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], trips=[],
   const liveShortageTotal = (vehicles||[]).reduce((sum,v)=>{
     let owed=0, recovered=0;
     (v.shortageTxns||[]).forEach(t=>{
-      const trip = linkedTripFor(t);
-      const inPeriod = trip ? inRange(trip.date||"") : true;
-      if(!inPeriod) return;
+      if(!txnInPeriod(t)) return;
       if(t.type==="recovery") recovered += t.amount||0; else owed += t.amount||0;
     });
     return sum + owed - recovered;
@@ -24914,9 +24919,8 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], trips=[],
   const shortageByVehicle = (vehicles||[]).map(v=>{
     let owed=0, recovered=0, noTripLinkedNet=0, lastLinkedEmpId="", hadLinkedTxn=false, hadUnlinkedTxn=false;
     (v.shortageTxns||[]).forEach(t=>{
+      if(!txnInPeriod(t)) return;
       const trip = linkedTripFor(t);
-      const inPeriod = trip ? inRange(trip.date||"") : true; // unlinked = never excluded
-      if(!inPeriod) return;
       const amt = t.amount||0;
       if(t.type==="recovery") recovered += amt; else owed += amt;
       if(trip) { hadLinkedTxn = true; lastLinkedEmpId = trip.assignedEmpId || lastLinkedEmpId; }
@@ -24932,9 +24936,8 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], trips=[],
   const shortageByEmployee = {};
   (vehicles||[]).forEach(v=>{
     (v.shortageTxns||[]).forEach(t=>{
+      if(!txnInPeriod(t)) return;
       const trip = linkedTripFor(t);
-      const inPeriod = trip ? inRange(trip.date||"") : true;
-      if(!inPeriod) return;
       const key = trip ? (trip.assignedEmpId || "unassigned") : NO_TRIP_KEY;
       if(!shortageByEmployee[key]) shortageByEmployee[key] = {empId:key, owed:0, recovered:0, net:0, trucks:new Set()};
       const amt = t.amount||0;
@@ -25022,7 +25025,9 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], trips=[],
             </button>
           )}
           <div style={{color:C.muted,fontSize:10}}>
-            {fyFilter ? `Only shortages whose LINKED TRIP falls in ${FY_LABEL(+fyFilter)} are counted — not the date the shortage was entered into the ledger. Entries with no trip link are always shown, in their own category.` : "No FY selected — showing all-time shortage activity."}
+            {(fyFilter||dateFrom||dateTo)
+              ? `Only shortages whose linked trip falls in ${fyFilter?FY_LABEL(+fyFilter):"the selected date range"} are counted — not the date the shortage was entered into the ledger. Entries with no trip linked can't be verified against any period, so they're excluded entirely while a filter is active.`
+              : "No filter selected — this is the complete total, including shortages with no trip linked."}
           </div>
         </div>
 
@@ -25082,7 +25087,7 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], trips=[],
                 <span style={{color:C.red,fontWeight:700}}>{fmt(x.net)}</span>
               </div>
               {x.noTripLinkedNet>0 && x.empId!==NO_TRIP_KEY && (
-                <div style={{color:C.orange,fontSize:10,marginTop:2}}>⚠ includes ₹{fmt(x.noTripLinkedNet)} with no trip linked — not FY-verified</div>
+                <div style={{color:C.orange,fontSize:10,marginTop:2}}>⚠ includes ₹{fmt(x.noTripLinkedNet)} with no trip linked — only shown in the complete total, excluded whenever a date/FY filter is active</div>
               )}
             </div>
           ))}
