@@ -136,6 +136,13 @@ const diRowsFor = (trip) => {
     billed: !!d.billed, invoiceNo: d.invoiceNo||"", invoiceDate: d.invoiceDate||"",
     billedAmt: d.billedAmt||0,
     paid: !!d.paid, paidAmount: d.paidAmount||0, utr: d.utr||"", paymentDate: d.paymentDate||"",
+    // Per-line orderType — a trip is "party" at the top level if ANY DI is
+    // party (see trip creation, "mixed trips handled correctly"), so a
+    // party-classified trip can still contain godown-orderType DI lines.
+    // Fall back to the trip's own orderType only for legacy diLines saved
+    // before per-line orderType was tracked.
+    orderType: d.orderType || trip.orderType || "",
+    epodDone: !!d.epodDone, epodDoneBy: d.epodDoneBy||"", epodDoneAt: d.epodDoneAt||"",
   }));
   // Single-DI trip using the flat fields directly
   return [{
@@ -143,8 +150,13 @@ const diRowsFor = (trip) => {
     billed: !!trip.invoiceNo, invoiceNo: trip.invoiceNo||"", invoiceDate: trip.invoiceDate||"",
     billedAmt: trip.billedToShree||((trip.qty||0)*(trip.givenRate||0)),
     paid: trip.status==="Paid", paidAmount: trip.paidAmount||0, utr: trip.utr||"", paymentDate: trip.paymentDate||"",
+    orderType: trip.orderType||"",
+    epodDone: !!trip.epodDone, epodDoneBy: trip.epodDoneBy||"", epodDoneAt: trip.epodDoneAt||"",
   }];
 };
+// Party Portal only ever wants PARTY DI lines — a trip classified "party"
+// overall can still carry godown-orderType DI lines mixed in (see above).
+const partyDiRowsFor = (trip) => diRowsFor(trip).filter(d => d.orderType==="party");
 const diRowStatus = d => d.paid ? "Paid" : d.billed ? "Billed" : "Not Billed";
 
 // ─── RETURN POUCH / CONFIRMATION DEADLINE — shared by Party Portal, the
@@ -152,7 +164,17 @@ const diRowStatus = d => d.paid ? "Paid" : d.billed ? "Billed" : "Not Billed";
 // (DriverPayments) so the three can't drift out of sync on what counts.
 // A party trip's pouch/confirmation is "received" by the same signal that
 // already releases the pouch hold elsewhere in the app.
-const tripConfirmReceived = t => !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received");
+// A trip counts as confirmed if either the document was uploaded, OR every
+// party DI line on it has been manually marked EPOD Done (the two are
+// alternative paths to the same "confirmed" state — see markEpodDone).
+// Partial EPOD marking on a multi-DI trip does NOT count as confirmed;
+// every party line must be resolved one way or the other.
+const tripConfirmReceived = t => {
+  if(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received") return true;
+  const partyLines = diRowsFor(t).filter(d=>d.orderType==="party");
+  if(partyLines.length>0) return partyLines.every(d=>d.epodDone);
+  return !!t.epodDone;
+};
 
 const daysSinceDate = dateStr => {
   if(!dateStr) return 0;
@@ -12786,7 +12808,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
   const tableGroups = activeList
     .filter(t => confirmFilter==="all" || (confirmFilter==="received")===confirmReceived(t))
     .map(t => {
-      const allRows = diRowsFor(t);
+      const allRows = partyDiRowsFor(t);
       const rows = billStatusFilter==="all" ? allRows
         : allRows.filter(d => diRowStatus(d) === (billStatusFilter==="not_billed"?"Not Billed":billStatusFilter==="billed"?"Billed":"Paid"));
       return {trip:t, rows};
@@ -12799,10 +12821,31 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
     finally { setRowUploadingId(""); }
   };
 
+  // ── Manual EPOD marking — owner/party manager only ─────────────────────
+  // An explicit alternative to uploading a document: the person marking it
+  // is personally asserting they've verified receipt with the customer.
+  // Requires a real confirm dialog naming exactly that responsibility —
+  // not a silent toggle — since it substitutes for actual proof of delivery.
+  const markEpodDone = (trip, diNo) => {
+    if(!isPartyMgr) { alert("Only the owner or party manager can mark EPOD."); return; }
+    const warn = `⚠ You are marking DI ${diNo||trip.lrNo} as EPOD Done.\n\n`+
+      `By continuing, you are personally confirming that you have verified receipt of this consignment with the customer, in place of an uploaded confirmation document.\n\n`+
+      `This will be recorded against your name (${user?.name||user?.username}) and cannot be undone by anyone but the owner.\n\nContinue?`;
+    if(!window.confirm(warn)) return;
+    const ts = new Date().toISOString();
+    const hasLines = (trip.diLines||[]).length > 0;
+    const updated = hasLines
+      ? {...trip, diLines: trip.diLines.map(d => d.diNo===diNo ? {...d, epodDone:true, epodDoneBy:user?.name||user?.username||"", epodDoneAt:ts} : d)}
+      : {...trip, epodDone:true, epodDoneBy:user?.name||user?.username||"", epodDoneAt:ts};
+    setTrips(prev=>prev.map(t=>t.id===trip.id?updated:t));
+    setTimeout(()=>DB.saveTrip(updated).catch(e=>console.error("saveTrip epodDone:",e)),0);
+    log&&log("EPOD MARKED",`DI:${diNo||"—"} LR:${trip.lrNo} by ${user?.name||user?.username}`);
+  };
+
   // ── Confirmation Mail Builder ────────────────────────────────────────────
   // DI search across ALL party trips (not scoped to the table's current filters).
   const diSearchResults = diSearch.trim().length < 3 ? [] : allPartyTrips.flatMap(t =>
-    diRowsFor(t).filter(d => d.diNo && d.diNo.includes(diSearch.trim()))
+    partyDiRowsFor(t).filter(d => d.diNo && d.diNo.includes(diSearch.trim()))
       .map(d => ({trip:t, d, key:t.id+"::"+d.diNo}))
   );
   const toggleMailRow = key => setMailSelected(prev => {
@@ -12814,7 +12857,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
     const [tripId, diNo] = key.split("::");
     const trip = allPartyTrips.find(t=>t.id===tripId);
     if(!trip) return null;
-    const d = diRowsFor(trip).find(x=>x.diNo===diNo);
+    const d = partyDiRowsFor(trip).find(x=>x.diNo===diNo);
     if(!d) return null;
     return {trip, d, key};
   }).filter(Boolean);
@@ -13147,21 +13190,32 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                           : <span style={{color:C.muted,fontSize:11}}>—</span>}
                       </td>
                     )}
-                    {i===0 && (
-                      <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top"}}>
-                        {confirmed ? (
-                          <span onClick={t.sealedInvoicePath?e=>openFile(t.sealedInvoicePath,e):undefined}
-                            style={{color:C.green,fontWeight:700,fontSize:11,cursor:t.sealedInvoicePath?"pointer":"default"}}>✓ Received</span>
-                        ) : (
+                    <td style={{padding:"6px 8px"}}>
+                      {confirmed ? (
+                        <span onClick={t.sealedInvoicePath?e=>openFile(t.sealedInvoicePath,e):undefined}
+                          style={{color:C.green,fontWeight:700,fontSize:11,cursor:t.sealedInvoicePath?"pointer":"default"}}>✓ Received</span>
+                      ) : d.epodDone ? (
+                        <div style={{color:C.green,fontWeight:700,fontSize:11}}>
+                          ✓ EPOD Done
+                          <div style={{color:C.muted,fontWeight:400,fontSize:10}}>by {d.epodDoneBy||"—"}</div>
+                        </div>
+                      ) : (
+                        <div style={{display:"flex",flexDirection:"column",gap:4,alignItems:"flex-start"}}>
                           <label style={{display:"inline-flex",alignItems:"center",gap:4,background:C.orange,borderRadius:6,padding:"4px 9px",
                             cursor:rowUploading?"not-allowed":"pointer",color:"#fff",fontWeight:700,fontSize:10}}>
                             {rowUploading?"⏳":"⬆"} Upload
                             <input type="file" accept=".pdf,image/*" style={{display:"none"}} disabled={rowUploading}
                               onChange={e=>{if(e.target.files[0]) uploadReturnPouch(t.id, e.target.files[0]);}}/>
                           </label>
-                        )}
-                      </td>
-                    )}
+                          {isPartyMgr && (
+                            <button onClick={()=>markEpodDone(t, d.diNo)}
+                              style={{background:"none",border:`1px solid ${C.green}`,borderRadius:6,color:C.green,fontSize:9,padding:"3px 7px",cursor:"pointer",fontWeight:700}}>
+                              ✅ Mark EPOD Done
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </td>
                     {i===0 && (
                       <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top"}}>
                         {t.mergedPdfPath
@@ -23285,7 +23339,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
   // uploaded — no other condition unlocks it. A trip being marked settled by
   // the owner does not release the pouch; it closes the trip out entirely
   // (see the bulk "Mark Settled" action, which zeroes pouchBalance directly).
-  const _hasMerged = !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received");
+  const _hasMerged = tripConfirmReceived(t);
   const _pouchHold = (t.orderType==="party"&&!_hasMerged) ? (t.pouchBalance||0) : 0;
   const _deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)+(t.shortageRecovery||0)+(t.loanRecovery||0)+_pouchHold;
   const _netDue  = Math.max(0, _diGross - _deducts);
@@ -24180,8 +24234,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
     // that upload, so this is the one legitimate case where a genuinely new,
     // unpaid amount can exist on an already-"settled" trip. Don't block that.
     const hasGenuinePouchClaim = (t) => {
-      const hasMerged = !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received");
-      return t.orderType==="party" && hasMerged && (t.pouchBalance||0)>0;
+      return t.orderType==="party" && tripConfirmReceived(t) && (t.pouchBalance||0)>0;
     };
     if (list.some(t => t.driverSettled && !hasGenuinePouchClaim(t))) {
       alert("This trip is already marked as settled — no further payment can be requested for it.");
@@ -24342,8 +24395,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
   React.useEffect(() => {
     const tripForLR = (lrNo) => (trips||[]).find(x=>x.lrNo && x.lrNo===lrNo) || null;
     const hasGenuinePouchClaim = (t) => {
-      const hasMerged = !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received");
-      return t.orderType==="party" && hasMerged && (t.pouchBalance||0)>0;
+      return t.orderType==="party" && tripConfirmReceived(t) && (t.pouchBalance||0)>0;
     };
     const balanceForTrip = (t) => {
       const gross = (t.diLines&&t.diLines.length>1)
@@ -24351,8 +24403,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
         : (t.qty||0)*(t.givenRate||0);
       // Pouch counts toward netDue once merged — same rule as RequestPaymentSheet
       // — so a fully-paid main balance doesn't mask a genuinely outstanding pouch.
-      const hasMerged = !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received");
-      const pouchHold = (t.orderType==="party" && !hasMerged) ? (t.pouchBalance||0) : 0;
+      const pouchHold = (t.orderType==="party" && !tripConfirmReceived(t)) ? (t.pouchBalance||0) : 0;
       const deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)
         +((t.shortage||0)*(t.givenRate||0))+(t.shortageRecovery||0)+(t.loanRecovery||0)+pouchHold;
       const netDue = Math.max(0, gross - deducts);
@@ -25075,7 +25126,7 @@ This will auto-recover in the next trip.`);
                 upload, so this is the one case a "settled" trip can still have a
                 genuine, unpaid amount. t.balance itself won't reflect this (it's
                 never pouch-aware), so this checks pouchBalance directly instead. */}
-            {t.driverSettled && t.orderType==="party" && (t.pouchBalance||0)>0 && !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received") && (
+            {t.driverSettled && t.orderType==="party" && (t.pouchBalance||0)>0 && tripConfirmReceived(t) && (
               <Btn onClick={()=>requestPaymentGuarded(t, t)} sm outline color={C.purple}>📋 Request Payment</Btn>
             )}
             {t.balance>0&&t.driverSettled&&(
