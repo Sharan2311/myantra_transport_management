@@ -147,6 +147,35 @@ const diRowsFor = (trip) => {
 };
 const diRowStatus = d => d.paid ? "Paid" : d.billed ? "Billed" : "Not Billed";
 
+// ─── RETURN POUCH / CONFIRMATION DEADLINE — shared by Party Portal, the
+// login reminder banner (Dashboard), and the payment-request gate
+// (DriverPayments) so the three can't drift out of sync on what counts.
+// A party trip's pouch/confirmation is "received" by the same signal that
+// already releases the pouch hold elsewhere in the app.
+const tripConfirmReceived = t => !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received");
+
+const daysSinceDate = dateStr => {
+  if(!dateStr) return 0;
+  const d1 = new Date(dateStr+"T00:00:00"), d2 = new Date(today()+"T00:00:00");
+  return Math.floor((d2-d1)/86400000);
+};
+
+// Every party trip assigned to this employee (via trip.assignedEmpId — the
+// most-recent-trip-per-truck convention used elsewhere, but here it's a
+// direct per-trip field so no truck-lookup ambiguity) that's missing its
+// Return Pouch/Confirmation, dated on/after the feature's global start date.
+// Trips before settings.pouchDeadlineStartDate are fully exempt — never
+// counted here, never blocking, never reminded about.
+const employeePouchOverdueTrips = (trips, settings, empId) => {
+  const startDate = settings?.pouchDeadlineStartDate || "";
+  return (trips||[]).filter(t =>
+    t.orderType==="party" &&
+    t.assignedEmpId===empId &&
+    !tripConfirmReceived(t) &&
+    (!startDate || (t.date||"") >= startDate)
+  ).sort((a,b)=>(a.date||"").localeCompare(b.date||""));
+};
+
 // Resolve which employee is responsible for a truck when a DI/trip doesn't exist
 // yet in the app: use the most recent trip (by date) for that truck number and
 // its assignedEmpId. Returns "" (owner-only / unassigned) if the truck has no
@@ -2363,6 +2392,7 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   const [unbilledPartyOpen,  setUnbilledPartyOpen]  = useState(false);
   const [unbilledClinkerOpen, setUnbilledClinkerOpen] = useState(false);
   const [billedClinkerOpen,   setBilledClinkerOpen]   = useState(false);
+  const [pouchLang, setPouchLang] = useState("en"); // for the Return Pouch reminder banner below
 
   const allFyTrips = fyTrips || trips;
   // Apply client filter then month filter
@@ -2726,6 +2756,65 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
           </div>
         );
       })()}
+
+      {/* ── Return Pouch / Confirmation reminder — shown every login for the ── */
+      /* employee's own overdue party trips, unless the owner turned this off  */
+      /* for them (employee.pouchDeadlineEnforced===false). Not a block — the  */
+      /* actual block lives in requestPaymentGuarded (DriverPayments). This is */
+      /* purely the "please upload before date X" heads-up. */}
+      {(() => {
+        if(!user?.assignedEmployeeId) return null;
+        const emp = (employees||[]).find(e=>e.id===user.assignedEmployeeId);
+        if(emp && emp.pouchDeadlineEnforced===false) return null;
+        const overdue = employeePouchOverdueTrips(trips, settings, user.assignedEmployeeId);
+        if(overdue.length===0) return null;
+        const pt = POUCH_GATE_TXT[pouchLang] || POUCH_GATE_TXT.en;
+        const blockDateOf = t => { const d=new Date((t.date||today())+"T00:00:00"); d.setDate(d.getDate()+8); return d.toISOString().slice(0,10); };
+        const alreadyBlocking = overdue.filter(t => daysSinceDate(t.date) >= 8);
+        return (
+          <div style={{background:C.orange+"18",border:`2px solid ${C.orange}`,borderRadius:14,padding:"14px 16px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,flexWrap:"wrap",gap:6}}>
+              <div style={{color:C.orange,fontSize:14,fontWeight:900,textTransform:"uppercase",letterSpacing:0.5,display:"flex",alignItems:"center",gap:6}}>
+                📋 Return Pouch / Confirmation — {overdue.length} Trip{overdue.length>1?"s":""} Pending
+              </div>
+              <div style={{display:"flex",gap:4}}>
+                {Object.entries(POUCH_GATE_TXT).map(([code,txt])=>(
+                  <button key={code} onClick={()=>setPouchLang(code)}
+                    style={{padding:"3px 8px",borderRadius:6,fontSize:10,fontWeight:700,cursor:"pointer",
+                      background:pouchLang===code?C.orange+"33":"transparent",border:`1px solid ${pouchLang===code?C.orange:C.border}`,
+                      color:pouchLang===code?C.orange:C.muted}}>
+                    {txt.langLabel}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {alreadyBlocking.length>0 && (
+              <div style={{color:C.red,fontSize:12,fontWeight:800,marginBottom:8}}>
+                🚫 {alreadyBlocking.length} of these are already blocking your payment requests.
+              </div>
+            )}
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {overdue.map(t=>{
+                const days = daysSinceDate(t.date);
+                const blocking = days>=8;
+                return (
+                  <div key={t.id} style={{background:C.card,borderRadius:10,padding:"10px 12px",border:`1px solid ${blocking?C.red:C.orange}55`}}>
+                    <div style={{fontWeight:900,fontSize:14,color:C.text}}>LR: {t.lrNo||"—"} · {t.truckNo}</div>
+                    <div style={{fontSize:12,color:C.muted,marginTop:2}}>Trip dated {t.date} · {days} day{days!==1?"s":""} old</div>
+                    <div style={{fontSize:11,marginTop:2,fontWeight:700,color:blocking?C.red:C.orange}}>
+                      {blocking
+                        ? `Blocking payment requests since ${blockDateOf(t)}`
+                        : `Upload before ${blockDateOf(t)} or payment requests will be blocked`}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{color:C.muted,fontSize:11,marginTop:8}}>{pt.footer}</div>
+          </div>
+        );
+      })()}
+
 
       {/* Actionable alerts */}
       {alerts.length>0 && (
@@ -12655,7 +12744,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
 
   // Trip-level "confirmation received" — same signal that already releases
   // the pouch hold elsewhere in the app (_hasMerged), just named for this view.
-  const confirmReceived = t => !!(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received");
+  const confirmReceived = tripConfirmReceived; // shared module-level helper — see definition near tripBillingStatus
 
   // Build grouped, DI-line-filtered table rows. billStatusFilter narrows which
   // DI SUB-ROWS show within a trip group (a trip stays visible if at least one
@@ -23704,11 +23793,45 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPaym
   );
 }
 
+// ─── Return Pouch / Confirmation Deadline Gate — translations ────────────────
+const POUCH_GATE_TXT = {
+  en: {
+    langLabel: "English",
+    title: "🚫 Payment Requests Blocked",
+    intro: (n) => <>You have <b>{n}</b> party trip{n>1?"s":""} still missing Return Pouch / Confirmation, more than 8 days old. Payment requests are blocked for you until these are uploaded — the owner can still act, but you cannot.</>,
+    tripLine: (lr, truck, date, blockedSince) => <>LR <b>{lr}</b> · Truck <b>{truck}</b> · Trip dated <b>{date}</b> — blocked since <b>{blockedSince}</b></>,
+    footer: "Upload the sealed invoice or confirmation email for each of these in Party Portal, then try requesting payment again.",
+    close: "Close",
+  },
+  kn: {
+    langLabel: "ಕನ್ನಡ",
+    title: "🚫 ಪಾವತಿ ವಿನಂತಿಗಳನ್ನು ನಿರ್ಬಂಧಿಸಲಾಗಿದೆ",
+    intro: (n) => <>ನಿಮಗೆ <b>{n}</b> ಪಾರ್ಟಿ ಟ್ರಿಪ್(ಗಳು) ಇನ್ನೂ ರಿಟರ್ನ್ ಪೌಚ್ / ಖಚಿತಪಡಿಸುವಿಕೆ ಇಲ್ಲದೆ 8 ದಿನಗಳಿಗಿಂತ ಹಳೆಯದಾಗಿವೆ. ಇವುಗಳನ್ನು ಅಪ್‌ಲೋಡ್ ಮಾಡುವವರೆಗೆ ನಿಮ್ಮ ಪಾವತಿ ವಿನಂತಿಗಳನ್ನು ನಿರ್ಬಂಧಿಸಲಾಗಿದೆ — ಮಾಲೀಕರು ಇನ್ನೂ ಕ್ರಮ ತೆಗೆದುಕೊಳ್ಳಬಹುದು, ಆದರೆ ನೀವು ಸಾಧ್ಯವಿಲ್ಲ.</>,
+    tripLine: (lr, truck, date, blockedSince) => <>LR <b>{lr}</b> · ಟ್ರಕ್ <b>{truck}</b> · ಟ್ರಿಪ್ ದಿನಾಂಕ <b>{date}</b> — <b>{blockedSince}</b> ರಿಂದ ನಿರ್ಬಂಧಿತ</>,
+    footer: "ಪಾರ್ಟಿ ಪೋರ್ಟಲ್‌ನಲ್ಲಿ ಪ್ರತಿಯೊಂದಕ್ಕೂ ಸೀಲ್ಡ್ ಇನ್ವಾಯ್ಸ್ ಅಥವಾ ಖಚಿತಪಡಿಸುವಿಕೆ ಇಮೇಲ್ ಅಪ್‌ಲೋಡ್ ಮಾಡಿ, ನಂತರ ಮತ್ತೆ ಪಾವತಿಗಾಗಿ ವಿನಂತಿಸಿ.",
+    close: "ಮುಚ್ಚಿ",
+  },
+  te: {
+    langLabel: "తెలుగు",
+    title: "🚫 చెల్లింపు అభ్యర్థనలు నిరోధించబడ్డాయి",
+    intro: (n) => <>మీకు <b>{n}</b> పార్టీ ట్రిప్(లు) ఇంకా రిటర్న్ పౌచ్ / నిర్ధారణ లేకుండా 8 రోజుల కంటే పాతవి ఉన్నాయి. వీటిని అప్‌లోడ్ చేసే వరకు మీ చెల్లింపు అభ్యర్థనలు నిరోధించబడ్డాయి — యజమాని ఇంకా చర్య తీసుకోవచ్చు, కానీ మీరు కాదు.</>,
+    tripLine: (lr, truck, date, blockedSince) => <>LR <b>{lr}</b> · ట్రక్ <b>{truck}</b> · ట్రిప్ తేదీ <b>{date}</b> — <b>{blockedSince}</b> నుండి నిరోధించబడింది</>,
+    footer: "పార్టీ పోర్టల్‌లో వీటిలో ప్రతిదానికి సీల్డ్ ఇన్వాయిస్ లేదా నిర్ధారణ ఇమెయిల్ అప్‌లోడ్ చేయండి, తర్వాత మళ్లీ చెల్లింపు అభ్యర్థించండి.",
+    close: "మూసివేయి",
+  },
+  mr: {
+    langLabel: "मराठी",
+    title: "🚫 पेमेंट विनंत्या अवरोधित",
+    intro: (n) => <>तुमच्या <b>{n}</b> पार्टी ट्रिप(चे) अजूनही रिटर्न पाउच / पुष्टीकरण नाही, आणि त्या 8 दिवसांपेक्षा जुन्या आहेत. या अपलोड होईपर्यंत तुमच्या पेमेंट विनंत्या अवरोधित आहेत — मालक अजूनही कारवाई करू शकतात, पण तुम्ही करू शकत नाही.</>,
+    tripLine: (lr, truck, date, blockedSince) => <>LR <b>{lr}</b> · ट्रक <b>{truck}</b> · ट्रिप दिनांक <b>{date}</b> — <b>{blockedSince}</b> पासून अवरोधित</>,
+    footer: "पार्टी पोर्टलमध्ये यापैकी प्रत्येकासाठी सीलबंद इनव्हॉइस किंवा पुष्टीकरण ईमेल अपलोड करा, नंतर पुन्हा पेमेंटची विनंती करा.",
+    close: "बंद करा",
+  },
+};
+
 // ─── Diesel Confirmation Gate — translations ──────────────────────────────────
 const DIESEL_GATE_TXT = {
   en: {
-    langLabel: "English",
-    title: "⛽ Diesel Confirmation Required",
     question: "Did you take diesel for this trip?",
     yesBtn: "Yes, I took diesel",
     noBtn: "No, I did not take diesel",
@@ -23780,7 +23903,7 @@ const DIESEL_GATE_TXT = {
   },
 };
 
-function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, vehicles, setVehicles, employees, setEmployees, cashTransfers, setCashTransfers, paymentRequests=[], setPaymentRequests, indents=[], dieselRequests=[], setDieselRequests, user, log, viewOnly=false, setTab}) {
+function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, vehicles, setVehicles, employees, setEmployees, cashTransfers, setCashTransfers, paymentRequests=[], setPaymentRequests, indents=[], dieselRequests=[], setDieselRequests, settings, user, log, viewOnly=false, setTab}) {
   const [filter,    setFilter]    = useState("unpaid");
   // Party-order sub-filter + bulk "mark settled" (owner only) — for party trips
   // whose sealed invoice never arrived, where the owner already paid manually
@@ -23790,6 +23913,20 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
   const [selectedTripIds, setSelectedTripIds] = useState(new Set());
   const [paySheet,  setPaySheet]  = useState(null);
   const [payReqSheet,   setPayReqSheet]   = useState(null); // trip for request payment
+  // ── Return Pouch / Confirmation deadline gate ──────────────────────────────
+  // Cross-trip, account-level block: if this employee has ANY party trip 8+
+  // days old still missing pouch/confirmation, block payment requests for
+  // EVERYTHING (not just the offending trip) until it's resolved. Owner is
+  // never blocked. Per-employee opt-out via employee.pouchDeadlineEnforced.
+  const [pouchBlockShow, setPouchBlockShow] = useState(false);
+  const [pouchBlockLang, setPouchBlockLang] = useState("en");
+  const myPouchBlockingTrips = (() => {
+    if(user?.role==="owner" || !user?.assignedEmployeeId) return [];
+    const emp = (employees||[]).find(e=>e.id===user.assignedEmployeeId);
+    if(emp && emp.pouchDeadlineEnforced===false) return [];
+    return employeePouchOverdueTrips(trips, settings, user.assignedEmployeeId).filter(t=>daysSinceDate(t.date)>=8);
+  })();
+
   // ── Diesel-confirmation gate ────────────────────────────────────────────────
   // Before a payment request goes out for a trip with NO diesel indent attached,
   // force an explicit Yes/No accountability check. "Yes" sends them to raise a
@@ -23801,6 +23938,9 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
   const [dieselGateLang,   setDieselGateLang]   = useState("en"); // en | kn | te | mr
 
   const requestPaymentGuarded = (checkTrips, openWith) => {
+    // Account-level block comes first — it doesn't matter which trip they're
+    // trying to request for, if it applies at all it applies to everything.
+    if (myPouchBlockingTrips.length > 0) { setPouchBlockShow(true); return; }
     const list = Array.isArray(checkTrips) ? checkTrips : [checkTrips];
     // A settled trip normally can't have anything else requested for it — EXCEPT
     // a party trip that settled on its main balance while the invoice was still
@@ -24907,6 +25047,39 @@ This will auto-recover in the next trip.`);
           })}
         </div>
       )}
+
+      {/* ── RETURN POUCH / CONFIRMATION DEADLINE — blocks payment request ── */}
+      {pouchBlockShow && (()=>{
+        const pt = POUCH_GATE_TXT[pouchBlockLang] || POUCH_GATE_TXT.en;
+        const blockDateOf = t => { const d=new Date((t.date||today())+"T00:00:00"); d.setDate(d.getDate()+8); return d.toISOString().slice(0,10); };
+        return (
+          <Sheet title={pt.title} onClose={()=>setPouchBlockShow(false)}>
+            <div style={{display:"flex",flexDirection:"column",gap:14}}>
+              <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                {Object.entries(POUCH_GATE_TXT).map(([code,txt])=>(
+                  <button key={code} onClick={()=>setPouchBlockLang(code)}
+                    style={{padding:"5px 12px",borderRadius:8,fontSize:11,fontWeight:700,cursor:"pointer",
+                      background:pouchBlockLang===code?C.red+"22":"transparent",
+                      border:`1.5px solid ${pouchBlockLang===code?C.red:C.border}`,
+                      color:pouchBlockLang===code?C.red:C.muted}}>
+                    {txt.langLabel}
+                  </button>
+                ))}
+              </div>
+              <div style={{color:C.text,fontSize:13,lineHeight:1.5}}>{pt.intro(myPouchBlockingTrips.length)}</div>
+              <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                {myPouchBlockingTrips.map(t=>(
+                  <div key={t.id} style={{background:C.bg,borderRadius:10,padding:"10px 12px",border:`1px solid ${C.red}55`,fontSize:12,color:C.text}}>
+                    {pt.tripLine(t.lrNo||"—", t.truckNo, t.date, blockDateOf(t))}
+                  </div>
+                ))}
+              </div>
+              <div style={{color:C.muted,fontSize:12}}>{pt.footer}</div>
+              <Btn onClick={()=>setPouchBlockShow(false)} full color={C.red}>{pt.close}</Btn>
+            </div>
+          </Sheet>
+        );
+      })()}
 
       {/* ── DIESEL CONFIRMATION GATE — blocks payment request until answered ── */}
       {dieselGateStep && dieselGateTrip && (()=>{
