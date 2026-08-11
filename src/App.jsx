@@ -3150,6 +3150,8 @@ Extract ALL the following fields. Return ONLY a JSON object, no markdown.
   "consignee": "FULL consignee name + complete address as printed — include ALL lines",
   "consigneePhone": "Phone number from consignee section — 10 digits or empty string",
   "consignor": "Consignor/plant name",
+  "consignorPAN": "PAN printed under/beside the CONSIGNOR block specifically (the cement plant) — not the transporter's own letterhead PAN, not the consignee's PAN. Empty string if not found.",
+  "consignorGST": "GST/GSTN printed under/beside the CONSIGNOR block specifically, same rule as consignorPAN. Empty string if not found.",
   "transporterName": "Transporter company name. Check TWO patterns in order: (1) an explicitly labeled field like 'Transported By' / 'Transporter' / 'Carrier' — common on invoices, near Transportation Mode/E-way Bill info; (2) if no such field, the document may be issued BY the transporter (GRs are) — use the company letterhead at the very TOP-LEFT of the page instead. Never confuse with Consignor (cement plant) or Consignee/Bill To/Ship To (buyer). Leave empty if genuinely unclear — do not guess.",
   "from": "Loading location / city",
   "to": "Destination city or town",
@@ -3268,7 +3270,11 @@ Rules:
 
       const data = await resp.json();
       if(!resp.ok||data.error) throw new Error(data.error||`Server returned ${resp.status}`);
-      const extracted = JSON.parse(data.text.replace(/```json|```/g,"").trim());
+      // Server now runs full validation (DI/GR format, mandatory fields, consignor
+      // PAN/GST match) on every DI-shaped scan and returns the validated object
+      // directly — not wrapped in {text} anymore. A document that fails any check
+      // never reaches here; it comes back as data.error above instead.
+      const extracted = data;
 
       // Block documents that belong to a different transporter than us
       if(extracted.transporterName && !isOwnTransporter(extracted.transporterName)) {
@@ -6036,6 +6042,8 @@ Extract the following fields from this document image and return ONLY a JSON obj
   "truckNo": "Vehicle/Truck registration number",
   "consignee": "Consignee name / destination party",
   "consignor": "Consignor name — the cement company/plant name e.g. the cement company plant name",
+  "consignorPAN": "PAN printed under/beside the CONSIGNOR block specifically (the cement plant) — not the transporter's own letterhead PAN, not the consignee's PAN. Empty string if not found.",
+  "consignorGST": "GST/GSTN printed under/beside the CONSIGNOR block specifically, same rule as consignorPAN. Empty string if not found.",
   "transporterName": "Transporter company name. Check TWO patterns in order: (1) an explicitly labeled field like 'Transported By' / 'Transporter' / 'Carrier' — common on invoices, near Transportation Mode/E-way Bill info; (2) if no such field, the document may be issued BY the transporter (GRs are) — use the company letterhead at the very TOP-LEFT of the page instead. Never confuse with Consignor (cement plant) or Consignee/Bill To/Ship To (buyer). Leave empty if genuinely unclear — do not guess.",
   "from": "Source/loading location",
   "to": "Destination/unloading location",
@@ -6090,11 +6098,11 @@ Rules:
 
       const data = await resp.json();
       if (!resp.ok || data.error) throw new Error(data.error || "Server error");
-      const text = data.text || "";
-
-      // Parse JSON — strip any accidental markdown
-      const clean = text.replace(/```json|```/g, "").trim();
-      const extracted = JSON.parse(clean);
+      // Server now runs full validation (DI/GR format, mandatory fields, consignor
+      // PAN/GST match) on every DI-shaped scan and returns the validated object
+      // directly — a document that fails any check never reaches here; it comes
+      // back as data.error above instead.
+      const extracted = data;
 
       // Block documents that belong to a different transporter than us
       if (extracted.transporterName && !isOwnTransporter(extracted.transporterName)) {
