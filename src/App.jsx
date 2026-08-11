@@ -12816,12 +12816,26 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
     </table>`;
   };
 
+  // Full mail body — greeting + table + sign-off, matching the reference
+  // screenshot's actual email layout, not just the bare table. This is what
+  // both the on-screen preview and "Copy Table" now produce, so what you see
+  // is exactly what lands in the paste.
+  const mailBodyHTML = () => `
+    <div style="font-family:Arial,sans-serif;font-size:14px;color:#000">
+      <p>Hello Sir,</p>
+      <p>Please confirm the receipt of the cement for the below consignment by return mail.</p>
+      ${mailTableHTML()}
+      <p>Thanks<br/>${RC.companyName||""}</p>
+    </div>`;
+
   const copyMailTable = async () => {
     if(mailRows.length===0){alert("Select at least one DI row first.");return;}
-    const html = mailTableHTML();
-    const plain = mailRows.map(({trip:t,d}) =>
-      [RC.companyName,t.date,d.grNo,d.diNo,d.qty,t.givenRate,d.billedAmt||(d.qty&&t.givenRate?d.qty*t.givenRate:""),"","",t.truckNo,t.to,t.district,t.state].join("\t")
-    ).join("\n");
+    const html = mailBodyHTML();
+    const plain = "Hello Sir,\n\nPlease confirm the receipt of the cement for the below consignment by return mail.\n\n" +
+      mailRows.map(({trip:t,d}) =>
+        [RC.companyName,t.date,d.grNo,d.diNo,d.qty,t.givenRate,d.billedAmt||(d.qty&&t.givenRate?d.qty*t.givenRate:""),"","",t.truckNo,t.to,t.district,t.state].join("\t")
+      ).join("\n") +
+      "\n\nThanks\n"+(RC.companyName||"");
     try {
       if(navigator.clipboard && window.ClipboardItem) {
         await navigator.clipboard.write([new window.ClipboardItem({
@@ -12831,8 +12845,8 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
       } else {
         await navigator.clipboard.writeText(plain);
       }
-      alert("✓ Table copied. Paste it directly into the Gmail compose body (rich paste, e.g. Ctrl/Cmd+V) — Gmail's compose link can't be pre-filled with a formatted table, only plain text.");
-    } catch(e) { alert("Copy failed: "+e.message+"\n\nYou can still select the table manually once shown below."); }
+      alert("✓ Mail copied (greeting + table + sign-off). Paste it directly into the Gmail compose body (rich paste, e.g. Ctrl/Cmd+V) — Gmail's compose link can't be pre-filled with a formatted table, only plain text.");
+    } catch(e) { alert("Copy failed: "+e.message+"\n\nYou can still select the preview below manually."); }
   };
 
   const openGmailCompose = () => {
@@ -13204,14 +13218,19 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                   ⚠ "tokenNumber" isn't a field this app tracks anywhere — left blank. "Customer/Vendor" is intentionally left blank too, for you to fill in after pasting.
                 </div>
 
+                <div style={{fontWeight:700,fontSize:12,color:C.purple,marginTop:6}}>✉️ Mail Preview — exactly what "Copy Table" copies</div>
+                <div style={{background:"#fff",borderRadius:10,padding:14,overflowX:"auto",border:`1px solid ${C.border}`}}>
+                  <div dangerouslySetInnerHTML={{__html: mailBodyHTML()}} />
+                </div>
+
                 <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                  <Btn onClick={copyMailTable} full color={C.purple}>📋 Copy Table (paste into Gmail)</Btn>
+                  <Btn onClick={copyMailTable} full color={C.purple}>📋 Copy Mail (paste into Gmail)</Btn>
                   <Btn onClick={openGmailCompose} full outline color={C.blue}>✉️ Open Gmail Compose</Btn>
                   <Btn onClick={mergeSelectedPouchPDFs} full outline color={C.green} disabled={mergingPdf}>
                     {mergingPdf?"⏳ Merging...":"📎 Merge Selected Return Pouch PDFs → Download"}
                   </Btn>
                   <div style={{color:C.muted,fontSize:10}}>
-                    Gmail's compose link can't be pre-filled with a formatted table — only plain text. "Copy Table" copies it in a format Gmail's rich-text body accepts on paste; "Open Gmail Compose" opens a draft with the greeting/subject ready, paste the table into the body.
+                    Gmail's compose link can't be pre-filled with a formatted table — only plain text. "Copy Mail" copies the greeting + table + sign-off above in a format Gmail's rich-text body accepts on paste; "Open Gmail Compose" opens a draft with the subject ready, paste the copied mail into the body.
                   </div>
                 </div>
               </>
