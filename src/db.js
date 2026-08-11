@@ -241,12 +241,12 @@ const driverPayToDB = p => ({
 
 const expenseFromDB = r => ({
   id: r.id, date: r.date, label: r.label, amount: +r.amount,
-  category: r.category, notes: r.notes, utr: r.utr||'',
+  category: r.category, source: r.source||'myantra', notes: r.notes, utr: r.utr||'',
   createdBy: r.created_by, createdAt: r.created_at,
 })
 const expenseToDB = e => ({
   id: e.id, date: e.date, label: e.label, amount: e.amount,
-  category: e.category, notes: e.notes||'', utr: e.utr||'',
+  category: e.category, source: e.source||'myantra', notes: e.notes||'', utr: e.utr||'',
   created_by: e.createdBy, created_at: e.createdAt,
 })
 
@@ -744,6 +744,7 @@ export const DB = {
       invoiceNo: r.invoice_no||'', invoiceDate: r.invoice_date||'',
       invoiceAmt: +(r.invoice_amt||0), expectedAmt: +(r.expected_amt||0),
       empId: r.emp_id||'', tripId: r.trip_id||'',
+      amount: +(r.amount||0), lrNo: r.lr_no||'',
       note: r.note||'',
       createdAt: r.created_at, resolvedAt: r.resolved_at||'',
     })); } catch(e) { console.warn('mye_action_items not ready:', e.message); return []; }
@@ -754,6 +755,7 @@ export const DB = {
     invoice_no: ai.invoiceNo||'', invoice_date: ai.invoiceDate||'',
     invoice_amt: ai.invoiceAmt||0, expected_amt: ai.expectedAmt||0,
     emp_id: ai.empId||'', trip_id: ai.tripId||'',
+    amount: ai.amount||0, lr_no: ai.lrNo||'',
     note: ai.note||'',
     created_at: ai.createdAt, resolved_at: ai.resolvedAt||'',
   }), ai),

@@ -83,7 +83,8 @@ Return ONLY this JSON, no markdown, no explanation:
   "shortages": [
     { "lrNo": "<LR number or null>", "tonnes": <number or null>, "deduction": <number or null>, "ref": "<reference or null>" }
   ],
-  "expenses": [{ "description": "<description or null>", "amount": <number or null> }],
+  "expenses": [{ "description": "<description or null>", "amount": <number or null>,
+    "categoryHint": "<best guess at ONE of: Rent, Rebidding Charges, SD Deposit, Electricity, Penalties, TDS, Miscellaneous, or null if unclear>" }],
   "penalties": []
 }`;
 

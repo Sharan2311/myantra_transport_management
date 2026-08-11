@@ -97,7 +97,8 @@ Return ONLY this JSON, no markdown, no explanation:
     { "lrNo": "<LR number or null>", "tonnes": <number or null>, "deduction": <number or null>, "ref": "<reference or null>" }
   ],
   "expenses": [
-    { "description": "<description or null>", "amount": <number or null> }
+    { "description": "<description or null>", "amount": <number or null>,
+      "categoryHint": "<your best guess at ONE of: Rent, Rebidding Charges, SD Deposit, Electricity, Penalties, TDS, Miscellaneous — based on the description text, or null if unclear>" }
   ],
   "penalties": []
 }`;
