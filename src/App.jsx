@@ -12576,6 +12576,13 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
   const [billStatusFilter, setBillStatusFilter] = useState("all"); // all | not_billed | billed | paid
   const [confirmFilter,    setConfirmFilter]    = useState("all"); // all | received | not_received
   const [rowUploadingId,   setRowUploadingId]   = useState(""); // per-row inline upload spinner
+  // ── Confirmation Mail Builder — separate from the main table's filters.
+  // Searches ALL party trips (not just what's currently filtered) by DI, so
+  // it's a standalone lookup tool rather than tied to the table's own view.
+  const [showMailBuilder, setShowMailBuilder] = useState(false);
+  const [diSearch,        setDiSearch]        = useState("");
+  const [mailSelected,    setMailSelected]    = useState(new Set()); // keys: tripId+"::"+diNo
+  const [mergingPdf,      setMergingPdf]      = useState(false);
 
   const roles      = (user?.role||"").split(",").map(r=>r.trim());
   const isOwner    = ["owner","manager"].includes(user?.role);
@@ -12792,11 +12799,137 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
     finally { setRowUploadingId(""); }
   };
 
+  // ── Confirmation Mail Builder ────────────────────────────────────────────
+  // DI search across ALL party trips (not scoped to the table's current filters).
+  const diSearchResults = diSearch.trim().length < 3 ? [] : allPartyTrips.flatMap(t =>
+    diRowsFor(t).filter(d => d.diNo && d.diNo.includes(diSearch.trim()))
+      .map(d => ({trip:t, d, key:t.id+"::"+d.diNo}))
+  );
+  const toggleMailRow = key => setMailSelected(prev => {
+    const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n;
+  });
+  // Resolve selected keys back to {trip,d} pairs — search results may not still
+  // be visible (search box cleared/changed) so this looks across all party trips.
+  const mailRows = [...mailSelected].map(key => {
+    const [tripId, diNo] = key.split("::");
+    const trip = allPartyTrips.find(t=>t.id===tripId);
+    if(!trip) return null;
+    const d = diRowsFor(trip).find(x=>x.diNo===diNo);
+    if(!d) return null;
+    return {trip, d, key};
+  }).filter(Boolean);
+
+  const mailTableHTML = () => {
+    const rows = mailRows.map(({trip:t, d}) => `<tr>
+      <td>${RC.companyName||""}</td>
+      <td>${t.date||""}</td>
+      <td>${d.grNo||""}</td>
+      <td>${d.diNo||""}</td>
+      <td>${d.qty||""}</td>
+      <td>${t.givenRate||""}</td>
+      <td>${d.billedAmt||(d.qty&&t.givenRate?d.qty*t.givenRate:"")}</td>
+      <td></td>
+      <td></td>
+      <td>${t.truckNo||""}</td>
+      <td>${t.to||""}</td>
+      <td>${t.district||""}</td>
+      <td>${t.state||""}</td>
+    </tr>`).join("");
+    const headers = ["Tranport Name","Shipment Date","Bill of Lading","Delivery Number","Freight Qty","Per MT","Freight Cost","tokenNumber","Customer/Vendor","Vehicle Number","To Location","District","State"];
+    return `<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px">
+      <thead><tr>${headers.map(h=>`<th style="background:#1a2e1a;color:#fff;padding:6px">${h}</th>`).join("")}</tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  };
+
+  // Full mail body — greeting + table + sign-off, matching the reference
+  // screenshot's actual email layout, not just the bare table. This is what
+  // both the on-screen preview and "Copy Table" now produce, so what you see
+  // is exactly what lands in the paste.
+  const mailBodyHTML = () => `
+    <div style="font-family:Arial,sans-serif;font-size:14px;color:#000">
+      <p>Hello Sir,</p>
+      <p>Please confirm the receipt of the cement for the below consignment by return mail.</p>
+      ${mailTableHTML()}
+      <p>Thanks<br/>${RC.companyName||""}</p>
+    </div>`;
+
+  const copyMailTable = async () => {
+    if(mailRows.length===0){alert("Select at least one DI row first.");return;}
+    const html = mailBodyHTML();
+    const plain = "Hello Sir,\n\nPlease confirm the receipt of the cement for the below consignment by return mail.\n\n" +
+      mailRows.map(({trip:t,d}) =>
+        [RC.companyName,t.date,d.grNo,d.diNo,d.qty,t.givenRate,d.billedAmt||(d.qty&&t.givenRate?d.qty*t.givenRate:""),"","",t.truckNo,t.to,t.district,t.state].join("\t")
+      ).join("\n") +
+      "\n\nThanks\n"+(RC.companyName||"");
+    try {
+      if(navigator.clipboard && window.ClipboardItem) {
+        await navigator.clipboard.write([new window.ClipboardItem({
+          "text/html": new Blob([html], {type:"text/html"}),
+          "text/plain": new Blob([plain], {type:"text/plain"}),
+        })]);
+      } else {
+        await navigator.clipboard.writeText(plain);
+      }
+      alert("✓ Mail copied (greeting + table + sign-off). Paste it directly into the Gmail compose body (rich paste, e.g. Ctrl/Cmd+V) — Gmail's compose link can't be pre-filled with a formatted table, only plain text.");
+    } catch(e) { alert("Copy failed: "+e.message+"\n\nYou can still select the preview below manually."); }
+  };
+
+  const openGmailCompose = () => {
+    if(mailRows.length===0){alert("Select at least one DI row first.");return;}
+    const su = encodeURIComponent("Confirmation of Cement Receipt");
+    const body = encodeURIComponent(
+      "Hello Sir,\n\nPlease confirm the receipt of the cement for the below consignment by return mail.\n\n"+
+      "[Paste the copied table here — tap 'Copy Table' above first, then paste into this body]\n\nThanks\n"+(RC.companyName||"")
+    );
+    window.open(`https://mail.google.com/mail/?view=cm&fs=1&su=${su}&body=${body}`, "_blank");
+  };
+
+  // Merge each selected trip's Return Pouch/Confirmation document into one PDF.
+  // Selection is per-DI-row but the pouch document is per-trip, so this
+  // dedupes to one fetch per unique trip even if multiple DIs on the same
+  // trip were selected.
+  const mergeSelectedPouchPDFs = async () => {
+    if(mailRows.length===0){alert("Select at least one DI row first.");return;}
+    const uniqueTrips = [...new Map(mailRows.map(r=>[r.trip.id, r.trip])).values()];
+    const missing = uniqueTrips.filter(t => !(t.mergedPdfPath||t.sealedInvoicePath||t.confirmPdfPath));
+    if(missing.length>0) {
+      if(!window.confirm(`${missing.length} of ${uniqueTrips.length} selected trip(s) have no Return Pouch/Confirmation document uploaded yet (${missing.map(t=>t.lrNo||t.truckNo).join(", ")}).\n\nMerge the ${uniqueTrips.length-missing.length} that do have one?`)) return;
+    }
+    setMergingPdf(true);
+    try {
+      const buffers = [];
+      for (const t of uniqueTrips) {
+        const path = t.mergedPdfPath || t.sealedInvoicePath || t.confirmPdfPath;
+        if(!path) continue;
+        try {
+          const buf = String(path).startsWith("http")
+            ? await (await fetch(path)).arrayBuffer()
+            : await fetchStorageFile(path);
+          buffers.push(buf);
+        } catch(e) { console.warn("Could not fetch pouch doc for", t.lrNo, e.message); }
+      }
+      if(buffers.length===0) { alert("No documents could be fetched to merge."); return; }
+      const merged = await mergePDFs(buffers);
+      const blob = new Blob([merged], {type:"application/pdf"});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = "Selected_ReturnPouch_Confirmations.pdf"; a.target="_blank";
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      log && log("MERGED SELECTED POUCH PDFS", `${buffers.length} trip(s)`);
+    } catch(e) { alert("Merge failed: "+e.message); }
+    finally { setMergingPdf(false); }
+  };
+
   return(
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
-      <div>
-        <div style={{fontWeight:800,fontSize:16,color:"#7c3aed"}}>📋 Party Portal</div>
-        <div style={{fontSize:11,color:C.muted}}>{user?.name||user?.username} · {ROLES[user?.role]?.label||user?.role}</div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+        <div>
+          <div style={{fontWeight:800,fontSize:16,color:"#7c3aed"}}>📋 Party Portal</div>
+          <div style={{fontSize:11,color:C.muted}}>{user?.name||user?.username} · {ROLES[user?.role]?.label||user?.role}</div>
+        </div>
+        <Btn onClick={()=>setShowMailBuilder(true)} sm outline color={C.purple}>✉️ Confirmation Mail</Btn>
       </div>
 
       {/* Status filter tabs */}
@@ -13045,6 +13178,92 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
           </table>
         </div>
       }
+
+      {/* ── Confirmation Mail Builder ────────────────────────────────────── */}
+      {showMailBuilder && (
+        <Sheet title="✉️ Confirmation Mail Builder" onClose={()=>{setShowMailBuilder(false);setDiSearch("");}}>
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <input value={diSearch} onChange={e=>setDiSearch(e.target.value)} placeholder="🔍 Search DI number (min 3 digits)..."
+              style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,color:C.text,padding:"10px 12px",fontSize:13,outline:"none"}}/>
+
+            {diSearch.trim().length>0 && diSearch.trim().length<3 && (
+              <div style={{color:C.muted,fontSize:11}}>Keep typing — need at least 3 digits to search.</div>
+            )}
+            {diSearchResults.length>0 && (
+              <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:220,overflowY:"auto"}}>
+                {diSearchResults.map(({trip:t,d,key})=>(
+                  <label key={key} style={{display:"flex",alignItems:"center",gap:8,background:C.card,borderRadius:8,padding:"8px 10px",cursor:"pointer"}}>
+                    <input type="checkbox" checked={mailSelected.has(key)} onChange={()=>toggleMailRow(key)}/>
+                    <div style={{flex:1}}>
+                      <div style={{fontWeight:700,fontSize:12,fontFamily:"monospace"}}>{d.diNo}</div>
+                      <div style={{color:C.muted,fontSize:11}}>LR {t.lrNo||"—"} · {t.truckNo} · {t.date} · GR {d.grNo||"—"}</div>
+                    </div>
+                  </label>
+                ))}
+              </div>
+            )}
+            {diSearch.trim().length>=3 && diSearchResults.length===0 && (
+              <div style={{color:C.muted,fontSize:12}}>No DI matching "{diSearch.trim()}" found among party trips.</div>
+            )}
+
+            {mailRows.length>0 && (
+              <>
+                <div style={{fontWeight:700,fontSize:12,color:C.purple,marginTop:6}}>Selected — {mailRows.length} row{mailRows.length>1?"s":""}</div>
+                <div style={{overflowX:"auto"}}>
+                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:10,minWidth:700}}>
+                    <thead>
+                      <tr style={{background:"#1a2e1a",color:"#fff"}}>
+                        {["Tranport Name","Shipment Date","Bill of Lading","Delivery Number","Freight Qty","Per MT","Freight Cost","tokenNumber","Customer/Vendor","Vehicle Number","To Location","District","State"].map(h=>
+                          <th key={h} style={{padding:"5px 6px",textAlign:"left",whiteSpace:"nowrap"}}>{h}</th>)}
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {mailRows.map(({trip:t,d,key})=>(
+                        <tr key={key} style={{borderBottom:`1px solid ${C.border}`}}>
+                          <td style={{padding:"5px 6px",whiteSpace:"nowrap"}}>{RC.companyName}</td>
+                          <td style={{padding:"5px 6px",whiteSpace:"nowrap"}}>{t.date}</td>
+                          <td style={{padding:"5px 6px",whiteSpace:"nowrap"}}>{d.grNo||"—"}</td>
+                          <td style={{padding:"5px 6px",whiteSpace:"nowrap"}}>{d.diNo}</td>
+                          <td style={{padding:"5px 6px"}}>{d.qty}</td>
+                          <td style={{padding:"5px 6px"}}>{t.givenRate||"—"}</td>
+                          <td style={{padding:"5px 6px"}}>{d.billedAmt||(d.qty&&t.givenRate?d.qty*t.givenRate:"—")}</td>
+                          <td style={{padding:"5px 6px",color:C.muted}}>—</td>
+                          <td style={{padding:"5px 6px",color:C.muted,fontStyle:"italic"}}>(blank)</td>
+                          <td style={{padding:"5px 6px",whiteSpace:"nowrap"}}>{t.truckNo}</td>
+                          <td style={{padding:"5px 6px",whiteSpace:"nowrap"}}>{t.to||"—"}</td>
+                          <td style={{padding:"5px 6px",whiteSpace:"nowrap"}}>{t.district||"—"}</td>
+                          <td style={{padding:"5px 6px",whiteSpace:"nowrap"}}>{t.state||"—"}</td>
+                          <td style={{padding:"5px 6px"}}><button onClick={()=>toggleMailRow(key)} style={{background:"none",border:"none",color:C.red,cursor:"pointer"}}>✕</button></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:8,padding:"8px 10px",fontSize:11,color:C.orange}}>
+                  ⚠ "tokenNumber" isn't a field this app tracks anywhere — left blank. "Customer/Vendor" is intentionally left blank too, for you to fill in after pasting.
+                </div>
+
+                <div style={{fontWeight:700,fontSize:12,color:C.purple,marginTop:6}}>✉️ Mail Preview — exactly what "Copy Table" copies</div>
+                <div style={{background:"#fff",borderRadius:10,padding:14,overflowX:"auto",border:`1px solid ${C.border}`}}>
+                  <div dangerouslySetInnerHTML={{__html: mailBodyHTML()}} />
+                </div>
+
+                <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                  <Btn onClick={copyMailTable} full color={C.purple}>📋 Copy Mail (paste into Gmail)</Btn>
+                  <Btn onClick={openGmailCompose} full outline color={C.blue}>✉️ Open Gmail Compose</Btn>
+                  <Btn onClick={mergeSelectedPouchPDFs} full outline color={C.green} disabled={mergingPdf}>
+                    {mergingPdf?"⏳ Merging...":"📎 Merge Selected Return Pouch PDFs → Download"}
+                  </Btn>
+                  <div style={{color:C.muted,fontSize:10}}>
+                    Gmail's compose link can't be pre-filled with a formatted table — only plain text. "Copy Mail" copies the greeting + table + sign-off above in a format Gmail's rich-text body accepts on paste; "Open Gmail Compose" opens a draft with the subject ready, paste the copied mail into the body.
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        </Sheet>
+      )}
     </div>
   );
 }
