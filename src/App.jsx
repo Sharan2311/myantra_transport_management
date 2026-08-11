@@ -24947,14 +24947,12 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], actionIte
         )}
       </div>
 
-      {/* Category summary — tap a category to filter the list below */}
+      {/* Category summary — informational totals, always shows the full
+          picture for the date range regardless of the filter below */}
       <div style={{background:C.card,borderRadius:12,padding:"14px 16px"}}>
         <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>By Category</div>
         {Object.entries(byCat).sort((a,b)=>b[1]-a[1]).map(([cat,amt])=>(
-          <div key={cat} onClick={()=>cat!=="Shortage"&&toggleCat(cat)}
-            style={{display:"flex",justifyContent:"space-between",padding:"6px 4px",borderBottom:`1px solid ${C.border}22`,
-              cursor:cat==="Shortage"?"default":"pointer",
-              background:catFilter.has(cat)?C.red+"11":"transparent",borderRadius:4}}>
+          <div key={cat} style={{display:"flex",justifyContent:"space-between",padding:"6px 4px",borderBottom:`1px solid ${C.border}22`}}>
             <span style={{color:C.text,fontSize:13}}>
               {cat}
               {cat==="Shortage" && <span style={{color:C.muted,fontSize:10,marginLeft:6}}>(live from vehicle ledgers)</span>}
@@ -24967,6 +24965,35 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], actionIte
             ⚠ ₹{fmt(unassignedShortTotal)} of that Shortage total is still unassigned to a truck — see Action Items.
           </div>
         )}
+      </div>
+
+      {/* Filter by category — explicit multi-select, narrows the entries list
+          below only. Shortage is excluded here since it's never a stored
+          mye_expenses row, so there's nothing in the entries list to filter to. */}
+      <div style={{background:C.card,borderRadius:12,padding:"12px 14px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+          <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Filter by Category</div>
+          {catFilter.size>0 && (
+            <button onClick={()=>setCatFilter(new Set())}
+              style={{background:"none",border:"none",color:C.red,fontSize:11,fontWeight:700,cursor:"pointer",padding:0}}>
+              ✕ Clear ({catFilter.size})
+            </button>
+          )}
+        </div>
+        <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+          {bucketCats.filter(c=>c!=="Shortage").map(cat=>{
+            const on = catFilter.has(cat);
+            return (
+              <button key={cat} onClick={()=>toggleCat(cat)}
+                style={{padding:"6px 12px",borderRadius:20,cursor:"pointer",fontWeight:700,fontSize:11,
+                  background:on?C.red:"transparent",border:`1.5px solid ${on?C.red:C.border}`,
+                  color:on?"#fff":C.text}}>
+                {cat}{byCat[cat]>0?` · ${fmt(byCat[cat])}`:""}
+              </button>
+            );
+          })}
+        </div>
+        {catFilter.size===0 && <div style={{color:C.muted,fontSize:11,marginTop:6}}>No filter selected — showing all categories below.</div>}
       </div>
 
       {/* Entries */}
