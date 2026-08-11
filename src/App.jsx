@@ -9105,6 +9105,19 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                       {t.sealedInvoicePath && !t.mergedPdfPath && <Badge label="🏷️ Sealed Invoice Uploaded" color={C.orange} />}
                       {t.mergedPdfPath && <Badge label="✅ Merged PDF ready" color={C.green} />}
                       {t.confirmPdfPath && !t.mergedPdfPath && <Badge label="✅ Confirmation Received" color={C.green} />}
+                      {!t.mergedPdfPath && (()=>{
+                        // EPOD is per-DI (multi-DI trips can be partially marked), so
+                        // show a completion badge only once every party DI is done, and
+                        // an explicit "Partial" badge otherwise — never silently blend
+                        // a partly-EPOD'd trip in with a fully-confirmed one.
+                        const partyLines = diRowsFor(t).filter(d=>d.orderType==="party");
+                        const epodLines = partyLines.filter(d=>d.epodDone);
+                        if(epodLines.length===0) return null;
+                        if(epodLines.length===partyLines.length) {
+                          return <Badge label={`✅ EPOD Done by ${epodLines[0].epodDoneBy||"—"}`} color={C.green} />;
+                        }
+                        return <Badge label={`🔶 EPOD Partial (${epodLines.length}/${partyLines.length})`} color={C.orange} />;
+                      })()}
                       {t.emailSentAt && t.batchId && !t.mergedPdfPath && (
                         <button onClick={()=>setBatchReceiptSheet(t.batchId)}
                           style={{background:C.green+"22",color:C.green,border:"1px solid "+C.green+"44",borderRadius:20,
