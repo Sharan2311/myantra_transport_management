@@ -17964,9 +17964,17 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                 <Badge
                   label={ownerBal2>0?"Loan Due":ownerOver2>0?`Over-recovered ₹${fmt(ownerOver2)}`:"Clear"}
                   color={ownerBal2>0?C.red:ownerOver2>0?C.orange:C.green} />
-                {/* Ledger/trip divergence, visible without running the scan. */}
+                {/* Ledger/trip divergence, visible without running the scan. Clicking
+                    opens the same reconcile Sheet as the global "Fix" button, but
+                    pre-filtered to just this vehicle's flagged trips. */}
                 {(mismatchByTruck.get(v.truckNo)||0)>0 && (
-                  <Badge label={`⚠ ${mismatchByTruck.get(v.truckNo)} trip${mismatchByTruck.get(v.truckNo)>1?"s":""} out of sync`} color={C.red} />
+                  <button onClick={()=>{
+                    setReconcileResults(ledgerMismatches.filter(m=>m.truckNo===v.truckNo));
+                    setReconcileSelected(new Set());
+                    setReconcileDir(new Map());
+                  }} style={{background:"none",border:"none",padding:0,cursor:"pointer"}}>
+                    <Badge label={`⚠ ${mismatchByTruck.get(v.truckNo)} trip${mismatchByTruck.get(v.truckNo)>1?"s":""} out of sync`} color={C.red} />
+                  </button>
                 )}
                 {isTafalExempt(v, employees)&&<Badge label={v.tafalExempt?"TAFAL Exempt":"TAFAL Exempt (assigned to employee)"} color={C.muted} />}
                 {isOwner ? (
