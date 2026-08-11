@@ -52,6 +52,9 @@ const tripFromDB = r => ({
   noDieselConfirmedByName: r.no_diesel_confirmed_by_name || '',
   noDieselFor: r.no_diesel_for || '',
   noDieselAt: r.no_diesel_at || '',
+  epodDone: r.epod_done || false,
+  epodDoneBy: r.epod_done_by || '',
+  epodDoneAt: r.epod_done_at || '',
 })
 const tripToDB = t => ({
   id: t.id, type: t.type, lr_no: t.lrNo, di_no: t.diNo, truck_no: t.truckNo,
@@ -104,6 +107,9 @@ const tripToDB = t => ({
   no_diesel_confirmed_by_name: t.noDieselConfirmedByName || '',
   no_diesel_for: t.noDieselFor || '',
   no_diesel_at: t.noDieselAt || '',
+  epod_done: t.epodDone || false,
+  epod_done_by: t.epodDoneBy || '',
+  epod_done_at: t.epodDoneAt || '',
 })
 
 const vehicleFromDB = r => ({
