@@ -142,7 +142,14 @@ const diRowsFor = (trip) => {
     // Fall back to the trip's own orderType only for legacy diLines saved
     // before per-line orderType was tracked.
     orderType: d.orderType || trip.orderType || "",
+    // Confirmation Email EPOD (existing fields, kept as-is — this is what
+    // "EPOD" meant before the Return Pouch / Confirmation split).
     epodDone: !!d.epodDone, epodDoneBy: d.epodDoneBy||"", epodDoneAt: d.epodDoneAt||"",
+    // Return Pouch EPOD — separate fields, separate column.
+    epodPouchDone: !!d.epodPouchDone, epodPouchBy: d.epodPouchBy||"", epodPouchAt: d.epodPouchAt||"",
+    // Ready for Billing — per-DI, set automatically when Confirmation Email
+    // is received, or manually by owner/party manager (see markReadyForBilling).
+    readyForBilling: !!d.readyForBilling, readyForBillingBy: d.readyForBillingBy||"", readyForBillingAt: d.readyForBillingAt||"",
   }));
   // Single-DI trip using the flat fields directly
   return [{
@@ -152,6 +159,8 @@ const diRowsFor = (trip) => {
     paid: trip.status==="Paid", paidAmount: trip.paidAmount||0, utr: trip.utr||"", paymentDate: trip.paymentDate||"",
     orderType: trip.orderType||"",
     epodDone: !!trip.epodDone, epodDoneBy: trip.epodDoneBy||"", epodDoneAt: trip.epodDoneAt||"",
+    epodPouchDone: !!trip.epodPouchDone, epodPouchBy: trip.epodPouchBy||"", epodPouchAt: trip.epodPouchAt||"",
+    readyForBilling: !!trip.readyForBilling, readyForBillingBy: trip.readyForBillingBy||"", readyForBillingAt: trip.readyForBillingAt||"",
   }];
 };
 // Party Portal only ever wants PARTY DI lines — a trip classified "party"
@@ -159,22 +168,25 @@ const diRowsFor = (trip) => {
 const partyDiRowsFor = (trip) => diRowsFor(trip).filter(d => d.orderType==="party");
 const diRowStatus = d => d.paid ? "Paid" : d.billed ? "Billed" : "Not Billed";
 
-// ─── RETURN POUCH / CONFIRMATION DEADLINE — shared by Party Portal, the
-// login reminder banner (Dashboard), and the payment-request gate
-// (DriverPayments) so the three can't drift out of sync on what counts.
-// A party trip's pouch/confirmation is "received" by the same signal that
-// already releases the pouch hold elsewhere in the app.
-// A trip counts as confirmed if either the document was uploaded, OR every
-// party DI line on it has been manually marked EPOD Done (the two are
-// alternative paths to the same "confirmed" state — see markEpodDone).
-// Partial EPOD marking on a multi-DI trip does NOT count as confirmed;
-// every party line must be resolved one way or the other.
-const tripConfirmReceived = t => {
-  if(t.mergedPdfPath||t.sealedInvoicePath||t.status==="Sealed Invoice Received"||t.status==="Confirmation Email Received") return true;
+// ─── RETURN POUCH — drives pouch release (driver's deduction) and the ────────
+// 8-day payment block, since "Return Pouch" is what unlocks the driver's
+// money everywhere else in the app. Separate from Confirmation Email below.
+// A trip's pouch counts received if the document is uploaded, OR every party
+// DI line has been EPOD'd specifically for the pouch (epodPouchDone).
+const tripPouchReceived = t => {
+  if(t.sealedInvoicePath || t.mergedPdfPath) return true;
   const partyLines = diRowsFor(t).filter(d=>d.orderType==="party");
-  if(partyLines.length>0) return partyLines.every(d=>d.epodDone);
-  return !!t.epodDone;
+  if(partyLines.length>0) return partyLines.every(d=>d.epodPouchDone);
+  return !!t.epodPouchDone;
 };
+// Back-compat alias — pouch release / 8-day block code was written against
+// this name before the Return Pouch vs Confirmation Email split.
+const tripConfirmReceived = tripPouchReceived;
+
+// ─── CONFIRMATION EMAIL — drives the Ready for Billing auto-trigger. ─────────
+// Received if the document is uploaded, OR the DI's own epodDone (the
+// original EPOD fields) is set.
+const diConfirmReceived = (t, d) => !!(t.confirmPdfPath) || !!d.epodDone;
 
 const daysSinceDate = dateStr => {
   if(!dateStr) return 0;
@@ -9134,17 +9146,29 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                       {t.mergedPdfPath && <Badge label="✅ Merged PDF ready" color={C.green} />}
                       {t.confirmPdfPath && !t.mergedPdfPath && <Badge label="✅ Confirmation Received" color={C.green} />}
                       {!t.mergedPdfPath && (()=>{
-                        // EPOD is per-DI (multi-DI trips can be partially marked), so
-                        // show a completion badge only once every party DI is done, and
-                        // an explicit "Partial" badge otherwise — never silently blend
-                        // a partly-EPOD'd trip in with a fully-confirmed one.
+                        // EPOD is per-DI and per-column (Return Pouch vs
+                        // Confirmation Email are separate now) — show at most
+                        // one badge per column, "Partial" if only some party
+                        // DIs are done, never silently blending partial with full.
                         const partyLines = diRowsFor(t).filter(d=>d.orderType==="party");
-                        const epodLines = partyLines.filter(d=>d.epodDone);
-                        if(epodLines.length===0) return null;
-                        if(epodLines.length===partyLines.length) {
-                          return <Badge label={`✅ EPOD Done by ${epodLines[0].epodDoneBy||"—"}`} color={C.green} />;
-                        }
-                        return <Badge label={`🔶 EPOD Partial (${epodLines.length}/${partyLines.length})`} color={C.orange} />;
+                        const pouchEpod = partyLines.filter(d=>d.epodPouchDone);
+                        const confirmEpod = partyLines.filter(d=>d.epodDone);
+                        const badge = (lines, label, by) => lines.length===0 ? null
+                          : lines.length===partyLines.length
+                            ? <Badge key={label} label={`✅ ${label} EPOD by ${by(lines[0])||"—"}`} color={C.green} />
+                            : <Badge key={label} label={`🔶 ${label} EPOD Partial (${lines.length}/${partyLines.length})`} color={C.orange} />;
+                        return <>
+                          {badge(pouchEpod, "Pouch", d=>d.epodPouchBy)}
+                          {badge(confirmEpod, "Confirm", d=>d.epodDoneBy)}
+                        </>;
+                      })()}
+                      {(()=>{
+                        const partyLines = diRowsFor(t).filter(d=>d.orderType==="party");
+                        const ready = partyLines.filter(d=>d.readyForBilling);
+                        if(ready.length===0) return null;
+                        return ready.length===partyLines.length
+                          ? <Badge label="🧾 Ready for Billing" color={C.green} />
+                          : <Badge label={`🧾 Ready for Billing (${ready.length}/${partyLines.length})`} color={C.orange} />;
                       })()}
                       {t.emailSentAt && t.batchId && !t.mergedPdfPath && (
                         <button onClick={()=>setBatchReceiptSheet(t.batchId)}
@@ -12637,7 +12661,9 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
   // some lines Paid and some Not Billed at once; filtering hides only the
   // non-matching lines within a group, not the whole trip).
   const [billStatusFilter, setBillStatusFilter] = useState("all"); // all | not_billed | billed | paid
-  const [confirmFilter,    setConfirmFilter]    = useState("all"); // all | received | not_received
+  const [pouchFilter,      setPouchFilter]      = useState("all"); // all | received | not_received — Return Pouch column
+  const [confirmFilter,    setConfirmFilter]    = useState("all"); // all | received | not_received — Confirmation Email column
+  const [readyFilter,      setReadyFilter]      = useState("all"); // all | ready | not_ready — Ready for Billing, DI-line level
   const [rowUploadingId,   setRowUploadingId]   = useState(""); // per-row inline upload spinner
   // ── Confirmation Mail Builder — separate from the main table's filters.
   // Searches ALL party trips (not just what's currently filtered) by DI, so
@@ -12781,8 +12807,13 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
     } catch(e){alert("Upload failed: "+e.message);}
     finally{setPdfUploading(false);}
   };
-  const uploadConfirmPdf = async(file) => {
-    if(!file||!selected.size)return;
+  const uploadConfirmPdf = async(file, targetIds) => {
+    // targetIds lets a single row's inline upload button target exactly that
+    // trip without relying on `selected` state, which setSelected() can't
+    // update synchronously before this runs (React state updates aren't
+    // immediate) — the bulk action bar still uses `selected` as before.
+    const ids = targetIds || selected;
+    if(!file||!ids.size)return;
     setPdfUploading(true);
     try{
       const path=`party_confirm/${Date.now()}_${file.name.replace(/\s/g,"_")}`;
@@ -12793,8 +12824,8 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
       const pdfUpdated=[];
       // Auto-merge for single selected trip
       let batchMergedPath="";
-      if(selected.size===1){
-        const t=(trips||[]).find(x=>selected.has(x.id));
+      if(ids.size===1){
+        const t=(trips||[]).find(x=>ids.has(x.id));
         if(t){
           const grPath=t.grFilePath||(t.diLines||[]).find(d=>d.grFilePath)?.grFilePath;
           const invPath=t.invoiceFilePath||(t.diLines||[]).find(d=>d.invoiceFilePath)?.invoiceFilePath;
@@ -12808,17 +12839,25 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
           }catch(me){console.warn("Merge failed:",me.message);}}
         }
       }
-      if(!batchMergedPath&&selected.size===1)alert("\u26a0 Confirmation uploaded but PDF merge failed.\nStatus not updated until merge succeeds.");
+      if(!batchMergedPath&&ids.size===1)alert("\u26a0 Confirmation uploaded but PDF merge failed.\nStatus not updated until merge succeeds.");
       setTrips(prev=>prev.map(t=>{
-        if(!selected.has(t.id))return t;
-        const mergedPath=selected.size===1?batchMergedPath:"";
-        const u={...t,emailSentAt:t.emailSentAt||ts,confirmPdfPath:publicUrl,
+        if(!ids.has(t.id))return t;
+        const mergedPath=ids.size===1?batchMergedPath:"";
+        // Confirmation Email received -> auto-mark Ready for Billing on every
+        // party DI line that isn't already marked (manual marks, e.g. from a
+        // pouch-only judgment call, are never overwritten by this).
+        const autoReady = d => d.readyForBilling ? d : {...d, readyForBilling:true, readyForBillingBy:"Auto — Confirmation Email", readyForBillingAt:ts};
+        const hasLines = (t.diLines||[]).length > 0;
+        const readyFields = hasLines
+          ? {diLines: t.diLines.map(d => d.orderType==="party" ? autoReady(d) : d)}
+          : (t.orderType==="party" && !t.readyForBilling ? {readyForBilling:true, readyForBillingBy:"Auto — Confirmation Email", readyForBillingAt:ts} : {});
+        const u={...t,emailSentAt:t.emailSentAt||ts,confirmPdfPath:publicUrl,...readyFields,
           ...(mergedPath?{status:"Confirmation Email Received",mergedPdfPath:mergedPath,receiptFilePath:path,receiptUploadedAt:ts}
-            :(selected.size>1?{status:"Confirmation Email Received"}:{}))};
+            :(ids.size>1?{status:"Confirmation Email Received"}:{}))};
         pdfUpdated.push(u); return u;
       }));
       setTimeout(()=>pdfUpdated.forEach(u=>DB.saveTrip(u).catch(e=>console.error("saveTrip confirm pdf:",e))),0);
-      log&&log("CONFIRM PDF",`${selected.size} trips`+(batchMergedPath?" + merged":""));setSelected(new Set());
+      log&&log("CONFIRM PDF",`${ids.size} trips`+(batchMergedPath?" + merged":"")+" — auto Ready for Billing");setSelected(new Set());
     }catch(e){alert("Upload failed: "+e.message);}
     finally{setPdfUploading(false);}
   };
@@ -12840,18 +12879,20 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
 
   // Trip-level "confirmation received" — same signal that already releases
   // the pouch hold elsewhere in the app (_hasMerged), just named for this view.
-  const confirmReceived = tripConfirmReceived; // shared module-level helper — see definition near tripBillingStatus
+  const pouchReceived = tripConfirmReceived; // = tripPouchReceived, see module-level definition
 
-  // Build grouped, DI-line-filtered table rows. billStatusFilter narrows which
-  // DI SUB-ROWS show within a trip group (a trip stays visible if at least one
-  // of its lines matches); confirmFilter narrows at the trip level, since the
-  // confirmation document is uploaded once per trip, not once per DI.
+  // Build grouped, DI-line-filtered table rows. billStatusFilter and
+  // readyFilter narrow which DI SUB-ROWS show within a trip group (a trip
+  // stays visible if at least one line matches); pouchFilter/confirmFilter
+  // narrow at the trip level for the pouch column (trip-wide document) but
+  // readyFilter is genuinely per-DI, since Ready for Billing is per-DI.
   const tableGroups = activeList
-    .filter(t => confirmFilter==="all" || (confirmFilter==="received")===confirmReceived(t))
+    .filter(t => pouchFilter==="all" || (pouchFilter==="received")===pouchReceived(t))
     .map(t => {
-      const allRows = partyDiRowsFor(t);
-      const rows = billStatusFilter==="all" ? allRows
-        : allRows.filter(d => diRowStatus(d) === (billStatusFilter==="not_billed"?"Not Billed":billStatusFilter==="billed"?"Billed":"Paid"));
+      let rows = partyDiRowsFor(t);
+      if(billStatusFilter!=="all") rows = rows.filter(d => diRowStatus(d) === (billStatusFilter==="not_billed"?"Not Billed":billStatusFilter==="billed"?"Billed":"Paid"));
+      if(confirmFilter!=="all") rows = rows.filter(d => (confirmFilter==="received")===diConfirmReceived(t,d));
+      if(readyFilter!=="all") rows = rows.filter(d => (readyFilter==="ready")===d.readyForBilling);
       return {trip:t, rows};
     })
     .filter(g => g.rows.length>0);
@@ -12867,20 +12908,66 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
   // is personally asserting they've verified receipt with the customer.
   // Requires a real confirm dialog naming exactly that responsibility —
   // not a silent toggle — since it substitutes for actual proof of delivery.
-  const markEpodDone = (trip, diNo) => {
+  // target: "pouch" (Return Pouch column) or "confirm" (Confirmation Email
+  // column) — EPOD can satisfy either, tracked with separate fields so a
+  // trip can have one done and not the other.
+  const markEpodDone = (trip, diNo, target) => {
     if(!isPartyMgr) { alert("Only the owner or party manager can mark EPOD."); return; }
-    const warn = `⚠ You are marking DI ${diNo||trip.lrNo} as EPOD Done.\n\n`+
-      `By continuing, you are personally confirming that you have verified receipt of this consignment with the customer, in place of an uploaded confirmation document.\n\n`+
+    const label = target==="pouch" ? "Return Pouch" : "Confirmation Email";
+    const warn = `⚠ You are marking DI ${diNo||trip.lrNo} — ${label} — as EPOD Done.\n\n`+
+      `By continuing, you are personally confirming that you have verified receipt of this consignment with the customer, in place of an uploaded ${label.toLowerCase()} document.\n\n`+
       `This will be recorded against your name (${user?.name||user?.username}) and cannot be undone by anyone but the owner.\n\nContinue?`;
     if(!window.confirm(warn)) return;
     const ts = new Date().toISOString();
+    const by = user?.name||user?.username||"";
     const hasLines = (trip.diLines||[]).length > 0;
-    const updated = hasLines
-      ? {...trip, diLines: trip.diLines.map(d => d.diNo===diNo ? {...d, epodDone:true, epodDoneBy:user?.name||user?.username||"", epodDoneAt:ts} : d)}
-      : {...trip, epodDone:true, epodDoneBy:user?.name||user?.username||"", epodDoneAt:ts};
+    const applyEpod = d => target==="pouch"
+      ? {...d, epodPouchDone:true, epodPouchBy:by, epodPouchAt:ts}
+      : {...d, epodDone:true, epodDoneBy:by, epodDoneAt:ts};
+    // EPOD-Confirm also satisfies the Ready for Billing auto-trigger, same as
+    // an actual confirmation email upload would — see uploadConfirmPdf.
+    const applyReady = d => target==="confirm" && !d.readyForBilling
+      ? {...d, readyForBilling:true, readyForBillingBy:"Auto — Confirmation Email (EPOD)", readyForBillingAt:ts}
+      : d;
+    let updated;
+    if(hasLines) {
+      updated = {...trip, diLines: trip.diLines.map(d => d.diNo===diNo ? applyReady(applyEpod(d)) : d)};
+    } else {
+      let flat = target==="pouch" ? {...trip, epodPouchDone:true, epodPouchBy:by, epodPouchAt:ts} : {...trip, epodDone:true, epodDoneBy:by, epodDoneAt:ts};
+      if(target==="confirm" && !flat.readyForBilling) flat = {...flat, readyForBilling:true, readyForBillingBy:"Auto — Confirmation Email (EPOD)", readyForBillingAt:ts};
+      updated = flat;
+    }
     setTrips(prev=>prev.map(t=>t.id===trip.id?updated:t));
     setTimeout(()=>DB.saveTrip(updated).catch(e=>console.error("saveTrip epodDone:",e)),0);
-    log&&log("EPOD MARKED",`DI:${diNo||"—"} LR:${trip.lrNo} by ${user?.name||user?.username}`);
+    log&&log("EPOD MARKED",`${label} · DI:${diNo||"—"} LR:${trip.lrNo} by ${by}`);
+  };
+
+  // ── Ready for Billing — per-DI, owner/party manager only ────────────────
+  const markReadyForBilling = (trip, diNo) => {
+    if(!isPartyMgr) { alert("Only the owner or party manager can mark Ready for Billing."); return; }
+    if(!window.confirm(`Mark DI ${diNo||trip.lrNo} as Ready for Billing?\n\nThis confirms YOU judge the uploaded Return Pouch sufficient to proceed with billing, even without a separate Confirmation Email. Recorded against your name (${user?.name||user?.username}).`)) return;
+    const ts = new Date().toISOString();
+    const by = user?.name||user?.username||"";
+    const hasLines = (trip.diLines||[]).length > 0;
+    const updated = hasLines
+      ? {...trip, diLines: trip.diLines.map(d => d.diNo===diNo ? {...d, readyForBilling:true, readyForBillingBy:by, readyForBillingAt:ts} : d)}
+      : {...trip, readyForBilling:true, readyForBillingBy:by, readyForBillingAt:ts};
+    setTrips(prev=>prev.map(t=>t.id===trip.id?updated:t));
+    setTimeout(()=>DB.saveTrip(updated).catch(e=>console.error("saveTrip readyForBilling:",e)),0);
+    log&&log("READY FOR BILLING",`DI:${diNo||"—"} LR:${trip.lrNo} by ${by}`);
+  };
+  // Reversal is owner-only, per explicit instruction — a party manager can
+  // mark it, but only the owner can undo a mistake.
+  const unmarkReadyForBilling = (trip, diNo) => {
+    if(user?.role!=="owner") { alert("Only the owner can un-mark Ready for Billing."); return; }
+    if(!window.confirm(`Remove Ready for Billing from DI ${diNo||trip.lrNo}?`)) return;
+    const hasLines = (trip.diLines||[]).length > 0;
+    const updated = hasLines
+      ? {...trip, diLines: trip.diLines.map(d => d.diNo===diNo ? {...d, readyForBilling:false, readyForBillingBy:"", readyForBillingAt:""} : d)}
+      : {...trip, readyForBilling:false, readyForBillingBy:"", readyForBillingAt:""};
+    setTrips(prev=>prev.map(t=>t.id===trip.id?updated:t));
+    setTimeout(()=>DB.saveTrip(updated).catch(e=>console.error("saveTrip unmarkReady:",e)),0);
+    log&&log("READY FOR BILLING REMOVED",`DI:${diNo||"—"} LR:${trip.lrNo} by ${user?.name||user?.username}`);
   };
 
   // ── Confirmation Mail Builder ────────────────────────────────────────────
@@ -13060,7 +13147,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
         {(dateFrom||dateTo)&&<button onClick={()=>{setDateFrom("");setDateTo("");}} style={{background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:14,fontWeight:700}}>✕</button>}
       </div>
 
-      {/* Billing status (DI-line level) + Confirmation filters */}
+      {/* Billing status (DI-line level) + Return Pouch + Confirmation Email + Ready for Billing filters */}
       <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
         {[["all","All"],["not_billed","Not Billed"],["billed","Billed"],["paid","Paid"]].map(([k,l])=>(
           <button key={k} onClick={()=>setBillStatusFilter(k)}
@@ -13070,12 +13157,36 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
             {l}
           </button>
         ))}
-        <span style={{width:1,background:C.border,margin:"2px 4px"}} />
-        {[["all","All"],["received","✓ Confirmed"],["not_received","Not Confirmed"]].map(([k,l])=>(
+      </div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+        <span style={{fontSize:10,color:C.muted,fontWeight:700}}>POUCH:</span>
+        {[["all","All"],["received","✓ Received"],["not_received","Not Received"]].map(([k,l])=>(
+          <button key={k} onClick={()=>setPouchFilter(k)}
+            style={{padding:"5px 11px",borderRadius:16,cursor:"pointer",fontWeight:700,fontSize:11,
+              background:pouchFilter===k?C.purple:"transparent",border:`1.5px solid ${C.purple}`,
+              color:pouchFilter===k?"#fff":C.purple}}>
+            {l}
+          </button>
+        ))}
+      </div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+        <span style={{fontSize:10,color:C.muted,fontWeight:700}}>EMAIL:</span>
+        {[["all","All"],["received","✓ Received"],["not_received","Not Received"]].map(([k,l])=>(
           <button key={k} onClick={()=>setConfirmFilter(k)}
             style={{padding:"5px 11px",borderRadius:16,cursor:"pointer",fontWeight:700,fontSize:11,
-              background:confirmFilter===k?C.purple:"transparent",border:`1.5px solid ${C.purple}`,
-              color:confirmFilter===k?"#fff":C.purple}}>
+              background:confirmFilter===k?C.blue:"transparent",border:`1.5px solid ${C.blue}`,
+              color:confirmFilter===k?"#fff":C.blue}}>
+            {l}
+          </button>
+        ))}
+      </div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+        <span style={{fontSize:10,color:C.muted,fontWeight:700}}>BILLING:</span>
+        {[["all","All"],["ready","✓ Ready"],["not_ready","Not Ready"]].map(([k,l])=>(
+          <button key={k} onClick={()=>setReadyFilter(k)}
+            style={{padding:"5px 11px",borderRadius:16,cursor:"pointer",fontWeight:700,fontSize:11,
+              background:readyFilter===k?C.green:"transparent",border:`1.5px solid ${C.green}`,
+              color:readyFilter===k?"#fff":C.green}}>
             {l}
           </button>
         ))}
@@ -13181,104 +13292,171 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
             </div>
             {!isPartyMgr&&activeTab==="pending"&&<div style={{fontSize:12,color:C.muted}}>The Party Manager will assign trips to you for followup.</div>}
           </div>
-        :<div style={{overflowX:"auto"}}>
-          <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:900}}>
-            <thead>
-              <tr style={{textAlign:"left",color:C.muted,fontSize:10,textTransform:"uppercase",letterSpacing:0.5,borderBottom:`2px solid ${C.border}`}}>
-                <th style={{padding:"6px 8px"}}><input type="checkbox" checked={selected.size===activeList.length&&activeList.length>0} onChange={toggleAll}/></th>
-                <th style={{padding:"6px 8px"}}>Date</th>
-                <th style={{padding:"6px 8px"}}>LR / Truck</th>
-                <th style={{padding:"6px 8px"}}>To</th>
-                <th style={{padding:"6px 8px"}}>DI</th>
-                <th style={{padding:"6px 8px"}}>Status</th>
-                <th style={{padding:"6px 8px"}}>GR</th>
-                <th style={{padding:"6px 8px"}}>Invoice</th>
-                <th style={{padding:"6px 8px"}}>Return Pouch / Confirmation</th>
-                <th style={{padding:"6px 8px"}}>Merged PDF</th>
-                <th style={{padding:"6px 8px",textAlign:"right"}}>Amount</th>
-              </tr>
-            </thead>
-            <tbody>
-              {tableGroups.map(({trip:t, rows})=>{
-                const grPath  = t.grFilePath || (t.diLines||[]).find(d=>d.grFilePath)?.grFilePath;
-                const invPath = t.invoiceFilePath || (t.diLines||[]).find(d=>d.invoiceFilePath)?.invoiceFilePath;
-                const confirmed = confirmReceived(t);
-                const rowUploading = rowUploadingId===t.id;
-                return rows.map((d,i)=>(
-                  <tr key={t.id+"-"+i} style={{borderBottom: i===rows.length-1 ? `1px solid ${C.border}` : `1px dashed ${C.border}44`}}>
-                    {i===0 && (
-                      <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top"}}>
-                        <input type="checkbox" checked={selected.has(t.id)} onChange={()=>toggle(t.id)}/>
-                      </td>
-                    )}
-                    {i===0 && <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",whiteSpace:"nowrap"}}>{t.date}</td>}
-                    {i===0 && (
-                      <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top"}}>
-                        <div style={{fontWeight:700}}>{t.lrNo||"—"}</div>
-                        <div style={{color:C.muted,fontSize:11}}>{t.truckNo}</div>
-                      </td>
-                    )}
-                    {i===0 && <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top"}}>{t.to||"—"}</td>}
-                    <td style={{padding:"6px 8px",fontFamily:"monospace",fontSize:11}}>{d.diNo||"—"}{d.qty?<div style={{color:C.muted,fontFamily:"inherit"}}>{d.qty}MT{d.bags?` · ${d.bags} bags`:""}</div>:null}</td>
-                    <td style={{padding:"6px 8px"}}>
-                      {(()=>{ const st=diRowStatus(d); const c = st==="Paid"?C.green:st==="Billed"?C.teal:C.orange;
-                        return <Badge label={st} color={c} />; })()}
-                      {d.invoiceNo && <div style={{color:C.muted,fontSize:10,marginTop:2,fontFamily:"monospace"}}>{d.invoiceNo}</div>}
-                    </td>
-                    {i===0 && (
-                      <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top"}}>
-                        {grPath
-                          ? <button onClick={e=>openFile(grPath,e)} style={{background:"none",border:`1px solid ${C.blue}`,borderRadius:6,color:C.blue,fontSize:11,padding:"3px 8px",cursor:"pointer"}}>📄 View</button>
-                          : <span style={{color:C.muted,fontSize:11}}>—</span>}
-                      </td>
-                    )}
-                    {i===0 && (
-                      <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top"}}>
-                        {invPath
-                          ? <button onClick={e=>openFile(invPath,e)} style={{background:"none",border:`1px solid ${C.blue}`,borderRadius:6,color:C.blue,fontSize:11,padding:"3px 8px",cursor:"pointer"}}>📄 View</button>
-                          : <span style={{color:C.muted,fontSize:11}}>—</span>}
-                      </td>
-                    )}
-                    <td style={{padding:"6px 8px"}}>
-                      {confirmed ? (
-                        <span onClick={t.sealedInvoicePath?e=>openFile(t.sealedInvoicePath,e):undefined}
-                          style={{color:C.green,fontWeight:700,fontSize:11,cursor:t.sealedInvoicePath?"pointer":"default"}}>✓ Received</span>
-                      ) : d.epodDone ? (
-                        <div style={{color:C.green,fontWeight:700,fontSize:11}}>
-                          ✓ EPOD Done
-                          <div style={{color:C.muted,fontWeight:400,fontSize:10}}>by {d.epodDoneBy||"—"}</div>
-                        </div>
-                      ) : (
-                        <div style={{display:"flex",flexDirection:"column",gap:4,alignItems:"flex-start"}}>
-                          <label style={{display:"inline-flex",alignItems:"center",gap:4,background:C.orange,borderRadius:6,padding:"4px 9px",
-                            cursor:rowUploading?"not-allowed":"pointer",color:"#fff",fontWeight:700,fontSize:10}}>
-                            {rowUploading?"⏳":"⬆"} Upload
-                            <input type="file" accept=".pdf,image/*" style={{display:"none"}} disabled={rowUploading}
-                              onChange={e=>{if(e.target.files[0]) uploadReturnPouch(t.id, e.target.files[0]);}}/>
-                          </label>
-                          {isPartyMgr && (
-                            <button onClick={()=>markEpodDone(t, d.diNo)}
-                              style={{background:"none",border:`1px solid ${C.green}`,borderRadius:6,color:C.green,fontSize:9,padding:"3px 7px",cursor:"pointer",fontWeight:700}}>
-                              ✅ Mark EPOD Done
-                            </button>
-                          )}
-                        </div>
+        :<div style={{position:"relative"}}>
+          {/* Scroll hint — fades in the right edge so it's obvious there's more
+              to scroll, since the sticky columns alone don't make that clear. */}
+          <div style={{position:"absolute",top:0,right:0,bottom:0,width:20,pointerEvents:"none",
+            background:`linear-gradient(to right, transparent, ${C.bg}cc)`,zIndex:3}} />
+          <div style={{overflowX:"auto",border:`1px solid ${C.border}`,borderRadius:10}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:1100}}>
+              <thead>
+                <tr style={{textAlign:"left",color:C.muted,fontSize:10,textTransform:"uppercase",letterSpacing:0.5}}>
+                  <th style={{padding:"6px 8px",position:"sticky",left:0,background:C.card,zIndex:2,borderRight:`1px solid ${C.border}`,borderBottom:`2px solid ${C.border}`}}><input type="checkbox" checked={selected.size===activeList.length&&activeList.length>0} onChange={toggleAll}/></th>
+                  <th style={{padding:"6px 8px",position:"sticky",left:34,background:C.card,zIndex:2,borderRight:`1px solid ${C.border}`,borderBottom:`2px solid ${C.border}`}}>Date</th>
+                  <th style={{padding:"6px 8px",position:"sticky",left:110,background:C.card,zIndex:2,borderRight:`2px solid ${C.border}`,borderBottom:`2px solid ${C.border}`}}>LR / Truck</th>
+                  <th style={{padding:"6px 8px",borderRight:`1px solid ${C.border}44`,borderBottom:`2px solid ${C.border}`}}>To</th>
+                  <th style={{padding:"6px 8px",borderRight:`1px solid ${C.border}44`,borderBottom:`2px solid ${C.border}`}}>DI</th>
+                  <th style={{padding:"6px 8px",borderRight:`1px solid ${C.border}44`,borderBottom:`2px solid ${C.border}`}}>Status</th>
+                  <th style={{padding:"6px 8px",borderRight:`1px solid ${C.border}44`,borderBottom:`2px solid ${C.border}`}}>GR</th>
+                  <th style={{padding:"6px 8px",borderRight:`1px solid ${C.border}44`,borderBottom:`2px solid ${C.border}`}}>Invoice</th>
+                  <th style={{padding:"6px 8px",borderRight:`1px solid ${C.border}44`,borderBottom:`2px solid ${C.border}`}}>Return Pouch</th>
+                  <th style={{padding:"6px 8px",borderRight:`1px solid ${C.border}44`,borderBottom:`2px solid ${C.border}`}}>Confirmation Email</th>
+                  <th style={{padding:"6px 8px",borderRight:`1px solid ${C.border}44`,borderBottom:`2px solid ${C.border}`}}>Ready for Billing</th>
+                  <th style={{padding:"6px 8px",borderRight:`1px solid ${C.border}44`,borderBottom:`2px solid ${C.border}`}}>Merged PDF</th>
+                  <th style={{padding:"6px 8px",textAlign:"right",borderBottom:`2px solid ${C.border}`}}>Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tableGroups.map(({trip:t, rows}, gi)=>{
+                  const grPath  = t.grFilePath || (t.diLines||[]).find(d=>d.grFilePath)?.grFilePath;
+                  const invPath = t.invoiceFilePath || (t.diLines||[]).find(d=>d.invoiceFilePath)?.invoiceFilePath;
+                  const pouchOk = pouchReceived(t);
+                  const rowUploading = rowUploadingId===t.id;
+                  const zebra = gi%2===1 ? C.bg+"88" : "transparent";
+                  return rows.map((d,i)=>{
+                    const bR = `1px solid ${C.border}44`;
+                    const bB = i===rows.length-1 ? `1px solid ${C.border}` : `1px dashed ${C.border}44`;
+                    const stickyBg = C.card; // sticky cells need an opaque bg, not zebra transparency
+                    return (
+                    <tr key={t.id+"-"+i} style={{background:zebra}}>
+                      {i===0 && (
+                        <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",position:"sticky",left:0,background:stickyBg,zIndex:1,borderRight:`1px solid ${C.border}`,borderBottom:bB}}>
+                          <input type="checkbox" checked={selected.has(t.id)} onChange={()=>toggle(t.id)}/>
+                        </td>
                       )}
-                    </td>
-                    {i===0 && (
-                      <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top"}}>
-                        {t.mergedPdfPath
-                          ? <button onClick={async()=>{try{const url=await getSignedUrl(t.mergedPdfPath,3600);const a=document.createElement("a");a.href=url;a.download="MergedConfirmation_"+(t.lrNo||t.id)+".pdf";a.target="_blank";document.body.appendChild(a);a.click();document.body.removeChild(a);}catch(e){alert("Download failed: "+e.message);}}}
-                              style={{background:"none",border:`1px solid ${C.green}`,borderRadius:6,color:C.green,fontSize:11,padding:"3px 8px",cursor:"pointer"}}>⬇ PDF</button>
-                          : <span style={{color:C.muted,fontSize:11}}>—</span>}
+                      {i===0 && <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",whiteSpace:"nowrap",position:"sticky",left:34,background:stickyBg,zIndex:1,borderRight:`1px solid ${C.border}`,borderBottom:bB}}>{t.date}</td>}
+                      {i===0 && (
+                        <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",position:"sticky",left:110,background:stickyBg,zIndex:1,borderRight:`2px solid ${C.border}`,borderBottom:bB}}>
+                          <div style={{fontWeight:700}}>{t.lrNo||"—"}</div>
+                          <div style={{color:C.muted,fontSize:11}}>{t.truckNo}</div>
+                        </td>
+                      )}
+                      {i===0 && <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",borderRight:bR,borderBottom:bB}}>{t.to||"—"}</td>}
+                      <td style={{padding:"6px 8px",fontFamily:"monospace",fontSize:11,borderRight:bR,borderBottom:bB}}>{d.diNo||"—"}{d.qty?<div style={{color:C.muted,fontFamily:"inherit"}}>{d.qty}MT{d.bags?` · ${d.bags} bags`:""}</div>:null}</td>
+                      <td style={{padding:"6px 8px",borderRight:bR,borderBottom:bB}}>
+                        {(()=>{ const st=diRowStatus(d); const c = st==="Paid"?C.green:st==="Billed"?C.teal:C.orange;
+                          return <Badge label={st} color={c} />; })()}
+                        {d.invoiceNo && <div style={{color:C.muted,fontSize:10,marginTop:2,fontFamily:"monospace"}}>{d.invoiceNo}</div>}
                       </td>
-                    )}
-                    <td style={{padding:"6px 8px",textAlign:"right",fontWeight:700}}>{d.billedAmt>0?fmt(d.billedAmt):(d.qty&&t.givenRate?fmt(d.qty*t.givenRate):"—")}</td>
-                  </tr>
-                ));
-              })}
-            </tbody>
-          </table>
+                      {i===0 && (
+                        <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",borderRight:bR,borderBottom:bB}}>
+                          {grPath
+                            ? <button onClick={e=>openFile(grPath,e)} style={{background:"none",border:`1px solid ${C.blue}`,borderRadius:6,color:C.blue,fontSize:11,padding:"3px 8px",cursor:"pointer"}}>📄 View</button>
+                            : <span style={{color:C.muted,fontSize:11}}>—</span>}
+                        </td>
+                      )}
+                      {i===0 && (
+                        <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",borderRight:bR,borderBottom:bB}}>
+                          {invPath
+                            ? <button onClick={e=>openFile(invPath,e)} style={{background:"none",border:`1px solid ${C.blue}`,borderRadius:6,color:C.blue,fontSize:11,padding:"3px 8px",cursor:"pointer"}}>📄 View</button>
+                            : <span style={{color:C.muted,fontSize:11}}>—</span>}
+                        </td>
+                      )}
+
+                      {/* Return Pouch */}
+                      <td style={{padding:"6px 8px",borderRight:bR,borderBottom:bB}}>
+                        {pouchOk ? (
+                          <span onClick={t.sealedInvoicePath?e=>openFile(t.sealedInvoicePath,e):undefined}
+                            style={{color:C.green,fontWeight:700,fontSize:11,cursor:t.sealedInvoicePath?"pointer":"default"}}>✓ Received</span>
+                        ) : d.epodPouchDone ? (
+                          <div style={{color:C.green,fontWeight:700,fontSize:11}}>
+                            ✓ EPOD Done
+                            <div style={{color:C.muted,fontWeight:400,fontSize:10}}>by {d.epodPouchBy||"—"}</div>
+                          </div>
+                        ) : (
+                          <div style={{display:"flex",flexDirection:"column",gap:4,alignItems:"flex-start"}}>
+                            <label style={{display:"inline-flex",alignItems:"center",gap:4,background:C.orange,borderRadius:6,padding:"4px 9px",
+                              cursor:rowUploading?"not-allowed":"pointer",color:"#fff",fontWeight:700,fontSize:10}}>
+                              {rowUploading?"⏳":"⬆"} Upload
+                              <input type="file" accept=".pdf,image/*" style={{display:"none"}} disabled={rowUploading}
+                                onChange={e=>{if(e.target.files[0]) uploadReturnPouch(t.id, e.target.files[0]);}}/>
+                            </label>
+                            {isPartyMgr && (
+                              <button onClick={()=>markEpodDone(t, d.diNo, "pouch")}
+                                style={{background:"none",border:`1px solid ${C.green}`,borderRadius:6,color:C.green,fontSize:9,padding:"3px 7px",cursor:"pointer",fontWeight:700}}>
+                                ✅ Mark EPOD
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </td>
+
+                      {/* Confirmation Email */}
+                      <td style={{padding:"6px 8px",borderRight:bR,borderBottom:bB}}>
+                        {diConfirmReceived(t,d) ? (
+                          <span onClick={t.confirmPdfPath?e=>openFile(t.confirmPdfPath,e):undefined}
+                            style={{color:C.green,fontWeight:700,fontSize:11,cursor:t.confirmPdfPath?"pointer":"default"}}>✓ Received</span>
+                        ) : d.epodDone ? (
+                          <div style={{color:C.green,fontWeight:700,fontSize:11}}>
+                            ✓ EPOD Done
+                            <div style={{color:C.muted,fontWeight:400,fontSize:10}}>by {d.epodDoneBy||"—"}</div>
+                          </div>
+                        ) : (
+                          <div style={{display:"flex",flexDirection:"column",gap:4,alignItems:"flex-start"}}>
+                            <label style={{display:"inline-flex",alignItems:"center",gap:4,background:C.blue,borderRadius:6,padding:"4px 9px",
+                              cursor:pdfUploading?"not-allowed":"pointer",color:"#fff",fontWeight:700,fontSize:10}}>
+                              {pdfUploading?"⏳":"⬆"} Upload
+                              <input type="file" accept=".pdf,image/*" style={{display:"none"}} disabled={pdfUploading}
+                                onChange={e=>{if(e.target.files[0]) uploadConfirmPdf(e.target.files[0], new Set([t.id]));}}/>
+                            </label>
+                            {isPartyMgr && (
+                              <button onClick={()=>markEpodDone(t, d.diNo, "confirm")}
+                                style={{background:"none",border:`1px solid ${C.green}`,borderRadius:6,color:C.green,fontSize:9,padding:"3px 7px",cursor:"pointer",fontWeight:700}}>
+                                ✅ Mark EPOD
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </td>
+
+                      {/* Ready for Billing */}
+                      <td style={{padding:"6px 8px",borderRight:bR,borderBottom:bB}}>
+                        {d.readyForBilling ? (
+                          <div>
+                            <div style={{color:C.green,fontWeight:700,fontSize:11}}>✓ Ready</div>
+                            <div style={{color:C.muted,fontSize:9,marginTop:1}}>{d.readyForBillingBy||"—"}</div>
+                            <div style={{color:C.muted,fontSize:9}}>{d.readyForBillingAt?new Date(d.readyForBillingAt).toLocaleString("en-IN",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"}):""}</div>
+                            {user?.role==="owner" && (
+                              <button onClick={()=>unmarkReadyForBilling(t,d.diNo)}
+                                style={{background:"none",border:`1px solid ${C.red}`,borderRadius:6,color:C.red,fontSize:9,padding:"2px 6px",cursor:"pointer",fontWeight:700,marginTop:3}}>
+                                ✕ Unmark
+                              </button>
+                            )}
+                          </div>
+                        ) : isPartyMgr ? (
+                          <button onClick={()=>markReadyForBilling(t,d.diNo)}
+                            style={{background:"none",border:`1px solid ${C.green}`,borderRadius:6,color:C.green,fontSize:10,padding:"4px 8px",cursor:"pointer",fontWeight:700}}>
+                            Mark Ready
+                          </button>
+                        ) : <span style={{color:C.muted,fontSize:11}}>—</span>}
+                      </td>
+
+                      {i===0 && (
+                        <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",borderRight:bR,borderBottom:bB}}>
+                          {t.mergedPdfPath
+                            ? <button onClick={async()=>{try{const url=await getSignedUrl(t.mergedPdfPath,3600);const a=document.createElement("a");a.href=url;a.download="MergedConfirmation_"+(t.lrNo||t.id)+".pdf";a.target="_blank";document.body.appendChild(a);a.click();document.body.removeChild(a);}catch(e){alert("Download failed: "+e.message);}}}
+                                style={{background:"none",border:`1px solid ${C.green}`,borderRadius:6,color:C.green,fontSize:11,padding:"3px 8px",cursor:"pointer"}}>⬇ PDF</button>
+                            : <span style={{color:C.muted,fontSize:11}}>—</span>}
+                        </td>
+                      )}
+                      <td style={{padding:"6px 8px",textAlign:"right",fontWeight:700,borderBottom:bB}}>{d.billedAmt>0?fmt(d.billedAmt):(d.qty&&t.givenRate?fmt(d.qty*t.givenRate):"—")}</td>
+                    </tr>
+                    );
+                  });
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       }
 
