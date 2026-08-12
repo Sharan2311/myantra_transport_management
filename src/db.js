@@ -55,6 +55,12 @@ const tripFromDB = r => ({
   epodDone: r.epod_done || false,
   epodDoneBy: r.epod_done_by || '',
   epodDoneAt: r.epod_done_at || '',
+  epodPouchDone: r.epod_pouch_done || false,
+  epodPouchBy: r.epod_pouch_by || '',
+  epodPouchAt: r.epod_pouch_at || '',
+  readyForBilling: r.ready_for_billing || false,
+  readyForBillingBy: r.ready_for_billing_by || '',
+  readyForBillingAt: r.ready_for_billing_at || '',
 })
 const tripToDB = t => ({
   id: t.id, type: t.type, lr_no: t.lrNo, di_no: t.diNo, truck_no: t.truckNo,
@@ -110,6 +116,12 @@ const tripToDB = t => ({
   epod_done: t.epodDone || false,
   epod_done_by: t.epodDoneBy || '',
   epod_done_at: t.epodDoneAt || '',
+  epod_pouch_done: t.epodPouchDone || false,
+  epod_pouch_by: t.epodPouchBy || '',
+  epod_pouch_at: t.epodPouchAt || '',
+  ready_for_billing: t.readyForBilling || false,
+  ready_for_billing_by: t.readyForBillingBy || '',
+  ready_for_billing_at: t.readyForBillingAt || '',
 })
 
 const vehicleFromDB = r => ({
