@@ -3408,6 +3408,12 @@ Rules:
   // Verify DI number from uploaded party GR/invoice file
   const verifyPartyFileDI = async (file, expectedDI, itemId, fileType) => {
     if(!expectedDI) return; // no DI to compare
+    // Invoices are validated differently from GRs: no consignor PAN/GST check
+    // (an invoice's own printed PAN/GST can legitimately differ from the GR's
+    // without meaning anything is wrong) — instead just the DI-number
+    // cross-check below (against the GR's already-verified DI) plus the
+    // Transported By check (via expectedTransporter, already always sent).
+    const docType = fileType==="invoiceFile" ? "invoice" : "gr";
     try {
       const base64 = await fileToBase64(file);
       const isImage = file.type.startsWith("image/");
@@ -3417,6 +3423,7 @@ Rules:
         body: JSON.stringify({ base64, anthropicKey: RC.anthropicKey,
           mediaType: isImage ? file.type : "application/pdf",
           promptType: "di",
+          docType,
           expectedDI: (expectedDI||"").replace(/\D/g,"") || undefined,
           expectedTransporter: RC.companyName,
         }),
@@ -3432,6 +3439,11 @@ Rules:
           msg: data._transporterMismatchMsg || "This file belongs to a different transporter",
         });
         return;
+      }
+      // Party Name is extracted from the invoice's Ship To block specifically —
+      // only meaningful for invoiceFile uploads, null/absent for GR uploads.
+      if(docType==="invoice" && data.partyName) {
+        updateItem(itemId, "partyName", data.partyName);
       }
       const extractedDI = (data.diNo||"").replace(/\D/g,"");
       const expectedClean = (expectedDI||"").replace(/\D/g,"");
