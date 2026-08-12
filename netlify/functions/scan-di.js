@@ -37,6 +37,7 @@ FIELDS TO EXTRACT — find each label and copy the value next to it verbatim:
 13. Number of bags → number only, 0 if not shown
 14. Freight rate per MT → number from "Rate PMT" or "Rate/MT" column — THIS document's rate only, do not reuse from memory
 15. Date → in YYYY-MM-DD format
+16. Party Name (Ship To) → ONLY relevant for INVOICE-format documents. Find the "Ship To" address block specifically — this is different from "Bill To" (the billing entity) and different from the Consignor. Copy the company/party name printed at the top of the Ship To block. Leave null if the document has no Ship To section (e.g. a GR copy).
 
 STRICT RULES:
 - diNo: must be exactly 10 digits. Count the digits — if wrapped across lines in the PDF, join them.
@@ -71,7 +72,8 @@ Return ONLY this JSON, no markdown, no explanation:
   "qty": <number or null>,
   "bags": <number or null>,
   "frRate": <number or null>,
-  "date": "<YYYY-MM-DD or null>"
+  "date": "<YYYY-MM-DD or null>",
+  "partyName": "<company/party name from the Ship To block on an invoice, or null>"
 }`;
 
 const PUMP_PROMPT = `You are reading a diesel pump statement Excel screenshot.
@@ -102,7 +104,7 @@ exports.handler = async (event) => {
 
   try {
     const body_parsed = JSON.parse(event.body);
-    const { base64, mediaType, promptType, expectedDI, expectedTransporter } = body_parsed;
+    const { base64, mediaType, promptType, expectedDI, expectedTransporter, docType } = body_parsed;
     const apiKey = body_parsed.anthropicKey || process.env.ANTHROPIC_API_KEY;
     if (!apiKey) {
       return { statusCode: 500, body: JSON.stringify({ error: "ANTHROPIC_API_KEY not set" }) };
@@ -241,17 +243,25 @@ exports.handler = async (event) => {
       // Consignor identity — if the consignor is Shree Cement, its PAN/GST must
       // exactly match one of the known plants. This is what actually pins the
       // document to a real plant rather than trusting the printed plant name text.
-      const consignorNorm = String(parsed.consignor || "").toUpperCase();
-      if (consignorNorm.includes("SHREE CEMENT")) {
-        const pan = String(parsed.consignorPAN || "").trim().toUpperCase();
-        const gst = String(parsed.consignorGST || "").trim().toUpperCase();
-        const match = SHREE_CONSIGNOR_WHITELIST.find(w => w.pan === pan && w.gst === gst);
-        if (!pan || !gst) {
-          rejections.push("Consignor PAN/GST could not be read from the document");
-        } else if (!match) {
-          rejections.push(`Consignor PAN/GST (${pan} / ${gst}) does not match any known Shree Cement plant`);
-        } else {
-          parsed._consignorPlant = match.plant;
+      // ONLY applied to GR documents. Invoices are validated a different way —
+      // by DI-number cross-check against the already-verified GR (done
+      // client-side in verifyPartyFileDI) and the Transported By check above —
+      // since an invoice's own printed PAN/GST can legitimately differ from
+      // what's on the GR (different template/software) without that meaning
+      // the invoice is fraudulent.
+      if (docType !== "invoice") {
+        const consignorNorm = String(parsed.consignor || "").toUpperCase();
+        if (consignorNorm.includes("SHREE CEMENT")) {
+          const pan = String(parsed.consignorPAN || "").trim().toUpperCase();
+          const gst = String(parsed.consignorGST || "").trim().toUpperCase();
+          const match = SHREE_CONSIGNOR_WHITELIST.find(w => w.pan === pan && w.gst === gst);
+          if (!pan || !gst) {
+            rejections.push("Consignor PAN/GST could not be read from the document");
+          } else if (!match) {
+            rejections.push(`Consignor PAN/GST (${pan} / ${gst}) does not match any known Shree Cement plant`);
+          } else {
+            parsed._consignorPlant = match.plant;
+          }
         }
       }
 
