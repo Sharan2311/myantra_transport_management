@@ -6561,6 +6561,22 @@ async function deletePartyFiles(tripId) {
 async function mergePDFs(pdfBuffers) {
   const { PDFDocument } = await import("pdf-lib");
   const merged = await PDFDocument.create();
+  // A4 in points — matches the actual page size Shree's GR/Invoice PDFs print
+  // at. Every page in the merged output is normalized to exactly this, so a
+  // phone-photo confirmation or a differently-sized source PDF can never
+  // produce a mismatched page next to the GR/Invoice pages.
+  const A4_WIDTH = 595.28, A4_HEIGHT = 841.89;
+
+  const drawFitted = (page, embedded, kind) => {
+    // Scale-to-fit (not stretch) — preserves aspect ratio so a tall phone
+    // screenshot doesn't get visibly warped to fill a wider A4 rect. Any
+    // leftover space is centered padding, not distortion.
+    const scale = Math.min(A4_WIDTH / embedded.width, A4_HEIGHT / embedded.height);
+    const w = embedded.width * scale, h = embedded.height * scale;
+    const opts = { x:(A4_WIDTH-w)/2, y:(A4_HEIGHT-h)/2, width:w, height:h };
+    kind === "page" ? page.drawPage(embedded, opts) : page.drawImage(embedded, opts);
+  };
+
   for (const buf of pdfBuffers) {
     try {
       // Detect PDF by %PDF magic bytes — images (JPEG/PNG) are embedded as a page
@@ -6568,15 +6584,15 @@ async function mergePDFs(pdfBuffers) {
       const isPDF = u8[0]===0x25&&u8[1]===0x50&&u8[2]===0x44&&u8[3]===0x46; // %PDF
       if(isPDF) {
         const doc = await PDFDocument.load(buf, { ignoreEncryption: true });
-        const pages = await merged.copyPages(doc, doc.getPageIndices());
-        pages.forEach(p => merged.addPage(p));
+        const embeddedPages = await merged.embedPdf(doc); // every page, in order
+        embeddedPages.forEach(ep => { const page = merged.addPage([A4_WIDTH, A4_HEIGHT]); drawFitted(page, ep, "page"); });
       } else {
         // Try JPEG first, fallback to PNG
         let img;
         try { img = await merged.embedJpg(buf); }
         catch { img = await merged.embedPng(buf); }
-        const page = merged.addPage([img.width, img.height]);
-        page.drawImage(img, {x:0, y:0, width:img.width, height:img.height});
+        const page = merged.addPage([A4_WIDTH, A4_HEIGHT]);
+        drawFitted(page, img, "image");
       }
     } catch(e) {
       console.warn("Could not merge one file:", e.message);
