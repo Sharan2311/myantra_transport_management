@@ -24490,18 +24490,32 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
   const [paySheet,  setPaySheet]  = useState(null);
   const [payReqSheet,   setPayReqSheet]   = useState(null); // trip for request payment
   // ── Return Pouch / Confirmation deadline gate ──────────────────────────────
-  // Cross-trip, account-level block: if this employee has ANY party trip 8+
-  // days old still missing pouch/confirmation, block payment requests for
-  // EVERYTHING (not just the offending trip) until it's resolved. Owner is
-  // never blocked. Per-employee opt-out via employee.pouchDeadlineEnforced.
+  // Cross-trip, TRUCK-level block: keyed off the truck(s) actually being
+  // requested, not the logged-in user's own employee link. Any non-owner
+  // requesting payment for a truck whose linked employee has an overdue
+  // trip is blocked — regardless of whether they ARE that employee or
+  // someone else entirely (a different employee, a shared account, etc).
+  // "Only the owner should be allowed" means exactly that: everyone else,
+  // not just the specific employee who missed the deadline.
   const [pouchBlockShow, setPouchBlockShow] = useState(false);
   const [pouchBlockLang, setPouchBlockLang] = useState("en");
-  const myPouchBlockingTrips = (() => {
-    if(user?.role==="owner" || !user?.assignedEmployeeId) return [];
-    const emp = (employees||[]).find(e=>e.id===user.assignedEmployeeId);
-    if(emp && emp.pouchDeadlineEnforced===false) return [];
-    return employeePouchOverdueTrips(trips, settings, user.assignedEmployeeId).filter(t=>daysSinceDate(t.date)>=8);
-  })();
+  const [pouchBlockingTrips, setPouchBlockingTrips] = useState([]);
+  const pouchBlockFor = (checkTrips) => {
+    if(user?.role==="owner") return [];
+    const list = Array.isArray(checkTrips) ? checkTrips : [checkTrips];
+    const truckNos = [...new Set(list.map(t=>t.truckNo).filter(Boolean))];
+    const seen = new Set();
+    const blocking = [];
+    truckNos.forEach(truckNo => {
+      const empId = resolveEmpForTruck(truckNo, trips);
+      if(!empId || seen.has(empId)) return;
+      seen.add(empId);
+      const emp = (employees||[]).find(e=>e.id===empId);
+      if(emp && emp.pouchDeadlineEnforced===false) return;
+      blocking.push(...employeePouchOverdueTrips(trips, settings, empId).filter(t=>daysSinceDate(t.date)>=8));
+    });
+    return blocking;
+  };
 
   // ── Diesel-confirmation gate ────────────────────────────────────────────────
   // Before a payment request goes out for a trip with NO diesel indent attached,
@@ -24514,9 +24528,11 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
   const [dieselGateLang,   setDieselGateLang]   = useState("en"); // en | kn | te | mr
 
   const requestPaymentGuarded = (checkTrips, openWith) => {
-    // Account-level block comes first — it doesn't matter which trip they're
-    // trying to request for, if it applies at all it applies to everything.
-    if (myPouchBlockingTrips.length > 0) { setPouchBlockShow(true); return; }
+    // Truck-level block comes first — it doesn't matter WHO is requesting,
+    // if the truck being requested is linked to an employee with an overdue
+    // confirmation, the request is blocked for everyone except the owner.
+    const blocking = pouchBlockFor(checkTrips);
+    if (blocking.length > 0) { setPouchBlockingTrips(blocking); setPouchBlockShow(true); return; }
     const list = Array.isArray(checkTrips) ? checkTrips : [checkTrips];
     // A settled trip normally can't have anything else requested for it — EXCEPT
     // a party trip that settled on its main balance while the invoice was still
@@ -25639,9 +25655,9 @@ This will auto-recover in the next trip.`);
                   </button>
                 ))}
               </div>
-              <div style={{color:C.text,fontSize:13,lineHeight:1.5}}>{pt.intro(myPouchBlockingTrips.length)}</div>
+              <div style={{color:C.text,fontSize:13,lineHeight:1.5}}>{pt.intro(pouchBlockingTrips.length)}</div>
               <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                {myPouchBlockingTrips.map(t=>(
+                {pouchBlockingTrips.map(t=>(
                   <div key={t.id} style={{background:C.bg,borderRadius:10,padding:"10px 12px",border:`1px solid ${C.red}55`,fontSize:12,color:C.text}}>
                     {pt.tripLine(t.lrNo||"—", t.truckNo, t.date, blockDateOf(t))}
                   </div>
