@@ -13869,7 +13869,13 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
           )}
           {verifiableRequests.map(r=>{
             const pump = pumps.find(p=>p.id===r.pumpId);
-            const hasAttachment = !!(r.receiptImagePath);
+            // "attached" (the status) means linked to a trip/LR -- NOT that a
+            // receipt photo was uploaded. Those are two different things;
+            // showing LR presence directly is what actually answers "is this
+            // properly attached", not the receiptImagePath field.
+            const dieselAmt = r.confirmedAmount ?? r.dieselAmount ?? 0;
+            const cashAmt   = r.confirmedCash   ?? r.cashAmount   ?? 0;
+            const total     = dieselAmt + cashAmt || r.amount || 0;
             return (
               <div key={r.id} style={{background:C.card,borderRadius:12,padding:"12px 14px",
                 border:`1.5px solid ${r.ownerVerified?C.green+"66":C.border}`}}>
@@ -13877,11 +13883,17 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{fontWeight:800,fontSize:14}}>#{r.indentNo} · {r.truckNo}</div>
                     <div style={{color:C.muted,fontSize:12,marginTop:2}}>{pump?.name||"—"} · {r.date}</div>
-                    <div style={{display:"flex",gap:6,marginTop:6,flexWrap:"wrap"}}>
-                      <Badge label={hasAttachment?"📎 Attached":"⚠ No Attachment"} color={hasAttachment?C.blue:C.orange} />
-                      <Badge label={`₹${fmt(r.confirmedAmount??r.amount)}`} color={C.teal} />
-                      {(r.vehicleMismatch||r.pumpMismatch||r.dateMismatch) && <Badge label="⚠ Had Mismatch" color={C.red} />}
+                    <div style={{marginTop:6}}>
+                      {r.lrNo
+                        ? <Badge label={`LR: ${r.lrNo}`} color={C.blue} />
+                        : <Badge label="⚠ No LR Attached" color={C.orange} />}
                     </div>
+                    <div style={{display:"flex",gap:14,marginTop:8,fontSize:12}}>
+                      <div><span style={{color:C.muted}}>Diesel</span> <b style={{color:C.text}}>{fmt(dieselAmt)}</b></div>
+                      <div><span style={{color:C.muted}}>Cash</span> <b style={{color:C.text}}>{fmt(cashAmt)}</b></div>
+                      <div><span style={{color:C.muted}}>Total</span> <b style={{color:C.teal}}>{fmt(total)}</b></div>
+                    </div>
+                    {(r.vehicleMismatch||r.pumpMismatch||r.dateMismatch) && <div style={{marginTop:6}}><Badge label="⚠ Had Mismatch" color={C.red} /></div>}
                     {r.ownerVerified && (
                       <div style={{color:C.green,fontSize:11,marginTop:6}}>
                         ✓ Checked by {r.ownerVerifiedBy||"—"} · {r.ownerVerifiedAt?new Date(r.ownerVerifiedAt).toLocaleString("en-IN",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"}):""}
@@ -15247,7 +15259,13 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
           )}
           {verifiableRequests.map(r=>{
             const pump = pumps.find(p=>p.id===r.pumpId);
-            const hasAttachment = !!(r.receiptImagePath);
+            // "attached" (the status) means linked to a trip/LR -- NOT that a
+            // receipt photo was uploaded. Those are two different things;
+            // showing LR presence directly is what actually answers "is this
+            // properly attached", not the receiptImagePath field.
+            const dieselAmt = r.confirmedAmount ?? r.dieselAmount ?? 0;
+            const cashAmt   = r.confirmedCash   ?? r.cashAmount   ?? 0;
+            const total     = dieselAmt + cashAmt || r.amount || 0;
             return (
               <div key={r.id} style={{background:C.card,borderRadius:12,padding:"12px 14px",
                 border:`1.5px solid ${r.ownerVerified?C.green+"66":C.border}`}}>
@@ -15255,11 +15273,17 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{fontWeight:800,fontSize:14}}>#{r.indentNo} · {r.truckNo}</div>
                     <div style={{color:C.muted,fontSize:12,marginTop:2}}>{pump?.name||"—"} · {r.date}</div>
-                    <div style={{display:"flex",gap:6,marginTop:6,flexWrap:"wrap"}}>
-                      <Badge label={hasAttachment?"📎 Attached":"⚠ No Attachment"} color={hasAttachment?C.blue:C.orange} />
-                      <Badge label={`₹${fmt(r.confirmedAmount??r.amount)}`} color={C.teal} />
-                      {(r.vehicleMismatch||r.pumpMismatch||r.dateMismatch) && <Badge label="⚠ Had Mismatch" color={C.red} />}
+                    <div style={{marginTop:6}}>
+                      {r.lrNo
+                        ? <Badge label={`LR: ${r.lrNo}`} color={C.blue} />
+                        : <Badge label="⚠ No LR Attached" color={C.orange} />}
                     </div>
+                    <div style={{display:"flex",gap:14,marginTop:8,fontSize:12}}>
+                      <div><span style={{color:C.muted}}>Diesel</span> <b style={{color:C.text}}>{fmt(dieselAmt)}</b></div>
+                      <div><span style={{color:C.muted}}>Cash</span> <b style={{color:C.text}}>{fmt(cashAmt)}</b></div>
+                      <div><span style={{color:C.muted}}>Total</span> <b style={{color:C.teal}}>{fmt(total)}</b></div>
+                    </div>
+                    {(r.vehicleMismatch||r.pumpMismatch||r.dateMismatch) && <div style={{marginTop:6}}><Badge label="⚠ Had Mismatch" color={C.red} /></div>}
                     {r.ownerVerified && (
                       <div style={{color:C.green,fontSize:11,marginTop:6}}>
                         ✓ Checked by {r.ownerVerifiedBy||"—"} · {r.ownerVerifiedAt?new Date(r.ownerVerifiedAt).toLocaleString("en-IN",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"}):""}
@@ -15303,7 +15327,12 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
               <button onClick={()=>{setScanSheet(true);setScanResults(null);setScanSummary(null);}}
                 style={{flex:1,background:C.accent,color:"#fff",border:"none",borderRadius:10,padding:"10px 14px",
                   fontWeight:700,fontSize:13,cursor:"pointer"}}>📷 Scan Payment</button>
-              <button onClick={()=>{if(!payPumpId)setPayPumpId(pumps[0]?.id||"");}}
+              <button onClick={()=>{
+                  const pid = payPumpId || pumps[0]?.id || "";
+                  setPayPumpId(pid);
+                  setExpandPump(pid);
+                  setView("pumps");
+                }}
                 style={{flex:1,background:C.card,color:C.text,border:`1px solid ${C.border}`,borderRadius:10,
                   padding:"10px 14px",fontWeight:700,fontSize:13,cursor:"pointer"}}>✏️ Record Manually</button>
             </>)}
