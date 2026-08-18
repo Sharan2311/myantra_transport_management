@@ -13601,7 +13601,7 @@ const dieselDateMismatch = (extractedDate, requestDate) => {
 };
 
 function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayments=[], user, log}) {
-  const [activeTab,   setActiveTab]   = useState("open");   // open | history | payments
+  const [activeTab,   setActiveTab]   = useState("open");   // open | history | payments | verify
   const [lrSearch,    setLrSearch]    = useState("");
   const [selected,    setSelected]    = useState(null);
   const [newDieselAmt, setNewDieselAmt] = useState("");  // editable diesel component
@@ -13617,6 +13617,12 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
   // History date filter
   const [histFrom,    setHistFrom]    = useState("");
   const [histTo,      setHistTo]      = useState("");
+
+  // Daily verification checklist — owner-only, one-time permanent mark per
+  // request ("I personally checked this request's attachment and amount").
+  // Separate from the automated confirmed/attached status: that's the system
+  // saying the numbers matched; this is a human saying they looked at it.
+  const [verifyFilter, setVerifyFilter] = useState("not_checked"); // all | checked | not_checked
 
   // Scope to assigned pump if user has one
   const assignedPumpId = user?.assignedPumpId || "";
@@ -13643,6 +13649,26 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
   const totalIndentAmt  = scopedRequests.filter(r=>r.status==="confirmed"||r.status==="attached").reduce((s,r)=>s+(r.amount||0),0);
   const totalPaid       = scopedPayments.reduce((s,p)=>s+(+(p.amount)||0),0);
   const pendingAmt      = Math.max(0, totalIndentAmt - totalPaid);
+
+  // Verification checklist — every confirmed/attached request, ever (full
+  // backlog, not scoped to today), filterable by checked status. A request
+  // never disappears once checked — it just carries the checkmark forward.
+  const verifiableRequests = scopedRequests
+    .filter(r => r.status==="confirmed"||r.status==="attached")
+    .filter(r => verifyFilter==="all" || (verifyFilter==="checked")===!!r.ownerVerified)
+    .sort((a,b)=>b.indentNo-a.indentNo);
+  const verifiedCount = scopedRequests.filter(r => (r.status==="confirmed"||r.status==="attached") && r.ownerVerified).length;
+  const verifiableTotal = scopedRequests.filter(r => r.status==="confirmed"||r.status==="attached").length;
+
+  const markOwnerVerified = (req, value) => {
+    if(user?.role!=="owner") { alert("Only the owner can mark requests as checked."); return; }
+    const updated = value
+      ? {...req, ownerVerified:true, ownerVerifiedBy:user?.name||user?.username||"", ownerVerifiedAt:new Date().toISOString()}
+      : {...req, ownerVerified:false, ownerVerifiedBy:"", ownerVerifiedAt:""};
+    setDieselRequests(prev=>prev.map(r=>r.id===req.id?updated:r));
+    DB.saveDieselRequest(updated).catch(e=>console.error("saveDieselRequest ownerVerified:",e));
+    log&&log(value?"REQUEST VERIFIED":"REQUEST VERIFICATION REMOVED", `Indent #${req.indentNo} · ${req.truckNo} by ${user?.name||user?.username}`);
+  };
 
   const resetFlow = () => {
     setSelected(null); setNewDieselAmt(""); setNewCashAmt(""); setReason("");
@@ -13807,6 +13833,7 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
           {id:"open",     label:`Open (${openRequests.length})`},
           {id:"history",  label:"History"},
           {id:"payments", label:"Payments"},
+          ...(user.role==="owner"?[{id:"verify", label:`Verify (${verifiedCount}/${verifiableTotal})`}]:[]),
         ].map(t=>(
           <button key={t.id} onClick={()=>{setActiveTab(t.id);resetFlow();}}
             style={{flex:1,padding:"7px 4px",borderRadius:8,border:"none",cursor:"pointer",
@@ -13817,6 +13844,62 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
           </button>
         ))}
       </div>
+
+      {/* ── DAILY VERIFICATION CHECKLIST TAB — owner only ── */}
+      {activeTab==="verify" && user.role==="owner" && (
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          <div style={{background:C.card,borderRadius:10,padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div style={{color:C.muted,fontSize:12}}>Every confirmed/attached request — mark once you've personally checked the attachment and amount</div>
+            <div style={{color:C.green,fontWeight:800,fontSize:14,flexShrink:0,marginLeft:8}}>{verifiedCount}/{verifiableTotal}</div>
+          </div>
+          <div style={{display:"flex",gap:6}}>
+            {[["not_checked","Not Checked"],["checked","✓ Checked"],["all","All"]].map(([k,l])=>(
+              <button key={k} onClick={()=>setVerifyFilter(k)}
+                style={{flex:1,padding:"6px 4px",borderRadius:8,cursor:"pointer",fontWeight:700,fontSize:11,
+                  background:verifyFilter===k?C.teal:"transparent",border:`1.5px solid ${C.teal}`,
+                  color:verifyFilter===k?"#fff":C.teal}}>
+                {l}
+              </button>
+            ))}
+          </div>
+          {verifiableRequests.length===0 && (
+            <div style={{textAlign:"center",color:C.muted,padding:32}}>
+              {verifyFilter==="not_checked" ? "Nothing left to check ✓" : "No requests match this filter"}
+            </div>
+          )}
+          {verifiableRequests.map(r=>{
+            const pump = pumps.find(p=>p.id===r.pumpId);
+            const hasAttachment = !!(r.receiptImagePath);
+            return (
+              <div key={r.id} style={{background:C.card,borderRadius:12,padding:"12px 14px",
+                border:`1.5px solid ${r.ownerVerified?C.green+"66":C.border}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontWeight:800,fontSize:14}}>#{r.indentNo} · {r.truckNo}</div>
+                    <div style={{color:C.muted,fontSize:12,marginTop:2}}>{pump?.name||"—"} · {r.date}</div>
+                    <div style={{display:"flex",gap:6,marginTop:6,flexWrap:"wrap"}}>
+                      <Badge label={hasAttachment?"📎 Attached":"⚠ No Attachment"} color={hasAttachment?C.blue:C.orange} />
+                      <Badge label={`₹${fmt(r.confirmedAmount??r.amount)}`} color={C.teal} />
+                      {(r.vehicleMismatch||r.pumpMismatch||r.dateMismatch) && <Badge label="⚠ Had Mismatch" color={C.red} />}
+                    </div>
+                    {r.ownerVerified && (
+                      <div style={{color:C.green,fontSize:11,marginTop:6}}>
+                        ✓ Checked by {r.ownerVerifiedBy||"—"} · {r.ownerVerifiedAt?new Date(r.ownerVerifiedAt).toLocaleString("en-IN",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"}):""}
+                      </div>
+                    )}
+                  </div>
+                  <button onClick={()=>markOwnerVerified(r, !r.ownerVerified)}
+                    style={{flexShrink:0,padding:"7px 14px",borderRadius:8,border:`1.5px solid ${r.ownerVerified?C.green:C.teal}`,
+                      background:r.ownerVerified?C.green+"22":"transparent",
+                      color:r.ownerVerified?C.green:C.teal,fontWeight:700,fontSize:12,cursor:"pointer"}}>
+                    {r.ownerVerified?"✓ Checked":"Mark Checked"}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* ── OPEN INDENTS TAB ── */}
       {activeTab==="open" && (<>
