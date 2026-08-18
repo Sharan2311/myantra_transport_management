@@ -14529,6 +14529,9 @@ function DieselReceiptReviewCard({ req, pumps, dieselRequests=[], user, log, vie
 
 function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, driverPays, setDriverPays, user, log, viewOnly=false, dieselRequests=[], setDieselRequests, settings}) {
   const [view,        setView]        = useState("requests");
+  // Daily verification checklist — owner-only, one-time permanent mark per
+  // request ("I personally checked this request's attachment and amount").
+  const [verifyFilter, setVerifyFilter] = useState("not_checked"); // all | checked | not_checked
   const [pumpSheet,   setPumpSheet]   = useState(false);
   const [scanSheet,   setScanSheet]   = useState(false);
   const [scanResults, setScanResults] = useState(null);
@@ -14760,16 +14763,51 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
     }
   };
 
+  // Total owed is computed from mye_diesel_requests (the live, actively-used
+  // request/receipt/PIN-confirm system, 870+ rows) rather than mye_indents
+  // (a separate, much smaller, mostly-legacy reconciliation table that only
+  // ever really accumulated data for one pump — confirmed against real data
+  // before making this change). Uses each request's diesel-only portion
+  // (confirmedAmount if the manager confirmed one, else the originally
+  // requested dieselAmount) — NOT the combined `amount` field, which can
+  // include a cash component paid directly to the driver, not owed to the pump.
+  const pumpOwedAmount = r => r.confirmedAmount != null ? r.confirmedAmount : (r.dieselAmount != null ? r.dieselAmount : (r.amount||0));
+
   // Per-pump balance: total confirmed - total paid
   const pumpBalances = pumps.map((p) => {
-    // Only count indents explicitly assigned to this pump — no auto-fallback
-    const pIndents = confirmedIndents.filter(i => i.pumpId === p.id);
+    // Only count requests explicitly assigned to this pump — no auto-fallback.
+    // Per explicit instruction, only status==="attached" counts toward what's
+    // owed — "confirmed" (the further-along, manager-reviewed status) is
+    // excluded from this calculation.
+    const pIndents = (dieselRequests||[])
+      .filter(r => r.pumpId===p.id && r.status==="attached")
+      .map(r => ({...r, amount: pumpOwedAmount(r)})); // normalize .amount to the pump-owed portion for display below
     const totalOwed = pIndents.reduce((s,i) => s+(+(i.amount)||0), 0);
     const totalPaid = (pumpPayments||[]).filter(pp => pp.pumpId === p.id)
                         .reduce((s,pp) => s+(+(pp.amount)||0), 0);
     const pending   = Math.max(0, totalOwed - totalPaid);
     return { ...p, pIndents, totalOwed, totalPaid, pending };
   });
+
+  // Verification checklist — every confirmed/attached diesel request, ever
+  // (full backlog), filterable by checked status. Never disappears once
+  // checked — the checkmark just carries forward.
+  const verifiableRequests = (dieselRequests||[])
+    .filter(r => r.status==="confirmed"||r.status==="attached")
+    .filter(r => verifyFilter==="all" || (verifyFilter==="checked")===!!r.ownerVerified)
+    .sort((a,b)=>(b.indentNo||0)-(a.indentNo||0));
+  const verifiedCount = (dieselRequests||[]).filter(r => (r.status==="confirmed"||r.status==="attached") && r.ownerVerified).length;
+  const verifiableTotal = (dieselRequests||[]).filter(r => r.status==="confirmed"||r.status==="attached").length;
+
+  const markOwnerVerified = (req, value) => {
+    if(user?.role!=="owner") { alert("Only the owner can mark requests as checked."); return; }
+    const updated = value
+      ? {...req, ownerVerified:true, ownerVerifiedBy:user?.name||user?.username||"", ownerVerifiedAt:new Date().toISOString()}
+      : {...req, ownerVerified:false, ownerVerifiedBy:"", ownerVerifiedAt:""};
+    setDieselRequests(prev=>prev.map(r=>r.id===req.id?updated:r));
+    DB.saveDieselRequest(updated).catch(e=>console.error("saveDieselRequest ownerVerified:",e));
+    log&&log(value?"REQUEST VERIFIED":"REQUEST VERIFICATION REMOVED", `Indent #${req.indentNo} · ${req.truckNo} by ${user?.name||user?.username}`);
+  };
 
   const confirmScanned = async () => {
     // ── DEDUP: check scanned indents against already-saved ones ──────────────
@@ -15182,7 +15220,64 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
         {id:"lrmap",    label:"LR ↔ Indent", color:C.teal||C.purple},
         ...(user.role==="owner"?[{id:"reconcile", label:"🔍 Reconcile", color:C.red}]:[]),
         {id:"history",  label:"Alerts", color:C.muted},
+        ...(user.role==="owner"?[{id:"verify", label:`Verify (${verifiedCount}/${verifiableTotal})`, color:C.purple}]:[]),
       ]} active={view} onSelect={setView} />
+
+      {/* ── DAILY VERIFICATION CHECKLIST — owner only ── */}
+      {view==="verify" && user.role==="owner" && (
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          <div style={{background:C.card,borderRadius:10,padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div style={{color:C.muted,fontSize:12}}>Every confirmed/attached request — mark once you've personally checked the attachment and amount</div>
+            <div style={{color:C.green,fontWeight:800,fontSize:14,flexShrink:0,marginLeft:8}}>{verifiedCount}/{verifiableTotal}</div>
+          </div>
+          <div style={{display:"flex",gap:6}}>
+            {[["not_checked","Not Checked"],["checked","✓ Checked"],["all","All"]].map(([k,l])=>(
+              <button key={k} onClick={()=>setVerifyFilter(k)}
+                style={{flex:1,padding:"6px 4px",borderRadius:8,cursor:"pointer",fontWeight:700,fontSize:11,
+                  background:verifyFilter===k?C.teal:"transparent",border:`1.5px solid ${C.teal}`,
+                  color:verifyFilter===k?"#fff":C.teal}}>
+                {l}
+              </button>
+            ))}
+          </div>
+          {verifiableRequests.length===0 && (
+            <div style={{textAlign:"center",color:C.muted,padding:32}}>
+              {verifyFilter==="not_checked" ? "Nothing left to check ✓" : "No requests match this filter"}
+            </div>
+          )}
+          {verifiableRequests.map(r=>{
+            const pump = pumps.find(p=>p.id===r.pumpId);
+            const hasAttachment = !!(r.receiptImagePath);
+            return (
+              <div key={r.id} style={{background:C.card,borderRadius:12,padding:"12px 14px",
+                border:`1.5px solid ${r.ownerVerified?C.green+"66":C.border}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontWeight:800,fontSize:14}}>#{r.indentNo} · {r.truckNo}</div>
+                    <div style={{color:C.muted,fontSize:12,marginTop:2}}>{pump?.name||"—"} · {r.date}</div>
+                    <div style={{display:"flex",gap:6,marginTop:6,flexWrap:"wrap"}}>
+                      <Badge label={hasAttachment?"📎 Attached":"⚠ No Attachment"} color={hasAttachment?C.blue:C.orange} />
+                      <Badge label={`₹${fmt(r.confirmedAmount??r.amount)}`} color={C.teal} />
+                      {(r.vehicleMismatch||r.pumpMismatch||r.dateMismatch) && <Badge label="⚠ Had Mismatch" color={C.red} />}
+                    </div>
+                    {r.ownerVerified && (
+                      <div style={{color:C.green,fontSize:11,marginTop:6}}>
+                        ✓ Checked by {r.ownerVerifiedBy||"—"} · {r.ownerVerifiedAt?new Date(r.ownerVerifiedAt).toLocaleString("en-IN",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"}):""}
+                      </div>
+                    )}
+                  </div>
+                  <button onClick={()=>markOwnerVerified(r, !r.ownerVerified)}
+                    style={{flexShrink:0,padding:"7px 14px",borderRadius:8,border:`1.5px solid ${r.ownerVerified?C.green:C.teal}`,
+                      background:r.ownerVerified?C.green+"22":"transparent",
+                      color:r.ownerVerified?C.green:C.teal,fontWeight:700,fontSize:12,cursor:"pointer"}}>
+                    {r.ownerVerified?"✓ Checked":"Mark Checked"}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* ── RECEIPT REVIEW VIEW — mismatches flagged by the scan, manager corrects & approves ── */}
       {view==="review" && (
