@@ -685,8 +685,8 @@ export const DB = {
       rejected_by: r.rejectedBy||null,
       rejected_at: r.rejectedAt||null,
       owner_verified: r.ownerVerified||false,
-      owner_verified_by: r.ownerVerifiedBy||null,
-      owner_verified_at: r.ownerVerifiedAt||null,
+      owner_verified_by: r.ownerVerifiedBy||'',
+      owner_verified_at: r.ownerVerifiedAt||'',
     }, { onConflict: 'id', ignoreDuplicates: false });
     if(error && !error.message?.includes('duplicate key')) throw error;
   },
