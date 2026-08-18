@@ -14588,6 +14588,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
   const [payUtr,      setPayUtr]      = useState("");
   const [payPaidTo,   setPayPaidTo]   = useState("");
   const [payNote,     setPayNote]     = useState("");
+  const [payDate,     setPayDate]     = useState(today());
   const [expandPump,  setExpandPump]  = useState(null);
   const [editPumpNameId, setEditPumpNameId] = useState(null);
   const [editPumpName, setEditPumpName] = useState("");
@@ -15014,11 +15015,11 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
     if (!payAmt || +payAmt <= 0 || !payUtr.trim()) return;
     const pump = pumps.find(p => p.id === payPumpId);
     const payment = { id:uid(), pumpId:payPumpId, amount:+payAmt, utr:payUtr.trim(),
-      date:today(), paidTo:payPaidTo.trim(), note:payNote.trim(), createdBy:user.username, createdAt:nowTs() };
+      date:payDate||today(), paidTo:payPaidTo.trim(), note:payNote.trim(), createdBy:user.username, createdAt:nowTs() };
     setPumpPayments(prev => [payment, ...(prev||[])]);
     await DB.savePumpPayment(payment);
-    log("PUMP PAYMENT", `${pump?.name} ₹${fmt(+payAmt)} UTR: ${payUtr}`);
-    setPayPumpId(null); setPayAmt(""); setPayUtr(""); setPayPaidTo(""); setPayNote("");
+    log("PUMP PAYMENT", `${pump?.name} ₹${fmt(+payAmt)} UTR: ${payUtr} · ${payment.date}`);
+    setPayPumpId(null); setPayAmt(""); setPayUtr(""); setPayPaidTo(""); setPayNote(""); setPayDate(today());
   };
 
   const deletePumpPayment = async (id) => {
@@ -15555,6 +15556,8 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                               note={`Pending: ${fmt(p.pending)}`} />
                             <Field label="UTR / Ref No" value={payUtr} onChange={setPayUtr} half />
                           </div>
+                          <Field label="Date" value={payDate} onChange={setPayDate} type="date"
+                            note="Change this if recording a past payment" />
                           <Field label="Paid To" value={payPaidTo} onChange={setPayPaidTo} placeholder="Recipient name…" />
                           <Field label="Note (optional)" value={payNote} onChange={setPayNote}
                             placeholder="e.g. 1st–15th Mar payment" />
