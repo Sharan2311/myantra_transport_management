@@ -15010,6 +15010,80 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
     log("DIESEL CONFIRM", `Truck ${ind?.truckNo} ₹${ind?.amount} confirmed`);
   };
 
+  // ── Pump Report — chronological indent+payment ledger, date-filterable ────
+  const [pumpReportOpenFor, setPumpReportOpenFor] = useState(null); // pump id whose report filter panel is open
+  const [pumpReportFrom,    setPumpReportFrom]    = useState("");
+  const [pumpReportTo,      setPumpReportTo]      = useState("");
+
+  const exportPumpReport = (pump, pIndentsAll, pPaymentsAll, repFrom="", repTo="") => {
+    const indentsInRange  = (pIndentsAll||[]).filter(i => (!repFrom || i.date>=repFrom) && (!repTo || i.date<=repTo));
+    const paymentsInRange = (pPaymentsAll||[]).filter(pp => (!repFrom || pp.date>=repFrom) && (!repTo || pp.date<=repTo));
+    const totalOwedRange  = indentsInRange.reduce((s,i)=>s+(+i.amount||0),0);
+    const totalPaidRange  = paymentsInRange.reduce((s,pp)=>s+(+pp.amount||0),0);
+    const remaining       = totalOwedRange - totalPaidRange;
+
+    // Combined chronological ledger — indents (debit) and payments (credit)
+    // interleaved by date with a running balance, payment rows highlighted,
+    // so it's visually obvious exactly when a payment landed relative to
+    // what was owed at that point — not two separate disconnected lists.
+    const ledger = [
+      ...indentsInRange.map(i => ({date:i.date||"", type:"indent", label:`Indent #${i.indentNo} · ${i.truckNo}`, debit:+i.amount||0, credit:0})),
+      ...paymentsInRange.map(pp => ({date:pp.date||"", type:"payment", label:`Payment${pp.utr?` · UTR ${pp.utr}`:""}${pp.paidTo?` · to ${pp.paidTo}`:""}${pp.note?` · ${pp.note}`:""}`, debit:0, credit:+pp.amount||0})),
+    ].sort((a,b)=>a.date.localeCompare(b.date));
+
+    let running = 0;
+    const ledgerRows = ledger.map(row => {
+      running += row.debit - row.credit;
+      const isPayment = row.type==="payment";
+      return `<tr${isPayment?' style="background:#dcfce7;font-weight:700"':""}>
+        <td>${row.date||"—"}</td>
+        <td>${isPayment?"💳 Payment":"⛽ Indent"}</td>
+        <td>${row.label}</td>
+        <td style="text-align:right;color:#dc2626">${row.debit?fmt(row.debit):"—"}</td>
+        <td style="text-align:right;color:#16a34a">${row.credit?fmt(row.credit):"—"}</td>
+        <td style="text-align:right;font-weight:700">${fmt(running)}</td>
+      </tr>`;
+    }).join("");
+
+    const html = `<style>
+      body{font-family:'Segoe UI',Arial,sans-serif;font-size:11px;color:#111;margin:20px}
+      h2{font-size:13px;color:#333;margin:18px 0 5px;border-bottom:2px solid #eee;padding-bottom:4px}
+      .kpis{display:flex;gap:12px;margin:12px 0;flex-wrap:wrap}
+      .kpi{border:1px solid #ddd;border-radius:6px;padding:8px 14px;min-width:120px;text-align:center}
+      .kpi .val{font-size:16px;font-weight:800} .kpi .lbl{font-size:9px;color:#888;margin-top:2px}
+      table{width:100%;border-collapse:collapse;margin-bottom:10px;font-size:10px}
+      th{background:#1565c0;color:white;padding:5px 7px;text-align:left;border:1px solid #1565c0;font-size:9px;text-transform:uppercase}
+      td{padding:4px 7px;border:1px solid #e0e0e0}
+      .footer{margin-top:20px;font-size:9px;color:#aaa;border-top:1px solid #eee;padding-top:8px}
+      .empty{color:#999;font-style:italic;font-size:11px;padding:6px 0}
+      .logo-img{width:52px;height:52px;border-radius:8px;object-fit:cover}
+      @media print { * { -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; } }
+    </style>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;padding-bottom:8px;border-bottom:2px solid #1565c0">
+      <img src="${RC.logoSrc}" class="logo-img" alt="${RC.companyShort}" />
+      <div>
+        <div style="font-size:7px;text-transform:uppercase;letter-spacing:2px;color:#1565c0;font-weight:700">${RC.companyName}</div>
+        <div style="font-size:20px;font-weight:800;line-height:1.2">Pump Report — ${pump.name}</div>
+        <div style="font-size:10px;color:#888">Generated ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}${repFrom||repTo ? ` &nbsp;·&nbsp; Period: <b>${repFrom||"start"}</b> to <b>${repTo||"today"}</b>` : " · All time"}</div>
+      </div>
+    </div>
+
+    <div class="kpis">
+      <div class="kpi"><div class="val" style="color:#dc2626">₹${fmt(totalOwedRange)}</div><div class="lbl">TOTAL OWED (PERIOD)</div></div>
+      <div class="kpi"><div class="val" style="color:#16a34a">₹${fmt(totalPaidRange)}</div><div class="lbl">TOTAL PAID (PERIOD)</div></div>
+      <div class="kpi"><div class="val" style="color:${remaining>0?"#dc2626":"#16a34a"}">₹${fmt(remaining)}</div><div class="lbl">REMAINING BALANCE</div></div>
+    </div>
+
+    <h2>📒 Ledger — Indents &amp; Payments (${ledger.length} entries)</h2>
+    ${ledger.length===0?'<div class="empty">No activity in this period.</div>':`<table><tr><th>Date</th><th>Type</th><th>Details</th><th style="text-align:right">Owed</th><th style="text-align:right">Paid</th><th style="text-align:right">Running Balance</th></tr>${ledgerRows}</table>`}
+
+    <div class="footer">${RC.companyName} · ${pump.name}${pump.contact?` · ${pump.contact}`:""} · Report generated ${new Date().toLocaleString("en-IN")}</div>`;
+
+    const w = window.open("","_blank");
+    w.document.write(`<!DOCTYPE html><html><head><title>${pump.name} — Pump Report</title></head><body onload="window.print()">${html}</body></html>`);
+    w.document.close();
+  };
+
   const recordPumpPayment = async () => {
     if (!payPumpId) { alert("Select a pump before recording this payment — every payment must be linked to one."); return; }
     if (!payAmt || +payAmt <= 0 || !payUtr.trim()) return;
@@ -15576,6 +15650,32 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                         </Btn>
                       )
                     )}
+
+                    {/* Pump report — date-filterable ledger, PDF-style print */}
+                    <div>
+                      {pumpReportOpenFor===p.id ? (
+                        <div style={{background:C.bg,borderRadius:10,padding:"12px 14px",display:"flex",flexDirection:"column",gap:8}}>
+                          <div style={{color:C.text,fontWeight:700,fontSize:13}}>📄 Generate Pump Report</div>
+                          <div style={{display:"flex",gap:8}}>
+                            <Field label="From" value={pumpReportFrom} onChange={setPumpReportFrom} type="date" half />
+                            <Field label="To"   value={pumpReportTo}   onChange={setPumpReportTo}   type="date" half />
+                          </div>
+                          <div style={{color:C.muted,fontSize:11}}>Leave both blank for the complete all-time report.</div>
+                          <div style={{display:"flex",gap:8}}>
+                            <Btn onClick={()=>exportPumpReport(p, p.pIndents, pPayments, pumpReportFrom, pumpReportTo)} full color={C.blue}>
+                              🖨️ Generate Report
+                            </Btn>
+                            <Btn onClick={()=>{setPumpReportOpenFor(null);setPumpReportFrom("");setPumpReportTo("");}} outline color={C.muted}>Cancel</Btn>
+                          </div>
+                        </div>
+                      ) : (
+                        <button onClick={()=>setPumpReportOpenFor(p.id)}
+                          style={{width:"100%",background:"none",border:`1.5px solid ${C.blue}`,borderRadius:10,
+                            color:C.blue,fontWeight:700,fontSize:13,padding:"10px 14px",cursor:"pointer"}}>
+                          📄 Generate Report — {p.name}
+                        </button>
+                      )}
+                    </div>
 
                     {/* Payment history */}
                     {pPayments.length > 0 && (
