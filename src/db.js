@@ -594,6 +594,13 @@ export const DB = {
         rejectedReason: r.rejected_reason||'',
         rejectedBy: r.rejected_by||'',
         rejectedAt: r.rejected_at||'',
+        // Owner's manual daily verification — separate from the automated
+        // confirmation/attachment status above. This is a human sign-off
+        // ("I personally checked this request's attachment and amount"),
+        // one-time and permanent once set.
+        ownerVerified: r.owner_verified||false,
+        ownerVerifiedBy: r.owner_verified_by||'',
+        ownerVerifiedAt: r.owner_verified_at||'',
       }));
     } catch(e) { console.warn('mye_diesel_requests not ready:', e.message); return []; }
   },
@@ -677,6 +684,9 @@ export const DB = {
       rejected_reason: r.rejectedReason||null,
       rejected_by: r.rejectedBy||null,
       rejected_at: r.rejectedAt||null,
+      owner_verified: r.ownerVerified||false,
+      owner_verified_by: r.ownerVerifiedBy||null,
+      owner_verified_at: r.ownerVerifiedAt||null,
     }, { onConflict: 'id', ignoreDuplicates: false });
     if(error && !error.message?.includes('duplicate key')) throw error;
   },
@@ -906,6 +916,7 @@ export const DB = {
           confirmedAmount: r.confirmed_amount!=null ? +(r.confirmed_amount) : null,
           confirmedReason: r.confirmed_reason, confirmedAt: r.confirmed_at,
           tripId: r.trip_id, lrNo: r.lr_no, createdBy: r.created_by, createdAt: r.created_at,
+          ownerVerified: r.owner_verified||false, ownerVerifiedBy: r.owner_verified_by||'', ownerVerifiedAt: r.owner_verified_at||'',
         }));
       }),
     ]);
