@@ -14775,9 +14775,12 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
 
   // Per-pump balance: total confirmed - total paid
   const pumpBalances = pumps.map((p) => {
-    // Only count requests explicitly assigned to this pump — no auto-fallback
+    // Only count requests explicitly assigned to this pump — no auto-fallback.
+    // Per explicit instruction, only status==="attached" counts toward what's
+    // owed — "confirmed" (the further-along, manager-reviewed status) is
+    // excluded from this calculation.
     const pIndents = (dieselRequests||[])
-      .filter(r => r.pumpId===p.id && (r.status==="confirmed"||r.status==="attached"))
+      .filter(r => r.pumpId===p.id && r.status==="attached")
       .map(r => ({...r, amount: pumpOwedAmount(r)})); // normalize .amount to the pump-owed portion for display below
     const totalOwed = pIndents.reduce((s,i) => s+(+(i.amount)||0), 0);
     const totalPaid = (pumpPayments||[]).filter(pp => pp.pumpId === p.id)
