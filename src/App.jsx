@@ -222,6 +222,32 @@ const resolveEmpForTruck = (truckNo, tripList) => {
     .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
   return truckTrips[0]?.assignedEmpId || "";
 };
+
+// Attempts to save a diesel-request "attach" update (linking it to an LR/
+// trip). mye_diesel_requests has a DB-level unique index on lr_no (excluding
+// null/empty) — the actual race-condition-safe guarantee that no two diesel
+// requests can ever be attached to the same LR, regardless of which of the
+// several call sites in this file issued the write, or how many happen
+// concurrently. This helper is what makes that guarantee visible in the UI:
+// on a rejected write, it reverts the optimistic update instead of leaving
+// the screen showing "attached" while the database actually rejected it.
+async function saveDieselAttachSafe(setDieselRequests, original, updated, { log, notify = true, context = "" } = {}) {
+  try {
+    await DB.saveDieselRequest(updated);
+    return true;
+  } catch(e) {
+    setDieselRequests(prev => (prev||[]).map(r => r.id===original.id ? original : r));
+    const isDupLR = /idx_diesel_requests_lr_unique|duplicate key/i.test(e.message||"");
+    const msg = isDupLR
+      ? `⚠ LR "${updated.lrNo}" is already attached to a different diesel indent — this attachment was NOT saved (Indent #${updated.indentNo}${context?" · "+context:""}).`
+      : `Could not save diesel attach (Indent #${updated.indentNo}): ${e.message}`;
+    if (notify) alert(msg);
+    log && log("DIESEL ATTACH FAILED", msg);
+    console.error("saveDieselAttachSafe:", e);
+    return false;
+  }
+}
+
 // True only when employee_self is the user's ONLY role — used to decide whether to
 // force-land on the wallet tab / hide dashboard. A combined role (e.g. a fleet
 // manager who is also a driver) keeps their normal landing tab and other tabs,
@@ -4229,9 +4255,11 @@ Rules:
               claimedDieselIdsThisBatch.add(preReq.id);
               const updPreReq = {...preReq, status:"attached", tripId:trip.id, lrNo};
               setDieselRequests(p=>p.map(r=>r.id===preReq.id?updPreReq:r));
-              await DB.saveDieselRequest(updPreReq);
-              console.log(`[BATCH TIMING] ${g.truckNo}: pre-filled diesel attach saved at +${(performance.now()-_t0).toFixed(0)}ms`);
-              log("DIESEL ATTACH", `Indent #${preReq.indentNo} → LR ${lrNo} · ₹${preReq.amount} (manual)`);
+              const attachOk = await saveDieselAttachSafe(setDieselRequests, preReq, updPreReq, {log, context:"manual, batch"});
+              if (attachOk) {
+                console.log(`[BATCH TIMING] ${g.truckNo}: pre-filled diesel attach saved at +${(performance.now()-_t0).toFixed(0)}ms`);
+                log("DIESEL ATTACH", `Indent #${preReq.indentNo} → LR ${lrNo} · ₹${preReq.amount} (manual)`);
+              }
           }
         }
         // ── Auto-attach confirmed diesel request for this truck (any age) ──
@@ -4291,12 +4319,14 @@ Rules:
               claimedDieselIdsThisBatch.add(chosenReq.id);
               const updReq = {...chosenReq, status:"attached", tripId:trip.id, lrNo};
               setDieselRequests(p=>p.map(r=>r.id===chosenReq.id?updReq:r));
-              await DB.saveDieselRequest(updReq);
-              console.log(`[BATCH TIMING] ${g.truckNo}: auto-attach diesel saved at +${(performance.now()-_t0).toFixed(0)}ms`);
-              const updTrip = {...trip, dieselEstimate:effAmt, dieselIndentNo:String(chosenReq.indentNo)};
-              setTrips(p=>p.map(t=>t.id===trip.id?updTrip:t));
-              await DB.saveTrip(updTrip);
-              log("DIESEL ATTACH", `Indent #${chosenReq.indentNo} → LR ${lrNo} · ₹${effAmt}${chosenReq.truckNo!==truckNo?" (truck mismatch: "+chosenReq.truckNo+"→"+truckNo+")":""}`);
+              const attachOk = await saveDieselAttachSafe(setDieselRequests, chosenReq, updReq, {log, context:"auto-attach, batch"});
+              if (attachOk) {
+                console.log(`[BATCH TIMING] ${g.truckNo}: auto-attach diesel saved at +${(performance.now()-_t0).toFixed(0)}ms`);
+                const updTrip = {...trip, dieselEstimate:effAmt, dieselIndentNo:String(chosenReq.indentNo)};
+                setTrips(p=>p.map(t=>t.id===trip.id?updTrip:t));
+                await DB.saveTrip(updTrip);
+                log("DIESEL ATTACH", `Indent #${chosenReq.indentNo} → LR ${lrNo} · ₹${effAmt}${chosenReq.truckNo!==truckNo?" (truck mismatch: "+chosenReq.truckNo+"→"+truckNo+")":""}`);
+              }
             }
           }
         }
@@ -4511,12 +4541,14 @@ Rules:
               claimedDieselIdsThisBatch.add(chosenReq.id);
               const updReq = {...chosenReq, status:"attached", tripId:trip.id, lrNo};
               setDieselRequests(p=>p.map(r=>r.id===chosenReq.id?updReq:r));
-              await DB.saveDieselRequest(updReq);
-              console.log(`[BATCH TIMING] ${g.truckNo}: auto-attach diesel saved (merged path) at +${(performance.now()-_t0).toFixed(0)}ms`);
-              const updTrip = {...trip, dieselEstimate:effAmt, dieselIndentNo:String(chosenReq.indentNo)};
-              setTrips(p=>p.map(t=>t.id===trip.id?updTrip:t));
-              await DB.saveTrip(updTrip);
-              log("DIESEL ATTACH", `Indent #${chosenReq.indentNo} → LR ${lrNo} · ₹${effAmt}${chosenReq.truckNo!==truckNo?" (truck mismatch: "+chosenReq.truckNo+"→"+truckNo+")":""}`);
+              const attachOk = await saveDieselAttachSafe(setDieselRequests, chosenReq, updReq, {log, context:"auto-attach, merged path"});
+              if (attachOk) {
+                console.log(`[BATCH TIMING] ${g.truckNo}: auto-attach diesel saved (merged path) at +${(performance.now()-_t0).toFixed(0)}ms`);
+                const updTrip = {...trip, dieselEstimate:effAmt, dieselIndentNo:String(chosenReq.indentNo)};
+                setTrips(p=>p.map(t=>t.id===trip.id?updTrip:t));
+                await DB.saveTrip(updTrip);
+                log("DIESEL ATTACH", `Indent #${chosenReq.indentNo} → LR ${lrNo} · ₹${effAmt}${chosenReq.truckNo!==truckNo?" (truck mismatch: "+chosenReq.truckNo+"→"+truckNo+")":""}`);
+              }
             }
           }
         }
@@ -8152,8 +8184,9 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       if (matchReq) {
         const updReq = {...matchReq, status:"attached", tripId:t.id, lrNo:t.lrNo||""};
         setDieselRequests(p => p.map(r => r.id===matchReq.id ? updReq : r));
-        DB.saveDieselRequest(updReq).catch(e => console.error("saveDieselRequest:", e));
-        log("DIESEL ATTACH", `Indent #${matchReq.indentNo} → LR ${t.lrNo} · ₹${matchReq.confirmedAmount??matchReq.amount} (trip form)`);
+        saveDieselAttachSafe(setDieselRequests, matchReq, updReq, {log, context:"trip form"}).then(ok => {
+          if (ok) log("DIESEL ATTACH", `Indent #${matchReq.indentNo} → LR ${t.lrNo} · ₹${matchReq.confirmedAmount??matchReq.amount} (trip form)`);
+        });
       }
     }
     setF(blankForm()); setAddSheet(false); setWasScanned(false);
@@ -8264,8 +8297,9 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       if (matchReq) {
         const updReq = {...matchReq, status:"attached", tripId:editSheet.id, lrNo:editSheet.lrNo||""};
         setDieselRequests(p => p.map(r => r.id===matchReq.id ? updReq : r));
-        DB.saveDieselRequest(updReq).catch(e => console.error("saveDieselRequest:", e));
-        log("DIESEL ATTACH", `Indent #${matchReq.indentNo} → LR ${editSheet.lrNo} (edit save)`);
+        saveDieselAttachSafe(setDieselRequests, matchReq, updReq, {log, context:"edit save"}).then(ok => {
+          if (ok) log("DIESEL ATTACH", `Indent #${matchReq.indentNo} → LR ${editSheet.lrNo} (edit save)`);
+        });
       }
     }
     // Sync vehicle ledger to exactly match this trip's current recovery fields.
@@ -14976,6 +15010,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
   };
 
   const recordPumpPayment = async () => {
+    if (!payPumpId) { alert("Select a pump before recording this payment — every payment must be linked to one."); return; }
     if (!payAmt || +payAmt <= 0 || !payUtr.trim()) return;
     const pump = pumps.find(p => p.id === payPumpId);
     const payment = { id:uid(), pumpId:payPumpId, amount:+payAmt, utr:payUtr.trim(),
@@ -16510,7 +16545,7 @@ This was already dispensed — only delete if it was recorded in error.`;
               const trip=(trips||[]).find(t=>t.lrNo===extra.lrNo); if(!trip) return prev;
               const upd={...e.app,lrNo:extra.lrNo,tripId:trip.id,status:"attached"};
               setDieselRequests(p=>p.map(r=>r.id===e.app.id?upd:r));
-              DB.saveDieselRequest(upd).catch(()=>{});
+              saveDieselAttachSafe(setDieselRequests, e.app, upd, {log, context:"reconcile"});
               // Use app's indentNo (not pump's), update dieselEstimate = diesel + cash
               const _attDiesel = Number(upd.dieselAmount ?? upd.amount ?? 0);
               const _attCash   = Number(upd.cashAmount   ?? 0);
@@ -16754,7 +16789,7 @@ This was already dispensed — only delete if it was recorded in error.`;
             const t=(trips||[]).find(t=>t.lrNo===extra.lrNo); if(!t) return;
             const upd={...a,lrNo:extra.lrNo,tripId:t.id,status:"attached"};
             setDieselRequests(pp=>pp.map(r=>r.id===a.id?upd:r));
-            DB.saveDieselRequest(upd).catch(()=>{});
+            saveDieselAttachSafe(setDieselRequests, a, upd, {log, context:"reconcile, saved"});
             const _saDiesel = Number(upd.dieselAmount ?? upd.amount ?? 0);
             const _saCash   = Number(upd.cashAmount   ?? 0);
             const updTrip={...t, dieselIndentNo:String(a?.indentNo), dieselEstimate:_saDiesel+_saCash};
@@ -24862,7 +24897,11 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
       const linkedTrip = tripsWithIndent.find(t=>String(t.dieselIndentNo).trim()===String(r.indentNo));
       if(!linkedTrip) return r;
       const upd={...r, status:"attached", tripId:linkedTrip.id, lrNo:linkedTrip.lrNo||""};
-      DB.saveDieselRequest(upd).catch(()=>{});
+      // Background auto-heal — no alert popup (would fire unprompted on every
+      // mount), but still routed through the safe helper so a rejected write
+      // (this LR already attached via a different indent) gets caught and
+      // reverted instead of silently leaving mismatched local state.
+      saveDieselAttachSafe(setDieselRequests, r, upd, {log, notify:false, context:"startup auto-heal"});
       return upd;
     }));
   // eslint-disable-next-line
