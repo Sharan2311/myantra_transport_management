@@ -15363,7 +15363,11 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                 style={{flex:1,background:C.accent,color:"#fff",border:"none",borderRadius:10,padding:"10px 14px",
                   fontWeight:700,fontSize:13,cursor:"pointer"}}>📷 Scan Payment</button>
               <button onClick={()=>{
-                  const pid = payPumpId || pumps[0]?.id || "";
+                  // Default to the pump with the highest pending balance — the
+                  // one you're actually most likely paying — rather than
+                  // whichever pump happens to be first in the list.
+                  const topPending = [...pumpBalances].sort((a,b)=>(b.pending||0)-(a.pending||0))[0];
+                  const pid = payPumpId || topPending?.id || pumps[0]?.id || "";
                   setPayPumpId(pid);
                   setExpandPump(pid);
                   setView("pumps");
@@ -15528,6 +15532,23 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                               if(r.paidTo) setPayPaidTo(r.paidTo);
                               if(r.date) {}
                             }} />
+                          </div>
+                          {/* Pump selector — lets you switch which pump this payment is
+                              for without leaving the form or navigating back out. Also
+                              expands the target pump's card so the form actually shows
+                              up there (each pump's form only renders while its own card
+                              is expanded). */}
+                          <div>
+                            <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:4}}>PUMP</div>
+                            <select value={payPumpId} onChange={e=>{
+                                const newId = e.target.value;
+                                setPayPumpId(newId);
+                                setExpandPump(newId);
+                              }}
+                              style={{width:"100%",background:C.card,border:`1.5px solid ${C.teal}`,
+                                borderRadius:8,padding:"9px 10px",fontSize:13,color:C.text,outline:"none",fontWeight:700}}>
+                              {pumps.map(pm=><option key={pm.id} value={pm.id}>{pm.name}</option>)}
+                            </select>
                           </div>
                           <div style={{display:"flex",gap:8}}>
                             <Field label="Amount ₹" value={payAmt} onChange={setPayAmt} type="number" half
