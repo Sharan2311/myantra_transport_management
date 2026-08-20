@@ -13093,7 +13093,11 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
       <td>${t.state||""}</td>
     </tr>`).join("");
     const headers = ["Tranport Name","Shipment Date","Bill of Lading","Delivery Number","Freight Qty","Per MT","Freight Cost","tokenNumber","Customer/Vendor","Vehicle Number","To Location","District","State"];
-    return `<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px">
+    // Explicit width (not just border-collapse) so the table can never
+    // auto-shrink to fit a narrow mobile viewport — some Android browsers'
+    // table-layout heuristics compress columns instead of triggering the
+    // parent's horizontal scroll if the table has no forced minimum width.
+    return `<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px;width:1400px">
       <thead><tr>${headers.map(h=>`<th style="background:#1a2e1a;color:#fff;padding:6px">${h}</th>`).join("")}</tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
@@ -13119,17 +13123,74 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
         [RC.companyName,t.date,d.grNo,d.diNo,d.qty,t.givenRate,d.billedAmt||(d.qty&&t.givenRate?d.qty*t.givenRate:""),"","",t.truckNo,t.to,t.district,t.state].join("\t")
       ).join("\n") +
       "\n\nThanks\n"+(RC.companyName||"");
+
+    // Layered fallback — the modern Clipboard API's write() with a rich
+    // ClipboardItem is inconsistently supported across Android browsers and
+    // especially Android WebViews (many silently reject or don't implement
+    // "text/html" at all), which is why this previously failed with no clear
+    // path forward on Android specifically. Try three approaches in order,
+    // each broader-compatibility than the last, and only report failure if
+    // every one of them didn't work.
+    let copied = false, method = "";
+
+    // 1) Modern Clipboard API — best fidelity, works well on iOS Safari and
+    // desktop browsers, unreliable on Android.
     try {
       if(navigator.clipboard && window.ClipboardItem) {
         await navigator.clipboard.write([new window.ClipboardItem({
           "text/html": new Blob([html], {type:"text/html"}),
           "text/plain": new Blob([plain], {type:"text/plain"}),
         })]);
-      } else {
-        await navigator.clipboard.writeText(plain);
+        copied = true; method = "rich";
       }
-      alert("✓ Mail copied (greeting + table + sign-off). Paste it directly into the Gmail compose body (rich paste, e.g. Ctrl/Cmd+V) — Gmail's compose link can't be pre-filled with a formatted table, only plain text.");
-    } catch(e) { alert("Copy failed: "+e.message+"\n\nYou can still select the preview below manually."); }
+    } catch(e) { console.warn("Clipboard API write failed, trying fallback:", e.message); }
+
+    // 2) execCommand('copy') on a temporary selection — much older API, but
+    // supported far more broadly (including most Android WebViews that don't
+    // implement ClipboardItem), and still copies the actual rendered HTML
+    // since it copies the real selected DOM content, not a MIME blob.
+    if(!copied) {
+      try {
+        const temp = document.createElement("div");
+        temp.setAttribute("contenteditable","true");
+        temp.style.position = "fixed"; temp.style.left = "-9999px"; temp.style.top = "0";
+        temp.innerHTML = html;
+        document.body.appendChild(temp);
+        const range = document.createRange();
+        range.selectNodeContents(temp);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        copied = document.execCommand("copy");
+        sel.removeAllRanges();
+        document.body.removeChild(temp);
+        if(copied) method = "rich";
+      } catch(e) { console.warn("execCommand rich-copy fallback failed:", e.message); }
+    }
+
+    // 3) Plain text only — absolute last resort, so at least SOMETHING gets
+    // copied even on a browser that blocks both approaches above.
+    if(!copied) {
+      try { await navigator.clipboard.writeText(plain); copied = true; method = "plain"; }
+      catch(e) {
+        try {
+          const ta = document.createElement("textarea");
+          ta.value = plain; ta.style.position = "fixed"; ta.style.left = "-9999px";
+          document.body.appendChild(ta); ta.focus(); ta.select();
+          copied = document.execCommand("copy");
+          document.body.removeChild(ta);
+          if(copied) method = "plain";
+        } catch(e2) { console.warn("Plain-text copy fallback failed:", e2.message); }
+      }
+    }
+
+    if(copied && method==="rich") {
+      alert("✓ Mail copied (greeting + table + sign-off). Paste it directly into the Gmail compose body (rich paste, e.g. long-press → Paste) — Gmail's compose link can't be pre-filled with a formatted table, only plain text.");
+    } else if(copied && method==="plain") {
+      alert("✓ Copied as plain text (this device/browser doesn't support copying a formatted table). The table structure won't carry over — you may want to reformat after pasting, or use 'Open Gmail Compose' instead.");
+    } else {
+      alert("Copy failed on this device/browser. Try long-pressing the preview below, choosing Select All, then Copy manually — or use 'Open Gmail Compose' and fill in the details by hand.");
+    }
   };
 
   const openGmailCompose = () => {
@@ -13632,9 +13693,11 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                 </div>
 
                 <div style={{fontWeight:700,fontSize:12,color:C.purple,marginTop:6}}>✉️ Mail Preview — exactly what "Copy Table" copies</div>
-                <div style={{background:"#fff",borderRadius:10,padding:14,overflowX:"auto",border:`1px solid ${C.border}`}}>
+                <div style={{background:"#fff",borderRadius:10,padding:14,overflowX:"auto",border:`1px solid ${C.border}`,
+                  WebkitOverflowScrolling:"touch",touchAction:"pan-x pan-y"}}>
                   <div dangerouslySetInnerHTML={{__html: mailBodyHTML()}} />
                 </div>
+                <div style={{color:C.muted,fontSize:10}}>↔ Swipe the preview above left/right to see the full table.</div>
 
                 <div style={{display:"flex",flexDirection:"column",gap:8}}>
                   <Btn onClick={copyMailTable} full color={C.purple}>📋 Copy Mail (paste into Gmail)</Btn>
