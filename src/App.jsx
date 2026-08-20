@@ -14998,11 +14998,27 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
   // request/receipt/PIN-confirm system, 870+ rows) rather than mye_indents
   // (a separate, much smaller, mostly-legacy reconciliation table that only
   // ever really accumulated data for one pump — confirmed against real data
-  // before making this change). Uses each request's diesel-only portion
-  // (confirmedAmount if the manager confirmed one, else the originally
-  // requested dieselAmount) — NOT the combined `amount` field, which can
-  // include a cash component paid directly to the driver, not owed to the pump.
-  const pumpOwedAmount = r => r.confirmedAmount != null ? r.confirmedAmount : (r.dieselAmount != null ? r.dieselAmount : (r.amount||0));
+  // before making this change).
+  //
+  // CORRECTED per explicit clarification: cash is also owed to the pump —
+  // the pump fronts both diesel AND a cash advance on one indent slip, so
+  // the full slip amount (diesel + cash) is what's owed back, not diesel
+  // alone. Verified against real data before fixing: `amount` already
+  // equals dieselAmount + cashAmount reliably in every row checked, and
+  // confirmed_amount only ever holds the confirmed DIESEL portion (there is
+  // no confirmed-cash column in this schema at all) — so blindly using
+  // confirmedAmount as "total owed" silently dropped every indent's cash
+  // component. This was undercounting SLV Gurmitkal by ₹1,94,500 and
+  // ₹5,14,084 across all pumps combined at the time this was found.
+  const pumpOwedAmount = r => {
+    const dieselPart = r.confirmedAmount != null ? r.confirmedAmount : (r.dieselAmount != null ? r.dieselAmount : null);
+    // Have a real diesel figure (confirmed or originally requested) -> add
+    // cash on top, since amount is NOT used here (would double-count).
+    if (dieselPart != null) return dieselPart + (r.cashAmount||0);
+    // Neither diesel figure exists at all -> amount is the only number we
+    // have, and it already includes any cash component, so use it as-is.
+    return r.amount || 0;
+  };
 
   // Per-pump balance: total confirmed - total paid
   const pumpBalances = pumps.map((p) => {
