@@ -13360,12 +13360,14 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
           <div style={{position:"absolute",top:0,right:0,bottom:0,width:20,pointerEvents:"none",
             background:`linear-gradient(to right, transparent, ${C.bg}cc)`,zIndex:3}} />
           <div style={{overflowX:"auto",border:`1px solid ${C.border}`,borderRadius:10}}>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:1100}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:1350}}>
               <thead>
                 <tr style={{textAlign:"left",color:C.muted,fontSize:10,textTransform:"uppercase",letterSpacing:0.5}}>
                   <th style={{padding:"6px 8px",position:"sticky",left:0,background:C.card,zIndex:2,borderRight:`1px solid ${C.border}`,borderBottom:`2px solid ${C.border}`}}><input type="checkbox" checked={selected.size===activeList.length&&activeList.length>0} onChange={toggleAll}/></th>
                   <th style={{padding:"6px 8px",position:"sticky",left:34,background:C.card,zIndex:2,borderRight:`1px solid ${C.border}`,borderBottom:`2px solid ${C.border}`}}>Date</th>
-                  <th style={{padding:"6px 8px",position:"sticky",left:110,background:C.card,zIndex:2,borderRight:`2px solid ${C.border}`,borderBottom:`2px solid ${C.border}`}}>LR / Truck</th>
+                  <th style={{padding:"6px 8px",position:"sticky",left:110,background:C.card,zIndex:2,borderRight:`1px solid ${C.border}`,borderBottom:`2px solid ${C.border}`}}>LR / Truck</th>
+                  <th style={{padding:"6px 8px",position:"sticky",left:240,background:C.card,zIndex:2,borderRight:`1px solid ${C.border}`,borderBottom:`2px solid ${C.border}`}}>Employee</th>
+                  <th style={{padding:"6px 8px",position:"sticky",left:350,background:C.card,zIndex:2,borderRight:`2px solid ${C.border}`,borderBottom:`2px solid ${C.border}`}}>Party Name</th>
                   <th style={{padding:"6px 8px",borderRight:`1px solid ${C.border}44`,borderBottom:`2px solid ${C.border}`}}>To</th>
                   <th style={{padding:"6px 8px",borderRight:`1px solid ${C.border}44`,borderBottom:`2px solid ${C.border}`}}>DI</th>
                   <th style={{padding:"6px 8px",borderRight:`1px solid ${C.border}44`,borderBottom:`2px solid ${C.border}`}}>Status</th>
@@ -13398,9 +13400,19 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                       )}
                       {i===0 && <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",whiteSpace:"nowrap",position:"sticky",left:34,background:stickyBg,zIndex:1,borderRight:`1px solid ${C.border}`,borderBottom:bB}}>{t.date}</td>}
                       {i===0 && (
-                        <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",position:"sticky",left:110,background:stickyBg,zIndex:1,borderRight:`2px solid ${C.border}`,borderBottom:bB}}>
+                        <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",position:"sticky",left:110,background:stickyBg,zIndex:1,borderRight:`1px solid ${C.border}`,borderBottom:bB}}>
                           <div style={{fontWeight:700}}>{t.lrNo||"—"}</div>
                           <div style={{color:C.muted,fontSize:11}}>{t.truckNo}</div>
+                        </td>
+                      )}
+                      {i===0 && (
+                        <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",position:"sticky",left:240,background:stickyBg,zIndex:1,borderRight:`1px solid ${C.border}`,borderBottom:bB}}>
+                          {employees.find(e=>e.id===t.assignedEmpId)?.name || "—"}
+                        </td>
+                      )}
+                      {i===0 && (
+                        <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",position:"sticky",left:350,background:stickyBg,zIndex:1,borderRight:`2px solid ${C.border}`,borderBottom:bB}}>
+                          {t.partyName || "—"}
                         </td>
                       )}
                       {i===0 && <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",borderRight:bR,borderBottom:bB}}>{t.to||"—"}</td>}
