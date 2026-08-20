@@ -12797,7 +12797,13 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
   });
   const totalAmt    = (list) => list.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
   const toggle      = (id) => setSelected(p=>{const s=new Set(p);s.has(id)?s.delete(id):s.add(id);return s;});
-  const toggleAll   = () => setSelected(p=>p.size===activeList.length?new Set():new Set(activeList.map(t=>t.id)));
+  const toggleAll   = () => setSelected(p=>{
+    // Operates on the DI/status/pouch/email/billing-filtered set (tableGroups),
+    // not the broader date/search/employee-only activeList — so "Select All"
+    // never selects a trip that isn't actually visible in the filtered table.
+    const ids = filteredTripIds;
+    return p.size===ids.length && ids.every(id=>p.has(id)) ? new Set() : new Set(ids);
+  });
   const followupEmps = (users||[]).filter(u=>
     u.active!==false && (
       (u.role||"").includes("email_followup") ||
@@ -12968,6 +12974,14 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
       return {trip:t, rows};
     })
     .filter(g => g.rows.length>0);
+
+  // Row-level amount (matches exactly what each DI sub-row displays in the
+  // Amount column below) and the filtered totals derived from it — so the
+  // summary line and "Select All" reflect exactly what the table shows,
+  // not the broader date/search/employee-only activeList.
+  const rowAmt = (t,d) => d.billedAmt>0 ? d.billedAmt : (d.qty&&t.givenRate ? d.qty*t.givenRate : 0);
+  const filteredTripIds = tableGroups.map(g=>g.trip.id);
+  const filteredTotal   = tableGroups.reduce((s,{trip:t,rows}) => s + rows.reduce((rs,d)=>rs+rowAmt(t,d),0), 0);
 
   const uploadReturnPouch = async (tripId, file) => {
     setRowUploadingId(tripId);
@@ -13355,11 +13369,11 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
         </div>
       )}
 
-      {activeList.length>0&&(
+      {tableGroups.length>0&&(
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <span style={{fontSize:12,color:C.muted}}>{activeList.length} trips · <b>₹{totalAmt(activeList).toLocaleString("en-IN")}</b></span>
+          <span style={{fontSize:12,color:C.muted}}>{tableGroups.length} trips · <b>{fmt(filteredTotal)}</b></span>
           <button onClick={toggleAll} style={{background:"none",border:`1px solid ${C.accent}`,borderRadius:6,color:C.accent,fontSize:11,padding:"3px 10px",cursor:"pointer",fontWeight:700}}>
-            {selected.size===activeList.length?"Deselect All":"Select All"}
+            {filteredTripIds.length>0 && filteredTripIds.every(id=>selected.has(id)) && selected.size===filteredTripIds.length ?"Deselect All":"Select All"}
           </button>
         </div>
       )}
@@ -13381,7 +13395,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:1250}}>
               <thead>
                 <tr style={{textAlign:"left",color:C.muted,fontSize:10,textTransform:"uppercase",letterSpacing:0.5}}>
-                  <th style={{padding:"6px 8px",position:"sticky",left:0,background:C.card,zIndex:2,borderRight:`1px solid ${C.border}`,borderBottom:`2px solid ${C.border}`}}><input type="checkbox" checked={selected.size===activeList.length&&activeList.length>0} onChange={toggleAll}/></th>
+                  <th style={{padding:"6px 8px",position:"sticky",left:0,background:C.card,zIndex:2,borderRight:`1px solid ${C.border}`,borderBottom:`2px solid ${C.border}`}}><input type="checkbox" checked={filteredTripIds.length>0 && filteredTripIds.every(id=>selected.has(id))} onChange={toggleAll}/></th>
                   <th style={{padding:"6px 8px",position:"sticky",left:34,background:C.card,zIndex:2,borderRight:`1px solid ${C.border}`,borderBottom:`2px solid ${C.border}`}}>Date</th>
                   <th style={{padding:"6px 8px",position:"sticky",left:110,background:C.card,zIndex:2,borderRight:`2px solid ${C.border}`,borderBottom:`2px solid ${C.border}`}}>LR / Truck</th>
                   <th style={{padding:"6px 8px",borderRight:`1px solid ${C.border}44`,borderBottom:`2px solid ${C.border}`}}>Employee</th>
