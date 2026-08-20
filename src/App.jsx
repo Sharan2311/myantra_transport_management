@@ -12725,7 +12725,8 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
   const [billStatusFilter, setBillStatusFilter] = useState("all"); // all | not_billed | billed | paid
   const [pouchFilter,      setPouchFilter]      = useState("all"); // all | received | not_received — Return Pouch column
   const [confirmFilter,    setConfirmFilter]    = useState("all"); // all | received | not_received — Confirmation Email column
-  const [readyFilter,      setReadyFilter]      = useState("all"); // all | ready | not_ready — Ready for Billing, DI-line level
+  const [readyFilter,      setReadyFilter]      = useState("all"); // all | ready | not_ready
+  const [employeeFilter,   setEmployeeFilter]    = useState(""); // "" = all employees, else empId
   const [rowUploadingId,   setRowUploadingId]   = useState(""); // per-row inline upload spinner
   // ── Confirmation Mail Builder — separate from the main table's filters.
   // Searches ALL party trips (not just what's currently filtered) by DI, so
@@ -12780,9 +12781,18 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
 
   const currentList = visibleTrips;
   const activeList  = currentList.filter(t=>{
-    if(searchQ && !(t.truckNo||"").toLowerCase().includes(searchQ.toLowerCase()) && !(t.lrNo||"").toLowerCase().includes(searchQ.toLowerCase()) && !(t.to||"").toLowerCase().includes(searchQ.toLowerCase())) return false;
+    if(searchQ) {
+      const q = searchQ.trim().toLowerCase();
+      const matches = (t.truckNo||"").toLowerCase().includes(q)
+        || (t.lrNo||"").toLowerCase().includes(q)
+        || (t.to||"").toLowerCase().includes(q)
+        || (t.partyName||"").toLowerCase().includes(q)
+        || partyDiRowsFor(t).some(d=>(d.diNo||"").toLowerCase().includes(q));
+      if(!matches) return false;
+    }
     if(dateFrom && (t.date||"") < dateFrom) return false;
     if(dateTo && (t.date||"") > dateTo) return false;
+    if(employeeFilter && t.assignedEmpId!==employeeFilter) return false;
     return true;
   });
   const totalAmt    = (list) => list.reduce((s,t)=>s+(t.qty||0)*(t.frRate||0),0);
@@ -13199,7 +13209,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
       </div>
 
       <div style={{display:"flex",gap:8,alignItems:"center"}}>
-        <input value={searchQ} onChange={e=>setSearchQ(e.target.value)} placeholder="🔍 Search truck, LR..."
+        <input value={searchQ} onChange={e=>setSearchQ(e.target.value)} placeholder="🔍 Search DI, LR, vehicle, party..."
           style={{flex:1,background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,color:C.text,padding:"10px 12px",fontSize:13,outline:"none",boxSizing:"border-box"}}/>
         <input type="date" value={dateFrom} onChange={e=>setDateFrom(e.target.value)}
           style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,color:C.text,padding:"9px 8px",fontSize:12,outline:"none"}}/>
@@ -13208,6 +13218,14 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
           style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,color:C.text,padding:"9px 8px",fontSize:12,outline:"none"}}/>
         {(dateFrom||dateTo)&&<button onClick={()=>{setDateFrom("");setDateTo("");}} style={{background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:14,fontWeight:700}}>✕</button>}
       </div>
+
+      {/* Employee filter */}
+      <select value={employeeFilter} onChange={e=>setEmployeeFilter(e.target.value)}
+        style={{width:"100%",background:C.bg,border:`1.5px solid ${employeeFilter?C.accent:C.border}`,
+          borderRadius:10,padding:"9px 10px",fontSize:13,color:C.text,outline:"none"}}>
+        <option value="">👤 All Employees</option>
+        {employees.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
+      </select>
 
       {/* Billing status (DI-line level) + Return Pouch + Confirmation Email + Ready for Billing filters */}
       <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
@@ -13360,14 +13378,14 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
           <div style={{position:"absolute",top:0,right:0,bottom:0,width:20,pointerEvents:"none",
             background:`linear-gradient(to right, transparent, ${C.bg}cc)`,zIndex:3}} />
           <div style={{overflowX:"auto",border:`1px solid ${C.border}`,borderRadius:10}}>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:1350}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:1250}}>
               <thead>
                 <tr style={{textAlign:"left",color:C.muted,fontSize:10,textTransform:"uppercase",letterSpacing:0.5}}>
                   <th style={{padding:"6px 8px",position:"sticky",left:0,background:C.card,zIndex:2,borderRight:`1px solid ${C.border}`,borderBottom:`2px solid ${C.border}`}}><input type="checkbox" checked={selected.size===activeList.length&&activeList.length>0} onChange={toggleAll}/></th>
                   <th style={{padding:"6px 8px",position:"sticky",left:34,background:C.card,zIndex:2,borderRight:`1px solid ${C.border}`,borderBottom:`2px solid ${C.border}`}}>Date</th>
-                  <th style={{padding:"6px 8px",position:"sticky",left:110,background:C.card,zIndex:2,borderRight:`1px solid ${C.border}`,borderBottom:`2px solid ${C.border}`}}>LR / Truck</th>
-                  <th style={{padding:"6px 8px",position:"sticky",left:240,background:C.card,zIndex:2,borderRight:`1px solid ${C.border}`,borderBottom:`2px solid ${C.border}`}}>Employee</th>
-                  <th style={{padding:"6px 8px",position:"sticky",left:350,background:C.card,zIndex:2,borderRight:`2px solid ${C.border}`,borderBottom:`2px solid ${C.border}`}}>Party Name</th>
+                  <th style={{padding:"6px 8px",position:"sticky",left:110,background:C.card,zIndex:2,borderRight:`2px solid ${C.border}`,borderBottom:`2px solid ${C.border}`}}>LR / Truck</th>
+                  <th style={{padding:"6px 8px",borderRight:`1px solid ${C.border}44`,borderBottom:`2px solid ${C.border}`}}>Employee</th>
+                  <th style={{padding:"6px 8px",borderRight:`1px solid ${C.border}44`,borderBottom:`2px solid ${C.border}`}}>Party Name</th>
                   <th style={{padding:"6px 8px",borderRight:`1px solid ${C.border}44`,borderBottom:`2px solid ${C.border}`}}>To</th>
                   <th style={{padding:"6px 8px",borderRight:`1px solid ${C.border}44`,borderBottom:`2px solid ${C.border}`}}>DI</th>
                   <th style={{padding:"6px 8px",borderRight:`1px solid ${C.border}44`,borderBottom:`2px solid ${C.border}`}}>Status</th>
@@ -13400,18 +13418,18 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                       )}
                       {i===0 && <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",whiteSpace:"nowrap",position:"sticky",left:34,background:stickyBg,zIndex:1,borderRight:`1px solid ${C.border}`,borderBottom:bB}}>{t.date}</td>}
                       {i===0 && (
-                        <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",position:"sticky",left:110,background:stickyBg,zIndex:1,borderRight:`1px solid ${C.border}`,borderBottom:bB}}>
+                        <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",position:"sticky",left:110,background:stickyBg,zIndex:1,borderRight:`2px solid ${C.border}`,borderBottom:bB}}>
                           <div style={{fontWeight:700}}>{t.lrNo||"—"}</div>
                           <div style={{color:C.muted,fontSize:11}}>{t.truckNo}</div>
                         </td>
                       )}
                       {i===0 && (
-                        <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",position:"sticky",left:240,background:stickyBg,zIndex:1,borderRight:`1px solid ${C.border}`,borderBottom:bB}}>
+                        <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",borderRight:bR,borderBottom:bB}}>
                           {employees.find(e=>e.id===t.assignedEmpId)?.name || "—"}
                         </td>
                       )}
                       {i===0 && (
-                        <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",position:"sticky",left:350,background:stickyBg,zIndex:1,borderRight:`2px solid ${C.border}`,borderBottom:bB}}>
+                        <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",borderRight:bR,borderBottom:bB}}>
                           {t.partyName || "—"}
                         </td>
                       )}
