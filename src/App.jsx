@@ -13085,14 +13085,13 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
       <td>${d.qty||""}</td>
       <td>${t.givenRate||""}</td>
       <td>${d.billedAmt||(d.qty&&t.givenRate?d.qty*t.givenRate:"")}</td>
-      <td></td>
-      <td></td>
+      <td>${t.partyName||""}</td>
       <td>${t.truckNo||""}</td>
       <td>${t.to||""}</td>
       <td>${t.district||""}</td>
       <td>${t.state||""}</td>
     </tr>`).join("");
-    const headers = ["Tranport Name","Shipment Date","Bill of Lading","Delivery Number","Freight Qty","Per MT","Freight Cost","tokenNumber","Customer/Vendor","Vehicle Number","To Location","District","State"];
+    const headers = ["Tranport Name","Shipment Date","Bill of Lading","Delivery Number","Freight Qty","Per MT","Freight Cost","Customer/Vendor","Vehicle Number","To Location","District","State"];
     // Explicit width (not just border-collapse) so the table can never
     // auto-shrink to fit a narrow mobile viewport — some Android browsers'
     // table-layout heuristics compress columns instead of triggering the
@@ -13120,7 +13119,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
     const html = mailBodyHTML();
     const plain = "Hello Sir,\n\nPlease confirm the receipt of the cement for the below consignment by return mail.\n\n" +
       mailRows.map(({trip:t,d}) =>
-        [RC.companyName,t.date,d.grNo,d.diNo,d.qty,t.givenRate,d.billedAmt||(d.qty&&t.givenRate?d.qty*t.givenRate:""),"","",t.truckNo,t.to,t.district,t.state].join("\t")
+        [RC.companyName,t.date,d.grNo,d.diNo,d.qty,t.givenRate,d.billedAmt||(d.qty&&t.givenRate?d.qty*t.givenRate:""),t.partyName||"",t.truckNo,t.to,t.district,t.state].join("\t")
       ).join("\n") +
       "\n\nThanks\n"+(RC.companyName||"");
 
@@ -13661,7 +13660,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                   <table style={{width:"100%",borderCollapse:"collapse",fontSize:10,minWidth:700}}>
                     <thead>
                       <tr style={{background:"#1a2e1a",color:"#fff"}}>
-                        {["Tranport Name","Shipment Date","Bill of Lading","Delivery Number","Freight Qty","Per MT","Freight Cost","tokenNumber","Customer/Vendor","Vehicle Number","To Location","District","State"].map(h=>
+                        {["Tranport Name","Shipment Date","Bill of Lading","Delivery Number","Freight Qty","Per MT","Freight Cost","Customer/Vendor","Vehicle Number","To Location","District","State"].map(h=>
                           <th key={h} style={{padding:"5px 6px",textAlign:"left",whiteSpace:"nowrap"}}>{h}</th>)}
                         <th></th>
                       </tr>
@@ -13676,8 +13675,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                           <td style={{padding:"5px 6px"}}>{d.qty}</td>
                           <td style={{padding:"5px 6px"}}>{t.givenRate||"—"}</td>
                           <td style={{padding:"5px 6px"}}>{d.billedAmt||(d.qty&&t.givenRate?d.qty*t.givenRate:"—")}</td>
-                          <td style={{padding:"5px 6px",color:C.muted}}>—</td>
-                          <td style={{padding:"5px 6px",color:C.muted,fontStyle:"italic"}}>(blank)</td>
+                          <td style={{padding:"5px 6px",whiteSpace:"nowrap"}}>{t.partyName||<span style={{color:C.muted,fontStyle:"italic"}}>(unknown)</span>}</td>
                           <td style={{padding:"5px 6px",whiteSpace:"nowrap"}}>{t.truckNo}</td>
                           <td style={{padding:"5px 6px",whiteSpace:"nowrap"}}>{t.to||"—"}</td>
                           <td style={{padding:"5px 6px",whiteSpace:"nowrap"}}>{t.district||"—"}</td>
@@ -13688,9 +13686,11 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                     </tbody>
                   </table>
                 </div>
-                <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:8,padding:"8px 10px",fontSize:11,color:C.orange}}>
-                  ⚠ "tokenNumber" isn't a field this app tracks anywhere — left blank. "Customer/Vendor" is intentionally left blank too, for you to fill in after pasting.
-                </div>
+                {mailRows.some(({trip:t})=>!t.partyName) && (
+                  <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:8,padding:"8px 10px",fontSize:11,color:C.orange}}>
+                    ⚠ Some selected trips have no Party Name on record (shown as "(unknown)" above) — fill those in manually after pasting.
+                  </div>
+                )}
 
                 <div style={{fontWeight:700,fontSize:12,color:C.purple,marginTop:6}}>✉️ Mail Preview — exactly what "Copy Table" copies</div>
                 <div style={{background:"#fff",borderRadius:10,padding:14,overflowX:"auto",border:`1px solid ${C.border}`,
