@@ -12983,6 +12983,78 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
   const filteredTripIds = tableGroups.map(g=>g.trip.id);
   const filteredTotal   = tableGroups.reduce((s,{trip:t,rows}) => s + rows.reduce((rs,d)=>rs+rowAmt(t,d),0), 0);
 
+  // Generate a PDF of exactly what's currently shown — same filters, same
+  // rows — for sending to an employee for follow-up. Not tied to any one
+  // trip: reads tableGroups directly, so whatever the owner is looking at
+  // (e.g. filtered to one employee + Pouch: Not Received) is exactly what
+  // gets printed.
+  const exportPartyPortalPDF = () => {
+    if(tableGroups.length===0) { alert("No trips match the current filters."); return; }
+    const empName = employeeFilter ? (employees.find(e=>e.id===employeeFilter)?.name || employeeFilter) : "";
+    const filterParts = [];
+    if(employeeFilter) filterParts.push(`Employee: ${empName}`);
+    if(billStatusFilter!=="all") filterParts.push(`Status: ${billStatusFilter==="not_billed"?"Not Billed":billStatusFilter==="billed"?"Billed":"Paid"}`);
+    if(pouchFilter!=="all") filterParts.push(`Return Pouch: ${pouchFilter==="received"?"Received":"Not Received"}`);
+    if(confirmFilter!=="all") filterParts.push(`Confirmation Email: ${confirmFilter==="received"?"Received":"Not Received"}`);
+    if(readyFilter!=="all") filterParts.push(`Ready for Billing: ${readyFilter==="ready"?"Ready":"Not Ready"}`);
+    if(dateFrom||dateTo) filterParts.push(`Date: ${dateFrom||"start"} to ${dateTo||"today"}`);
+    if(searchQ.trim()) filterParts.push(`Search: "${searchQ.trim()}"`);
+    const filterSummary = filterParts.length ? filterParts.join(" &nbsp;·&nbsp; ") : "No filters applied — showing all";
+
+    const rows = tableGroups.flatMap(({trip:t, rows}) => rows.map(d => {
+      const empN = employees.find(e=>e.id===t.assignedEmpId)?.name || "—";
+      const pouchOk = pouchReceived(t);
+      const confirmOk = diConfirmReceived(t,d);
+      return `<tr>
+        <td>${t.date||""}</td>
+        <td>${t.lrNo||"—"}<br/><span style="color:#888;font-size:9px">${t.truckNo||""}</span></td>
+        <td>${empN}</td>
+        <td>${t.partyName||"—"}</td>
+        <td>${d.diNo||"—"}</td>
+        <td>${diRowStatus(d)}</td>
+        <td style="color:${pouchOk?"#16a34a":"#dc2626"};font-weight:700">${pouchOk?"✓":"✗"}</td>
+        <td style="color:${confirmOk?"#16a34a":"#dc2626"};font-weight:700">${confirmOk?"✓":"✗"}</td>
+        <td style="color:${d.readyForBilling?"#16a34a":"#dc2626"};font-weight:700">${d.readyForBilling?"✓":"✗"}</td>
+        <td style="text-align:right">${fmt(rowAmt(t,d))}</td>
+      </tr>`;
+    })).join("");
+
+    const html = `<style>
+      body{font-family:'Segoe UI',Arial,sans-serif;font-size:11px;color:#111;margin:20px}
+      .kpis{display:flex;gap:12px;margin:12px 0;flex-wrap:wrap}
+      .kpi{border:1px solid #ddd;border-radius:6px;padding:8px 14px;min-width:100px;text-align:center}
+      .kpi .val{font-size:16px;font-weight:800} .kpi .lbl{font-size:9px;color:#888;margin-top:2px}
+      table{width:100%;border-collapse:collapse;margin-bottom:10px;font-size:10px}
+      th{background:#7c3aed;color:white;padding:5px 7px;text-align:left;border:1px solid #7c3aed;font-size:9px;text-transform:uppercase}
+      td{padding:4px 7px;border:1px solid #e0e0e0}
+      tr:nth-child(even){background:#f7f5fc}
+      .footer{margin-top:20px;font-size:9px;color:#aaa;border-top:1px solid #eee;padding-top:8px}
+      .logo-img{width:52px;height:52px;border-radius:8px;object-fit:cover}
+      @media print { * { -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; } }
+    </style>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;padding-bottom:8px;border-bottom:2px solid #7c3aed">
+      <img src="${RC.logoSrc}" class="logo-img" alt="${RC.companyShort}" />
+      <div>
+        <div style="font-size:7px;text-transform:uppercase;letter-spacing:2px;color:#7c3aed;font-weight:700">${RC.companyName}</div>
+        <div style="font-size:20px;font-weight:800;line-height:1.2">Party Portal — Follow-up List</div>
+        <div style="font-size:10px;color:#888">Generated ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}</div>
+      </div>
+    </div>
+    <div style="background:#f7f5fc;border:1px solid #7c3aed44;border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:11px;color:#555">
+      <b>Filters applied:</b> ${filterSummary}
+    </div>
+    <div class="kpis">
+      <div class="kpi"><div class="val" style="color:#7c3aed">${tableGroups.length}</div><div class="lbl">TRIPS</div></div>
+      <div class="kpi"><div class="val" style="color:#16a34a">${fmt(filteredTotal)}</div><div class="lbl">TOTAL AMOUNT</div></div>
+    </div>
+    <table><tr><th>Date</th><th>LR/Truck</th><th>Employee</th><th>Party Name</th><th>DI</th><th>Status</th><th>Pouch</th><th>Email</th><th>Ready</th><th style="text-align:right">Amount</th></tr>${rows}</table>
+    <div class="footer">${RC.companyName} · Report generated ${new Date().toLocaleString("en-IN")}</div>`;
+
+    const w = window.open("","_blank");
+    w.document.write(`<!DOCTYPE html><html><head><title>Party Portal Follow-up</title></head><body onload="window.print()">${html}</body></html>`);
+    w.document.close();
+  };
+
   const uploadReturnPouch = async (tripId, file) => {
     setRowUploadingId(tripId);
     try { await uploadSealedForTrip(tripId, file); }
@@ -13430,11 +13502,16 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
       )}
 
       {tableGroups.length>0&&(
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
           <span style={{fontSize:12,color:C.muted}}>{tableGroups.length} trips · <b>{fmt(filteredTotal)}</b></span>
-          <button onClick={toggleAll} style={{background:"none",border:`1px solid ${C.accent}`,borderRadius:6,color:C.accent,fontSize:11,padding:"3px 10px",cursor:"pointer",fontWeight:700}}>
-            {filteredTripIds.length>0 && filteredTripIds.every(id=>selected.has(id)) && selected.size===filteredTripIds.length ?"Deselect All":"Select All"}
-          </button>
+          <div style={{display:"flex",gap:6}}>
+            <button onClick={exportPartyPortalPDF} style={{background:"none",border:`1px solid ${C.purple}`,borderRadius:6,color:C.purple,fontSize:11,padding:"3px 10px",cursor:"pointer",fontWeight:700}}>
+              📄 Generate PDF
+            </button>
+            <button onClick={toggleAll} style={{background:"none",border:`1px solid ${C.accent}`,borderRadius:6,color:C.accent,fontSize:11,padding:"3px 10px",cursor:"pointer",fontWeight:700}}>
+              {filteredTripIds.length>0 && filteredTripIds.every(id=>selected.has(id)) && selected.size===filteredTripIds.length ?"Deselect All":"Select All"}
+            </button>
+          </div>
         </div>
       )}
 
