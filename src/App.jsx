@@ -15226,9 +15226,16 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
     // interleaved by date with a running balance, payment rows highlighted,
     // so it's visually obvious exactly when a payment landed relative to
     // what was owed at that point — not two separate disconnected lists.
+    // Diesel/Cash shown as separate columns (not just merged into "Owed")
+    // so the breakdown that makes up the total is actually visible and
+    // auditable from the report itself, not just a number you have to trust.
     const ledger = [
-      ...indentsInRange.map(i => ({date:i.date||"", type:"indent", label:`Indent #${i.indentNo} · ${i.truckNo}`, debit:+i.amount||0, credit:0})),
-      ...paymentsInRange.map(pp => ({date:pp.date||"", type:"payment", label:`Payment${pp.utr?` · UTR ${pp.utr}`:""}${pp.paidTo?` · to ${pp.paidTo}`:""}${pp.note?` · ${pp.note}`:""}`, debit:0, credit:+pp.amount||0})),
+      ...indentsInRange.map(i => {
+        const diesel = i.confirmedAmount != null ? i.confirmedAmount : (i.dieselAmount != null ? i.dieselAmount : Math.max(0,(+i.amount||0)-(+i.cashAmount||0)));
+        const cash = +i.cashAmount||0;
+        return {date:i.date||"", type:"indent", label:`Indent #${i.indentNo} · ${i.truckNo}`, diesel, cash, debit:+i.amount||0, credit:0};
+      }),
+      ...paymentsInRange.map(pp => ({date:pp.date||"", type:"payment", label:`Payment${pp.utr?` · UTR ${pp.utr}`:""}${pp.paidTo?` · to ${pp.paidTo}`:""}${pp.note?` · ${pp.note}`:""}`, diesel:0, cash:0, debit:0, credit:+pp.amount||0})),
     ].sort((a,b)=>a.date.localeCompare(b.date));
 
     let running = 0;
@@ -15239,6 +15246,8 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
         <td>${row.date||"—"}</td>
         <td>${isPayment?"💳 Payment":"⛽ Indent"}</td>
         <td>${row.label}</td>
+        <td style="text-align:right">${row.diesel?fmt(row.diesel):"—"}</td>
+        <td style="text-align:right">${row.cash?fmt(row.cash):"—"}</td>
         <td style="text-align:right;color:#dc2626">${row.debit?fmt(row.debit):"—"}</td>
         <td style="text-align:right;color:#16a34a">${row.credit?fmt(row.credit):"—"}</td>
         <td style="text-align:right;font-weight:700">${fmt(running)}</td>
@@ -15275,7 +15284,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
     </div>
 
     <h2>📒 Ledger — Indents &amp; Payments (${ledger.length} entries)</h2>
-    ${ledger.length===0?'<div class="empty">No activity in this period.</div>':`<table><tr><th>Date</th><th>Type</th><th>Details</th><th style="text-align:right">Owed</th><th style="text-align:right">Paid</th><th style="text-align:right">Running Balance</th></tr>${ledgerRows}</table>`}
+    ${ledger.length===0?'<div class="empty">No activity in this period.</div>':`<table><tr><th>Date</th><th>Type</th><th>Details</th><th style="text-align:right">Diesel</th><th style="text-align:right">Cash</th><th style="text-align:right">Owed (Total)</th><th style="text-align:right">Paid</th><th style="text-align:right">Running Balance</th></tr>${ledgerRows}</table>`}
 
     <div class="footer">${RC.companyName} · ${pump.name}${pump.contact?` · ${pump.contact}`:""} · Report generated ${new Date().toLocaleString("en-IN")}</div>`;
 
