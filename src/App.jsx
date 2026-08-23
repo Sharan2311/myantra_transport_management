@@ -13633,8 +13633,22 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                       {/* Return Pouch */}
                       <td style={{padding:"6px 8px",borderRight:bR,borderBottom:bB}}>
                         {pouchOk ? (
-                          <span onClick={t.sealedInvoicePath?e=>openFile(t.sealedInvoicePath,e):undefined}
-                            style={{color:C.green,fontWeight:700,fontSize:11,cursor:t.sealedInvoicePath?"pointer":"default"}}>✓ Received</span>
+                          <div style={{display:"flex",flexDirection:"column",gap:3,alignItems:"flex-start"}}>
+                            <span onClick={t.sealedInvoicePath?e=>openFile(t.sealedInvoicePath,e):undefined}
+                              style={{color:C.green,fontWeight:700,fontSize:11,cursor:t.sealedInvoicePath?"pointer":"default"}}>✓ Received</span>
+                            {isPartyMgr && t.sealedInvoicePath && (
+                              <label style={{display:"inline-flex",alignItems:"center",gap:3,border:`1px solid ${C.muted}`,borderRadius:6,padding:"2px 6px",
+                                cursor:rowUploading?"not-allowed":"pointer",color:C.muted,fontWeight:700,fontSize:9}}>
+                                {rowUploading?"⏳":"🔄"} Re-upload
+                                <input type="file" accept=".pdf,image/*" style={{display:"none"}} disabled={rowUploading}
+                                  onChange={e=>{
+                                    const f=e.target.files[0];
+                                    if(f && window.confirm("Replace the currently uploaded Return Pouch file with this one? The old file will no longer be shown.")) uploadReturnPouch(t.id, f);
+                                    e.target.value="";
+                                  }}/>
+                              </label>
+                            )}
+                          </div>
                         ) : d.epodPouchDone ? (
                           <div style={{color:C.green,fontWeight:700,fontSize:11}}>
                             ✓ EPOD Done
@@ -13661,8 +13675,22 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                       {/* Confirmation Email */}
                       <td style={{padding:"6px 8px",borderRight:bR,borderBottom:bB}}>
                         {diConfirmReceived(t,d) ? (
-                          <span onClick={t.confirmPdfPath?e=>openFile(t.confirmPdfPath,e):undefined}
-                            style={{color:C.green,fontWeight:700,fontSize:11,cursor:t.confirmPdfPath?"pointer":"default"}}>✓ Received</span>
+                          <div style={{display:"flex",flexDirection:"column",gap:3,alignItems:"flex-start"}}>
+                            <span onClick={t.confirmPdfPath?e=>openFile(t.confirmPdfPath,e):undefined}
+                              style={{color:C.green,fontWeight:700,fontSize:11,cursor:t.confirmPdfPath?"pointer":"default"}}>✓ Received</span>
+                            {isPartyMgr && t.confirmPdfPath && (
+                              <label style={{display:"inline-flex",alignItems:"center",gap:3,border:`1px solid ${C.muted}`,borderRadius:6,padding:"2px 6px",
+                                cursor:pdfUploading?"not-allowed":"pointer",color:C.muted,fontWeight:700,fontSize:9}}>
+                                {pdfUploading?"⏳":"🔄"} Re-upload
+                                <input type="file" accept=".pdf,image/*" style={{display:"none"}} disabled={pdfUploading}
+                                  onChange={e=>{
+                                    const f=e.target.files[0];
+                                    if(f && window.confirm("Replace the currently uploaded Confirmation Email file with this one? The old file will no longer be shown.")) uploadConfirmPdf(f, new Set([t.id]));
+                                    e.target.value="";
+                                  }}/>
+                              </label>
+                            )}
+                          </div>
                         ) : d.epodDone ? (
                           <div style={{color:C.green,fontWeight:700,fontSize:11}}>
                             ✓ EPOD Done
