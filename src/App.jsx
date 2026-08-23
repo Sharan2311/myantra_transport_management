@@ -12902,22 +12902,47 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
       const pdfUpdated=[];
       // Auto-merge for single selected trip
       let batchMergedPath="";
+      let mergeErrorMsg="";
+      let mergeWarning="";
       if(ids.size===1){
         const t=(trips||[]).find(x=>ids.has(x.id));
         if(t){
           const grPath=t.grFilePath||(t.diLines||[]).find(d=>d.grFilePath)?.grFilePath;
           const invPath=t.invoiceFilePath||(t.diLines||[]).find(d=>d.invoiceFilePath)?.invoiceFilePath;
-          if(grPath&&invPath){try{
+          // Degrade gracefully — merge with whatever's actually fetchable
+          // instead of requiring BOTH GR and Invoice to succeed or aborting
+          // entirely. One missing/corrupted supporting file shouldn't block
+          // merging the confirmation with the other one that's fine.
+          if(grPath||invPath){try{
             const confBuf=await file.arrayBuffer();
-            const[grBuf,invBuf]=await Promise.all([fetchStorageFile(grPath),fetchStorageFile(invPath)]);
-            const merged=await mergePDFs([confBuf,grBuf,invBuf]);
+            const buffers=[confBuf];
+            const fetchErrors=[];
+            if(grPath){ try{ buffers.push(await fetchStorageFile(grPath)); } catch(ge){ fetchErrors.push("GR: "+ge.message); } }
+            if(invPath){ try{ buffers.push(await fetchStorageFile(invPath)); } catch(ie){ fetchErrors.push("Invoice: "+ie.message); } }
+            const merged=await mergePDFs(buffers);
             const mf=new File([merged],"merged_confirmation.pdf",{type:"application/pdf"});
             const mr=await uploadPartyFile(t.id,"merged_confirmation",mf);
             batchMergedPath=mr.path;
-          }catch(me){console.warn("Merge failed:",me.message);}}
+            if(fetchErrors.length) mergeWarning=fetchErrors.join("; ");
+          }catch(me){ mergeErrorMsg=me.message; console.warn("Merge failed:",me.message); }}
         }
       }
-      if(!batchMergedPath&&ids.size===1)alert("\u26a0 Confirmation uploaded but PDF merge failed.\nStatus not updated until merge succeeds.");
+      // The confirmation file itself is ALWAYS saved below (confirmPdfPath),
+      // regardless of merge outcome — that's what actually marks Confirmation
+      // Email as received. Only the bonus combined "Merged PDF" (confirmation
+      // + GR + Invoice in one file) depends on the merge succeeding. Also
+      // fixes a second bug: the old alert fired unconditionally whenever no
+      // merged PDF existed — including trips with no GR/Invoice uploaded at
+      // all, where no merge was ever attempted and nothing actually failed.
+      if(!batchMergedPath && ids.size===1) {
+        const t=(trips||[]).find(x=>ids.has(x.id));
+        const hasSupportingDocs = t&&(t.grFilePath||t.invoiceFilePath||(t.diLines||[]).some(d=>d.grFilePath||d.invoiceFilePath));
+        if(hasSupportingDocs) {
+          alert(`✓ Confirmation uploaded and saved — it counts as received.\n\n⚠ The combined PDF (confirmation + GR + Invoice) could not be generated${mergeErrorMsg?": "+mergeErrorMsg:""}. This only affects the "Merged PDF" download for this trip, not the Confirmation Email status.`);
+        }
+      } else if(mergeWarning && ids.size===1) {
+        alert(`✓ Confirmation uploaded and merged, but couldn't include: ${mergeWarning}`);
+      }
       setTrips(prev=>prev.map(t=>{
         if(!ids.has(t.id))return t;
         const mergedPath=ids.size===1?batchMergedPath:"";
@@ -12929,9 +12954,8 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
         const readyFields = hasLines
           ? {diLines: t.diLines.map(d => d.orderType==="party" ? autoReady(d) : d)}
           : (t.orderType==="party" && !t.readyForBilling ? {readyForBilling:true, readyForBillingBy:"Auto — Confirmation Email", readyForBillingAt:ts} : {});
-        const u={...t,emailSentAt:t.emailSentAt||ts,confirmPdfPath:publicUrl,...readyFields,
-          ...(mergedPath?{status:"Confirmation Email Received",mergedPdfPath:mergedPath,receiptFilePath:path,receiptUploadedAt:ts}
-            :(ids.size>1?{status:"Confirmation Email Received"}:{}))};
+        const u={...t,emailSentAt:t.emailSentAt||ts,confirmPdfPath:publicUrl,status:"Confirmation Email Received",...readyFields,
+          ...(mergedPath?{mergedPdfPath:mergedPath,receiptFilePath:path,receiptUploadedAt:ts}:{})};
         pdfUpdated.push(u); return u;
       }));
       setTimeout(()=>pdfUpdated.forEach(u=>DB.saveTrip(u).catch(e=>console.error("saveTrip confirm pdf:",e))),0);
