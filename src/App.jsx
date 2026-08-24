@@ -12727,6 +12727,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
   const [confirmFilter,    setConfirmFilter]    = useState("all"); // all | received | not_received — Confirmation Email column
   const [readyFilter,      setReadyFilter]      = useState("all"); // all | ready | not_ready
   const [employeeFilter,   setEmployeeFilter]    = useState(""); // "" = all employees, else empId
+  const [clubFilter,       setClubFilter]        = useState("all"); // all | clubbed | party_only — mixed party+godown LRs vs pure-party
   const [rowUploadingId,   setRowUploadingId]   = useState(""); // per-row inline upload spinner
   // ── Confirmation Mail Builder — separate from the main table's filters.
   // Searches ALL party trips (not just what's currently filtered) by DI, so
@@ -12983,6 +12984,17 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
   // the pouch hold elsewhere in the app (_hasMerged), just named for this view.
   const pouchReceived = tripConfirmReceived; // = tripPouchReceived, see module-level definition
 
+  // A trip is "clubbed" when its LR carries BOTH party and godown DI lines —
+  // one truck/LR serving two different order types on the same trip. The
+  // table normally only ever shows PARTY DI lines (partyDiRowsFor); for a
+  // clubbed trip specifically, every DI (both party and godown) is shown so
+  // the whole LR's contents are visible in one place, each line labeled with
+  // its own type.
+  const isClubbedTrip = t => {
+    const types = new Set(diRowsFor(t).map(d=>d.orderType));
+    return types.has("party") && types.has("godown");
+  };
+
   // Build grouped, DI-line-filtered table rows. billStatusFilter and
   // readyFilter narrow which DI SUB-ROWS show within a trip group (a trip
   // stays visible if at least one line matches); pouchFilter/confirmFilter
@@ -12990,12 +13002,22 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
   // readyFilter is genuinely per-DI, since Ready for Billing is per-DI.
   const tableGroups = activeList
     .filter(t => pouchFilter==="all" || (pouchFilter==="received")===pouchReceived(t))
+    .filter(t => {
+      if(clubFilter==="all") return true;
+      return clubFilter==="clubbed" ? isClubbedTrip(t) : !isClubbedTrip(t);
+    })
     .map(t => {
-      let rows = partyDiRowsFor(t);
+      const clubbed = isClubbedTrip(t);
+      // Clubbed trips show every DI on the LR (party + godown); everything
+      // else keeps showing party DIs only, same as before.
+      let rows = clubbed ? diRowsFor(t) : partyDiRowsFor(t);
       if(billStatusFilter!=="all") rows = rows.filter(d => diRowStatus(d) === (billStatusFilter==="not_billed"?"Not Billed":billStatusFilter==="billed"?"Billed":"Paid"));
-      if(confirmFilter!=="all") rows = rows.filter(d => (confirmFilter==="received")===diConfirmReceived(t,d));
-      if(readyFilter!=="all") rows = rows.filter(d => (readyFilter==="ready")===d.readyForBilling);
-      return {trip:t, rows};
+      // Confirmation Email / Ready for Billing are party-specific concepts —
+      // a godown DI row on a clubbed trip is never excluded by these two
+      // filters (it has nothing to confirm), only by billing status.
+      if(confirmFilter!=="all") rows = rows.filter(d => d.orderType!=="party" || (confirmFilter==="received")===diConfirmReceived(t,d));
+      if(readyFilter!=="all") rows = rows.filter(d => d.orderType!=="party" || (readyFilter==="ready")===d.readyForBilling);
+      return {trip:t, rows, clubbed};
     })
     .filter(g => g.rows.length>0);
 
@@ -13441,6 +13463,17 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
           </button>
         ))}
       </div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+        <span style={{fontSize:10,color:C.muted,fontWeight:700}}>TYPE:</span>
+        {[["all","All"],["clubbed","🔗 Clubbed LR"],["party_only","Party Only"]].map(([k,l])=>(
+          <button key={k} onClick={()=>setClubFilter(k)}
+            style={{padding:"5px 11px",borderRadius:16,cursor:"pointer",fontWeight:700,fontSize:11,
+              background:clubFilter===k?"#7c3aed":"transparent",border:"1.5px solid #7c3aed",
+              color:clubFilter===k?"#fff":"#7c3aed"}}>
+            {l}
+          </button>
+        ))}
+      </div>
 
       {selected.size>0&&(
         <div style={{background:C.accent+"11",border:`1.5px solid ${C.accent}`,borderRadius:10,padding:"10px 14px",display:"flex",flexDirection:"column",gap:8}}>
@@ -13574,7 +13607,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                 </tr>
               </thead>
               <tbody>
-                {tableGroups.map(({trip:t, rows}, gi)=>{
+                {tableGroups.map(({trip:t, rows, clubbed}, gi)=>{
                   const grPath  = t.grFilePath || (t.diLines||[]).find(d=>d.grFilePath)?.grFilePath;
                   const invPath = t.invoiceFilePath || (t.diLines||[]).find(d=>d.invoiceFilePath)?.invoiceFilePath;
                   const pouchOk = pouchReceived(t);
@@ -13596,6 +13629,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                         <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",position:"sticky",left:110,background:stickyBg,zIndex:1,borderRight:`2px solid ${C.border}`,borderBottom:bB}}>
                           <div style={{fontWeight:700}}>{t.lrNo||"—"}</div>
                           <div style={{color:C.muted,fontSize:11}}>{t.truckNo}</div>
+                          {clubbed && <div style={{marginTop:3}}><Badge label="🔗 Clubbed LR" color="#7c3aed" /></div>}
                         </td>
                       )}
                       {i===0 && (
@@ -13609,7 +13643,10 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                         </td>
                       )}
                       {i===0 && <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",borderRight:bR,borderBottom:bB}}>{t.to||"—"}</td>}
-                      <td style={{padding:"6px 8px",fontFamily:"monospace",fontSize:11,borderRight:bR,borderBottom:bB}}>{d.diNo||"—"}{d.qty?<div style={{color:C.muted,fontFamily:"inherit"}}>{d.qty}MT{d.bags?` · ${d.bags} bags`:""}</div>:null}</td>
+                      <td style={{padding:"6px 8px",fontFamily:"monospace",fontSize:11,borderRight:bR,borderBottom:bB}}>
+                        {d.diNo||"—"}{d.qty?<div style={{color:C.muted,fontFamily:"inherit"}}>{d.qty}MT{d.bags?` · ${d.bags} bags`:""}</div>:null}
+                        {clubbed && <div style={{marginTop:3}}>{d.orderType==="party"?<Badge label="🎪 Party" color="#7c3aed" />:<Badge label="🏭 Godown" color={C.muted} />}</div>}
+                      </td>
                       <td style={{padding:"6px 8px",borderRight:bR,borderBottom:bB}}>
                         {(()=>{ const st=diRowStatus(d); const c = st==="Paid"?C.green:st==="Billed"?C.teal:C.orange;
                           return <Badge label={st} color={c} />; })()}
@@ -13630,9 +13667,12 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                         </td>
                       )}
 
-                      {/* Return Pouch */}
+                      {/* Return Pouch — party-specific concept; godown DI rows
+                          on a clubbed trip show a neutral placeholder instead */}
                       <td style={{padding:"6px 8px",borderRight:bR,borderBottom:bB}}>
-                        {pouchOk ? (
+                        {d.orderType!=="party" ? (
+                          <span style={{color:C.muted,fontSize:11}}>— Godown</span>
+                        ) : pouchOk ? (
                           <div style={{display:"flex",flexDirection:"column",gap:3,alignItems:"flex-start"}}>
                             <span onClick={t.sealedInvoicePath?e=>openFile(t.sealedInvoicePath,e):undefined}
                               style={{color:C.green,fontWeight:700,fontSize:11,cursor:t.sealedInvoicePath?"pointer":"default"}}>✓ Received</span>
@@ -13672,9 +13712,11 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                         )}
                       </td>
 
-                      {/* Confirmation Email */}
+                      {/* Confirmation Email — party-specific concept */}
                       <td style={{padding:"6px 8px",borderRight:bR,borderBottom:bB}}>
-                        {diConfirmReceived(t,d) ? (
+                        {d.orderType!=="party" ? (
+                          <span style={{color:C.muted,fontSize:11}}>— Godown</span>
+                        ) : diConfirmReceived(t,d) ? (
                           <div style={{display:"flex",flexDirection:"column",gap:3,alignItems:"flex-start"}}>
                             <span onClick={t.confirmPdfPath?e=>openFile(t.confirmPdfPath,e):undefined}
                               style={{color:C.green,fontWeight:700,fontSize:11,cursor:t.confirmPdfPath?"pointer":"default"}}>✓ Received</span>
@@ -13714,9 +13756,11 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                         )}
                       </td>
 
-                      {/* Ready for Billing */}
+                      {/* Ready for Billing — party-specific concept */}
                       <td style={{padding:"6px 8px",borderRight:bR,borderBottom:bB}}>
-                        {d.readyForBilling ? (
+                        {d.orderType!=="party" ? (
+                          <span style={{color:C.muted,fontSize:11}}>— Godown</span>
+                        ) : d.readyForBilling ? (
                           <div>
                             <div style={{color:C.green,fontWeight:700,fontSize:11}}>✓ Ready</div>
                             <div style={{color:C.muted,fontSize:9,marginTop:1}}>{d.readyForBillingBy||"—"}</div>
