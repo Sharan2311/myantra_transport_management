@@ -20783,7 +20783,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                   <div>
                     <div style={{fontWeight:800,fontSize:13,color:enforced?C.orange:C.text}}>Return Pouch Deadline — {emp.name}</div>
                     <div style={{color:C.muted,fontSize:11,marginTop:2}}>
-                      {enforced ? "If any party trip on this employee's trucks is 8+ days old without pouch/confirmation, payment requests are blocked (owner can still act)" : "Off — this employee is exempt from the 8-day payment-request block"}
+                      {enforced ? "If any party trip on this employee's trucks is 8+ days old without pouch/confirmation, payment requests are blocked (owner/manager can still act)" : "Off — this employee is exempt from the 8-day payment-request block"}
                     </div>
                   </div>
                   <button onClick={togglePouchDeadline}
@@ -25001,7 +25001,7 @@ const POUCH_GATE_TXT = {
   en: {
     langLabel: "English",
     title: "🚫 Payment Requests Blocked",
-    intro: (n) => <>You have <b>{n}</b> party trip{n>1?"s":""} still missing Return Pouch / Confirmation, more than 8 days old. Payment requests are blocked for you until these are uploaded — the owner can still act, but you cannot.</>,
+    intro: (n) => <>You have <b>{n}</b> party trip{n>1?"s":""} still missing Return Pouch / Confirmation, more than 8 days old. Payment requests are blocked for you until these are uploaded — the owner or manager can still act, but you cannot.</>,
     tripLine: (lr, truck, date, blockedSince) => <>LR <b>{lr}</b> · Truck <b>{truck}</b> · Trip dated <b>{date}</b> — blocked since <b>{blockedSince}</b></>,
     footer: "Upload the sealed invoice or confirmation email for each of these in Party Portal, then try requesting payment again.",
     close: "Close",
@@ -25009,7 +25009,7 @@ const POUCH_GATE_TXT = {
   kn: {
     langLabel: "ಕನ್ನಡ",
     title: "🚫 ಪಾವತಿ ವಿನಂತಿಗಳನ್ನು ನಿರ್ಬಂಧಿಸಲಾಗಿದೆ",
-    intro: (n) => <>ನಿಮಗೆ <b>{n}</b> ಪಾರ್ಟಿ ಟ್ರಿಪ್(ಗಳು) ಇನ್ನೂ ರಿಟರ್ನ್ ಪೌಚ್ / ಖಚಿತಪಡಿಸುವಿಕೆ ಇಲ್ಲದೆ 8 ದಿನಗಳಿಗಿಂತ ಹಳೆಯದಾಗಿವೆ. ಇವುಗಳನ್ನು ಅಪ್‌ಲೋಡ್ ಮಾಡುವವರೆಗೆ ನಿಮ್ಮ ಪಾವತಿ ವಿನಂತಿಗಳನ್ನು ನಿರ್ಬಂಧಿಸಲಾಗಿದೆ — ಮಾಲೀಕರು ಇನ್ನೂ ಕ್ರಮ ತೆಗೆದುಕೊಳ್ಳಬಹುದು, ಆದರೆ ನೀವು ಸಾಧ್ಯವಿಲ್ಲ.</>,
+    intro: (n) => <>ನಿಮಗೆ <b>{n}</b> ಪಾರ್ಟಿ ಟ್ರಿಪ್(ಗಳು) ಇನ್ನೂ ರಿಟರ್ನ್ ಪೌಚ್ / ಖಚಿತಪಡಿಸುವಿಕೆ ಇಲ್ಲದೆ 8 ದಿನಗಳಿಗಿಂತ ಹಳೆಯದಾಗಿವೆ. ಇವುಗಳನ್ನು ಅಪ್‌ಲೋಡ್ ಮಾಡುವವರೆಗೆ ನಿಮ್ಮ ಪಾವತಿ ವಿನಂತಿಗಳನ್ನು ನಿರ್ಬಂಧಿಸಲಾಗಿದೆ — ಮಾಲೀಕರು ಅಥವಾ ಮ್ಯಾನೇಜರ್ ಇನ್ನೂ ಕ್ರಮ ತೆಗೆದುಕೊಳ್ಳಬಹುದು, ಆದರೆ ನೀವು ಸಾಧ್ಯವಿಲ್ಲ.</>,
     tripLine: (lr, truck, date, blockedSince) => <>LR <b>{lr}</b> · ಟ್ರಕ್ <b>{truck}</b> · ಟ್ರಿಪ್ ದಿನಾಂಕ <b>{date}</b> — <b>{blockedSince}</b> ರಿಂದ ನಿರ್ಬಂಧಿತ</>,
     footer: "ಪಾರ್ಟಿ ಪೋರ್ಟಲ್‌ನಲ್ಲಿ ಪ್ರತಿಯೊಂದಕ್ಕೂ ಸೀಲ್ಡ್ ಇನ್ವಾಯ್ಸ್ ಅಥವಾ ಖಚಿತಪಡಿಸುವಿಕೆ ಇಮೇಲ್ ಅಪ್‌ಲೋಡ್ ಮಾಡಿ, ನಂತರ ಮತ್ತೆ ಪಾವತಿಗಾಗಿ ವಿನಂತಿಸಿ.",
     close: "ಮುಚ್ಚಿ",
@@ -25017,7 +25017,7 @@ const POUCH_GATE_TXT = {
   te: {
     langLabel: "తెలుగు",
     title: "🚫 చెల్లింపు అభ్యర్థనలు నిరోధించబడ్డాయి",
-    intro: (n) => <>మీకు <b>{n}</b> పార్టీ ట్రిప్(లు) ఇంకా రిటర్న్ పౌచ్ / నిర్ధారణ లేకుండా 8 రోజుల కంటే పాతవి ఉన్నాయి. వీటిని అప్‌లోడ్ చేసే వరకు మీ చెల్లింపు అభ్యర్థనలు నిరోధించబడ్డాయి — యజమాని ఇంకా చర్య తీసుకోవచ్చు, కానీ మీరు కాదు.</>,
+    intro: (n) => <>మీకు <b>{n}</b> పార్టీ ట్రిప్(లు) ఇంకా రిటర్న్ పౌచ్ / నిర్ధారణ లేకుండా 8 రోజుల కంటే పాతవి ఉన్నాయి. వీటిని అప్‌లోడ్ చేసే వరకు మీ చెల్లింపు అభ్యర్థనలు నిరోధించబడ్డాయి — యజమాని లేదా మేనేజర్ ఇంకా చర్య తీసుకోవచ్చు, కానీ మీరు కాదు.</>,
     tripLine: (lr, truck, date, blockedSince) => <>LR <b>{lr}</b> · ట్రక్ <b>{truck}</b> · ట్రిప్ తేదీ <b>{date}</b> — <b>{blockedSince}</b> నుండి నిరోధించబడింది</>,
     footer: "పార్టీ పోర్టల్‌లో వీటిలో ప్రతిదానికి సీల్డ్ ఇన్వాయిస్ లేదా నిర్ధారణ ఇమెయిల్ అప్‌లోడ్ చేయండి, తర్వాత మళ్లీ చెల్లింపు అభ్యర్థించండి.",
     close: "మూసివేయి",
@@ -25025,7 +25025,7 @@ const POUCH_GATE_TXT = {
   mr: {
     langLabel: "मराठी",
     title: "🚫 पेमेंट विनंत्या अवरोधित",
-    intro: (n) => <>तुमच्या <b>{n}</b> पार्टी ट्रिप(चे) अजूनही रिटर्न पाउच / पुष्टीकरण नाही, आणि त्या 8 दिवसांपेक्षा जुन्या आहेत. या अपलोड होईपर्यंत तुमच्या पेमेंट विनंत्या अवरोधित आहेत — मालक अजूनही कारवाई करू शकतात, पण तुम्ही करू शकत नाही.</>,
+    intro: (n) => <>तुमच्या <b>{n}</b> पार्टी ट्रिप(चे) अजूनही रिटर्न पाउच / पुष्टीकरण नाही, आणि त्या 8 दिवसांपेक्षा जुन्या आहेत. या अपलोड होईपर्यंत तुमच्या पेमेंट विनंत्या अवरोधित आहेत — मालक किंवा मॅनेजर अजूनही कारवाई करू शकतात, पण तुम्ही करू शकत नाही.</>,
     tripLine: (lr, truck, date, blockedSince) => <>LR <b>{lr}</b> · ट्रक <b>{truck}</b> · ट्रिप दिनांक <b>{date}</b> — <b>{blockedSince}</b> पासून अवरोधित</>,
     footer: "पार्टी पोर्टलमध्ये यापैकी प्रत्येकासाठी सीलबंद इनव्हॉइस किंवा पुष्टीकरण ईमेल अपलोड करा, नंतर पुन्हा पेमेंटची विनंती करा.",
     close: "बंद करा",
@@ -25118,17 +25118,16 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
   const [payReqSheet,   setPayReqSheet]   = useState(null); // trip for request payment
   // ── Return Pouch / Confirmation deadline gate ──────────────────────────────
   // Cross-trip, TRUCK-level block: keyed off the truck(s) actually being
-  // requested, not the logged-in user's own employee link. Any non-owner
-  // requesting payment for a truck whose linked employee has an overdue
-  // trip is blocked — regardless of whether they ARE that employee or
-  // someone else entirely (a different employee, a shared account, etc).
-  // "Only the owner should be allowed" means exactly that: everyone else,
-  // not just the specific employee who missed the deadline.
+  // requested, not the logged-in user's own employee link. Any non-owner/
+  // non-manager requesting payment for a truck whose linked employee has an
+  // overdue trip is blocked — regardless of whether they ARE that employee
+  // or someone else entirely (a different employee, a shared account, etc).
+  // Exemption extended from owner-only to owner+manager per explicit request.
   const [pouchBlockShow, setPouchBlockShow] = useState(false);
   const [pouchBlockLang, setPouchBlockLang] = useState("en");
   const [pouchBlockingTrips, setPouchBlockingTrips] = useState([]);
   const pouchBlockFor = (checkTrips) => {
-    if(user?.role==="owner") return [];
+    if(user?.role==="owner" || user?.role==="manager") return [];
     const list = Array.isArray(checkTrips) ? checkTrips : [checkTrips];
     const truckNos = [...new Set(list.map(t=>t.truckNo).filter(Boolean))];
     const seen = new Set();
