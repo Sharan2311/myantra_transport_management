@@ -167,6 +167,16 @@ const diRowsFor = (trip) => {
 // overall can still carry godown-orderType DI lines mixed in (see above).
 const partyDiRowsFor = (trip) => diRowsFor(trip).filter(d => d.orderType==="party");
 const diRowStatus = d => d.paid ? "Paid" : d.billed ? "Billed" : "Not Billed";
+// GR numbers are formatted <line-code>/MYE/<seq> (e.g. 1070/MYE/1908,
+// 1079/MYE/512) — the prefix identifies which physical loading line at the
+// plant the GR was issued from. Returns null for anything else, so an
+// unrecognized prefix is neither Line 1 nor Line 2, not silently miscounted.
+const grLine = grNo => {
+  const prefix = String(grNo||"").split("/")[0].trim();
+  if(prefix==="1070") return "line1";
+  if(prefix==="1079") return "line2";
+  return null;
+};
 
 // ─── RETURN POUCH — drives pouch release (driver's deduction) and the ────────
 // 8-day payment block, since "Return Pouch" is what unlocks the driver's
@@ -12728,6 +12738,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
   const [readyFilter,      setReadyFilter]      = useState("all"); // all | ready | not_ready
   const [employeeFilter,   setEmployeeFilter]    = useState(""); // "" = all employees, else empId
   const [clubFilter,       setClubFilter]        = useState("all"); // all | clubbed | party_only — mixed party+godown LRs vs pure-party
+  const [lineFilter,       setLineFilter]         = useState("all"); // all | line1 | line2 — GR number prefix (1070 vs 1079)
   const [rowUploadingId,   setRowUploadingId]   = useState(""); // per-row inline upload spinner
   // ── Confirmation Mail Builder — separate from the main table's filters.
   // Searches ALL party trips (not just what's currently filtered) by DI, so
@@ -13017,6 +13028,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
       // filters (it has nothing to confirm), only by billing status.
       if(confirmFilter!=="all") rows = rows.filter(d => d.orderType!=="party" || (confirmFilter==="received")===diConfirmReceived(t,d));
       if(readyFilter!=="all") rows = rows.filter(d => d.orderType!=="party" || (readyFilter==="ready")===d.readyForBilling);
+      if(lineFilter!=="all") rows = rows.filter(d => grLine(d.grNo)===lineFilter);
       return {trip:t, rows, clubbed};
     })
     .filter(g => g.rows.length>0);
@@ -13470,6 +13482,17 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
             style={{padding:"5px 11px",borderRadius:16,cursor:"pointer",fontWeight:700,fontSize:11,
               background:clubFilter===k?"#7c3aed":"transparent",border:"1.5px solid #7c3aed",
               color:clubFilter===k?"#fff":"#7c3aed"}}>
+            {l}
+          </button>
+        ))}
+      </div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+        <span style={{fontSize:10,color:C.muted,fontWeight:700}}>LINE:</span>
+        {[["all","All"],["line1","Line 1 (1070)"],["line2","Line 2 (1079)"]].map(([k,l])=>(
+          <button key={k} onClick={()=>setLineFilter(k)}
+            style={{padding:"5px 11px",borderRadius:16,cursor:"pointer",fontWeight:700,fontSize:11,
+              background:lineFilter===k?"#0891b2":"transparent",border:"1.5px solid #0891b2",
+              color:lineFilter===k?"#fff":"#0891b2"}}>
             {l}
           </button>
         ))}
