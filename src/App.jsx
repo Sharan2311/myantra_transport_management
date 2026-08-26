@@ -150,6 +150,12 @@ const diRowsFor = (trip) => {
     // Ready for Billing — per-DI, set automatically when Confirmation Email
     // is received, or manually by owner/party manager (see markReadyForBilling).
     readyForBilling: !!d.readyForBilling, readyForBillingBy: d.readyForBillingBy||"", readyForBillingAt: d.readyForBillingAt||"",
+    // Per-DI Return Pouch + its own GR/Invoice/Merged PDF — each DI already
+    // had its own GR/Invoice since trip creation; sealedInvoicePath/
+    // mergedPdfPath are new, uploaded per-DI going forward (see
+    // diPouchReceived's legacy-fallback note above).
+    grFilePath: d.grFilePath||"", invoiceFilePath: d.invoiceFilePath||"",
+    sealedInvoicePath: d.sealedInvoicePath||"", mergedPdfPath: d.mergedPdfPath||"",
   }));
   // Single-DI trip using the flat fields directly
   return [{
@@ -161,6 +167,10 @@ const diRowsFor = (trip) => {
     epodDone: !!trip.epodDone, epodDoneBy: trip.epodDoneBy||"", epodDoneAt: trip.epodDoneAt||"",
     epodPouchDone: !!trip.epodPouchDone, epodPouchBy: trip.epodPouchBy||"", epodPouchAt: trip.epodPouchAt||"",
     readyForBilling: !!trip.readyForBilling, readyForBillingBy: trip.readyForBillingBy||"", readyForBillingAt: trip.readyForBillingAt||"",
+    // Single-DI trip: the "per-DI" fields ARE the trip-level fields — no
+    // separate storage needed since there's only ever one DI.
+    grFilePath: trip.grFilePath||"", invoiceFilePath: trip.invoiceFilePath||"",
+    sealedInvoicePath: trip.sealedInvoicePath||"", mergedPdfPath: trip.mergedPdfPath||"",
   }];
 };
 // Party Portal only ever wants PARTY DI lines — a trip classified "party"
@@ -181,13 +191,23 @@ const grLine = grNo => {
 // ─── RETURN POUCH — drives pouch release (driver's deduction) and the ────────
 // 8-day payment block, since "Return Pouch" is what unlocks the driver's
 // money everywhere else in the app. Separate from Confirmation Email below.
-// A trip's pouch counts received if the document is uploaded, OR every party
-// DI line has been EPOD'd specifically for the pouch (epodPouchDone).
+//
+// Per-DI now, not per-trip — a multi-DI trip's DIs can each have a genuinely
+// different Return Pouch document (each DI already had its own GR/Invoice
+// stored per-line since trip creation; the pouch upload just hadn't caught
+// up to that until now). t.sealedInvoicePath/t.mergedPdfPath are LEGACY
+// trip-level fields from before this split: since a multi-DI trip's lines
+// are always all created together (never added to later), the old
+// trip-level file only exists on trips created before this change shipped.
+// It's kept as a fallback — grandfathers old data as "received" for every
+// DI on that trip until a real per-DI upload happens for a specific one,
+// which then takes over just for that DI. No migration needed; every trip
+// created after this ships never writes the legacy field at all.
+const diPouchReceived = (t, d) => !!(d.sealedInvoicePath || d.mergedPdfPath || t.sealedInvoicePath || t.mergedPdfPath || d.epodPouchDone);
 const tripPouchReceived = t => {
-  if(t.sealedInvoicePath || t.mergedPdfPath) return true;
   const partyLines = diRowsFor(t).filter(d=>d.orderType==="party");
-  if(partyLines.length>0) return partyLines.every(d=>d.epodPouchDone);
-  return !!t.epodPouchDone;
+  if(partyLines.length>0) return partyLines.every(d=>diPouchReceived(t,d));
+  return !!(t.sealedInvoicePath || t.mergedPdfPath || t.epodPouchDone);
 };
 // Back-compat alias — pouch release / 8-day block code was written against
 // this name before the Return Pouch vs Confirmation Email split.
@@ -195,7 +215,9 @@ const tripConfirmReceived = tripPouchReceived;
 
 // ─── CONFIRMATION EMAIL — drives the Ready for Billing auto-trigger. ─────────
 // Received if the document is uploaded, OR the DI's own epodDone (the
-// original EPOD fields) is set.
+// original EPOD fields) is set. Confirmation Email stays TRIP-level by
+// design (unlike Return Pouch above) — it's one email covering the whole
+// consignment, not a per-DI document.
 const diConfirmReceived = (t, d) => !!(t.confirmPdfPath) || !!d.epodDone;
 
 const daysSinceDate = dateStr => {
@@ -12860,26 +12882,41 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
     setSelected(new Set()); setAssignTo(""); setShowAssign(false);
   };
 
-  const uploadSealedForTrip = async(tripId, file) => {
+  const uploadSealedForTrip = async(tripId, file, diNo) => {
     setPdfUploading(true);
     try {
-      const path=`${tripId}/sealed_invoice.${file.name.split(".").pop()||"pdf"}`;
+      const trip = (trips||[]).find(t=>t.id===tripId);
+      const hasLines = trip && (trip.diLines||[]).length > 0;
+      // Single-DI trips never have per-DI storage to speak of — there's only
+      // one DI, so the trip-level fields ARE the per-DI fields. Only multi-DI
+      // trips with an explicit diNo actually write to a specific line.
+      const targetDiNo = (hasLines && diNo) ? diNo : null;
+
+      const pathSuffix = targetDiNo ? `sealed_invoice_${targetDiNo}` : "sealed_invoice";
+      const path=`${tripId}/${pathSuffix}.${file.name.split(".").pop()||"pdf"}`;
       const {error}=await supabase.storage.from("party-trip-files").upload(path,file,{upsert:true});
       if(error) throw error;
 
-      // Auto-merge: if GR + Invoice exist, create merged PDF
-      const trip = (trips||[]).find(t=>t.id===tripId);
+      // Auto-merge: if THIS DI's own GR + Invoice exist, create a merged PDF
+      // scoped to just this DI — not the trip's other DIs' documents.
       let mergedPath = "";
       if(trip) {
-        const grPath = trip.grFilePath || (trip.diLines||[]).find(d=>d.grFilePath)?.grFilePath;
-        const invPath = trip.invoiceFilePath || (trip.diLines||[]).find(d=>d.invoiceFilePath)?.invoiceFilePath;
+        let grPath, invPath;
+        if(targetDiNo) {
+          const line = (trip.diLines||[]).find(d=>d.diNo===targetDiNo);
+          grPath = line?.grFilePath; invPath = line?.invoiceFilePath;
+        } else {
+          grPath = trip.grFilePath || (trip.diLines||[]).find(d=>d.grFilePath)?.grFilePath;
+          invPath = trip.invoiceFilePath || (trip.diLines||[]).find(d=>d.invoiceFilePath)?.invoiceFilePath;
+        }
         if(grPath && invPath) {
           try {
             const sealedBuf = await file.arrayBuffer();
             const [grBuf, invBuf] = await Promise.all([fetchStorageFile(grPath), fetchStorageFile(invPath)]);
             const finalBytes = await mergePDFs([sealedBuf, grBuf, invBuf]);
-            const mergedFile = new File([finalBytes], "merged_confirmation.pdf", {type:"application/pdf"});
-            const mergedResult = await uploadPartyFile(tripId, "merged_confirmation", mergedFile);
+            const mergeName = `merged_confirmation${targetDiNo?"_"+targetDiNo:""}`;
+            const mergedFile = new File([finalBytes], mergeName+".pdf", {type:"application/pdf"});
+            const mergedResult = await uploadPartyFile(tripId, mergeName, mergedFile);
             mergedPath = mergedResult.path;
           } catch(me) { console.warn("Auto-merge failed:", me.message); }
         }
@@ -12887,13 +12924,20 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
 
       setTrips(prev=>prev.map(t=>{
         if(t.id!==tripId) return t;
-        const u={...t, sealedInvoicePath:path, status:"Sealed Invoice Received",
-          ...(mergedPath ? {mergedPdfPath:mergedPath, receiptFilePath:path, receiptUploadedAt:new Date().toISOString()} : {})};
+        let u;
+        if(targetDiNo) {
+          u = {...t, diLines: t.diLines.map(d => d.diNo===targetDiNo
+            ? {...d, sealedInvoicePath:path, ...(mergedPath?{mergedPdfPath:mergedPath}:{})}
+            : d)};
+        } else {
+          u = {...t, sealedInvoicePath:path, status:"Sealed Invoice Received",
+            ...(mergedPath ? {mergedPdfPath:mergedPath, receiptFilePath:path, receiptUploadedAt:new Date().toISOString()} : {})};
+        }
         setTimeout(()=>DB.saveTrip(u).catch(e=>console.error("saveTrip sealed:",e)),0);
         return u;
       }));
       setSelected(new Set());
-      log&&log("SEALED INVOICE UPLOADED",`${trip?.lrNo||tripId}${mergedPath?" + auto-merged":""}`);
+      log&&log("SEALED INVOICE UPLOADED",`${trip?.lrNo||tripId}${targetDiNo?" · DI "+targetDiNo:""}${mergedPath?" + auto-merged":""}`);
     } catch(e){alert("Upload failed: "+e.message);}
     finally{setPdfUploading(false);}
   };
@@ -13061,7 +13105,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
 
     const rows = tableGroups.flatMap(({trip:t, rows}) => rows.map(d => {
       const empN = employees.find(e=>e.id===t.assignedEmpId)?.name || "—";
-      const pouchOk = pouchReceived(t);
+      const pouchOk = d.orderType==="party" ? diPouchReceived(t,d) : false;
       const confirmOk = diConfirmReceived(t,d);
       return `<tr>
         <td>${t.date||""}</td>
@@ -13113,9 +13157,12 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
     w.document.close();
   };
 
-  const uploadReturnPouch = async (tripId, file) => {
-    setRowUploadingId(tripId);
-    try { await uploadSealedForTrip(tripId, file); }
+  const uploadReturnPouch = async (tripId, diNo, file) => {
+    // Composite key (not just tripId) so uploading one DI's pouch doesn't
+    // show a spinner on a sibling DI's button on the same clubbed/multi-DI trip.
+    const rowKey = tripId+"::"+(diNo||"");
+    setRowUploadingId(rowKey);
+    try { await uploadSealedForTrip(tripId, file, diNo); }
     finally { setRowUploadingId(""); }
   };
 
@@ -13338,31 +13385,32 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
   // trip were selected.
   const mergeSelectedPouchPDFs = async () => {
     if(mailRows.length===0){alert("Select at least one DI row first.");return;}
-    const uniqueTrips = [...new Map(mailRows.map(r=>[r.trip.id, r.trip])).values()];
-    // Pure Return Pouch/Confirmation only — sealedInvoicePath/confirmPdfPath is
-    // the standalone document as uploaded. mergedPdfPath is a DIFFERENT thing:
-    // uploadSealedForTrip auto-merges sealed+GR+Invoice together into one PDF
-    // when all three exist, for a different use case (a complete trip record).
-    // Using that here would silently pull GR/Invoice pages into what's supposed
-    // to be just the confirmation — only fall back to it if the standalone
-    // document genuinely isn't available any other way.
-    const pouchPathFor = t => t.sealedInvoicePath || t.confirmPdfPath || t.mergedPdfPath || "";
-    const missing = uniqueTrips.filter(t => !pouchPathFor(t));
+    // Per-DI now, not deduped to one-per-trip — a multi-DI trip can have a
+    // genuinely different Return Pouch document for each DI, so selecting
+    // two DIs off the same trip should fetch two different documents, not
+    // silently collapse to whichever one trip-level path happened to exist.
+    // sealedInvoicePath/mergedPdfPath is a DIFFERENT thing from confirmPdfPath
+    // (uploadSealedForTrip auto-merges sealed+GR+Invoice together for a
+    // different use case — a complete trip record) — only fall back to it if
+    // the standalone document genuinely isn't available any other way.
+    // Trip-level fields are the legacy pre-per-DI fallback (see diPouchReceived).
+    const pouchPathFor = (t,d) => d.sealedInvoicePath || t.confirmPdfPath || d.mergedPdfPath || t.sealedInvoicePath || t.mergedPdfPath || "";
+    const missing = mailRows.filter(({trip:t,d}) => !pouchPathFor(t,d));
     if(missing.length>0) {
-      if(!window.confirm(`${missing.length} of ${uniqueTrips.length} selected trip(s) have no Return Pouch/Confirmation document uploaded yet (${missing.map(t=>t.lrNo||t.truckNo).join(", ")}).\n\nMerge the ${uniqueTrips.length-missing.length} that do have one?`)) return;
+      if(!window.confirm(`${missing.length} of ${mailRows.length} selected DI(s) have no Return Pouch document uploaded yet (${missing.map(({trip:t,d})=>`${t.lrNo||t.truckNo} · DI ${d.diNo}`).join(", ")}).\n\nMerge the ${mailRows.length-missing.length} that do have one?`)) return;
     }
     setMergingPdf(true);
     try {
       const buffers = [];
-      for (const t of uniqueTrips) {
-        const path = pouchPathFor(t);
+      for (const {trip:t, d} of mailRows) {
+        const path = pouchPathFor(t,d);
         if(!path) continue;
         try {
           const buf = String(path).startsWith("http")
             ? await (await fetch(path)).arrayBuffer()
             : await fetchStorageFile(path);
           buffers.push(buf);
-        } catch(e) { console.warn("Could not fetch pouch doc for", t.lrNo, e.message); }
+        } catch(e) { console.warn("Could not fetch pouch doc for", t.lrNo, d.diNo, e.message); }
       }
       if(buffers.length===0) { alert("No documents could be fetched to merge."); return; }
       const merged = await mergePDFs(buffers);
@@ -13372,7 +13420,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
       a.href = url; a.download = "Selected_ReturnPouch_Confirmations.pdf"; a.target="_blank";
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      log && log("MERGED SELECTED POUCH PDFS", `${buffers.length} trip(s)`);
+      log && log("MERGED SELECTED POUCH PDFS", `${buffers.length} DI(s)`);
     } catch(e) { alert("Merge failed: "+e.message); }
     finally { setMergingPdf(false); }
   };
@@ -13631,15 +13679,18 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
               </thead>
               <tbody>
                 {tableGroups.map(({trip:t, rows, clubbed}, gi)=>{
-                  const grPath  = t.grFilePath || (t.diLines||[]).find(d=>d.grFilePath)?.grFilePath;
-                  const invPath = t.invoiceFilePath || (t.diLines||[]).find(d=>d.invoiceFilePath)?.invoiceFilePath;
-                  const pouchOk = pouchReceived(t);
-                  const rowUploading = rowUploadingId===t.id;
                   const zebra = gi%2===1 ? C.bg+"88" : "transparent";
                   return rows.map((d,i)=>{
                     const bR = `1px solid ${C.border}44`;
                     const bB = i===rows.length-1 ? `1px solid ${C.border}` : `1px dashed ${C.border}44`;
                     const stickyBg = C.card; // sticky cells need an opaque bg, not zebra transparency
+                    // Per-DI GR/Invoice/Pouch/Merged — falls back to the trip-
+                    // level field for single-DI trips or legacy pre-split data.
+                    const grPath  = d.grFilePath  || t.grFilePath;
+                    const invPath = d.invoiceFilePath || t.invoiceFilePath;
+                    const diMergedPath = d.mergedPdfPath || t.mergedPdfPath;
+                    const pouchOk = d.orderType==="party" ? diPouchReceived(t,d) : false;
+                    const rowUploading = rowUploadingId===(t.id+"::"+(d.diNo||""));
                     return (
                     <tr key={t.id+"-"+i} style={{background:zebra}}>
                       {i===0 && (
@@ -13675,20 +13726,16 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                           return <Badge label={st} color={c} />; })()}
                         {d.invoiceNo && <div style={{color:C.muted,fontSize:10,marginTop:2,fontFamily:"monospace"}}>{d.invoiceNo}</div>}
                       </td>
-                      {i===0 && (
-                        <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",borderRight:bR,borderBottom:bB}}>
-                          {grPath
-                            ? <button onClick={e=>openFile(grPath,e)} style={{background:"none",border:`1px solid ${C.blue}`,borderRadius:6,color:C.blue,fontSize:11,padding:"3px 8px",cursor:"pointer"}}>📄 View</button>
-                            : <span style={{color:C.muted,fontSize:11}}>—</span>}
-                        </td>
-                      )}
-                      {i===0 && (
-                        <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",borderRight:bR,borderBottom:bB}}>
-                          {invPath
-                            ? <button onClick={e=>openFile(invPath,e)} style={{background:"none",border:`1px solid ${C.blue}`,borderRadius:6,color:C.blue,fontSize:11,padding:"3px 8px",cursor:"pointer"}}>📄 View</button>
-                            : <span style={{color:C.muted,fontSize:11}}>—</span>}
-                        </td>
-                      )}
+                      <td style={{padding:"6px 8px",borderRight:bR,borderBottom:bB}}>
+                        {grPath
+                          ? <button onClick={e=>openFile(grPath,e)} style={{background:"none",border:`1px solid ${C.blue}`,borderRadius:6,color:C.blue,fontSize:11,padding:"3px 8px",cursor:"pointer"}}>📄 View</button>
+                          : <span style={{color:C.muted,fontSize:11}}>—</span>}
+                      </td>
+                      <td style={{padding:"6px 8px",borderRight:bR,borderBottom:bB}}>
+                        {invPath
+                          ? <button onClick={e=>openFile(invPath,e)} style={{background:"none",border:`1px solid ${C.blue}`,borderRadius:6,color:C.blue,fontSize:11,padding:"3px 8px",cursor:"pointer"}}>📄 View</button>
+                          : <span style={{color:C.muted,fontSize:11}}>—</span>}
+                      </td>
 
                       {/* Return Pouch — party-specific concept; godown DI rows
                           on a clubbed trip show a neutral placeholder instead */}
@@ -13697,16 +13744,16 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                           <span style={{color:C.muted,fontSize:11}}>— Godown</span>
                         ) : pouchOk ? (
                           <div style={{display:"flex",flexDirection:"column",gap:3,alignItems:"flex-start"}}>
-                            <span onClick={t.sealedInvoicePath?e=>openFile(t.sealedInvoicePath,e):undefined}
-                              style={{color:C.green,fontWeight:700,fontSize:11,cursor:t.sealedInvoicePath?"pointer":"default"}}>✓ Received</span>
-                            {isPartyMgr && t.sealedInvoicePath && (
+                            <span onClick={d.sealedInvoicePath?e=>openFile(d.sealedInvoicePath,e):undefined}
+                              style={{color:C.green,fontWeight:700,fontSize:11,cursor:d.sealedInvoicePath?"pointer":"default"}}>✓ Received</span>
+                            {isPartyMgr && d.sealedInvoicePath && (
                               <label style={{display:"inline-flex",alignItems:"center",gap:3,border:`1px solid ${C.muted}`,borderRadius:6,padding:"2px 6px",
                                 cursor:rowUploading?"not-allowed":"pointer",color:C.muted,fontWeight:700,fontSize:9}}>
                                 {rowUploading?"⏳":"🔄"} Re-upload
                                 <input type="file" accept=".pdf,image/*" style={{display:"none"}} disabled={rowUploading}
                                   onChange={e=>{
                                     const f=e.target.files[0];
-                                    if(f && window.confirm("Replace the currently uploaded Return Pouch file with this one? The old file will no longer be shown.")) uploadReturnPouch(t.id, f);
+                                    if(f && window.confirm("Replace the currently uploaded Return Pouch file for this DI with this one? The old file will no longer be shown.")) uploadReturnPouch(t.id, d.diNo, f);
                                     e.target.value="";
                                   }}/>
                               </label>
@@ -13723,7 +13770,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                               cursor:rowUploading?"not-allowed":"pointer",color:"#fff",fontWeight:700,fontSize:10}}>
                               {rowUploading?"⏳":"⬆"} Upload
                               <input type="file" accept=".pdf,image/*" style={{display:"none"}} disabled={rowUploading}
-                                onChange={e=>{if(e.target.files[0]) uploadReturnPouch(t.id, e.target.files[0]);}}/>
+                                onChange={e=>{if(e.target.files[0]) uploadReturnPouch(t.id, d.diNo, e.target.files[0]);}}/>
                             </label>
                             {isPartyMgr && (
                               <button onClick={()=>markEpodDone(t, d.diNo, "pouch")}
@@ -13803,14 +13850,12 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                         ) : <span style={{color:C.muted,fontSize:11}}>—</span>}
                       </td>
 
-                      {i===0 && (
-                        <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",borderRight:bR,borderBottom:bB}}>
-                          {t.mergedPdfPath
-                            ? <button onClick={async()=>{try{const url=await getSignedUrl(t.mergedPdfPath,3600);const a=document.createElement("a");a.href=url;a.download="MergedConfirmation_"+(t.lrNo||t.id)+".pdf";a.target="_blank";document.body.appendChild(a);a.click();document.body.removeChild(a);}catch(e){alert("Download failed: "+e.message);}}}
-                                style={{background:"none",border:`1px solid ${C.green}`,borderRadius:6,color:C.green,fontSize:11,padding:"3px 8px",cursor:"pointer"}}>⬇ PDF</button>
-                            : <span style={{color:C.muted,fontSize:11}}>—</span>}
-                        </td>
-                      )}
+                      <td style={{padding:"6px 8px",borderRight:bR,borderBottom:bB}}>
+                        {diMergedPath
+                          ? <button onClick={async()=>{try{const url=await getSignedUrl(diMergedPath,3600);const a=document.createElement("a");a.href=url;a.download="MergedConfirmation_"+(t.lrNo||t.id)+(d.diNo?"_"+d.diNo:"")+".pdf";a.target="_blank";document.body.appendChild(a);a.click();document.body.removeChild(a);}catch(e){alert("Download failed: "+e.message);}}}
+                              style={{background:"none",border:`1px solid ${C.green}`,borderRadius:6,color:C.green,fontSize:11,padding:"3px 8px",cursor:"pointer"}}>⬇ PDF</button>
+                          : <span style={{color:C.muted,fontSize:11}}>—</span>}
+                      </td>
                       <td style={{padding:"6px 8px",textAlign:"right",fontWeight:700,borderBottom:bB}}>{d.billedAmt>0?fmt(d.billedAmt):(d.qty&&t.givenRate?fmt(d.qty*t.givenRate):"—")}</td>
                     </tr>
                     );
