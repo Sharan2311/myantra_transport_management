@@ -226,6 +226,16 @@ const daysSinceDate = dateStr => {
   return Math.floor((d2-d1)/86400000);
 };
 
+// ─── UNBILLED PARTY DI AGING — 90-day billing deadline, alert from 70 ────────
+// Only meaningful for a DI that's genuinely still "Not Billed" (diRowStatus).
+// dueSoon: 70-89 days old, still time to bill before the 90-day mark.
+// overdue: 90+ days old, past the deadline.
+const billingAging = (t, d) => {
+  if(diRowStatus(d)!=="Not Billed") return {daysOld:0, dueSoon:false, overdue:false};
+  const daysOld = daysSinceDate(t.date);
+  return { daysOld, dueSoon: daysOld>=70 && daysOld<90, overdue: daysOld>=90 };
+};
+
 // Every party trip assigned to this employee (via trip.assignedEmpId — the
 // most-recent-trip-per-truck convention used elsewhere, but here it's a
 // direct per-trip field so no truck-lookup ambiguity) that's missing its
@@ -2903,11 +2913,64 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
         );
       })()}
 
-      {/* ── Return Pouch / Confirmation reminder — shown every login for the ── */
-      /* employee's own overdue party trips, unless the owner turned this off  */
-      /* for them (employee.pouchDeadlineEnforced===false). Not a block — the  */
-      /* actual block lives in requestPaymentGuarded (DriverPayments). This is */
-      /* purely the "please upload before date X" heads-up. */}
+      {/* ── Unbilled party DI aging reminder — owner/manager/party manager, ── */}
+      {/* every login. Not employee-specific like the pouch reminder below —   */}
+      {/* billing is a party-manager/owner responsibility, not tied to whose   */}
+      {/* truck it is. 90-day deadline, alerts from 70 so there's time to act. */}
+      {(() => {
+        const isBillingRole = user?.role==="owner" || user?.role==="manager"
+          || (user?.role||"").split(",").map(r=>r.trim()).includes("party_manager");
+        if(!isBillingRole) return null;
+        const agingRows = (trips||[])
+          .filter(t=>t.orderType==="party")
+          .flatMap(t => partyDiRowsFor(t).map(d=>({t,d,aging:billingAging(t,d)})))
+          .filter(({aging}) => aging.dueSoon || aging.overdue)
+          .sort((a,b) => b.aging.daysOld - a.aging.daysOld);
+        if(agingRows.length===0) return null;
+        const overdueCount = agingRows.filter(r=>r.aging.overdue).length;
+        return (
+          <div style={{background:C.red+"12",border:`2px solid ${C.red}`,borderRadius:14,padding:"14px 16px"}}>
+            <div style={{color:C.red,fontSize:14,fontWeight:900,textTransform:"uppercase",letterSpacing:0.5,marginBottom:8}}>
+              🧾 Unbilled Party DIs — 90-Day Deadline
+            </div>
+            {overdueCount>0 && (
+              <div style={{color:C.red,fontSize:12,fontWeight:800,marginBottom:8}}>
+                🚨 {overdueCount} DI{overdueCount>1?"s are":" is"} already past the 90-day deadline.
+              </div>
+            )}
+            <div style={{display:"flex",flexDirection:"column",gap:8,maxHeight:320,overflowY:"auto"}}>
+              {agingRows.slice(0,15).map(({t,d,aging})=>{
+                const pouchOk = d.orderType==="party" ? diPouchReceived(t,d) : false;
+                return (
+                  <div key={t.id+"::"+d.diNo} style={{background:C.card,borderRadius:10,padding:"10px 12px",border:`1px solid ${aging.overdue?C.red:C.orange}55`}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+                      <div>
+                        <div style={{fontWeight:900,fontSize:13,color:C.text}}>LR {t.lrNo||"—"} · {t.truckNo} · DI {d.diNo||"—"}</div>
+                        <div style={{fontSize:11,color:C.muted,marginTop:2}}>Trip dated {t.date} · {aging.daysOld} days old · {t.partyName||"—"}</div>
+                        <div style={{fontSize:11,marginTop:2,fontWeight:700,color:pouchOk?C.green:C.orange}}>
+                          {pouchOk ? "✓ Return Pouch received" : "⚠ Return Pouch NOT received"}
+                        </div>
+                      </div>
+                      <div style={{fontSize:11,fontWeight:800,color:aging.overdue?C.red:C.orange,whiteSpace:"nowrap"}}>
+                        {aging.overdue ? `Overdue ${aging.daysOld-90}d` : `${90-aging.daysOld}d left`}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+              {agingRows.length>15 && (
+                <div style={{color:C.muted,fontSize:11,textAlign:"center"}}>+{agingRows.length-15} more — open Party Portal, filter by 90-Day Bill Deadline, to see all.</div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── Return Pouch / Confirmation reminder — shown every login for the ── */}
+      {/* employee's own overdue party trips, unless the owner turned this off  */}
+      {/* for them (employee.pouchDeadlineEnforced===false). Not a block — the  */}
+      {/* actual block lives in requestPaymentGuarded (DriverPayments). This is */}
+      {/* purely the "please upload before date X" heads-up. */}
       {(() => {
         if(!user?.assignedEmployeeId) return null;
         const emp = (employees||[]).find(e=>e.id===user.assignedEmployeeId);
@@ -12761,6 +12824,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
   const [employeeFilter,   setEmployeeFilter]    = useState(""); // "" = all employees, else empId
   const [clubFilter,       setClubFilter]        = useState("all"); // all | clubbed | party_only — mixed party+godown LRs vs pure-party
   const [lineFilter,       setLineFilter]         = useState("all"); // all | line1 | line2 — GR number prefix (1070 vs 1079)
+  const [agingFilter,      setAgingFilter]         = useState("all"); // all | due_soon | overdue — unbilled 90-day deadline, alert from 70
   const [rowUploadingId,   setRowUploadingId]   = useState(""); // per-row inline upload spinner
   // ── Confirmation Mail Builder — separate from the main table's filters.
   // Searches ALL party trips (not just what's currently filtered) by DI, so
@@ -13073,6 +13137,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
       if(confirmFilter!=="all") rows = rows.filter(d => d.orderType!=="party" || (confirmFilter==="received")===diConfirmReceived(t,d));
       if(readyFilter!=="all") rows = rows.filter(d => d.orderType!=="party" || (readyFilter==="ready")===d.readyForBilling);
       if(lineFilter!=="all") rows = rows.filter(d => grLine(d.grNo)===lineFilter);
+      if(agingFilter!=="all") rows = rows.filter(d => { const a=billingAging(t,d); return agingFilter==="due_soon" ? a.dueSoon : a.overdue; });
       return {trip:t, rows, clubbed};
     })
     .filter(g => g.rows.length>0);
@@ -13545,6 +13610,17 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
           </button>
         ))}
       </div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+        <span style={{fontSize:10,color:C.muted,fontWeight:700}}>90-DAY BILL DEADLINE:</span>
+        {[["all","All"],["due_soon","⏰ Due Soon (70+d)"],["overdue","🚨 Overdue (90+d)"]].map(([k,l])=>(
+          <button key={k} onClick={()=>setAgingFilter(k)}
+            style={{padding:"5px 11px",borderRadius:16,cursor:"pointer",fontWeight:700,fontSize:11,
+              background:agingFilter===k?C.red:"transparent",border:`1.5px solid ${C.red}`,
+              color:agingFilter===k?"#fff":C.red}}>
+            {l}
+          </button>
+        ))}
+      </div>
 
       {selected.size>0&&(
         <div style={{background:C.accent+"11",border:`1.5px solid ${C.accent}`,borderRadius:10,padding:"10px 14px",display:"flex",flexDirection:"column",gap:8}}>
@@ -13691,8 +13767,12 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                     const diMergedPath = d.mergedPdfPath || t.mergedPdfPath;
                     const pouchOk = d.orderType==="party" ? diPouchReceived(t,d) : false;
                     const rowUploading = rowUploadingId===(t.id+"::"+(d.diNo||""));
+                    const aging = billingAging(t,d);
+                    // Aging highlight takes priority over the plain zebra
+                    // stripe — this is meant to actually catch the eye.
+                    const rowBg = aging.overdue ? C.red+"18" : aging.dueSoon ? C.orange+"18" : zebra;
                     return (
-                    <tr key={t.id+"-"+i} style={{background:zebra}}>
+                    <tr key={t.id+"-"+i} style={{background:rowBg}}>
                       {i===0 && (
                         <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",position:"sticky",left:0,background:stickyBg,zIndex:1,borderRight:`1px solid ${C.border}`,borderBottom:bB}}>
                           <input type="checkbox" checked={selected.has(t.id)} onChange={()=>toggle(t.id)}/>
@@ -13725,6 +13805,8 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                         {(()=>{ const st=diRowStatus(d); const c = st==="Paid"?C.green:st==="Billed"?C.teal:C.orange;
                           return <Badge label={st} color={c} />; })()}
                         {d.invoiceNo && <div style={{color:C.muted,fontSize:10,marginTop:2,fontFamily:"monospace"}}>{d.invoiceNo}</div>}
+                        {aging.overdue && <div style={{marginTop:3}}><Badge label={`🚨 Overdue by ${aging.daysOld-90}d`} color={C.red} /></div>}
+                        {aging.dueSoon && <div style={{marginTop:3}}><Badge label={`⏰ Bill within ${90-aging.daysOld}d`} color={C.orange} /></div>}
                       </td>
                       <td style={{padding:"6px 8px",borderRight:bR,borderBottom:bB}}>
                         {grPath
