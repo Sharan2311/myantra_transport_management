@@ -6685,47 +6685,92 @@ async function deletePartyFiles(tripId) {
 }
 
 // Merge PDFs using pdf-lib — returns Uint8Array blob
-async function mergePDFs(pdfBuffers) {
+// Merges PDFs/images into one PDF, targeting a max output size (default
+// 800KB). Every page is normalized to A4 (see drawFitted below) — unchanged
+// from before. What's new: any non-PDF input (a photo of the pouch, a
+// scanned confirmation) is downscaled and re-encoded as JPEG before
+// embedding, since phone camera photos (often several MB each) are almost
+// always what actually drives a merged PDF over budget — the GR/Invoice
+// PDFs themselves are typically much smaller generated documents that this
+// approach can't meaningfully shrink further. If the first compression pass
+// still leaves the output over target, retries at progressively lower
+// quality/resolution; if even the smallest attempt is still over budget
+// (e.g. many pages of dense PDF content), ships the smallest one actually
+// achieved rather than failing outright — a usable oversized PDF beats no
+// PDF at all.
+async function mergePDFs(pdfBuffers, targetBytes = 800*1024) {
   const { PDFDocument } = await import("pdf-lib");
-  const merged = await PDFDocument.create();
   // A4 in points — matches the actual page size Shree's GR/Invoice PDFs print
   // at. Every page in the merged output is normalized to exactly this, so a
   // phone-photo confirmation or a differently-sized source PDF can never
   // produce a mismatched page next to the GR/Invoice pages.
   const A4_WIDTH = 595.28, A4_HEIGHT = 841.89;
 
-  const drawFitted = (page, embedded, kind) => {
-    // Scale-to-fit (not stretch) — preserves aspect ratio so a tall phone
-    // screenshot doesn't get visibly warped to fill a wider A4 rect. Any
-    // leftover space is centered padding, not distortion.
-    const scale = Math.min(A4_WIDTH / embedded.width, A4_HEIGHT / embedded.height);
-    const w = embedded.width * scale, h = embedded.height * scale;
-    const opts = { x:(A4_WIDTH-w)/2, y:(A4_HEIGHT-h)/2, width:w, height:h };
-    kind === "page" ? page.drawPage(embedded, opts) : page.drawImage(embedded, opts);
+  // Downscale + re-encode a photo/scan as JPEG at the given max dimension/
+  // quality. Falls back to returning the ORIGINAL buffer unchanged if it
+  // can't be decoded as an image at all — embedJpg/embedPng below then just
+  // fails naturally for that one file, same as before this change.
+  const compressImage = async (buf, maxDim, quality) => {
+    try {
+      const bitmap = await createImageBitmap(new Blob([buf]));
+      const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
+      const w = Math.max(1, Math.round(bitmap.width*scale)), h = Math.max(1, Math.round(bitmap.height*scale));
+      const canvas = document.createElement("canvas");
+      canvas.width = w; canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#fff"; ctx.fillRect(0,0,w,h); // flatten any PNG transparency onto white before JPEG encode
+      ctx.drawImage(bitmap, 0, 0, w, h);
+      const outBlob = await new Promise(res => canvas.toBlob(res, "image/jpeg", quality));
+      return outBlob ? new Uint8Array(await outBlob.arrayBuffer()) : buf;
+    } catch { return buf; }
   };
 
-  for (const buf of pdfBuffers) {
-    try {
-      // Detect PDF by %PDF magic bytes — images (JPEG/PNG) are embedded as a page
-      const u8 = new Uint8Array(buf instanceof ArrayBuffer ? buf : buf.buffer, 0, 4);
-      const isPDF = u8[0]===0x25&&u8[1]===0x50&&u8[2]===0x44&&u8[3]===0x46; // %PDF
-      if(isPDF) {
-        const doc = await PDFDocument.load(buf, { ignoreEncryption: true });
-        const embeddedPages = await merged.embedPdf(doc); // every page, in order
-        embeddedPages.forEach(ep => { const page = merged.addPage([A4_WIDTH, A4_HEIGHT]); drawFitted(page, ep, "page"); });
-      } else {
-        // Try JPEG first, fallback to PNG
-        let img;
-        try { img = await merged.embedJpg(buf); }
-        catch { img = await merged.embedPng(buf); }
-        const page = merged.addPage([A4_WIDTH, A4_HEIGHT]);
-        drawFitted(page, img, "image");
+  const buildOnce = async (imgMaxDim, imgQuality) => {
+    const merged = await PDFDocument.create();
+    const drawFitted = (page, embedded, kind) => {
+      // Scale-to-fit (not stretch) — preserves aspect ratio so a tall phone
+      // screenshot doesn't get visibly warped to fill a wider A4 rect. Any
+      // leftover space is centered padding, not distortion.
+      const scale = Math.min(A4_WIDTH / embedded.width, A4_HEIGHT / embedded.height);
+      const w = embedded.width * scale, h = embedded.height * scale;
+      const opts = { x:(A4_WIDTH-w)/2, y:(A4_HEIGHT-h)/2, width:w, height:h };
+      kind === "page" ? page.drawPage(embedded, opts) : page.drawImage(embedded, opts);
+    };
+    for (const buf of pdfBuffers) {
+      try {
+        // Detect PDF by %PDF magic bytes — images (JPEG/PNG) are embedded as a page
+        const u8 = new Uint8Array(buf instanceof ArrayBuffer ? buf : buf.buffer, 0, 4);
+        const isPDF = u8[0]===0x25&&u8[1]===0x50&&u8[2]===0x44&&u8[3]===0x46; // %PDF
+        if(isPDF) {
+          const doc = await PDFDocument.load(buf, { ignoreEncryption: true });
+          const embeddedPages = await merged.embedPdf(doc); // every page, in order
+          embeddedPages.forEach(ep => { const page = merged.addPage([A4_WIDTH, A4_HEIGHT]); drawFitted(page, ep, "page"); });
+        } else {
+          const compressed = await compressImage(buf, imgMaxDim, imgQuality);
+          let img;
+          try { img = await merged.embedJpg(compressed); }
+          catch { img = await merged.embedPng(buf); } // re-encode failed for some reason — fall back to the original
+          const page = merged.addPage([A4_WIDTH, A4_HEIGHT]);
+          drawFitted(page, img, "image");
+        }
+      } catch(e) {
+        console.warn("Could not merge one file:", e.message);
       }
-    } catch(e) {
-      console.warn("Could not merge one file:", e.message);
     }
+    return await merged.save({ useObjectStreams: true });
+  };
+
+  const attempts = [[1600,0.75],[1200,0.55],[1000,0.4],[800,0.3]];
+  let best = null;
+  for (const [maxDim, quality] of attempts) {
+    const out = await buildOnce(maxDim, quality);
+    if(!best || out.length < best.length) best = out;
+    if(out.length <= targetBytes) return out;
   }
-  return await merged.save();
+  if(best.length > targetBytes) {
+    console.warn(`Merged PDF is ${(best.length/1024).toFixed(0)}KB — over the ${(targetBytes/1024).toFixed(0)}KB target even at the lowest quality tried.`);
+  }
+  return best;
 }
 
 // Fetch a file from Supabase Storage as ArrayBuffer
