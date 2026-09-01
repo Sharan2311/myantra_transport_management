@@ -270,6 +270,40 @@ const expenseToDB = e => ({
   created_by: e.createdBy, created_at: e.createdAt,
 })
 
+const gypsumTripFromDB = r => ({
+  id: r.id, date: r.date||'', truckNo: r.truck_no||'', driverName: r.driver_name||'',
+  empId: r.emp_id||'', toCompany: r.to_company||'', invoiceNo: r.invoice_no||'',
+  invoiceFilePath: r.invoice_file_path||'', qty: +r.qty||0, status: r.status||'not_billed',
+  createdBy: r.created_by||'', createdAt: r.created_at||'', updatedAt: r.updated_at||'',
+})
+const gypsumTripToDB = t => ({
+  id: t.id, date: t.date||'', truck_no: t.truckNo||'', driver_name: t.driverName||'',
+  emp_id: t.empId||'', to_company: t.toCompany||'', invoice_no: t.invoiceNo||'',
+  invoice_file_path: t.invoiceFilePath||'', qty: t.qty||0, status: t.status||'not_billed',
+  created_by: t.createdBy||'', created_at: t.createdAt||'', updated_at: t.updatedAt||'',
+})
+
+// Rate audit trails — every entry is a permanent historical record, never
+// edited/overwritten. "Setting a new rate" means inserting a new row with
+// its own effective_from date; the trip-time lookup (rateEffectiveOn, in
+// App.jsx) finds whichever entry was active on a given date.
+const gypsumShreeRateFromDB = r => ({
+  id: r.id, company: r.company||'', rate: +r.rate||0, effectiveFrom: r.effective_from||'',
+  setBy: r.set_by||'', setAt: r.set_at||'',
+})
+const gypsumShreeRateToDB = r => ({
+  id: r.id, company: r.company||'', rate: r.rate||0, effective_from: r.effectiveFrom||'',
+  set_by: r.setBy||'', set_at: r.setAt||'',
+})
+const gypsumDriverRateFromDB = r => ({
+  id: r.id, rate: +r.rate||0, effectiveFrom: r.effective_from||'',
+  setBy: r.set_by||'', setAt: r.set_at||'',
+})
+const gypsumDriverRateToDB = r => ({
+  id: r.id, rate: r.rate||0, effective_from: r.effectiveFrom||'',
+  set_by: r.setBy||'', set_at: r.setAt||'',
+})
+
 const gstFromDB = r => ({
   id: r.id, date: r.date, invoiceRef: r.invoice_ref, amount: +r.amount,
   utr: r.utr, notes: r.notes, createdBy: r.created_by, createdAt: r.created_at,
@@ -540,6 +574,14 @@ export const DB = {
   getExpenses:     () => fetchRecent('mye_expenses', expenseFromDB, 'date'),
   saveExpense:     e  => upsertOne('mye_expenses', expenseToDB, e),
   deleteExpense:   id => deleteOne('mye_expenses', id),
+
+  getGypsumTrips:    () => fetchRecent('mye_gypsum_trips', gypsumTripFromDB, 'date'),
+  saveGypsumTrip:    t  => upsertOne('mye_gypsum_trips', gypsumTripToDB, t),
+  deleteGypsumTrip:  id => deleteOne('mye_gypsum_trips', id),
+  getGypsumShreeRates:   () => fetchRecent('mye_gypsum_shree_rates', gypsumShreeRateFromDB, 'effective_from'),
+  saveGypsumShreeRate:   r  => upsertOne('mye_gypsum_shree_rates', gypsumShreeRateToDB, r),
+  getGypsumDriverRates:  () => fetchRecent('mye_gypsum_driver_rates', gypsumDriverRateFromDB, 'effective_from'),
+  saveGypsumDriverRate:  r  => upsertOne('mye_gypsum_driver_rates', gypsumDriverRateToDB, r),
 
   getGstReleases:  () => fetchRecent('mye_gst_releases', gstFromDB, 'date'),
   saveGstRelease:  g  => upsertOne('mye_gst_releases', gstToDB, g),
@@ -925,7 +967,7 @@ export const DB = {
     await sleep(350);
 
     // ── Phase 3: background — driver pays, expenses, wallet, activity etc ─────
-    const [driverPays, cashTransfers, pumpPayments, settlements, paymentRequests, activity, actionItems] = await Promise.all([
+    const [driverPays, cashTransfers, pumpPayments, settlements, paymentRequests, activity, actionItems, gypsumTrips, gypsumShreeRates, gypsumDriverRates] = await Promise.all([
       safe(() => fetchRecent('mye_driver_payments', driverPayFromDB, 'date')),
       safe(async () => {
         try { return await fetchRecent('mye_cash_transfers', cashTransferFromDB, 'date'); }
@@ -964,7 +1006,19 @@ export const DB = {
           createdAt: r.created_at, resolvedAt: r.resolved_at||'',
         })); } catch(e) { console.warn('mye_action_items not ready:', e.message); return []; }
       }),
+      safe(async () => {
+        try { return await fetchRecent('mye_gypsum_trips', gypsumTripFromDB, 'date'); }
+        catch(e) { console.warn('mye_gypsum_trips not ready:', e.message); return []; }
+      }),
+      safe(async () => {
+        try { return await fetchRecent('mye_gypsum_shree_rates', gypsumShreeRateFromDB, 'effective_from'); }
+        catch(e) { console.warn('mye_gypsum_shree_rates not ready:', e.message); return []; }
+      }),
+      safe(async () => {
+        try { return await fetchRecent('mye_gypsum_driver_rates', gypsumDriverRateFromDB, 'effective_from'); }
+        catch(e) { console.warn('mye_gypsum_driver_rates not ready:', e.message); return []; }
+      }),
     ]);
-    onPhase?.({ driverPays, cashTransfers, pumpPayments, settlements, paymentRequests, activity, actionItems });
+    onPhase?.({ driverPays, cashTransfers, pumpPayments, settlements, paymentRequests, activity, actionItems, gypsumTrips, gypsumShreeRates, gypsumDriverRates });
   },
 }

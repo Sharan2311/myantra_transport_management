@@ -236,6 +236,19 @@ const billingAging = (t, d) => {
   return { daysOld, dueSoon: daysOld>=70 && daysOld<90, overdue: daysOld>=90 };
 };
 
+// ─── GYPSUM RATE AUDIT TRAIL ──────────────────────────────────────────────
+// Every rate-history entry is permanent — "setting a new rate" means adding
+// a new entry with its own effectiveFrom date, never editing an old one.
+// This finds whichever entry was actually in effect on a given date: the
+// entry with the LATEST effectiveFrom that is still <= asOfDate. Returns
+// null if no rate was ever set for a date that early (nothing to bill/pay
+// against — the UI should treat this as "rate not set" rather than 0).
+const rateEffectiveOn = (history, asOfDate) => {
+  const applicable = (history||[]).filter(r => r.effectiveFrom && r.effectiveFrom <= asOfDate);
+  if(applicable.length===0) return null;
+  return applicable.reduce((latest, r) => r.effectiveFrom > latest.effectiveFrom ? r : latest);
+};
+
 // Every party trip assigned to this employee (via trip.assignedEmpId — the
 // most-recent-trip-per-truck convention used elsewhere, but here it's a
 // direct per-trip field so no truck-lookup ambiguity) that's missing its
@@ -506,6 +519,7 @@ const FEATURE_CATALOG = [
   {key:"lr_auto_assign",    label:"LR Auto-Assignment",            cat:"Core Operations",     plans:["basic","pro","enterprise"]},
   {key:"multi_client",      label:"Multi-Client Support",          cat:"Core Operations",     plans:["pro","enterprise"]},
   {key:"inbound_trips",     label:"Inbound / Raw Material",        cat:"Core Operations",     plans:["pro","enterprise"]},
+  {key:"gypsum_trips",      label:"Gypsum Trips",                  cat:"Core Operations",     plans:["pro","enterprise"]},
   // AI Scanning
   {key:"payment_scan",      label:"Payment Scan",                  cat:"AI Scanning",         plans:["enterprise"]},
   {key:"gr_particulars",    label:"GR Particulars",                cat:"AI Scanning",         plans:["pro","enterprise"]},
@@ -563,8 +577,8 @@ function computeEffectiveFeatures(plan, overrides={}, rcFeatures={}) {
 
 // ─── ROLES ────────────────────────────────────────────────────────────────────
 const ROLES = {
-  owner:         {label:"Owner",               color:C.accent,  perms:["trips","inbound","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","admin","driverPay","party_portal","unbilled_oversight"]},
-  manager:       {label:"Manager",             color:C.blue,    perms:["trips","inbound","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","driverPay","party_portal","unbilled_oversight"]},
+  owner:         {label:"Owner",               color:C.accent,  perms:["trips","inbound","gypsum","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","admin","driverPay","party_portal","unbilled_oversight"]},
+  manager:       {label:"Manager",             color:C.blue,    perms:["trips","inbound","gypsum","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","driverPay","party_portal","unbilled_oversight"]},
   fleet_manager: {label:"Cement Fleet Manager",color:C.teal,    perms:["cement_trips","billing","diesel","driverPay_view"]},
   fleet_mgr_nd:  {label:"Fleet Mgr (No Diesel Req)",color:"#0891b2", perms:["cement_trips","billing","diesel_view","driverPay_view"]},
   operator:      {label:"Trip Operator",       color:C.teal,    perms:["trips","billing","diesel"]},
@@ -1193,6 +1207,7 @@ const MORE_TABS = [
   {id:"unbilled_oversight", icon:"⏰",label:"Unbilled Oversight", perm:"unbilled_oversight", group:"info"},
   {id:"daily_ops",   icon:"📋",label:"Daily Ops",     perm:"reports",      group:"ops",     feat:"daily_ops"},
   {id:"inbound",      icon:"🏭",label:"Raw Material",   perm:"inbound",      group:"ops",     feat:"inbound_trips"},
+  {id:"gypsum",       icon:"⛰️",label:"Gypsum",         perm:"gypsum",       group:"ops",     feat:"gypsum_trips"},
   {id:"party_portal", icon:"📋",label:"Party Portal",   perm:"party_portal", group:"ops",     feat:"party_billing"},
   {id:"driverPay", icon:"🏧",label:"Driver Pay",     perm:"driverPay",    group:"money",   feat:"driver_pay"},
   {id:"settlement",icon:"💵",label:"Settlement",     perm:"settlement",   group:"money",   feat:"driver_pay"},
@@ -1876,6 +1891,9 @@ function AppMain() {
   const [actionItems, setActionItems, rAI, reloadActionItems] = useDB(DB.getActionItems, [],         650, tableEnabled("actionItems"));
   const [invoiceRegistry, setInvoiceRegistry] = useDB(DB.getInvoiceRegistry, [],                      650, tableEnabled("invoiceRegistry"));
   const [clinkerBills, setClinkerBills] = useDB(DB.getClinkerBills, [],                                650, tableEnabled("clinkerBills"));
+  const [gypsumTrips, setGypsumTrips, rGT, reloadGypsumTrips] = useDB(DB.getGypsumTrips, [],            650, tableEnabled("gypsumTrips"));
+  const [gypsumShreeRates, setGypsumShreeRates] = useDB(DB.getGypsumShreeRates, [],                     650, tableEnabled("gypsumShreeRates"));
+  const [gypsumDriverRates, setGypsumDriverRates] = useDB(DB.getGypsumDriverRates, [],                  650, tableEnabled("gypsumDriverRates"));
   const dbSetPumpPayments = async (val) => { setPumpPayments(val); };
 
   const loading = !rU||!rT||!rV||!rE||!rP||!rS||!rPu||!rI||!rSt||!rDP||!rEx||!rGR;
@@ -2172,6 +2190,9 @@ function AppMain() {
     actionItems, setActionItems,
     invoiceRegistry, setInvoiceRegistry,
     clinkerBills, setClinkerBills,
+    gypsumTrips, setGypsumTrips,
+    gypsumShreeRates, setGypsumShreeRates,
+    gypsumDriverRates, setGypsumDriverRates,
     user, log,
     allTripsLoaded, loadingAllTrips, loadAllTrips,
   };
@@ -2464,6 +2485,7 @@ function AppMain() {
         {tab==="diesel"     && can(user,"diesel")     && <DieselMod  {...sp} viewOnly={!canEdit(user,"diesel")} />}
         {tab==="pump_portal"&& can(user,"pump_portal")&& <PumpPortal {...sp} />}
         {tab==="party_portal"&&can(user,"party_portal")&&<PartyPortal {...sp} users={users} />}
+        {tab==="gypsum"      && can(user,"gypsum")      && <GypsumTrips {...sp} />}
         {tab==="vehicles"   && can(user,"vehicles")   && <Vehicles   {...sp} />}
         {tab==="employees"  && can(user,"employees")  && <Employees  {...sp} />}
         {tab==="payments"   && can(user,"payments")   && <Payments   {...sp} />}
@@ -12804,6 +12826,295 @@ function PartyTripCard({t, selected, toggle, isOwner, isPartyMgr, employees, ope
 }
 
 // ─── PARTY PORTAL ─────────────────────────────────────────────────────────────
+// ─── GYPSUM TRIPS — Stage 1: trip creation + rate audit trails ──────────────
+// Vishakapatnam-origin gypsum supply, a genuinely different business flow
+// from cement trips: fixed origin, invoice/tax number instead of DI/GR, and
+// two independently rate-audited prices (what the destination company pays
+// M Yantra, and what M Yantra pays the driver) rather than one flat rate.
+// Shortage/balance tracking and the payment ledger come in later stages —
+// this stage is trip capture + getting the rate history right, since every
+// later stage depends on rateEffectiveOn() being correct.
+function GypsumTrips({gypsumTrips=[], setGypsumTrips, gypsumShreeRates=[], setGypsumShreeRates, gypsumDriverRates=[], setGypsumDriverRates, employees=[], settings, setSettings, user, log}) {
+  const [view, setView] = useState("trips"); // trips | rates
+  const isOwner = user?.role==="owner" || user?.role==="manager";
+
+  const fileToBase64 = file => new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result.split(",")[1]);
+    r.onerror = rej;
+    r.readAsDataURL(file);
+  });
+
+  // ── Add Trip ──────────────────────────────────────────────────────────────
+  const [showAdd, setShowAdd] = useState(false);
+  const [fDate, setFDate] = useState(today());
+  const [fTruck, setFTruck] = useState("");
+  const [fEmpId, setFEmpId] = useState("");
+  const [fToCompany, setFToCompany] = useState("");
+  const [fInvoiceNo, setFInvoiceNo] = useState("");
+  const [fQty, setFQty] = useState("");
+  const [fInvoiceFile, setFInvoiceFile] = useState(null);
+  const [scanning, setScanning] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const handleInvoiceFile = async (file) => {
+    setFInvoiceFile(file);
+    setScanning(true);
+    try {
+      const base64 = await fileToBase64(file);
+      const isImage = file.type.startsWith("image/");
+      const resp = await fetch("/.netlify/functions/scan-gypsum-invoice", {
+        method: "POST", headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ base64, anthropicKey: RC.anthropicKey, mediaType: isImage?file.type:"application/pdf" }),
+      });
+      const data = await resp.json();
+      if(!resp.ok || data.error) { console.warn("Gypsum invoice scan failed:", data.error); return; }
+      if(data.invoiceNo && !fInvoiceNo) setFInvoiceNo(data.invoiceNo);
+      if(data.truckNo && !fTruck) setFTruck(data.truckNo);
+      if(data.qty && !fQty) setFQty(String(data.qty));
+    } catch(e) { console.warn("Gypsum invoice scan error:", e.message); }
+    finally { setScanning(false); }
+  };
+
+  const resetForm = () => {
+    setFDate(today()); setFTruck(""); setFEmpId(""); setFToCompany("");
+    setFInvoiceNo(""); setFQty(""); setFInvoiceFile(null); setShowAdd(false);
+  };
+
+  const saveTrip = async () => {
+    if(!fTruck.trim())       { alert("Truck number is required."); return; }
+    if(!fToCompany)          { alert("Destination company is required."); return; }
+    if(!fInvoiceNo.trim())   { alert("Invoice/Tax number is required."); return; }
+    if(!fInvoiceFile)        { alert("Invoice file upload is mandatory."); return; }
+    if(!fQty || +fQty<=0)    { alert("Quantity (tons) is required."); return; }
+    setSaving(true);
+    try {
+      const id = "GYP"+uid();
+      const upload = await uploadPartyFile(id, "gypsum_invoice", fInvoiceFile);
+      const emp = employees.find(e=>e.id===fEmpId);
+      const trip = {
+        id, date: fDate, truckNo: fTruck.trim().toUpperCase(), driverName: emp?.name||"", empId: fEmpId,
+        toCompany: fToCompany, invoiceNo: fInvoiceNo.trim(), invoiceFilePath: upload.path,
+        qty: +fQty, status: "not_billed",
+        createdBy: user?.name||user?.username||"", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      };
+      setGypsumTrips(prev=>[trip, ...(prev||[])]);
+      await DB.saveGypsumTrip(trip);
+      log && log("GYPSUM TRIP ADDED", `${trip.truckNo} → ${trip.toCompany} · ${trip.qty}MT · Invoice ${trip.invoiceNo}`);
+      resetForm();
+    } catch(e) { alert("Save failed: "+e.message); }
+    finally { setSaving(false); }
+  };
+
+  // ── Rate management (owner/manager only) ─────────────────────────────────
+  const [rateCompany, setRateCompany]         = useState((RC.clients||[])[0]||"");
+  const [newShreeRate, setNewShreeRate]       = useState("");
+  const [newShreeEffDate, setNewShreeEffDate] = useState(today());
+  const [newDriverRate, setNewDriverRate]         = useState("");
+  const [newDriverEffDate, setNewDriverEffDate]   = useState(today());
+
+  const shreeHistoryForCompany = gypsumShreeRates.filter(r=>r.company===rateCompany).sort((a,b)=>b.effectiveFrom.localeCompare(a.effectiveFrom));
+  const currentShreeRate = rateEffectiveOn(gypsumShreeRates.filter(r=>r.company===rateCompany), today());
+  const driverHistory = [...gypsumDriverRates].sort((a,b)=>b.effectiveFrom.localeCompare(a.effectiveFrom));
+  const currentDriverRate = rateEffectiveOn(gypsumDriverRates, today());
+
+  const submitShreeRate = async () => {
+    if(!rateCompany)                     { alert("Select a company first."); return; }
+    if(!newShreeRate || +newShreeRate<=0){ alert("Enter a valid rate."); return; }
+    const entry = { id:"GSR"+uid(), company:rateCompany, rate:+newShreeRate, effectiveFrom:newShreeEffDate,
+      setBy:user?.name||user?.username||"", setAt:new Date().toISOString() };
+    setGypsumShreeRates(prev=>[entry, ...(prev||[])]);
+    await DB.saveGypsumShreeRate(entry);
+    log && log("GYPSUM SHREE RATE SET", `${rateCompany}: ₹${newShreeRate}/MT from ${newShreeEffDate}`);
+    setNewShreeRate("");
+  };
+
+  const submitDriverRate = async () => {
+    if(!newDriverRate || +newDriverRate<=0){ alert("Enter a valid rate."); return; }
+    const entry = { id:"GDR"+uid(), rate:+newDriverRate, effectiveFrom:newDriverEffDate,
+      setBy:user?.name||user?.username||"", setAt:new Date().toISOString() };
+    setGypsumDriverRates(prev=>[entry, ...(prev||[])]);
+    await DB.saveGypsumDriverRate(entry);
+    log && log("GYPSUM DRIVER RATE SET", `₹${newDriverRate}/MT from ${newDriverEffDate}`);
+    setNewDriverRate("");
+  };
+
+  const holdback = settings?.gypsumHoldbackAmount ?? 4000;
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+      <div style={{display:"flex",gap:0,background:C.card,borderRadius:10,padding:3,border:`1px solid ${C.border}`}}>
+        {[{id:"trips",label:`Trips (${gypsumTrips.length})`},{id:"rates",label:"Rates"}].map(t=>(
+          <button key={t.id} onClick={()=>setView(t.id)}
+            style={{flex:1,padding:"8px 4px",borderRadius:8,border:"none",cursor:"pointer",fontWeight:700,fontSize:13,
+              background:view===t.id?"#a16207":"transparent",color:view===t.id?"#fff":C.muted}}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {view==="trips" && (
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          {(!currentShreeRate || !currentDriverRate) && (
+            <div style={{background:C.orange+"18",border:`1.5px solid ${C.orange}`,borderRadius:10,padding:"10px 14px",fontSize:12,color:C.orange}}>
+              ⚠ {!currentShreeRate && !currentDriverRate ? "No Shree rate or Driver rate has been set yet." : !currentShreeRate ? "No Shree rate has been set for the selected company yet." : "No Driver rate has been set yet."} Set them under the Rates tab before adding trips, so billing/pay can be computed correctly.
+            </div>
+          )}
+
+          {!showAdd ? (
+            <Btn onClick={()=>setShowAdd(true)} full color="#a16207">➕ Add Gypsum Trip</Btn>
+          ) : (
+            <div style={{background:C.card,borderRadius:12,padding:14,border:`1.5px solid #a16207`,display:"flex",flexDirection:"column",gap:10}}>
+              <div style={{fontWeight:800,fontSize:14}}>New Gypsum Trip</div>
+              <Field label="Date" value={fDate} onChange={setFDate} type="date" />
+              <div>
+                <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:4}}>FROM</div>
+                <div style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px 10px",fontSize:13,color:C.text}}>Vishakapatnam (fixed)</div>
+              </div>
+              <div>
+                <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:4}}>TO — DESTINATION COMPANY *</div>
+                <select value={fToCompany} onChange={e=>setFToCompany(e.target.value)}
+                  style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,padding:"9px 10px",fontSize:13,color:C.text,outline:"none"}}>
+                  <option value="">Select company…</option>
+                  {(RC.clients||[]).map(c=><option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
+              <Field label="Truck Number *" value={fTruck} onChange={v=>setFTruck(v.toUpperCase())} placeholder="AP31Z1234" />
+              <div>
+                <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:4}}>DRIVER / EMPLOYEE</div>
+                <select value={fEmpId} onChange={e=>setFEmpId(e.target.value)}
+                  style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,padding:"9px 10px",fontSize:13,color:C.text,outline:"none"}}>
+                  <option value="">Select employee…</option>
+                  {employees.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
+                </select>
+              </div>
+              <Field label="Invoice / Tax Number *" value={fInvoiceNo} onChange={setFInvoiceNo} placeholder="Entered manually — no DI/GR here" />
+              <Field label="Quantity (Tons) *" value={fQty} onChange={setFQty} type="number" />
+              <div>
+                <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:4}}>INVOICE FILE — MANDATORY *</div>
+                <label style={{display:"inline-flex",alignItems:"center",gap:6,background:"#a16207",borderRadius:8,padding:"9px 14px",
+                  cursor:scanning?"not-allowed":"pointer",color:"#fff",fontWeight:700,fontSize:12}}>
+                  {scanning?"⏳ Scanning…":fInvoiceFile?`📎 ${fInvoiceFile.name}`:"⬆ Upload Invoice"}
+                  <input type="file" accept=".pdf,image/*" style={{display:"none"}} disabled={scanning}
+                    onChange={e=>{if(e.target.files[0]) handleInvoiceFile(e.target.files[0]);}}/>
+                </label>
+                {fInvoiceFile && <div style={{color:C.muted,fontSize:10,marginTop:4}}>Fields above auto-filled from the scan where possible — check them before saving.</div>}
+              </div>
+              {(fQty && (currentShreeRate||currentDriverRate)) && (
+                <div style={{background:C.bg,borderRadius:8,padding:"8px 10px",fontSize:11,color:C.muted}}>
+                  {currentShreeRate && <div>Est. Bill: {fmt(+fQty * currentShreeRate.rate)} (₹{currentShreeRate.rate}/MT × {fQty}MT)</div>}
+                  {currentDriverRate && <div>Est. Driver Net Pay: {fmt(+fQty * currentDriverRate.rate)} (₹{currentDriverRate.rate}/MT × {fQty}MT)</div>}
+                </div>
+              )}
+              <div style={{display:"flex",gap:8}}>
+                <Btn onClick={saveTrip} full color="#a16207" loading={saving} disabled={saving}>✓ Save Trip</Btn>
+                <Btn onClick={resetForm} outline color={C.muted}>Cancel</Btn>
+              </div>
+            </div>
+          )}
+
+          {gypsumTrips.length===0 && !showAdd && (
+            <div style={{textAlign:"center",color:C.muted,padding:32}}>No gypsum trips yet.</div>
+          )}
+          {gypsumTrips.map(t=>{
+            const shreeRate = rateEffectiveOn(gypsumShreeRates.filter(r=>r.company===t.toCompany), t.date);
+            const driverRate = rateEffectiveOn(gypsumDriverRates, t.date);
+            return (
+              <div key={t.id} style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.border}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+                  <div>
+                    <div style={{fontWeight:800,fontSize:14}}>{t.truckNo} · Vishakapatnam → {t.toCompany}</div>
+                    <div style={{color:C.muted,fontSize:11,marginTop:2}}>{t.date} · {t.driverName||"—"} · Invoice {t.invoiceNo} · {t.qty}MT</div>
+                  </div>
+                  <Badge label={t.status==="billed"?"✓ Billed":"Not Billed"} color={t.status==="billed"?C.green:C.orange} />
+                </div>
+                <div style={{display:"flex",gap:14,marginTop:8,fontSize:11}}>
+                  {t.invoiceFilePath && <button onClick={async()=>{try{const url=await getSignedUrl(t.invoiceFilePath,3600);window.open(url,"_blank");}catch(e){alert("Could not open file: "+e.message);}}}
+                    style={{background:"none",border:`1px solid ${C.blue}`,borderRadius:6,color:C.blue,padding:"3px 8px",cursor:"pointer"}}>📄 Invoice</button>}
+                  <span style={{color:C.muted}}>Shree rate: {shreeRate?`₹${shreeRate.rate}/MT`:"not set for this date"}</span>
+                  <span style={{color:C.muted}}>Driver rate: {driverRate?`₹${driverRate.rate}/MT`:"not set for this date"}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {view==="rates" && (
+        !isOwner ? (
+          <div style={{textAlign:"center",color:C.muted,padding:32}}>Only the owner or manager can view/set gypsum rates.</div>
+        ) : (
+        <div style={{display:"flex",flexDirection:"column",gap:16}}>
+          {/* Shree rate — per company */}
+          <div style={{background:C.card,borderRadius:12,padding:14,border:`1px solid ${C.border}`}}>
+            <div style={{fontWeight:800,fontSize:14,marginBottom:8}}>Shree Rate (per destination company)</div>
+            <select value={rateCompany} onChange={e=>setRateCompany(e.target.value)}
+              style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,padding:"9px 10px",fontSize:13,color:C.text,outline:"none",marginBottom:10}}>
+              {(RC.clients||[]).map(c=><option key={c} value={c}>{c}</option>)}
+            </select>
+            <div style={{color:C.muted,fontSize:12,marginBottom:8}}>
+              Current rate: {currentShreeRate ? <b style={{color:C.text}}>₹{currentShreeRate.rate}/MT</b> : <i>not set</i>}
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <Field label="New Rate (₹/MT)" value={newShreeRate} onChange={setNewShreeRate} type="number" half />
+              <Field label="Effective From" value={newShreeEffDate} onChange={setNewShreeEffDate} type="date" half />
+            </div>
+            <Btn onClick={submitShreeRate} full color="#a16207">Set Shree Rate for {rateCompany||"…"}</Btn>
+            {shreeHistoryForCompany.length>0 && (
+              <div style={{marginTop:10}}>
+                <div style={{color:C.muted,fontSize:10,fontWeight:700,textTransform:"uppercase",marginBottom:6}}>History — {rateCompany}</div>
+                {shreeHistoryForCompany.map(r=>(
+                  <div key={r.id} style={{display:"flex",justifyContent:"space-between",fontSize:11,padding:"4px 0",borderBottom:`1px solid ${C.border}33`}}>
+                    <span>₹{r.rate}/MT from {r.effectiveFrom}</span>
+                    <span style={{color:C.muted}}>{r.setBy} · {new Date(r.setAt).toLocaleDateString("en-IN")}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Driver rate — shared across all companies */}
+          <div style={{background:C.card,borderRadius:12,padding:14,border:`1px solid ${C.border}`}}>
+            <div style={{fontWeight:800,fontSize:14,marginBottom:8}}>Driver Rate</div>
+            <div style={{color:C.muted,fontSize:12,marginBottom:8}}>
+              Current rate: {currentDriverRate ? <b style={{color:C.text}}>₹{currentDriverRate.rate}/MT</b> : <i>not set</i>}
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <Field label="New Rate (₹/MT)" value={newDriverRate} onChange={setNewDriverRate} type="number" half />
+              <Field label="Effective From" value={newDriverEffDate} onChange={setNewDriverEffDate} type="date" half />
+            </div>
+            <Btn onClick={submitDriverRate} full color="#a16207">Set Driver Rate</Btn>
+            {driverHistory.length>0 && (
+              <div style={{marginTop:10}}>
+                <div style={{color:C.muted,fontSize:10,fontWeight:700,textTransform:"uppercase",marginBottom:6}}>History</div>
+                {driverHistory.map(r=>(
+                  <div key={r.id} style={{display:"flex",justifyContent:"space-between",fontSize:11,padding:"4px 0",borderBottom:`1px solid ${C.border}33`}}>
+                    <span>₹{r.rate}/MT from {r.effectiveFrom}</span>
+                    <span style={{color:C.muted}}>{r.setBy} · {new Date(r.setAt).toLocaleDateString("en-IN")}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Holdback default — a single current value, not audit-trailed like the two rates above */}
+          <div style={{background:C.card,borderRadius:12,padding:14,border:`1px solid ${C.border}`}}>
+            <div style={{fontWeight:800,fontSize:14,marginBottom:8}}>Default Holdback per Trip</div>
+            <div style={{color:C.muted,fontSize:11,marginBottom:8}}>Held back from every trip's driver pay, released via shortage settlement in a later stage.</div>
+            <Field label="Amount (₹)" value={String(holdback)} onChange={v=>setSettings(p=>{
+              const updated={...(p||{}), gypsumHoldbackAmount:+v||0};
+              DB.saveSettings(updated).catch(e=>console.error("saveSettings:",e));
+              return updated;
+            })} type="number" />
+          </div>
+        </div>
+        )
+      )}
+    </div>
+  );
+}
+
+
 function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, selectedClient}) {
   const [activeTab,    setActiveTab]   = useState("all");
   const [selected,     setSelected]    = useState(new Set());
