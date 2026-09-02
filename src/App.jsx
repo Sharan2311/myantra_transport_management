@@ -1894,6 +1894,7 @@ function AppMain() {
   const [gypsumTrips, setGypsumTrips, rGT, reloadGypsumTrips] = useDB(DB.getGypsumTrips, [],            650, tableEnabled("gypsumTrips"));
   const [gypsumShreeRates, setGypsumShreeRates] = useDB(DB.getGypsumShreeRates, [],                     650, tableEnabled("gypsumShreeRates"));
   const [gypsumDriverRates, setGypsumDriverRates] = useDB(DB.getGypsumDriverRates, [],                  650, tableEnabled("gypsumDriverRates"));
+  const [gypsumPayments, setGypsumPayments] = useDB(DB.getGypsumPayments, [],                            650, tableEnabled("gypsumPayments"));
   const dbSetPumpPayments = async (val) => { setPumpPayments(val); };
 
   const loading = !rU||!rT||!rV||!rE||!rP||!rS||!rPu||!rI||!rSt||!rDP||!rEx||!rGR;
@@ -2193,6 +2194,7 @@ function AppMain() {
     gypsumTrips, setGypsumTrips,
     gypsumShreeRates, setGypsumShreeRates,
     gypsumDriverRates, setGypsumDriverRates,
+    gypsumPayments, setGypsumPayments,
     user, log,
     allTripsLoaded, loadingAllTrips, loadAllTrips,
   };
@@ -12834,7 +12836,7 @@ function PartyTripCard({t, selected, toggle, isOwner, isPartyMgr, employees, ope
 // Shortage/balance tracking and the payment ledger come in later stages —
 // this stage is trip capture + getting the rate history right, since every
 // later stage depends on rateEffectiveOn() being correct.
-function GypsumTrips({gypsumTrips=[], setGypsumTrips, gypsumShreeRates=[], setGypsumShreeRates, gypsumDriverRates=[], setGypsumDriverRates, employees=[], settings, setSettings, user, log}) {
+function GypsumTrips({gypsumTrips=[], setGypsumTrips, gypsumShreeRates=[], setGypsumShreeRates, gypsumDriverRates=[], setGypsumDriverRates, gypsumPayments=[], setGypsumPayments, employees=[], settings, setSettings, user, log}) {
   const [view, setView] = useState("trips"); // trips | rates
   const isOwner = user?.role==="owner" || user?.role==="manager";
 
@@ -12887,19 +12889,42 @@ function GypsumTrips({gypsumTrips=[], setGypsumTrips, gypsumShreeRates=[], setGy
     if(!fInvoiceNo.trim())   { alert("Invoice/Tax number is required."); return; }
     if(!fInvoiceFile)        { alert("Invoice file upload is mandatory."); return; }
     if(!fQty || +fQty<=0)    { alert("Quantity (tons) is required."); return; }
+    // Client-side pre-check for a fast, clear message — the DB-level unique
+    // index (idx_gypsum_trips_invoice_unique) is the actual race-condition-
+    // safe guarantee; this just avoids an unnecessary upload/round-trip for
+    // the common case of typing a duplicate.
+    const invoiceNorm = fInvoiceNo.trim().toLowerCase();
+    if(gypsumTrips.some(t => (t.invoiceNo||"").trim().toLowerCase()===invoiceNorm)) {
+      alert(`Invoice number "${fInvoiceNo.trim()}" is already used on another gypsum trip. Invoice numbers must be unique.`);
+      return;
+    }
     setSaving(true);
+    let id;
     try {
-      const id = "GYP"+uid();
+      id = "GYP"+uid();
       const upload = await uploadPartyFile(id, "gypsum_invoice", fInvoiceFile);
       const emp = employees.find(e=>e.id===fEmpId);
       const trip = {
         id, date: fDate, truckNo: fTruck.trim().toUpperCase(), driverName: emp?.name||"", empId: fEmpId,
         toCompany: fToCompany, invoiceNo: fInvoiceNo.trim(), invoiceFilePath: upload.path,
         qty: +fQty, status: "not_billed",
+        // Snapshot the CURRENT default holdback at creation time — if the
+        // owner changes the default later, this trip's own holdback stays
+        // what it was when it was actually added, not retroactively updated.
+        holdbackAmount: settings?.gypsumHoldbackAmount ?? 4000,
+        shortageAmount: 0, shortageRecordedBy: "", shortageRecordedAt: "", settled: false,
         createdBy: user?.name||user?.username||"", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       };
       setGypsumTrips(prev=>[trip, ...(prev||[])]);
-      await DB.saveGypsumTrip(trip);
+      try {
+        await DB.saveGypsumTrip(trip);
+      } catch(dbErr) {
+        setGypsumTrips(prev=>prev.filter(t=>t.id!==trip.id)); // revert optimistic add
+        const isDupInvoice = /idx_gypsum_trips_invoice_unique|duplicate key/i.test(dbErr.message||"");
+        throw new Error(isDupInvoice
+          ? `Invoice number "${trip.invoiceNo}" is already used on another gypsum trip. Invoice numbers must be unique.`
+          : dbErr.message);
+      }
       log && log("GYPSUM TRIP ADDED", `${trip.truckNo} → ${trip.toCompany} · ${trip.qty}MT · Invoice ${trip.invoiceNo}`);
       resetForm();
     } catch(e) { alert("Save failed: "+e.message); }
@@ -12941,10 +12966,83 @@ function GypsumTrips({gypsumTrips=[], setGypsumTrips, gypsumShreeRates=[], setGy
 
   const holdback = settings?.gypsumHoldbackAmount ?? 4000;
 
+  // ── Stage 2: shortage + running driver balance pool + payment ledger ────
+  // Balance is a POOL per driver, not per-trip: sum of every trip's own
+  // holdback, minus every trip's recorded shortage, minus everything already
+  // paid out. A shortage on one trip reduces the shared pool directly (can
+  // go negative — the next trip's holdback naturally pulls it back up, no
+  // per-trip carry-forward bookkeeping needed).
+  const gypsumBalanceForEmp = (empId) => {
+    const empTrips = gypsumTrips.filter(t=>t.empId===empId);
+    const totalHoldback = empTrips.reduce((s,t)=>s+(t.holdbackAmount||0),0);
+    const totalShortage = empTrips.reduce((s,t)=>s+(t.shortageAmount||0),0);
+    const totalPaid = gypsumPayments.filter(p=>p.empId===empId).reduce((s,p)=>s+(p.amount||0),0);
+    return { totalHoldback, totalShortage, totalPaid, balance: totalHoldback - totalShortage - totalPaid, tripCount: empTrips.length };
+  };
+
+  const [shortageOpenFor, setShortageOpenFor] = useState(null); // trip id
+  const [shortageAmt, setShortageAmt] = useState("");
+
+  const recordShortage = async (trip) => {
+    if(!isOwner) { alert("Only the owner or manager can record a shortage."); return; }
+    if(!shortageAmt || +shortageAmt<0) { alert("Enter a valid shortage amount (0 if none, to mark it checked)."); return; }
+    const updated = {...trip, shortageAmount:+shortageAmt, shortageRecordedBy:user?.name||user?.username||"", shortageRecordedAt:new Date().toISOString(), updatedAt:new Date().toISOString()};
+    setGypsumTrips(prev=>prev.map(t=>t.id===trip.id?updated:t));
+    try { await DB.saveGypsumTrip(updated); }
+    catch(e) { setGypsumTrips(prev=>prev.map(t=>t.id===trip.id?trip:t)); alert("Could not save shortage: "+e.message); return; }
+    log && log("GYPSUM SHORTAGE RECORDED", `${trip.truckNo} · Invoice ${trip.invoiceNo} · ₹${shortageAmt}`);
+    setShortageOpenFor(null); setShortageAmt("");
+  };
+
+  // ── Payments (standalone gypsum ledger — select LRs, mark lump-sum paid) ─
+  const [payEmpId, setPayEmpId]     = useState("");
+  const [paySelectedTrips, setPaySelectedTrips] = useState(new Set());
+  const [payAmount, setPayAmount]   = useState("");
+  const [payUtr, setPayUtr]         = useState("");
+  const [payNote, setPayNote]       = useState("");
+  const [paySaving, setPaySaving]   = useState(false);
+
+  const unsettledTripsForPay = gypsumTrips.filter(t=>t.empId===payEmpId && !t.settled);
+
+  const togglePayTrip = (id) => setPaySelectedTrips(prev => {
+    const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
+  });
+
+  const submitGypsumPayment = async () => {
+    if(!payEmpId)                    { alert("Select a driver first."); return; }
+    if(!payAmount || +payAmount<=0)  { alert("Enter a valid amount."); return; }
+    if(!payUtr.trim())               { alert("UTR / reference is required."); return; }
+    setPaySaving(true);
+    try {
+      const emp = employees.find(e=>e.id===payEmpId);
+      const tripIds = [...paySelectedTrips];
+      const payment = {
+        id: "GPAY"+uid(), empId: payEmpId, driverName: emp?.name||"", amount:+payAmount,
+        utr: payUtr.trim(), tripIds, note: payNote.trim(),
+        paidBy: user?.name||user?.username||"", paidAt: new Date().toISOString(),
+      };
+      setGypsumPayments(prev=>[payment, ...(prev||[])]);
+      await DB.saveGypsumPayment(payment);
+      // Mark the selected trips settled — a UX aid only (keeps them out of
+      // future pickers), NOT what drives the balance math above.
+      if(tripIds.length>0) {
+        const updatedTrips = gypsumTrips.map(t => tripIds.includes(t.id) ? {...t, settled:true} : t);
+        setGypsumTrips(updatedTrips);
+        tripIds.forEach(id => {
+          const t = updatedTrips.find(x=>x.id===id);
+          if(t) DB.saveGypsumTrip(t).catch(e=>console.error("saveGypsumTrip settled:",e));
+        });
+      }
+      log && log("GYPSUM PAYMENT", `${emp?.name||payEmpId} · ₹${payAmount} · UTR ${payUtr} · ${tripIds.length} LR(s) tagged`);
+      setPaySelectedTrips(new Set()); setPayAmount(""); setPayUtr(""); setPayNote("");
+    } catch(e) { alert("Payment save failed: "+e.message); }
+    finally { setPaySaving(false); }
+  };
+
   return (
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <div style={{display:"flex",gap:0,background:C.card,borderRadius:10,padding:3,border:`1px solid ${C.border}`}}>
-        {[{id:"trips",label:`Trips (${gypsumTrips.length})`},{id:"rates",label:"Rates"}].map(t=>(
+        {[{id:"trips",label:`Trips (${gypsumTrips.length})`},{id:"balances",label:"⚖️ Balances"},{id:"rates",label:"Rates"}].map(t=>(
           <button key={t.id} onClick={()=>setView(t.id)}
             style={{flex:1,padding:"8px 4px",borderRadius:8,border:"none",cursor:"pointer",fontWeight:700,fontSize:13,
               background:view===t.id?"#a16207":"transparent",color:view===t.id?"#fff":C.muted}}>
@@ -13019,6 +13117,7 @@ function GypsumTrips({gypsumTrips=[], setGypsumTrips, gypsumShreeRates=[], setGy
           {gypsumTrips.map(t=>{
             const shreeRate = rateEffectiveOn(gypsumShreeRates.filter(r=>r.company===t.toCompany), t.date);
             const driverRate = rateEffectiveOn(gypsumDriverRates, t.date);
+            const shortageChecked = !!t.shortageRecordedAt;
             return (
               <div key={t.id} style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.border}`}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
@@ -13026,18 +13125,102 @@ function GypsumTrips({gypsumTrips=[], setGypsumTrips, gypsumShreeRates=[], setGy
                     <div style={{fontWeight:800,fontSize:14}}>{t.truckNo} · Vishakapatnam → {t.toCompany}</div>
                     <div style={{color:C.muted,fontSize:11,marginTop:2}}>{t.date} · {t.driverName||"—"} · Invoice {t.invoiceNo} · {t.qty}MT</div>
                   </div>
-                  <Badge label={t.status==="billed"?"✓ Billed":"Not Billed"} color={t.status==="billed"?C.green:C.orange} />
+                  <div style={{display:"flex",flexDirection:"column",gap:4,alignItems:"flex-end"}}>
+                    <Badge label={t.status==="billed"?"✓ Billed":"Not Billed"} color={t.status==="billed"?C.green:C.orange} />
+                    {t.settled && <Badge label="💰 Settled" color={C.green} />}
+                  </div>
                 </div>
-                <div style={{display:"flex",gap:14,marginTop:8,fontSize:11}}>
+                <div style={{display:"flex",gap:14,marginTop:8,fontSize:11,flexWrap:"wrap"}}>
                   {t.invoiceFilePath && <button onClick={async()=>{try{const url=await getSignedUrl(t.invoiceFilePath,3600);window.open(url,"_blank");}catch(e){alert("Could not open file: "+e.message);}}}
                     style={{background:"none",border:`1px solid ${C.blue}`,borderRadius:6,color:C.blue,padding:"3px 8px",cursor:"pointer"}}>📄 Invoice</button>}
                   <span style={{color:C.muted}}>Shree rate: {shreeRate?`₹${shreeRate.rate}/MT`:"not set for this date"}</span>
                   <span style={{color:C.muted}}>Driver rate: {driverRate?`₹${driverRate.rate}/MT`:"not set for this date"}</span>
                 </div>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:8,paddingTop:8,borderTop:`1px solid ${C.border}44`}}>
+                  <div style={{fontSize:11}}>
+                    <span style={{color:C.muted}}>Holdback: </span><b>{fmt(t.holdbackAmount||0)}</b>
+                    {shortageChecked && <span style={{marginLeft:10,color:t.shortageAmount>0?C.red:C.green}}>Shortage: <b>{fmt(t.shortageAmount||0)}</b></span>}
+                  </div>
+                  {isOwner && (
+                    shortageOpenFor===t.id ? (
+                      <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                        <input type="number" value={shortageAmt} onChange={e=>setShortageAmt(e.target.value)} placeholder="Shortage ₹"
+                          style={{width:90,background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 7px",fontSize:12,color:C.text}} />
+                        <button onClick={()=>recordShortage(t)} style={{background:C.green,border:"none",borderRadius:6,color:"#fff",fontSize:11,padding:"5px 9px",cursor:"pointer",fontWeight:700}}>✓</button>
+                        <button onClick={()=>{setShortageOpenFor(null);setShortageAmt("");}} style={{background:"none",border:`1px solid ${C.muted}`,borderRadius:6,color:C.muted,fontSize:11,padding:"5px 9px",cursor:"pointer"}}>✕</button>
+                      </div>
+                    ) : (
+                      <button onClick={()=>{setShortageOpenFor(t.id);setShortageAmt(String(t.shortageAmount||0));}}
+                        style={{background:"none",border:`1px solid ${C.orange}`,borderRadius:6,color:C.orange,fontSize:11,padding:"4px 9px",cursor:"pointer",fontWeight:700}}>
+                        {shortageChecked?"✏️ Edit Shortage":"⚠ Record Shortage"}
+                      </button>
+                    )
+                  )}
+                </div>
               </div>
             );
           })}
         </div>
+      )}
+
+      {view==="balances" && (
+        !isOwner ? (
+          <div style={{textAlign:"center",color:C.muted,padding:32}}>Only the owner or manager can view driver balances.</div>
+        ) : (
+        <div style={{display:"flex",flexDirection:"column",gap:14}}>
+          <div style={{color:C.muted,fontSize:11}}>Balance = every trip's holdback, minus recorded shortages, minus what's already been paid out. Can go negative — a negative balance is recovered as new trips accrue more holdback.</div>
+          {[...new Set(gypsumTrips.map(t=>t.empId).filter(Boolean))].map(empId => {
+            const emp = employees.find(e=>e.id===empId);
+            const b = gypsumBalanceForEmp(empId);
+            return (
+              <div key={empId} style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1.5px solid ${b.balance<0?C.red:C.border}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div style={{fontWeight:800,fontSize:14}}>{emp?.name||empId}</div>
+                  <div style={{fontWeight:900,fontSize:16,color:b.balance<0?C.red:C.green}}>{fmt(b.balance)}</div>
+                </div>
+                <div style={{display:"flex",gap:14,marginTop:6,fontSize:11,color:C.muted,flexWrap:"wrap"}}>
+                  <span>{b.tripCount} trip(s)</span>
+                  <span>Holdback accrued: {fmt(b.totalHoldback)}</span>
+                  <span>Shortage deducted: {fmt(b.totalShortage)}</span>
+                  <span>Already paid: {fmt(b.totalPaid)}</span>
+                </div>
+                {b.balance>0 && (
+                  <Btn onClick={()=>{setPayEmpId(empId);setPayAmount(String(b.balance));}} full color="#a16207">
+                    💸 Pay {emp?.name||"driver"}
+                  </Btn>
+                )}
+              </div>
+            );
+          })}
+          {gypsumTrips.length===0 && <div style={{textAlign:"center",color:C.muted,padding:32}}>No gypsum trips yet.</div>}
+
+          {payEmpId && (
+            <div style={{background:C.card,borderRadius:12,padding:14,border:`1.5px solid #a16207`,display:"flex",flexDirection:"column",gap:10}}>
+              <div style={{fontWeight:800,fontSize:14}}>Record Payment — {employees.find(e=>e.id===payEmpId)?.name||payEmpId}</div>
+              <Field label="Amount (₹)" value={payAmount} onChange={setPayAmount} type="number" />
+              <Field label="UTR / Reference" value={payUtr} onChange={setPayUtr} />
+              <Field label="Note (optional)" value={payNote} onChange={setPayNote} />
+              {unsettledTripsForPay.length>0 && (
+                <div>
+                  <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:6}}>TAG LRs THIS PAYMENT IS SETTLING (optional, for record-keeping)</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:4,maxHeight:180,overflowY:"auto"}}>
+                    {unsettledTripsForPay.map(t=>(
+                      <label key={t.id} style={{display:"flex",alignItems:"center",gap:8,fontSize:12,padding:"4px 0"}}>
+                        <input type="checkbox" checked={paySelectedTrips.has(t.id)} onChange={()=>togglePayTrip(t.id)} />
+                        {t.truckNo} · {t.date} · Invoice {t.invoiceNo} · Holdback {fmt(t.holdbackAmount||0)}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div style={{display:"flex",gap:8}}>
+                <Btn onClick={submitGypsumPayment} full color="#a16207" loading={paySaving} disabled={paySaving}>✓ Mark Paid</Btn>
+                <Btn onClick={()=>{setPayEmpId("");setPaySelectedTrips(new Set());setPayAmount("");setPayUtr("");setPayNote("");}} outline color={C.muted}>Cancel</Btn>
+              </div>
+            </div>
+          )}
+        </div>
+        )
       )}
 
       {view==="rates" && (

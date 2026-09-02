@@ -274,13 +274,30 @@ const gypsumTripFromDB = r => ({
   id: r.id, date: r.date||'', truckNo: r.truck_no||'', driverName: r.driver_name||'',
   empId: r.emp_id||'', toCompany: r.to_company||'', invoiceNo: r.invoice_no||'',
   invoiceFilePath: r.invoice_file_path||'', qty: +r.qty||0, status: r.status||'not_billed',
+  holdbackAmount: +r.holdback_amount||0, shortageAmount: +r.shortage_amount||0,
+  shortageRecordedBy: r.shortage_recorded_by||'', shortageRecordedAt: r.shortage_recorded_at||'',
+  settled: !!r.settled,
   createdBy: r.created_by||'', createdAt: r.created_at||'', updatedAt: r.updated_at||'',
 })
 const gypsumTripToDB = t => ({
   id: t.id, date: t.date||'', truck_no: t.truckNo||'', driver_name: t.driverName||'',
   emp_id: t.empId||'', to_company: t.toCompany||'', invoice_no: t.invoiceNo||'',
   invoice_file_path: t.invoiceFilePath||'', qty: t.qty||0, status: t.status||'not_billed',
+  holdback_amount: t.holdbackAmount||0, shortage_amount: t.shortageAmount||0,
+  shortage_recorded_by: t.shortageRecordedBy||'', shortage_recorded_at: t.shortageRecordedAt||'',
+  settled: t.settled||false,
   created_by: t.createdBy||'', created_at: t.createdAt||'', updated_at: t.updatedAt||'',
+})
+
+const gypsumPaymentFromDB = r => ({
+  id: r.id, empId: r.emp_id||'', driverName: r.driver_name||'', amount: +r.amount||0,
+  utr: r.utr||'', tripIds: r.trip_ids||[], note: r.note||'',
+  paidBy: r.paid_by||'', paidAt: r.paid_at||'',
+})
+const gypsumPaymentToDB = p => ({
+  id: p.id, emp_id: p.empId||'', driver_name: p.driverName||'', amount: p.amount||0,
+  utr: p.utr||'', trip_ids: p.tripIds||[], note: p.note||'',
+  paid_by: p.paidBy||'', paid_at: p.paidAt||'',
 })
 
 // Rate audit trails — every entry is a permanent historical record, never
@@ -578,6 +595,9 @@ export const DB = {
   getGypsumTrips:    () => fetchRecent('mye_gypsum_trips', gypsumTripFromDB, 'date'),
   saveGypsumTrip:    t  => upsertOne('mye_gypsum_trips', gypsumTripToDB, t),
   deleteGypsumTrip:  id => deleteOne('mye_gypsum_trips', id),
+  getGypsumPayments:  () => fetchRecent('mye_gypsum_payments', gypsumPaymentFromDB, 'paid_at'),
+  saveGypsumPayment:  p  => upsertOne('mye_gypsum_payments', gypsumPaymentToDB, p),
+  deleteGypsumPayment:id => deleteOne('mye_gypsum_payments', id),
   getGypsumShreeRates:   () => fetchRecent('mye_gypsum_shree_rates', gypsumShreeRateFromDB, 'effective_from'),
   saveGypsumShreeRate:   r  => upsertOne('mye_gypsum_shree_rates', gypsumShreeRateToDB, r),
   getGypsumDriverRates:  () => fetchRecent('mye_gypsum_driver_rates', gypsumDriverRateFromDB, 'effective_from'),
