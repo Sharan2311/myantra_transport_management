@@ -829,6 +829,9 @@ export const DB = {
   // Action Items — created when invoice scan can't cleanly bill a DI:
   //  type "missing_di"     → DI on the invoice has no matching trip in the app
   //  type "amount_mismatch"→ DI matched, but invoice amount != app's expected amount
+  //  type "diesel_no_lr"   → diesel request confirmed/attached but no LR yet;
+  //                          uses dieselIndentNo (its own column), NOT diNo —
+  //                          di_no is reserved for real Shree DI numbers.
   getActionItems: async () => {
     try { return await fetchAll('mye_action_items', r => ({
       id: r.id, type: r.type, status: r.status||'open',
@@ -837,6 +840,7 @@ export const DB = {
       invoiceAmt: +(r.invoice_amt||0), expectedAmt: +(r.expected_amt||0),
       empId: r.emp_id||'', tripId: r.trip_id||'',
       amount: +(r.amount||0), lrNo: r.lr_no||'',
+      dieselIndentNo: r.diesel_indent_no||'',
       note: r.note||'',
       createdAt: r.created_at, resolvedAt: r.resolved_at||'',
     })); } catch(e) { console.warn('mye_action_items not ready:', e.message); return []; }
@@ -848,6 +852,7 @@ export const DB = {
     invoice_amt: ai.invoiceAmt||0, expected_amt: ai.expectedAmt||0,
     emp_id: ai.empId||'', trip_id: ai.tripId||'',
     amount: ai.amount||0, lr_no: ai.lrNo||'',
+    diesel_indent_no: ai.dieselIndentNo||'',
     note: ai.note||'',
     created_at: ai.createdAt, resolved_at: ai.resolvedAt||'',
   }), ai),

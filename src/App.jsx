@@ -84,18 +84,6 @@ const isTafalExempt = (veh, employees, assignedEmpId) => !!employeeTafalExemptFo
 // string match is the only correct comparison.
 const normalizeDI = s => String(s||"").trim();
 
-// mye_action_items has no dedicated column for "which diesel request is this
-// about" — the existing diNo column is reused to hold the diesel indent
-// number for type:"diesel_no_lr" items. Real DI numbers are normalized to
-// digits-only (see the invoice-scan compare above), and a diesel indent
-// number is ALSO just a plain integer — so a bare indent number in that same
-// column could collide with a genuine DI number of the same digits. Tagging
-// it with a non-digit prefix makes that impossible regardless of what other
-// code reads diNo without also checking ai.type.
-const dieselIndentTag   = n => `DR-${n||""}`;
-const isDieselIndentTag = s => /^DR-/.test(String(s||""));
-const untagDieselIndent = s => String(s||"").replace(/^DR-/, "");
-
 // A trip's diLines carry per-line billing AND payment now (billed/invoiceNo/
 // invoiceDate/billedAmt, and paid/paidAmount/utr/paymentDate). Trip-level
 // status is DERIVED from these, never set independently:
@@ -2310,11 +2298,10 @@ function AppMain() {
   // ── Auto-resolve / auto-escalate "diesel — no LR attached" action items ────
   // Created manually by the owner from the Diesel Verify tab (DieselMod) when
   // a confirmed/attached diesel request has no LR. Matched back to its
-  // diesel request via ai.diNo === dieselIndentTag(request.indentNo) — this
-  // action-item type has no dedicated indent-number column, so the existing
-  // diNo field is reused to hold it, tagged (see dieselIndentTag near
-  // normalizeDI) so it can never collide with a real digits-only DI number.
-  // Two automatic outcomes:
+  // diesel request via ai.dieselIndentNo === request.indentNo (a dedicated
+  // column — kept separate from ai.diNo, which is reserved for real Shree DI
+  // numbers, since both would otherwise be plain digit strings that could
+  // collide). Two automatic outcomes:
   //  1) The request gets an LR attached later (any code path) → the action
   //     item is simply deleted — nothing else happens.
   //  2) 7 days pass with still no LR → the request's full amount is added
@@ -2329,7 +2316,7 @@ function AppMain() {
     const toClear    = []; // request now has an LR, or no longer exists — just remove the item
     const toEscalate = []; // 7+ days, still no LR, has an assignable employee — convert to loan
     open.forEach(ai => {
-      const req = (dieselRequests||[]).find(r => dieselIndentTag(r.indentNo)===ai.diNo);
+      const req = (dieselRequests||[]).find(r => String(r.indentNo)===ai.dieselIndentNo);
       if(!req || req.lrNo) { toClear.push(ai); return; }
       const created = new Date(ai.createdAt);
       if(isNaN(created) || created > sevenDaysAgo) return; // not due yet
@@ -2991,7 +2978,7 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
                 const daysLeft = Math.max(0, 7 - Math.floor((Date.now() - new Date(ai.createdAt).getTime()) / 86400000));
                 return (
                   <div key={ai.id} style={{background:C.card,borderRadius:10,padding:"10px 12px",border:`1px solid ${C.orange}55`}}>
-                    <div style={{fontWeight:900,fontSize:15,color:C.text}}>Indent #{untagDieselIndent(ai.diNo)||"—"} · {ai.truckNo||"—"} · {fmt(ai.amount||0)}</div>
+                    <div style={{fontWeight:900,fontSize:15,color:C.text}}>Indent #{ai.dieselIndentNo||"—"} · {ai.truckNo||"—"} · {fmt(ai.amount||0)}</div>
                     <div style={{fontSize:12,color:C.text,marginTop:4,lineHeight:1.4}}>{ai.note}</div>
                     <div style={{fontSize:11,color:C.orange,marginTop:4,fontWeight:700}}>
                       {daysLeft>0 ? `${daysLeft} day(s) left before this becomes a loan` : "Overdue — will be added as a loan"}
@@ -15913,9 +15900,8 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
   // Assigns the employee currently linked to this truck (via their most
   // recent trip) a task to add the vehicle/trip and attach this diesel
   // request. If it's still unresolved 7 days later, the App-level
-  // auto-escalation effect (keyed on this item's diNo, tagged via
-  // dieselIndentTag — see comment near normalizeDI) adds the full amount
-  // as a loan against that employee automatically.
+  // auto-escalation effect (keyed on this item's dieselIndentNo) adds
+  // the full amount as a loan against that employee automatically.
   const createNoLrActionItem = (req) => {
     if(user?.role!=="owner") { alert("Only the owner can create this action item."); return; }
     const empId = resolveEmpForTruck(req.truckNo, trips);
@@ -15924,7 +15910,8 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
     const ai = {
       id: uid()+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
       type: "diesel_no_lr", status: "open",
-      diNo: dieselIndentTag(req.indentNo), grNo: "", truckNo: req.truckNo||"",
+      diNo: "", grNo: "", truckNo: req.truckNo||"",
+      dieselIndentNo: String(req.indentNo||""),
       invoiceNo: "", invoiceDate: "",
       invoiceAmt: 0, expectedAmt: 0,
       empId: empId||"", tripId: "",
@@ -16496,7 +16483,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
             // Existing open "no LR" action item for this request, if any —
             // used to show progress instead of the "Notify Employee" button.
             const noLrItem = !r.lrNo
-              ? (actionItems||[]).find(ai=>ai.type==="diesel_no_lr" && ai.status==="open" && ai.diNo===dieselIndentTag(r.indentNo))
+              ? (actionItems||[]).find(ai=>ai.type==="diesel_no_lr" && ai.status==="open" && ai.dieselIndentNo===String(r.indentNo))
               : null;
             const noLrDaysLeft = noLrItem
               ? Math.max(0, 7 - Math.floor((Date.now() - new Date(noLrItem.createdAt).getTime()) / 86400000))
@@ -23306,7 +23293,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
             if(!window.confirm("Dismiss this action item? This does not bill anything — use this only if you've resolved it manually.")) return;
             setActionItems(prev=>(prev||[]).filter(x=>x.id!==ai.id));
             DB.deleteActionItem(ai.id).catch(e=>console.error("deleteActionItem dismiss:",e));
-            log && log("Dismissed action item — "+ai.type+(ai.diNo?" · DI "+(isDieselIndentTag(ai.diNo)?untagDieselIndent(ai.diNo):ai.diNo):""));
+            log && log("Dismissed action item — "+ai.type+(ai.diNo?" · DI "+ai.diNo:"")+(ai.dieselIndentNo?" · Indent #"+ai.dieselIndentNo:""));
           };
 
           // Assign a deferred shortage to a truck — writes the vehicle ledger
@@ -23419,7 +23406,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                     <div key={ai.id} style={{background:C.card,borderRadius:10,padding:"11px 14px",border:`1px solid ${C.orange}44`}}>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
                         <div>
-                          <div style={{fontWeight:800,fontSize:14}}>Indent #{untagDieselIndent(ai.diNo)||"—"} · {ai.truckNo||"—"} · {fmt(ai.amount||0)}</div>
+                          <div style={{fontWeight:800,fontSize:14}}>Indent #{ai.dieselIndentNo||"—"} · {ai.truckNo||"—"} · {fmt(ai.amount||0)}</div>
                           <div style={{fontSize:12,marginTop:4,fontWeight:700,color:ai.empId?C.blue:C.orange}}>
                             Assigned to: {empName(ai.empId)}
                           </div>
