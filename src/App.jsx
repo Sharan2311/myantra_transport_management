@@ -15886,11 +15886,12 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
   // Per-pump balance: total confirmed - total paid
   const pumpBalances = pumps.map((p) => {
     // Only count requests explicitly assigned to this pump — no auto-fallback.
-    // Per explicit instruction, only status==="attached" counts toward what's
-    // owed — "confirmed" (the further-along, manager-reviewed status) is
-    // excluded from this calculation.
+    // Same status pool as the Verify tab's own checklist (confirmed OR
+    // attached) — a confirmed request with no LR yet is exactly the thing
+    // Verify's "no LR attached" flow exists to catch, so it needs to be
+    // checkable (and countable) here too, not just once it's attached.
     const pIndents = (dieselRequests||[])
-      .filter(r => r.pumpId===p.id && r.status==="attached")
+      .filter(r => r.pumpId===p.id && (r.status==="confirmed"||r.status==="attached"))
       .map(r => ({...r, amount: pumpOwedAmount(r)})); // normalize .amount to the pump-owed portion for display below
     // Per explicit instruction: the amount owed to the pump only includes
     // requests the owner has personally checked off in the Verify tab
