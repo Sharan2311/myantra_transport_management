@@ -2295,6 +2295,60 @@ function AppMain() {
     }
   }, [trips, actionItems]);
 
+  // ── Auto-resolve / auto-escalate "diesel — no LR attached" action items ────
+  // Created manually by the owner from the Diesel Verify tab (DieselMod) when
+  // a confirmed/attached diesel request has no LR. Matched back to its
+  // diesel request via ai.dieselIndentNo === request.indentNo (a dedicated
+  // column — kept separate from ai.diNo, which is reserved for real Shree DI
+  // numbers, since both would otherwise be plain digit strings that could
+  // collide). Two automatic outcomes:
+  //  1) The request gets an LR attached later (any code path) → the action
+  //     item is simply deleted — nothing else happens.
+  //  2) 7 days pass with still no LR → the request's full amount is added
+  //     as a loan against the assigned employee, and the item is deleted.
+  //     Unassigned trucks (no employee resolvable when the item was created)
+  //     are left open — there's nobody to charge automatically.
+  React.useEffect(() => {
+    const open = (actionItems||[]).filter(ai=>ai.type==="diesel_no_lr" && ai.status==="open");
+    if(open.length===0) return;
+    const sevenDaysAgo = (() => { const d=new Date(); d.setDate(d.getDate()-7); return d; })();
+
+    const toClear    = []; // request now has an LR, or no longer exists — just remove the item
+    const toEscalate = []; // 7+ days, still no LR, has an assignable employee — convert to loan
+    open.forEach(ai => {
+      const req = (dieselRequests||[]).find(r => String(r.indentNo)===ai.dieselIndentNo);
+      if(!req || req.lrNo) { toClear.push(ai); return; }
+      const created = new Date(ai.createdAt);
+      if(isNaN(created) || created > sevenDaysAgo) return; // not due yet
+      if(!ai.empId) return; // no employee to charge — leave open for manual handling
+      toEscalate.push({ai, req});
+    });
+
+    if(toEscalate.length>0) {
+      toEscalate.forEach(({ai, req}) => {
+        const emp = (employees||[]).find(e=>e.id===ai.empId);
+        if(!emp) return; // employee record no longer exists — leave the item open for manual handling
+        const amt = ai.amount||0;
+        const loanTxn = {
+          id: uid(), type:"loan", date:today(),
+          amount: amt, lrNo:"",
+          note: `Diesel indent #${req.indentNo} (${req.truckNo}) — no LR attached for 7+ days. Auto-added as loan.`,
+        };
+        const updatedEmp = {...emp, loan:(emp.loan||0)+amt, loanTxns:[...(emp.loanTxns||[]), loanTxn]};
+        setEmployees(prev => (prev||[]).map(e=>e.id===emp.id?updatedEmp:e));
+        DB.saveEmployee(updatedEmp).catch(e=>console.error("saveEmployee diesel_no_lr loan:",e));
+        log && log("DIESEL NO-LR → EMPLOYEE LOAN", `Indent #${req.indentNo} · ${req.truckNo} · ₹${amt} added to ${emp.name}'s loan (no LR after 7 days)`);
+        toClear.push(ai);
+      });
+    }
+
+    if(toClear.length>0 && setActionItems) {
+      const clearIds = toClear.map(ai=>ai.id);
+      setActionItems(prev => (prev||[]).filter(ai => !clearIds.includes(ai.id)));
+      clearIds.forEach(id => DB.deleteActionItem(id).catch(e=>console.error("deleteActionItem diesel_no_lr:",e)));
+    }
+  }, [dieselRequests, actionItems]);
+
   if (!user) {
     if (loading) return (
       <div style={{minHeight:"100vh",background:"linear-gradient(135deg,#0a1628 0%,#0d2348 40%,#0f2d5c 70%,#071020 100%)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:0,fontFamily:"system-ui",overflow:"hidden",position:"relative"}}>
@@ -2905,6 +2959,33 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
                   </div>
                 </div>
               ))}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── Diesel "no LR attached" action items assigned to this employee ── */}
+      {(() => {
+        const myItems = (actionItems||[]).filter(ai=>ai.type==="diesel_no_lr" && ai.status==="open" && ai.empId && ai.empId===user.assignedEmployeeId);
+        if(myItems.length===0) return null;
+        return (
+          <div style={{background:C.orange+"18",border:`2px solid ${C.orange}`,borderRadius:14,padding:"14px 16px"}}>
+            <div style={{color:C.orange,fontSize:14,fontWeight:900,textTransform:"uppercase",letterSpacing:0.5,marginBottom:10,display:"flex",alignItems:"center",gap:6}}>
+              ⛽ Diesel Requests Missing LR — {myItems.length}
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {myItems.map(ai=>{
+                const daysLeft = Math.max(0, 7 - Math.floor((Date.now() - new Date(ai.createdAt).getTime()) / 86400000));
+                return (
+                  <div key={ai.id} style={{background:C.card,borderRadius:10,padding:"10px 12px",border:`1px solid ${C.orange}55`}}>
+                    <div style={{fontWeight:900,fontSize:15,color:C.text}}>Indent #{ai.dieselIndentNo||"—"} · {ai.truckNo||"—"} · {fmt(ai.amount||0)}</div>
+                    <div style={{fontSize:12,color:C.text,marginTop:4,lineHeight:1.4}}>{ai.note}</div>
+                    <div style={{fontSize:11,color:C.orange,marginTop:4,fontWeight:700}}>
+                      {daysLeft>0 ? `${daysLeft} day(s) left before this becomes a loan` : "Overdue — will be added as a loan"}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         );
@@ -15502,6 +15583,8 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
   // Daily verification checklist — owner-only, one-time permanent mark per
   // request ("I personally checked this request's attachment and amount").
   const [verifyFilter, setVerifyFilter] = useState("not_checked"); // all | checked | not_checked
+  const [verifyPumpFilter, setVerifyPumpFilter] = useState("all"); // "all" | pumpId
+  const [verifySearch, setVerifySearch] = useState(""); // matches truck no / indent no / LR no
   const [pumpSheet,   setPumpSheet]   = useState(false);
   const [scanSheet,   setScanSheet]   = useState(false);
   const [scanResults, setScanResults] = useState(null);
@@ -15769,11 +15852,19 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
     const pIndents = (dieselRequests||[])
       .filter(r => r.pumpId===p.id && r.status==="attached")
       .map(r => ({...r, amount: pumpOwedAmount(r)})); // normalize .amount to the pump-owed portion for display below
-    const totalOwed = pIndents.reduce((s,i) => s+(+(i.amount)||0), 0);
+    // Per explicit instruction: the amount owed to the pump only includes
+    // requests the owner has personally checked off in the Verify tab
+    // (ownerVerified). Unchecked ones are tracked separately below as
+    // "pending verification" — NOT included in what we owe yet.
+    const checkedIndents   = pIndents.filter(i => i.ownerVerified);
+    const uncheckedIndents = pIndents.filter(i => !i.ownerVerified);
+    const checkedSum   = checkedIndents.reduce((s,i) => s+(+(i.amount)||0), 0);
+    const uncheckedSum = uncheckedIndents.reduce((s,i) => s+(+(i.amount)||0), 0);
+    const totalOwed = checkedSum;
     const totalPaid = (pumpPayments||[]).filter(pp => pp.pumpId === p.id)
                         .reduce((s,pp) => s+(+(pp.amount)||0), 0);
     const pending   = Math.max(0, totalOwed - totalPaid);
-    return { ...p, pIndents, totalOwed, totalPaid, pending };
+    return { ...p, pIndents, totalOwed, totalPaid, pending, checkedSum, uncheckedSum };
   });
 
   // Verification checklist — every confirmed/attached diesel request, ever
@@ -15782,6 +15873,15 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
   const verifiableRequests = (dieselRequests||[])
     .filter(r => r.status==="confirmed"||r.status==="attached")
     .filter(r => verifyFilter==="all" || (verifyFilter==="checked")===!!r.ownerVerified)
+    .filter(r => verifyPumpFilter==="all" || r.pumpId===verifyPumpFilter)
+    .filter(r => {
+      const q = verifySearch.trim();
+      if(!q) return true;
+      const qUpper = q.toUpperCase();
+      return String(r.truckNo||"").toUpperCase().includes(qUpper)
+          || String(r.indentNo||"").includes(q)
+          || String(r.lrNo||"").toUpperCase().includes(qUpper);
+    })
     .sort((a,b)=>(b.indentNo||0)-(a.indentNo||0));
   const verifiedCount = (dieselRequests||[]).filter(r => (r.status==="confirmed"||r.status==="attached") && r.ownerVerified).length;
   const verifiableTotal = (dieselRequests||[]).filter(r => r.status==="confirmed"||r.status==="attached").length;
@@ -15794,6 +15894,46 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
     setDieselRequests(prev=>prev.map(r=>r.id===req.id?updated:r));
     DB.saveDieselRequest(updated).catch(e=>console.error("saveDieselRequest ownerVerified:",e));
     log&&log(value?"REQUEST VERIFIED":"REQUEST VERIFICATION REMOVED", `Indent #${req.indentNo} · ${req.truckNo} by ${user?.name||user?.username}`);
+  };
+
+  // "No LR attached" action item — owner-triggered from the Verify tab.
+  // Assigns the employee currently linked to this truck (via their most
+  // recent trip) a task to add the vehicle/trip and attach this diesel
+  // request. If it's still unresolved 7 days later, the App-level
+  // auto-escalation effect (keyed on this item's dieselIndentNo) adds
+  // the full amount as a loan against that employee automatically.
+  const createNoLrActionItem = (req) => {
+    if(user?.role!=="owner") { alert("Only the owner can create this action item."); return; }
+    const empId = resolveEmpForTruck(req.truckNo, trips);
+    const emp   = (employees||[]).find(e=>e.id===empId);
+    const amt   = pumpOwedAmount(req);
+    const ai = {
+      id: uid()+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
+      type: "diesel_no_lr", status: "open",
+      diNo: "", grNo: "", truckNo: req.truckNo||"",
+      dieselIndentNo: String(req.indentNo||""),
+      invoiceNo: "", invoiceDate: "",
+      invoiceAmt: 0, expectedAmt: 0,
+      empId: empId||"", tripId: "",
+      amount: amt, lrNo: "",
+      note: `Diesel indent #${req.indentNo} (${req.truckNo}, ${fmt(amt)}) has no LR attached. Add the vehicle/trip and attach this diesel request. If this isn't done within 7 days, ${fmt(amt)} will be deducted from your salary or TAFAL, and after 7 days it will be added as a loan against you.`,
+      createdAt: nowTs(),
+    };
+    setActionItems(prev=>[ai, ...(prev||[])]);
+    DB.saveActionItem(ai).catch(e=>console.error("saveActionItem diesel_no_lr:",e));
+    log&&log("DIESEL NO-LR ACTION ITEM", `Indent #${req.indentNo} · ${req.truckNo} → ${emp?.name||"unassigned truck — owner only"}`);
+  };
+
+  // Owner-only delete of a diesel request from the Verify tab.
+  const deleteVerifyRequest = (req) => {
+    if(user?.role!=="owner") { alert("Only the owner can delete requests."); return; }
+    if(!window.confirm(`Delete diesel indent #${req.indentNo} (${req.truckNo}, ${fmt(pumpOwedAmount(req))})?\n\nThis cannot be undone.`)) return;
+    setDieselRequests(prev=>(prev||[]).filter(r=>r.id!==req.id));
+    DB.deleteDieselRequest(req.id).catch(e=>{
+      alert("Failed to delete: "+e.message);
+      setDieselRequests(prev=>[req, ...(prev||[])]);
+    });
+    log&&log("DIESEL REQUEST DELETED", `Indent #${req.indentNo} · ${req.truckNo} deleted by ${user?.name||user?.username}`);
   };
 
   const confirmScanned = async () => {
@@ -16311,6 +16451,21 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
               </button>
             ))}
           </div>
+          {/* Filter by petrol pump */}
+          <select value={verifyPumpFilter} onChange={e=>setVerifyPumpFilter(e.target.value)}
+            style={{width:"100%",background:C.card,border:`1.5px solid ${C.border}`,borderRadius:8,
+              padding:"8px 10px",fontSize:13,color:C.text,outline:"none"}}>
+            <option value="all">All Pumps</option>
+            {pumps.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+          {/* Search by vehicle number, indent number, or LR number */}
+          <div style={{background:C.card,borderRadius:10,padding:"8px 12px",display:"flex",alignItems:"center",gap:8,border:`1px solid ${C.border}`}}>
+            <span style={{color:C.muted}}>🔍</span>
+            <input value={verifySearch} onChange={e=>setVerifySearch(e.target.value)}
+              placeholder="Search by vehicle no, indent no, or LR no…"
+              style={{flex:1,background:"none",border:"none",outline:"none",fontSize:13,color:C.text}}/>
+            {verifySearch && <span onClick={()=>setVerifySearch("")} style={{color:C.muted,cursor:"pointer",fontSize:18}}>×</span>}
+          </div>
           {verifiableRequests.length===0 && (
             <div style={{textAlign:"center",color:C.muted,padding:32}}>
               {verifyFilter==="not_checked" ? "Nothing left to check ✓" : "No requests match this filter"}
@@ -16325,6 +16480,14 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
             const dieselAmt = r.confirmedAmount ?? r.dieselAmount ?? 0;
             const cashAmt   = r.confirmedCash   ?? r.cashAmount   ?? 0;
             const total     = dieselAmt + cashAmt || r.amount || 0;
+            // Existing open "no LR" action item for this request, if any —
+            // used to show progress instead of the "Notify Employee" button.
+            const noLrItem = !r.lrNo
+              ? (actionItems||[]).find(ai=>ai.type==="diesel_no_lr" && ai.status==="open" && ai.dieselIndentNo===String(r.indentNo))
+              : null;
+            const noLrDaysLeft = noLrItem
+              ? Math.max(0, 7 - Math.floor((Date.now() - new Date(noLrItem.createdAt).getTime()) / 86400000))
+              : null;
             return (
               <div key={r.id} style={{background:C.card,borderRadius:12,padding:"12px 14px",
                 border:`1.5px solid ${r.ownerVerified?C.green+"66":C.border}`}}>
@@ -16348,13 +16511,36 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                         ✓ Checked by {r.ownerVerifiedBy||"—"} · {r.ownerVerifiedAt?new Date(r.ownerVerifiedAt).toLocaleString("en-IN",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"}):""}
                       </div>
                     )}
+                    {/* No LR attached — owner can notify the employee, or track the countdown to auto-loan */}
+                    {!r.lrNo && user.role==="owner" && (
+                      noLrItem ? (
+                        <div style={{color:C.orange,fontSize:11,marginTop:6,fontWeight:700}}>
+                          ⏳ Employee notified — {noLrDaysLeft>0 ? `${noLrDaysLeft} day(s) left before this becomes a loan` : "loan will be applied on next check"}
+                        </div>
+                      ) : (
+                        <button onClick={()=>createNoLrActionItem(r)}
+                          style={{marginTop:8,padding:"6px 12px",borderRadius:8,border:`1.5px solid ${C.orange}`,
+                            background:"transparent",color:C.orange,fontWeight:700,fontSize:11,cursor:"pointer"}}>
+                          📨 Notify Employee — Add Vehicle & Attach
+                        </button>
+                      )
+                    )}
                   </div>
-                  <button onClick={()=>markOwnerVerified(r, !r.ownerVerified)}
-                    style={{flexShrink:0,padding:"7px 14px",borderRadius:8,border:`1.5px solid ${r.ownerVerified?C.green:C.teal}`,
-                      background:r.ownerVerified?C.green+"22":"transparent",
-                      color:r.ownerVerified?C.green:C.teal,fontWeight:700,fontSize:12,cursor:"pointer"}}>
-                    {r.ownerVerified?"✓ Checked":"Mark Checked"}
-                  </button>
+                  <div style={{display:"flex",flexDirection:"column",gap:6,alignItems:"flex-end"}}>
+                    <button onClick={()=>markOwnerVerified(r, !r.ownerVerified)}
+                      style={{flexShrink:0,padding:"7px 14px",borderRadius:8,border:`1.5px solid ${r.ownerVerified?C.green:C.teal}`,
+                        background:r.ownerVerified?C.green+"22":"transparent",
+                        color:r.ownerVerified?C.green:C.teal,fontWeight:700,fontSize:12,cursor:"pointer"}}>
+                      {r.ownerVerified?"✓ Checked":"Mark Checked"}
+                    </button>
+                    {user.role==="owner" && (
+                      <button onClick={()=>deleteVerifyRequest(r)}
+                        style={{flexShrink:0,padding:"6px 10px",borderRadius:8,border:`1.5px solid ${C.red}66`,
+                          background:"transparent",color:C.red,fontWeight:700,fontSize:11,cursor:"pointer"}}>
+                        🗑 Delete
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
             );
@@ -16530,11 +16716,18 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                     </div>
                   </div>
                   {/* Mini balance bar */}
-                  <div style={{marginTop:10,display:"flex",gap:10,fontSize:12,cursor:"pointer"}}
+                  <div style={{marginTop:10,display:"flex",gap:10,fontSize:12,cursor:"pointer",flexWrap:"wrap"}}
                     onClick={()=> editPumpNameId!==p.id && setExpandPump(isExpanded?null:p.id)}>
                     <span style={{color:C.muted}}>Total Owed: <b style={{color:C.text}}>{fmt(p.totalOwed)}</b></span>
                     <span style={{color:C.muted}}>Paid: <b style={{color:C.green}}>{fmt(p.totalPaid)}</b></span>
                     <span style={{color:C.muted,marginLeft:"auto"}}>{isExpanded?"▲":"▼"}</span>
+                  </div>
+                  {/* Checked vs. pending-verification split — Total Owed above only
+                      counts requests the owner has checked off in Verify; this line
+                      shows both that checked sum and what's still unchecked. */}
+                  <div style={{marginTop:6,display:"flex",gap:10,fontSize:11}}>
+                    <span style={{color:C.muted}}>✓ Checked: <b style={{color:C.green}}>{fmt(p.checkedSum)}</b></span>
+                    <span style={{color:C.muted}}>⏳ Pending Verification: <b style={{color:C.orange}}>{fmt(p.uncheckedSum)}</b></span>
                   </div>
                 </div>
 
@@ -23094,12 +23287,13 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
           const conflict = open.filter(ai=>ai.type==="duplicate_di");
           const noDiesel = open.filter(ai=>ai.type==="no_diesel_confirmed");
           const unassignedShort = open.filter(ai=>ai.type==="unassigned_shortage");
+          const dieselNoLr = open.filter(ai=>ai.type==="diesel_no_lr");
 
           const dismiss = (ai) => {
             if(!window.confirm("Dismiss this action item? This does not bill anything — use this only if you've resolved it manually.")) return;
             setActionItems(prev=>(prev||[]).filter(x=>x.id!==ai.id));
             DB.deleteActionItem(ai.id).catch(e=>console.error("deleteActionItem dismiss:",e));
-            log && log("Dismissed action item — "+ai.type+(ai.diNo?" · DI "+ai.diNo:""));
+            log && log("Dismissed action item — "+ai.type+(ai.diNo?" · DI "+ai.diNo:"")+(ai.dieselIndentNo?" · Indent #"+ai.dieselIndentNo:""));
           };
 
           // Assign a deferred shortage to a truck — writes the vehicle ledger
@@ -23144,6 +23338,10 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                 <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.border}`}}>
                   <div style={{fontSize:20,fontWeight:800,color:C.red}}>{unassignedShort.length}</div>
                   <div style={{fontSize:11,color:C.muted}}>Shortages awaiting a truck</div>
+                </div>
+                <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.border}`}}>
+                  <div style={{fontSize:20,fontWeight:800,color:C.orange}}>{dieselNoLr.length}</div>
+                  <div style={{fontSize:11,color:C.muted}}>Diesel — no LR attached</div>
                 </div>
               </div>
 
@@ -23195,6 +23393,32 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                     </div>
                   </div>
                 ))}
+              </div>
+
+              <div style={{fontSize:12,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:8}}>
+                ⛽ Diesel — no LR attached (auto-converts to a loan after 7 days)
+              </div>
+              {dieselNoLr.length===0 && <div style={{color:C.muted,fontSize:13,marginBottom:16}}>None open.</div>}
+              <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:20}}>
+                {dieselNoLr.map(ai=>{
+                  const daysLeft = Math.max(0, 7 - Math.floor((Date.now() - new Date(ai.createdAt).getTime()) / 86400000));
+                  return (
+                    <div key={ai.id} style={{background:C.card,borderRadius:10,padding:"11px 14px",border:`1px solid ${C.orange}44`}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                        <div>
+                          <div style={{fontWeight:800,fontSize:14}}>Indent #{ai.dieselIndentNo||"—"} · {ai.truckNo||"—"} · {fmt(ai.amount||0)}</div>
+                          <div style={{fontSize:12,marginTop:4,fontWeight:700,color:ai.empId?C.blue:C.orange}}>
+                            Assigned to: {empName(ai.empId)}
+                          </div>
+                          <div style={{fontSize:11,color:C.orange,marginTop:2,fontWeight:700}}>
+                            {ai.empId ? (daysLeft>0 ? `${daysLeft} day(s) left before auto-loan` : "Overdue — will be added as a loan") : "No employee resolvable for this truck — will not auto-convert"}
+                          </div>
+                        </div>
+                        <button onClick={()=>dismiss(ai)} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,fontSize:11,padding:"4px 8px",cursor:"pointer"}}>Dismiss</button>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
 
               <div style={{fontSize:12,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:8}}>
