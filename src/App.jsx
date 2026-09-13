@@ -2309,6 +2309,13 @@ function AppMain() {
   //     Unassigned trucks (no employee resolvable when the item was created)
   //     are left open — there's nobody to charge automatically.
   React.useEffect(() => {
+    // rDR guards against a real race condition: right after a page load/
+    // refresh, dieselRequests starts as [] before its fetch resolves, while
+    // actionItems can resolve first (or at the same time). Without this
+    // guard, every open diesel_no_lr item would look like its underlying
+    // request "no longer exists" during that gap and get deleted for real —
+    // this is exactly what was happening on refresh.
+    if(!rDR) return;
     const open = (actionItems||[]).filter(ai=>ai.type==="diesel_no_lr" && ai.status==="open");
     if(open.length===0) return;
     const sevenDaysAgo = (() => { const d=new Date(); d.setDate(d.getDate()-7); return d; })();
@@ -2347,7 +2354,7 @@ function AppMain() {
       setActionItems(prev => (prev||[]).filter(ai => !clearIds.includes(ai.id)));
       clearIds.forEach(id => DB.deleteActionItem(id).catch(e=>console.error("deleteActionItem diesel_no_lr:",e)));
     }
-  }, [dieselRequests, actionItems]);
+  }, [dieselRequests, actionItems, rDR]);
 
   if (!user) {
     if (loading) return (
@@ -17099,10 +17106,23 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                       {p.pIndents.slice(0,10).map(i => {
                         const trip = trips.find(t=>t.id===i.tripId);
                         return (
-                          <div key={i.id} style={{display:"flex",justifyContent:"space-between",
-                            padding:"6px 0",borderBottom:`1px solid ${C.border}11`,fontSize:12}}>
-                            <span style={{color:C.muted}}>{i.truckNo} · #{i.indentNo} · {i.date}</span>
-                            <div style={{textAlign:"right"}}>
+                          <div key={i.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                            padding:"6px 0",borderBottom:`1px solid ${C.border}11`,fontSize:12,gap:8}}>
+                            <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}>
+                              {user.role==="owner" && (
+                                <button onClick={()=>markOwnerVerified(i, !i.ownerVerified)}
+                                  title={i.ownerVerified ? "Checked — click to uncheck" : "Not checked — click to mark checked"}
+                                  style={{flexShrink:0,width:20,height:20,borderRadius:5,cursor:"pointer",
+                                    border:`1.5px solid ${i.ownerVerified?C.green:C.border}`,
+                                    background:i.ownerVerified?C.green:"transparent",
+                                    color:"#fff",fontSize:12,fontWeight:900,lineHeight:1,
+                                    display:"flex",alignItems:"center",justifyContent:"center",padding:0}}>
+                                  {i.ownerVerified?"✓":""}
+                                </button>
+                              )}
+                              <span style={{color:C.muted,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{i.truckNo} · #{i.indentNo} · {i.date}</span>
+                            </div>
+                            <div style={{textAlign:"right",flexShrink:0}}>
                               <div style={{color:C.text,fontWeight:600}}>{fmt(i.amount)}</div>
                               {(i.hsd>0||i.advance>0) && (
                                 <div style={{color:C.muted,fontSize:10}}>
