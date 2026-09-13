@@ -2574,6 +2574,7 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
   const [billedClinkerOpen,   setBilledClinkerOpen]   = useState(false);
   const [pouchLang, setPouchLang] = useState("en"); // for the Return Pouch reminder banner below
   const [announceLang, setAnnounceLang] = useState("en"); // for the one-week policy announcement banner
+  const [dieselLrLang, setDieselLrLang] = useState("en"); // for the diesel "no LR attached" notice
 
   const allFyTrips = fyTrips || trips;
   // Apply client filter then month filter
@@ -2968,10 +2969,23 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
       {(() => {
         const myItems = (actionItems||[]).filter(ai=>ai.type==="diesel_no_lr" && ai.status==="open" && ai.empId && ai.empId===user.assignedEmployeeId);
         if(myItems.length===0) return null;
+        const dt = DIESEL_NO_LR_TXT[dieselLrLang] || DIESEL_NO_LR_TXT.en;
         return (
           <div style={{background:C.orange+"18",border:`2px solid ${C.orange}`,borderRadius:14,padding:"14px 16px"}}>
-            <div style={{color:C.orange,fontSize:14,fontWeight:900,textTransform:"uppercase",letterSpacing:0.5,marginBottom:10,display:"flex",alignItems:"center",gap:6}}>
-              ⛽ Diesel Requests Missing LR — {myItems.length}
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,flexWrap:"wrap",gap:6}}>
+              <div style={{color:C.orange,fontSize:14,fontWeight:900,textTransform:"uppercase",letterSpacing:0.5,display:"flex",alignItems:"center",gap:6}}>
+                {dt.heading} — {myItems.length}
+              </div>
+              <div style={{display:"flex",gap:4}}>
+                {Object.entries(DIESEL_NO_LR_TXT).map(([code,txt])=>(
+                  <button key={code} onClick={()=>setDieselLrLang(code)}
+                    style={{padding:"3px 8px",borderRadius:6,fontSize:10,fontWeight:700,cursor:"pointer",
+                      background:dieselLrLang===code?C.orange+"33":"transparent",border:`1px solid ${dieselLrLang===code?C.orange:C.border}`,
+                      color:dieselLrLang===code?C.orange:C.muted}}>
+                    {txt.langLabel}
+                  </button>
+                ))}
+              </div>
             </div>
             <div style={{display:"flex",flexDirection:"column",gap:8}}>
               {myItems.map(ai=>{
@@ -2979,9 +2993,9 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
                 return (
                   <div key={ai.id} style={{background:C.card,borderRadius:10,padding:"10px 12px",border:`1px solid ${C.orange}55`}}>
                     <div style={{fontWeight:900,fontSize:15,color:C.text}}>Indent #{ai.dieselIndentNo||"—"} · {ai.truckNo||"—"} · {fmt(ai.amount||0)}</div>
-                    <div style={{fontSize:12,color:C.text,marginTop:4,lineHeight:1.4}}>{ai.note}</div>
+                    <div style={{fontSize:12,color:C.text,marginTop:4,lineHeight:1.4}}>{dt.note(ai.dieselIndentNo||"—", ai.truckNo||"—", fmt(ai.amount||0))}</div>
                     <div style={{fontSize:11,color:C.orange,marginTop:4,fontWeight:700}}>
-                      {daysLeft>0 ? `${daysLeft} day(s) left before this becomes a loan` : "Overdue — will be added as a loan"}
+                      {daysLeft>0 ? dt.daysLeft(daysLeft) : dt.overdue}
                     </div>
                   </div>
                 );
@@ -15993,6 +16007,23 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
   // across different pumps' exports, since we match header text, not
   // hardcoded column letters. Ditto marks ('"') in any column carry the
   // previous row's value forward (seen on Date in this pump's export).
+  // ExcelJS represents a formula cell's .value as an object like
+  // { formula: "E7*F7", result: 15000.4542 } — NOT a plain number — and this
+  // pump's statement computes Amount as Quantity*Rate via formula, not a
+  // static value. A naive typeof-number check silently treats every row's
+  // amount as unparseable and skips it, which is exactly what happened.
+  // This also defensively unwraps richText ({richText:[{text}]}) and
+  // hyperlink ({text, hyperlink}) cell shapes, in case a future export uses
+  // those instead.
+  const resolveCellValue = (raw) => {
+    if(raw && typeof raw === "object") {
+      if("result" in raw) return (raw.result && typeof raw.result === "object" && "error" in raw.result) ? null : raw.result;
+      if(Array.isArray(raw.richText)) return raw.richText.map(t=>t.text||"").join("");
+      if("text" in raw) return raw.text;
+    }
+    return raw;
+  };
+
   const parseStatementFile = async (file) => {
     const ExcelJS = (await import("exceljs")).default;
     const wb = new ExcelJS.Workbook();
@@ -16004,7 +16035,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
     ws.eachRow((row, rowNum) => {
       if(headerRowNum) return;
       row.eachCell((cell, colNum) => {
-        const v = String(cell.value||"").trim().toLowerCase();
+        const v = String(resolveCellValue(cell.value)||"").trim().toLowerCase();
         if(v.includes("vehicle")) colIdx.vehicleNo = colNum;
         if(v === "amount") colIdx.amount = colNum;
         if(v === "date") colIdx.date = colNum;
@@ -16017,9 +16048,9 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
     const lastVal = {}; // ditto-mark carry-forward, per column
     for(let r = headerRowNum+1; r <= ws.rowCount; r++) {
       const row = ws.getRow(r);
-      const rawVehicle = row.getCell(colIdx.vehicleNo).value;
-      const rawAmount  = row.getCell(colIdx.amount).value;
-      const rawDate    = colIdx.date ? row.getCell(colIdx.date).value : null;
+      const rawVehicle = resolveCellValue(row.getCell(colIdx.vehicleNo).value);
+      const rawAmount  = resolveCellValue(row.getCell(colIdx.amount).value);
+      const rawDate    = colIdx.date ? resolveCellValue(row.getCell(colIdx.date).value) : null;
 
       const resolve = (col, raw) => {
         if(String(raw||"").trim() === '"') return lastVal[col];
@@ -16276,26 +16307,6 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
     setScanResults(null);
     setScanSummary({ saved:green.length, flagged:alerts.length, date:today() });
     if (alerts.length===0) setScanSheet(false);
-  };
-
-  const saveIndent = () => {
-    // Validate: indent number must be unique across both indents AND trips
-    if (f.indentNo && f.indentNo.trim()) {
-      const dupIndent = (indents||[]).find(i => i.indentNo && String(i.indentNo).trim() === f.indentNo.trim());
-      if (dupIndent) {
-        alert(`Indent No "${f.indentNo}" already exists in Diesel records (Truck: ${dupIndent.truckNo}, Date: ${dupIndent.date}). Each indent number must be unique.\n\nIndent No "${f.indentNo}" ಡೀಸೆಲ್ ರೆಕಾರ್ಡ್‌ನಲ್ಲಿ ಇದೆ. ಅನನ್ಯ ನಂಬರ್ ಬಳಸಿ.`);
-        return;
-      }
-      const dupTrip = (trips||[]).find(t => t.dieselIndentNo && t.dieselIndentNo.trim() === f.indentNo.trim());
-      if (dupTrip) {
-        alert(`Indent No "${f.indentNo}" is already linked to Trip LR: ${dupTrip.lrNo||"—"} (Truck: ${dupTrip.truckNo}). Each indent number must be unique.\n\nIndent No ಟ್ರಿಪ್ LR ${dupTrip.lrNo||"—"}ಗೆ ಲಿಂಕ್ ಆಗಿದೆ. ಅನನ್ಯ ನಂಬರ್ ಬಳಸಿ.`);
-        return;
-      }
-    }
-    const ind = {...f, id:uid(), amount:+f.amount, litres:+f.litres, ratePerLitre:+f.ratePerLitre, paid:false, createdBy:user.username, createdAt:nowTs()};
-    setIndents(p => [ind, ...(p||[])]);
-    log("DIESEL INDENT", `${ind.truckNo} · Indent ${ind.indentNo} · ${fmt(ind.amount)}`);
-    setF(blankI); setAddSheet(false);
   };
 
   const confirmIndent = async (id, newAmount) => {
@@ -26243,6 +26254,37 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPaym
 // visibility of a policy change, not a once-and-forget notice.
 const POUCH_ANNOUNCEMENT_START = "2026-08-11";
 const POUCH_ANNOUNCEMENT_END   = "2026-08-18";
+const DIESEL_NO_LR_TXT = {
+  en: {
+    langLabel: "English",
+    heading: "⛽ Diesel Requests Missing LR",
+    note: (indentNo, truckNo, amt) => `Diesel indent #${indentNo} (${truckNo}, ${amt}) has no LR attached. Add the vehicle/trip and attach this diesel request. If this isn't done within 7 days, ${amt} will be deducted from your salary or TAFAL, and after 7 days it will be added as a loan against you.`,
+    daysLeft: (n) => `${n} day(s) left before this becomes a loan`,
+    overdue: "Overdue — will be added as a loan",
+  },
+  kn: {
+    langLabel: "ಕನ್ನಡ",
+    heading: "⛽ LR ಇಲ್ಲದ ಡೀಸೆಲ್ ವಿನಂತಿಗಳು",
+    note: (indentNo, truckNo, amt) => `ಡೀಸೆಲ್ ಇಂಡೆಂಟ್ #${indentNo} (${truckNo}, ${amt}) ಗೆ LR ಲಗತ್ತಿಸಿಲ್ಲ. ವಾಹನ/ಟ್ರಿಪ್ ಸೇರಿಸಿ ಮತ್ತು ಈ ಡೀಸೆಲ್ ವಿನಂತಿಯನ್ನು ಲಗತ್ತಿಸಿ. ಇದನ್ನು 7 ದಿನಗಳ ಒಳಗೆ ಮಾಡದಿದ್ದರೆ, ${amt} ನಿಮ್ಮ ಸಂಬಳ ಅಥವಾ TAFAL ನಿಂದ ಕಡಿತಗೊಳ್ಳುತ್ತದೆ, ಮತ್ತು 7 ದಿನಗಳ ನಂತರ ಇದು ನಿಮ್ಮ ಮೇಲೆ ಸಾಲವಾಗಿ ಸೇರಿಸಲಾಗುತ್ತದೆ.`,
+    daysLeft: (n) => `ಇದು ಸಾಲವಾಗುವ ಮೊದಲು ${n} ದಿನ(ಗಳು) ಬಾಕಿ ಇವೆ`,
+    overdue: "ಅವಧಿ ಮೀರಿದೆ — ಸಾಲವಾಗಿ ಸೇರಿಸಲಾಗುವುದು",
+  },
+  te: {
+    langLabel: "తెలుగు",
+    heading: "⛽ LR లేని డీజిల్ అభ్యర్థనలు",
+    note: (indentNo, truckNo, amt) => `డీజిల్ ఇండెంట్ #${indentNo} (${truckNo}, ${amt})కి LR జోడించబడలేదు. వాహనం/ట్రిప్‌ను జోడించి ఈ డీజిల్ అభ్యర్థనను అటాచ్ చేయండి. ఇది 7 రోజుల్లో చేయకపోతే, ${amt} మీ జీతం లేదా TAFAL నుండి తీసివేయబడుతుంది, మరియు 7 రోజుల తర్వాత ఇది మీపై అప్పుగా జోడించబడుతుంది.`,
+    daysLeft: (n) => `ఇది అప్పుగా మారే ముందు ${n} రోజు(లు) మిగిలి ఉన్నాయి`,
+    overdue: "గడువు మించింది — అప్పుగా జోడించబడుతుంది",
+  },
+  mr: {
+    langLabel: "मराठी",
+    heading: "⛽ LR नसलेल्या डिझेल विनंत्या",
+    note: (indentNo, truckNo, amt) => `डिझेल इंडेंट #${indentNo} (${truckNo}, ${amt}) ला LR जोडलेले नाही. वाहन/ट्रिप जोडा आणि ही डिझेल विनंती संलग्न करा. हे 7 दिवसांत न केल्यास, ${amt} तुमच्या पगारातून किंवा TAFAL मधून कापले जाईल, आणि 7 दिवसांनंतर ते तुमच्यावर कर्ज म्हणून जोडले जाईल.`,
+    daysLeft: (n) => `हे कर्ज होण्यापूर्वी ${n} दिवस शिल्लक आहेत`,
+    overdue: "मुदत संपली — कर्ज म्हणून जोडले जाईल",
+  },
+};
+
 const POUCH_ANNOUNCEMENT_TXT = {
   en: {
     langLabel: "English",
