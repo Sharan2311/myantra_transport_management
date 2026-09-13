@@ -15585,6 +15585,8 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
   const [verifyFilter, setVerifyFilter] = useState("not_checked"); // all | checked | not_checked
   const [verifyPumpFilter, setVerifyPumpFilter] = useState("all"); // "all" | pumpId
   const [verifySearch, setVerifySearch] = useState(""); // matches truck no / indent no / LR no
+  const [empPickerFor, setEmpPickerFor] = useState(null); // diesel request awaiting a manual employee pick (no trip history to auto-resolve from)
+  const [empPickerChoice, setEmpPickerChoice] = useState("");
 
   // ── Pump statement (Excel) reconciliation — Verify tab ─────────────────────
   // Owner uploads a pump's own statement; each row is matched against
@@ -15916,12 +15918,14 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
   // "No LR attached" action item builder — shared by the manual "Notify
   // Employee" button below AND the bulk pump-statement reconcile flow
   // further down, so both paths produce identical action items. Assigns the
-  // employee currently linked to this truck (via their most recent trip).
-  // If still unresolved 7 days later, the App-level auto-escalation effect
-  // (keyed on this item's dieselIndentNo) adds the full amount as a loan
-  // against that employee automatically.
-  const buildNoLrActionItem = (req) => {
-    const empId = resolveEmpForTruck(req.truckNo, trips);
+  // employee currently linked to this truck (via their most recent trip),
+  // unless overrideEmpId is given (used when the owner picks one manually
+  // because no trip history exists to auto-resolve from). If still
+  // unresolved 7 days later, the App-level auto-escalation effect (keyed
+  // on this item's dieselIndentNo) adds the full amount as a loan against
+  // that employee automatically.
+  const buildNoLrActionItem = (req, overrideEmpId) => {
+    const empId = overrideEmpId!=null ? overrideEmpId : resolveEmpForTruck(req.truckNo, trips);
     const emp   = (employees||[]).find(e=>e.id===empId);
     const amt   = pumpOwedAmount(req);
     return {
@@ -15941,12 +15945,27 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
     };
   };
 
-  const createNoLrActionItem = (req) => {
-    if(user?.role!=="owner") { alert("Only the owner can create this action item."); return; }
-    const { ai, empName } = buildNoLrActionItem(req);
+  const sendNoLrActionItem = (req, overrideEmpId) => {
+    const { ai, empName } = buildNoLrActionItem(req, overrideEmpId);
     setActionItems(prev=>[ai, ...(prev||[])]);
     DB.saveActionItem(ai).catch(e=>console.error("saveActionItem diesel_no_lr:",e));
     log&&log("DIESEL NO-LR ACTION ITEM", `Indent #${req.indentNo} · ${req.truckNo} → ${empName}`);
+  };
+
+  // Manual "Notify Employee" button in the Verify tab. If the truck has no
+  // trip history at all, there's nobody to auto-assign — rather than
+  // silently filing the item as owner-only (where it can never reach the
+  // 7-day auto-loan escalation, since that needs an employee), the owner
+  // is asked to pick one.
+  const createNoLrActionItem = (req) => {
+    if(user?.role!=="owner") { alert("Only the owner can create this action item."); return; }
+    const autoEmpId = resolveEmpForTruck(req.truckNo, trips);
+    if(!autoEmpId) {
+      setEmpPickerFor(req);
+      setEmpPickerChoice("");
+      return;
+    }
+    sendNoLrActionItem(req);
   };
 
   // Owner-only delete of a diesel request from the Verify tab.
@@ -19135,6 +19154,32 @@ This was already dispensed — only delete if it was recorded in error.`;
             <Field label="Bank A/C No"  value={pf.accountNo} onChange={v=>setPf(p=>({...p,accountNo:v}))} />
             <Field label="IFSC Code"    value={pf.ifsc}      onChange={v=>setPf(p=>({...p,ifsc:v}))} />
             <Btn onClick={()=>{const p={...pf,id:uid(),createdBy:user.username}; setPumps(prev=>[...prev,p]); log("ADD PUMP",p.name); setPf(blankP); setPumpSheet(false);}} full color={C.blue}>Save Pump</Btn>
+          </div>
+        </Sheet>
+      )}
+
+      {/* ── MANUAL EMPLOYEE PICKER — truck has no trip history, so no one to auto-assign ── */}
+      {empPickerFor && (
+        <Sheet title="Select Employee" onClose={()=>setEmpPickerFor(null)}>
+          <div style={{display:"flex",flexDirection:"column",gap:13}}>
+            <div style={{color:C.muted,fontSize:12}}>
+              Truck {empPickerFor.truckNo} has no trip history yet, so an employee can't be auto-assigned. Pick who should get this notification for indent #{empPickerFor.indentNo}.
+            </div>
+            <select value={empPickerChoice} onChange={e=>setEmpPickerChoice(e.target.value)}
+              style={{width:"100%",background:C.card,border:`1.5px solid ${C.teal}`,borderRadius:8,
+                padding:"9px 10px",fontSize:13,color:C.text,outline:"none",fontWeight:700}}>
+              <option value="">— select employee —</option>
+              {(employees||[]).map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
+            </select>
+            <div style={{display:"flex",gap:8}}>
+              <Btn onClick={()=>{
+                  sendNoLrActionItem(empPickerFor, empPickerChoice);
+                  setEmpPickerFor(null); setEmpPickerChoice("");
+                }} full color={C.orange} disabled={!empPickerChoice}>
+                📨 Send Notification
+              </Btn>
+              <Btn onClick={()=>{setEmpPickerFor(null); setEmpPickerChoice("");}} outline color={C.muted}>Cancel</Btn>
+            </div>
           </div>
         </Sheet>
       )}
