@@ -15585,6 +15585,23 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
   const [verifyFilter, setVerifyFilter] = useState("not_checked"); // all | checked | not_checked
   const [verifyPumpFilter, setVerifyPumpFilter] = useState("all"); // "all" | pumpId
   const [verifySearch, setVerifySearch] = useState(""); // matches truck no / indent no / LR no
+
+  // ── Pump statement (Excel) reconciliation — Verify tab ─────────────────────
+  // Owner uploads a pump's own statement; each row is matched against
+  // existing confirmed/attached diesel requests for the chosen pump by
+  // vehicle number + diesel amount (±₹1). Matches get auto-checked; rows
+  // with no match get a new confirmed diesel request + the same "no LR"
+  // action item the manual button sends. Ambiguous matches (2+ candidates)
+  // are never auto-resolved. See computeStatementMatches/applyStatementResults.
+  const [stmtSheet,    setStmtSheet]    = useState(false);
+  const [stmtPumpId,   setStmtPumpId]   = useState("");
+  const [stmtFile,     setStmtFile]     = useState(null);
+  const [stmtParsing,  setStmtParsing]  = useState(false);
+  const [stmtRows,     setStmtRows]     = useState(null); // parsed rows, pre-match
+  const [stmtResults,  setStmtResults]  = useState(null); // matched rows w/ outcome
+  const [stmtApplying, setStmtApplying] = useState(false);
+  const [stmtSummary,  setStmtSummary]  = useState(null); // post-apply counts
+  const [stmtError,    setStmtError]    = useState("");
   const [pumpSheet,   setPumpSheet]   = useState(false);
   const [scanSheet,   setScanSheet]   = useState(false);
   const [scanResults, setScanResults] = useState(null);
@@ -15896,32 +15913,40 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
     log&&log(value?"REQUEST VERIFIED":"REQUEST VERIFICATION REMOVED", `Indent #${req.indentNo} · ${req.truckNo} by ${user?.name||user?.username}`);
   };
 
-  // "No LR attached" action item — owner-triggered from the Verify tab.
-  // Assigns the employee currently linked to this truck (via their most
-  // recent trip) a task to add the vehicle/trip and attach this diesel
-  // request. If it's still unresolved 7 days later, the App-level
-  // auto-escalation effect (keyed on this item's dieselIndentNo) adds
-  // the full amount as a loan against that employee automatically.
-  const createNoLrActionItem = (req) => {
-    if(user?.role!=="owner") { alert("Only the owner can create this action item."); return; }
+  // "No LR attached" action item builder — shared by the manual "Notify
+  // Employee" button below AND the bulk pump-statement reconcile flow
+  // further down, so both paths produce identical action items. Assigns the
+  // employee currently linked to this truck (via their most recent trip).
+  // If still unresolved 7 days later, the App-level auto-escalation effect
+  // (keyed on this item's dieselIndentNo) adds the full amount as a loan
+  // against that employee automatically.
+  const buildNoLrActionItem = (req) => {
     const empId = resolveEmpForTruck(req.truckNo, trips);
     const emp   = (employees||[]).find(e=>e.id===empId);
     const amt   = pumpOwedAmount(req);
-    const ai = {
-      id: uid()+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
-      type: "diesel_no_lr", status: "open",
-      diNo: "", grNo: "", truckNo: req.truckNo||"",
-      dieselIndentNo: String(req.indentNo||""),
-      invoiceNo: "", invoiceDate: "",
-      invoiceAmt: 0, expectedAmt: 0,
-      empId: empId||"", tripId: "",
-      amount: amt, lrNo: "",
-      note: `Diesel indent #${req.indentNo} (${req.truckNo}, ${fmt(amt)}) has no LR attached. Add the vehicle/trip and attach this diesel request. If this isn't done within 7 days, ${fmt(amt)} will be deducted from your salary or TAFAL, and after 7 days it will be added as a loan against you.`,
-      createdAt: nowTs(),
+    return {
+      ai: {
+        id: uid()+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
+        type: "diesel_no_lr", status: "open",
+        diNo: "", grNo: "", truckNo: req.truckNo||"",
+        dieselIndentNo: String(req.indentNo||""),
+        invoiceNo: "", invoiceDate: "",
+        invoiceAmt: 0, expectedAmt: 0,
+        empId: empId||"", tripId: "",
+        amount: amt, lrNo: "",
+        note: `Diesel indent #${req.indentNo} (${req.truckNo}, ${fmt(amt)}) has no LR attached. Add the vehicle/trip and attach this diesel request. If this isn't done within 7 days, ${fmt(amt)} will be deducted from your salary or TAFAL, and after 7 days it will be added as a loan against you.`,
+        createdAt: nowTs(),
+      },
+      empName: emp?.name || "unassigned truck — owner only",
     };
+  };
+
+  const createNoLrActionItem = (req) => {
+    if(user?.role!=="owner") { alert("Only the owner can create this action item."); return; }
+    const { ai, empName } = buildNoLrActionItem(req);
     setActionItems(prev=>[ai, ...(prev||[])]);
     DB.saveActionItem(ai).catch(e=>console.error("saveActionItem diesel_no_lr:",e));
-    log&&log("DIESEL NO-LR ACTION ITEM", `Indent #${req.indentNo} · ${req.truckNo} → ${emp?.name||"unassigned truck — owner only"}`);
+    log&&log("DIESEL NO-LR ACTION ITEM", `Indent #${req.indentNo} · ${req.truckNo} → ${empName}`);
   };
 
   // Owner-only delete of a diesel request from the Verify tab.
@@ -15934,6 +15959,180 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
       setDieselRequests(prev=>[req, ...(prev||[])]);
     });
     log&&log("DIESEL REQUEST DELETED", `Indent #${req.indentNo} · ${req.truckNo} deleted by ${user?.name||user?.username}`);
+  };
+
+  // ── Pump statement (Excel) bulk reconcile — Verify tab ──────────────────
+  // Parses a pump's own statement (Sl.No / Date / Vehicle No / Amount / ...),
+  // matches each row to an existing diesel request for the chosen pump, and
+  // either checks it off or creates a new confirmed request + no-LR action
+  // item for it. See the state block above for the design decisions this
+  // encodes (amount tolerance, tie handling, idempotent re-upload).
+
+  // Reads the workbook, finds the header row by locating "vehicle" in a
+  // cell, then maps each subsequent row by column position relative to
+  // that header — robust to slightly different column ordering/wording
+  // across different pumps' exports, since we match header text, not
+  // hardcoded column letters. Ditto marks ('"') in any column carry the
+  // previous row's value forward (seen on Date in this pump's export).
+  const parseStatementFile = async (file) => {
+    const ExcelJS = (await import("exceljs")).default;
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(await file.arrayBuffer());
+    const ws = wb.worksheets[0];
+    if(!ws) throw new Error("No sheet found in this file.");
+
+    let headerRowNum = null, colIdx = {};
+    ws.eachRow((row, rowNum) => {
+      if(headerRowNum) return;
+      row.eachCell((cell, colNum) => {
+        const v = String(cell.value||"").trim().toLowerCase();
+        if(v.includes("vehicle")) colIdx.vehicleNo = colNum;
+        if(v === "amount") colIdx.amount = colNum;
+        if(v === "date") colIdx.date = colNum;
+      });
+      if(colIdx.vehicleNo && colIdx.amount) headerRowNum = rowNum;
+    });
+    if(!headerRowNum) throw new Error('Could not find a header row with "Vehicle No" and "Amount" columns.');
+
+    const rows = [];
+    const lastVal = {}; // ditto-mark carry-forward, per column
+    for(let r = headerRowNum+1; r <= ws.rowCount; r++) {
+      const row = ws.getRow(r);
+      const rawVehicle = row.getCell(colIdx.vehicleNo).value;
+      const rawAmount  = row.getCell(colIdx.amount).value;
+      const rawDate    = colIdx.date ? row.getCell(colIdx.date).value : null;
+
+      const resolve = (col, raw) => {
+        if(String(raw||"").trim() === '"') return lastVal[col];
+        lastVal[col] = raw;
+        return raw;
+      };
+      const vehicleVal = resolve("vehicleNo", rawVehicle);
+      const dateVal    = resolve("date", rawDate);
+
+      const vehicleNo = normVehicleNo(vehicleVal);
+      const amount = typeof rawAmount === "number" ? rawAmount : parseFloat(String(rawAmount||"").replace(/[^0-9.]/g,""));
+      if(!vehicleNo || !Number.isFinite(amount) || amount<=0) continue; // skip balance/blank/header-repeat rows
+      // Date isn't validated or used for matching (per explicit instruction) —
+      // kept only for display and as the new request's date if one gets created.
+      let dateStr = "";
+      if(dateVal instanceof Date) dateStr = dateVal.toISOString().slice(0,10);
+      else if(typeof dateVal === "string" && dateVal.trim() && dateVal.trim()!=='"') dateStr = dateVal.trim();
+      rows.push({ rowNum: r, vehicleNo, amount, dateStr });
+    }
+    return rows;
+  };
+
+  // Pure matching — no side effects, so the preview and the apply step see
+  // exactly the same outcome. Diesel-only amount (confirmedAmount ??
+  // dieselAmount), NOT diesel+cash — the pump's own Amount column is
+  // Quantity×Rate, which never includes any cash-advance component.
+  const computeStatementMatches = (rows, pumpId) => {
+    const pool = (dieselRequests||[]).filter(r =>
+      r.pumpId===pumpId && (r.status==="confirmed"||r.status==="attached"));
+    const claimed = new Set();
+    return rows.map(row => {
+      const candidates = pool.filter(r => {
+        if(claimed.has(r.id)) return false;
+        if(normVehicleNo(r.truckNo) !== row.vehicleNo) return false;
+        const dieselAmt = r.confirmedAmount ?? r.dieselAmount ?? 0;
+        return Math.abs(dieselAmt - row.amount) <= 1;
+      });
+      if(candidates.length === 1) {
+        claimed.add(candidates[0].id);
+        return { row, outcome: candidates[0].ownerVerified ? "already" : "matched", request: candidates[0] };
+      }
+      if(candidates.length === 0) return { row, outcome: "create" };
+      return { row, outcome: "ambiguous", candidates };
+    });
+  };
+
+  const runStatementParse = async () => {
+    if(!stmtPumpId) { setStmtError("Select a pump first."); return; }
+    if(!stmtFile)   { setStmtError("Choose a statement file."); return; }
+    setStmtError(""); setStmtParsing(true);
+    try {
+      const rows = await parseStatementFile(stmtFile);
+      if(rows.length===0) throw new Error("No data rows found — check this is the right file/sheet.");
+      setStmtRows(rows);
+      setStmtResults(computeStatementMatches(rows, stmtPumpId));
+    } catch(e) {
+      setStmtError(e.message || "Could not read this file.");
+      setStmtRows(null); setStmtResults(null);
+    } finally { setStmtParsing(false); }
+  };
+
+  // Commits the preview: marks "matched" rows checked, creates a confirmed
+  // request + no-LR action item for "create" rows. "already" and
+  // "ambiguous" rows are left untouched — ambiguous ones need the owner to
+  // resolve manually (which pump-owed request is which), "already" ones
+  // were fully handled by a previous upload.
+  const applyStatementResults = async () => {
+    if(!stmtResults || user?.role!=="owner") return;
+    setStmtApplying(true);
+    let checkedCount=0, createdCount=0;
+    const usedNos = new Set((dieselRequests||[]).map(r=>r.indentNo).filter(Boolean));
+    const numericNos = [...usedNos].filter(n=>Number.isFinite(+n)&&+n<10000);
+    let nextNo = numericNos.length>0 ? Math.max(...numericNos.map(Number))+1 : 1;
+
+    for(const result of stmtResults) {
+      if(result.outcome === "matched") {
+        const req = result.request;
+        const updated = {...req, ownerVerified:true, ownerVerifiedBy:user?.name||user?.username||"", ownerVerifiedAt:new Date().toISOString()};
+        setDieselRequests(prev=>prev.map(r=>r.id===req.id?updated:r));
+        try { await DB.saveDieselRequest(updated); } catch(e) { console.error("saveDieselRequest stmt-match:",e); }
+        if(!req.lrNo) {
+          const { ai, empName } = buildNoLrActionItem(updated);
+          setActionItems(prev=>[ai, ...(prev||[])]);
+          DB.saveActionItem(ai).catch(e=>console.error("saveActionItem stmt no-lr:",e));
+          log&&log("DIESEL NO-LR ACTION ITEM", `Indent #${req.indentNo} · ${req.truckNo} → ${empName} (from statement reconcile)`);
+        }
+        checkedCount++;
+      } else if(result.outcome === "create") {
+        const row = result.row;
+        const amt = Math.round(row.amount);
+        const pin = String(Math.floor(1000+Math.random()*9000));
+        const buildRecord = (indentNo) => ({
+          id:uid(), indentNo,
+          truckNo:row.vehicleNo, pumpId:stmtPumpId,
+          amount:amt, dieselAmount:amt, cashAmount:0,
+          date: row.dateStr || today(), pin, status:"open",
+          requestedBy: user.username, createdBy:user.username, createdAt:nowTs(),
+        });
+        const result2 = await DB.createDieselRequestSafe(buildRecord, nextNo);
+        if(!result2.success) { console.error("createDieselRequestSafe stmt:", result2.error); continue; }
+        nextNo = result2.record.indentNo + 1;
+        const confirmedReq = {...result2.record,
+          status:"confirmed", confirmedAmount:amt,
+          confirmedBy:user.username, confirmedAt:nowTs(),
+          confirmedReason:"Reconciled from pump statement upload",
+        };
+        setDieselRequests(p=>[confirmedReq, ...(p||[])]);
+        try { await DB.saveDieselRequest(confirmedReq); } catch(e) { console.error("saveDieselRequest stmt-create:",e); }
+        if(!(vehicles||[]).find(v=>v.truckNo===row.vehicleNo)) {
+          const nv={id:uid(),truckNo:row.vehicleNo,ownerName:"",phone:"",driverName:"",driverPhone:"",
+            driverLicense:"",accountNo:"",ifsc:"",loan:0,loanRecovered:0,deductPerTrip:0,
+            tafalExempt:false,shortageOwed:0,shortageRecovered:0,loanTxns:[],shortageTxns:[],
+            createdBy:user.username};
+          setVehicles(p=>[...(p||[]),nv]);
+          DB.saveVehicle(nv).catch(()=>{});
+        }
+        const { ai, empName } = buildNoLrActionItem(confirmedReq);
+        setActionItems(prev=>[ai, ...(prev||[])]);
+        DB.saveActionItem(ai).catch(e=>console.error("saveActionItem stmt-create no-lr:",e));
+        log&&log("DIESEL FROM STATEMENT", `Indent #${confirmedReq.indentNo} · ${row.vehicleNo} · ${fmt(amt)} → ${empName}`);
+        createdCount++;
+      }
+    }
+    const ambiguousCount = stmtResults.filter(r=>r.outcome==="ambiguous").length;
+    const alreadyCount   = stmtResults.filter(r=>r.outcome==="already").length;
+    setStmtSummary({checked:checkedCount, created:createdCount, ambiguous:ambiguousCount, already:alreadyCount});
+    setStmtApplying(false);
+  };
+
+  const resetStatementSheet = () => {
+    setStmtSheet(false); setStmtPumpId(""); setStmtFile(null);
+    setStmtRows(null); setStmtResults(null); setStmtSummary(null); setStmtError("");
   };
 
   const confirmScanned = async () => {
@@ -16441,6 +16640,11 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
             <div style={{color:C.muted,fontSize:12}}>Every confirmed/attached request — mark once you've personally checked the attachment and amount</div>
             <div style={{color:C.green,fontWeight:800,fontSize:14,flexShrink:0,marginLeft:8}}>{verifiedCount}/{verifiableTotal}</div>
           </div>
+          <button onClick={()=>setStmtSheet(true)}
+            style={{width:"100%",background:"transparent",border:`1.5px solid ${C.blue}`,borderRadius:10,
+              color:C.blue,fontWeight:700,fontSize:13,padding:"10px 14px",cursor:"pointer"}}>
+            📤 Upload Pump Statement (Excel)
+          </button>
           <div style={{display:"flex",gap:6}}>
             {[["not_checked","Not Checked"],["checked","✓ Checked"],["all","All"]].map(([k,l])=>(
               <button key={k} onClick={()=>setVerifyFilter(k)}
@@ -18931,6 +19135,118 @@ This was already dispensed — only delete if it was recorded in error.`;
             <Field label="Bank A/C No"  value={pf.accountNo} onChange={v=>setPf(p=>({...p,accountNo:v}))} />
             <Field label="IFSC Code"    value={pf.ifsc}      onChange={v=>setPf(p=>({...p,ifsc:v}))} />
             <Btn onClick={()=>{const p={...pf,id:uid(),createdBy:user.username}; setPumps(prev=>[...prev,p]); log("ADD PUMP",p.name); setPf(blankP); setPumpSheet(false);}} full color={C.blue}>Save Pump</Btn>
+          </div>
+        </Sheet>
+      )}
+
+      {/* ── PUMP STATEMENT (EXCEL) RECONCILE SHEET — Verify tab ── */}
+      {stmtSheet && (
+        <Sheet title="📤 Upload Pump Statement" onClose={resetStatementSheet}>
+          <div style={{display:"flex",flexDirection:"column",gap:13}}>
+            {!stmtResults && !stmtSummary && (<>
+              <div style={{color:C.muted,fontSize:12}}>
+                Matches each row to an existing confirmed/attached diesel request for the pump you pick below, by vehicle number + diesel amount (±₹1). Matched rows get marked checked; rows with no match get a new confirmed diesel request and a "no LR attached" notice sent to the assigned employee, same as the manual button.
+              </div>
+              <div>
+                <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:4}}>PUMP THIS STATEMENT IS FOR</div>
+                <select value={stmtPumpId} onChange={e=>setStmtPumpId(e.target.value)}
+                  style={{width:"100%",background:C.card,border:`1.5px solid ${C.teal}`,borderRadius:8,
+                    padding:"9px 10px",fontSize:13,color:C.text,outline:"none",fontWeight:700}}>
+                  <option value="">— select pump —</option>
+                  {pumps.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+              </div>
+              <div>
+                <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:4}}>STATEMENT FILE (.xlsx)</div>
+                <input type="file" accept=".xlsx" onChange={e=>{setStmtFile(e.target.files[0]||null); setStmtError("");}}
+                  style={{width:"100%",fontSize:13,color:C.text}} />
+              </div>
+              {stmtError && <div style={{color:C.red,fontSize:12}}>{stmtError}</div>}
+              <Btn onClick={runStatementParse} full color={C.blue} disabled={stmtParsing||!stmtPumpId||!stmtFile}>
+                {stmtParsing ? "Reading…" : "Read & Match"}
+              </Btn>
+            </>)}
+
+            {stmtResults && !stmtSummary && (()=>{
+              const matched   = stmtResults.filter(r=>r.outcome==="matched");
+              const toCreate  = stmtResults.filter(r=>r.outcome==="create");
+              const ambiguous = stmtResults.filter(r=>r.outcome==="ambiguous");
+              const already   = stmtResults.filter(r=>r.outcome==="already");
+              return (
+                <>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                    <div style={{background:C.green+"18",borderRadius:10,padding:"10px 12px",textAlign:"center"}}>
+                      <div style={{fontSize:20,fontWeight:800,color:C.green}}>{matched.length}</div>
+                      <div style={{fontSize:10,color:C.muted}}>Will mark checked</div>
+                    </div>
+                    <div style={{background:C.blue+"18",borderRadius:10,padding:"10px 12px",textAlign:"center"}}>
+                      <div style={{fontSize:20,fontWeight:800,color:C.blue}}>{toCreate.length}</div>
+                      <div style={{fontSize:10,color:C.muted}}>Will create + notify</div>
+                    </div>
+                    <div style={{background:C.orange+"18",borderRadius:10,padding:"10px 12px",textAlign:"center"}}>
+                      <div style={{fontSize:20,fontWeight:800,color:C.orange}}>{ambiguous.length}</div>
+                      <div style={{fontSize:10,color:C.muted}}>Ambiguous — skipped</div>
+                    </div>
+                    <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 12px",textAlign:"center"}}>
+                      <div style={{fontSize:20,fontWeight:800,color:C.muted}}>{already.length}</div>
+                      <div style={{fontSize:10,color:C.muted}}>Already reconciled</div>
+                    </div>
+                  </div>
+
+                  {ambiguous.length>0 && (
+                    <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:10,padding:"10px 12px"}}>
+                      <div style={{color:C.orange,fontWeight:700,fontSize:12,marginBottom:6}}>⚠ Needs manual review — 2+ requests fit these rows</div>
+                      {ambiguous.map((r,i)=>(
+                        <div key={i} style={{fontSize:12,color:C.text,marginTop:4}}>
+                          {r.row.vehicleNo} · {fmt(r.row.amount)} → {r.candidates.length} candidates: {r.candidates.map(c=>"#"+c.indentNo).join(", ")}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {toCreate.length>0 && (
+                    <div style={{maxHeight:180,overflowY:"auto",background:C.bg,borderRadius:10,padding:"8px 10px"}}>
+                      <div style={{color:C.blue,fontWeight:700,fontSize:11,marginBottom:4}}>New confirmed requests to create</div>
+                      {toCreate.map((r,i)=>(
+                        <div key={i} style={{fontSize:12,color:C.text,padding:"3px 0"}}>
+                          {r.row.vehicleNo} · {fmt(r.row.amount)}{r.row.dateStr?" · "+r.row.dateStr:""}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div style={{display:"flex",gap:8}}>
+                    <Btn onClick={applyStatementResults} full color={C.green} disabled={stmtApplying}>
+                      {stmtApplying ? "Applying…" : `✓ Apply (${matched.length+toCreate.length} action${matched.length+toCreate.length!==1?"s":""})`}
+                    </Btn>
+                    <Btn onClick={resetStatementSheet} outline color={C.muted} disabled={stmtApplying}>Cancel</Btn>
+                  </div>
+                </>
+              );
+            })()}
+
+            {stmtSummary && (
+              <>
+                <div style={{textAlign:"center",padding:"12px 0"}}>
+                  <div style={{fontSize:32}}>✓</div>
+                  <div style={{fontWeight:800,fontSize:15,marginTop:4}}>Reconciliation applied</div>
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                  <div style={{background:C.green+"18",borderRadius:10,padding:"10px 12px",textAlign:"center"}}>
+                    <div style={{fontSize:20,fontWeight:800,color:C.green}}>{stmtSummary.checked}</div>
+                    <div style={{fontSize:10,color:C.muted}}>Marked checked</div>
+                  </div>
+                  <div style={{background:C.blue+"18",borderRadius:10,padding:"10px 12px",textAlign:"center"}}>
+                    <div style={{fontSize:20,fontWeight:800,color:C.blue}}>{stmtSummary.created}</div>
+                    <div style={{fontSize:10,color:C.muted}}>Created + notified</div>
+                  </div>
+                </div>
+                {stmtSummary.ambiguous>0 && (
+                  <div style={{color:C.orange,fontSize:12,textAlign:"center"}}>{stmtSummary.ambiguous} row(s) still need manual review — re-open this upload to see them.</div>
+                )}
+                <Btn onClick={resetStatementSheet} full color={C.blue}>Done</Btn>
+              </>
+            )}
           </div>
         </Sheet>
       )}
