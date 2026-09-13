@@ -15578,7 +15578,7 @@ function DieselReceiptReviewCard({ req, pumps, dieselRequests=[], user, log, vie
   );
 }
 
-function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, driverPays, setDriverPays, user, log, viewOnly=false, dieselRequests=[], setDieselRequests, settings}) {
+function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, driverPays, setDriverPays, user, log, viewOnly=false, dieselRequests=[], setDieselRequests, settings, actionItems=[], setActionItems}) {
   const [view,        setView]        = useState("requests");
   // Daily verification checklist — owner-only, one-time permanent mark per
   // request ("I personally checked this request's attachment and amount").
