@@ -16309,26 +16309,6 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
     if (alerts.length===0) setScanSheet(false);
   };
 
-  const saveIndent = () => {
-    // Validate: indent number must be unique across both indents AND trips
-    if (f.indentNo && f.indentNo.trim()) {
-      const dupIndent = (indents||[]).find(i => i.indentNo && String(i.indentNo).trim() === f.indentNo.trim());
-      if (dupIndent) {
-        alert(`Indent No "${f.indentNo}" already exists in Diesel records (Truck: ${dupIndent.truckNo}, Date: ${dupIndent.date}). Each indent number must be unique.\n\nIndent No "${f.indentNo}" ಡೀಸೆಲ್ ರೆಕಾರ್ಡ್‌ನಲ್ಲಿ ಇದೆ. ಅನನ್ಯ ನಂಬರ್ ಬಳಸಿ.`);
-        return;
-      }
-      const dupTrip = (trips||[]).find(t => t.dieselIndentNo && t.dieselIndentNo.trim() === f.indentNo.trim());
-      if (dupTrip) {
-        alert(`Indent No "${f.indentNo}" is already linked to Trip LR: ${dupTrip.lrNo||"—"} (Truck: ${dupTrip.truckNo}). Each indent number must be unique.\n\nIndent No ಟ್ರಿಪ್ LR ${dupTrip.lrNo||"—"}ಗೆ ಲಿಂಕ್ ಆಗಿದೆ. ಅನನ್ಯ ನಂಬರ್ ಬಳಸಿ.`);
-        return;
-      }
-    }
-    const ind = {...f, id:uid(), amount:+f.amount, litres:+f.litres, ratePerLitre:+f.ratePerLitre, paid:false, createdBy:user.username, createdAt:nowTs()};
-    setIndents(p => [ind, ...(p||[])]);
-    log("DIESEL INDENT", `${ind.truckNo} · Indent ${ind.indentNo} · ${fmt(ind.amount)}`);
-    setF(blankI); setAddSheet(false);
-  };
-
   const confirmIndent = async (id, newAmount) => {
     const updated = indents.map(i => i.id===id
       ? {...i, confirmed:true, amount: newAmount!=null ? +newAmount : i.amount}
