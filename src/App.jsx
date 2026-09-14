@@ -15608,6 +15608,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
   const [verifySearch, setVerifySearch] = useState(""); // matches truck no / indent no / LR no
   const [empPickerFor, setEmpPickerFor] = useState(null); // diesel request awaiting a manual employee pick (no trip history to auto-resolve from)
   const [empPickerChoice, setEmpPickerChoice] = useState("");
+  const [remarkDrafts, setRemarkDrafts] = useState({}); // requestId -> in-progress remark text, before Save
 
   // ── Pump statement (Excel) reconciliation — Verify tab ─────────────────────
   // Owner uploads a pump's own statement; each row is matched against
@@ -16000,6 +16001,42 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
       setDieselRequests(prev=>[req, ...(prev||[])]);
     });
     log&&log("DIESEL REQUEST DELETED", `Indent #${req.indentNo} · ${req.truckNo} deleted by ${user?.name||user?.username}`);
+  };
+
+  // Owner-only: correct a request that was raised against the wrong pump.
+  // Moving pumpId automatically moves the request to the new pump's By Pump
+  // list/sums on the next render — no separate bookkeeping needed there.
+  // Doesn't touch ownerVerified either way; if it was already checked under
+  // the wrong pump the owner can uncheck/recheck as they see fit.
+  const changeRequestPump = (req, newPumpId) => {
+    if(user?.role!=="owner") { alert("Only the owner can change the pump."); return; }
+    if(newPumpId===req.pumpId) return;
+    const oldPump = pumps.find(p=>p.id===req.pumpId);
+    const newPump = pumps.find(p=>p.id===newPumpId);
+    const updated = {...req, pumpId: newPumpId};
+    setDieselRequests(prev=>prev.map(r=>r.id===req.id?updated:r));
+    DB.saveDieselRequest(updated).catch(e=>{
+      alert("Failed to change pump: "+e.message);
+      setDieselRequests(prev=>prev.map(r=>r.id===req.id?req:r));
+    });
+    log&&log("DIESEL REQUEST PUMP CHANGED", `Indent #${req.indentNo} · ${req.truckNo} · ${oldPump?.name||"—"} → ${newPump?.name||"—"} by ${user?.name||user?.username}`);
+  };
+
+  // Owner-only free-text remark on a diesel request — for anything that
+  // doesn't fit a structured field (e.g. "raised on wrong pump, corrected",
+  // "driver confirmed by phone"). Draft is kept in remarkDrafts until Save
+  // so retyping doesn't write to the DB on every keystroke.
+  const saveRemark = (req) => {
+    if(user?.role!=="owner") { alert("Only the owner can add a remark."); return; }
+    const text = (remarkDrafts[req.id] ?? req.remark ?? "").trim();
+    const updated = {...req, remark: text};
+    setDieselRequests(prev=>prev.map(r=>r.id===req.id?updated:r));
+    DB.saveDieselRequest(updated).catch(e=>{
+      alert("Failed to save remark: "+e.message);
+      setDieselRequests(prev=>prev.map(r=>r.id===req.id?req:r));
+    });
+    setRemarkDrafts(prev=>{ const n={...prev}; delete n[req.id]; return n; });
+    log&&log("DIESEL REQUEST REMARK", `Indent #${req.indentNo} · ${req.truckNo} by ${user?.name||user?.username}`);
   };
 
   // ── Pump statement (Excel) bulk reconcile — Verify tab ──────────────────
@@ -16736,7 +16773,18 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10}}>
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{fontWeight:800,fontSize:14}}>#{r.indentNo} · {r.truckNo}</div>
-                    <div style={{color:C.muted,fontSize:12,marginTop:2}}>{pump?.name||"—"} · {r.date}</div>
+                    {user.role==="owner" ? (
+                      <div style={{marginTop:2,display:"flex",alignItems:"center",gap:6}}>
+                        <select value={r.pumpId||""} onChange={e=>changeRequestPump(r, e.target.value)}
+                          style={{background:"transparent",border:`1px solid ${C.border}`,borderRadius:6,
+                            padding:"2px 6px",fontSize:12,color:C.muted,outline:"none"}}>
+                          {pumps.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+                        </select>
+                        <span style={{color:C.muted,fontSize:12}}>· {r.date}</span>
+                      </div>
+                    ) : (
+                      <div style={{color:C.muted,fontSize:12,marginTop:2}}>{pump?.name||"—"} · {r.date}</div>
+                    )}
                     <div style={{marginTop:6}}>
                       {r.lrNo
                         ? <Badge label={`LR: ${r.lrNo}`} color={C.blue} />
@@ -16767,6 +16815,26 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                         </button>
                       )
                     )}
+                    {/* Free-text remark — owner only, for anything that doesn't fit a structured field */}
+                    {user.role==="owner" && (()=>{
+                      const draft = remarkDrafts[r.id] ?? r.remark ?? "";
+                      const dirty = draft !== (r.remark||"");
+                      return (
+                        <div style={{marginTop:8,display:"flex",gap:6,alignItems:"center"}}>
+                          <input value={draft} placeholder="Add a remark…"
+                            onChange={e=>setRemarkDrafts(prev=>({...prev,[r.id]:e.target.value}))}
+                            style={{flex:1,background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,
+                              padding:"5px 8px",fontSize:11,color:C.text,outline:"none"}} />
+                          {dirty && (
+                            <button onClick={()=>saveRemark(r)}
+                              style={{flexShrink:0,padding:"5px 10px",borderRadius:6,border:`1px solid ${C.blue}`,
+                                background:"transparent",color:C.blue,fontWeight:700,fontSize:11,cursor:"pointer"}}>
+                              💾 Save
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                   <div style={{display:"flex",flexDirection:"column",gap:6,alignItems:"flex-end"}}>
                     <button onClick={()=>markOwnerVerified(r, !r.ownerVerified)}

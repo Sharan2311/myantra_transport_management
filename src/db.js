@@ -663,6 +663,10 @@ export const DB = {
         ownerVerified: r.owner_verified||false,
         ownerVerifiedBy: r.owner_verified_by||'',
         ownerVerifiedAt: r.owner_verified_at||'',
+        // Free-text note the owner can attach to a request for anything
+        // that doesn't fit a structured field — e.g. "raised on wrong pump,
+        // corrected" or "driver confirmed by phone".
+        remark: r.remark||'',
       }));
     } catch(e) { console.warn('mye_diesel_requests not ready:', e.message); return []; }
   },
@@ -749,6 +753,7 @@ export const DB = {
       owner_verified: r.ownerVerified||false,
       owner_verified_by: r.ownerVerifiedBy||'',
       owner_verified_at: r.ownerVerifiedAt||'',
+      remark: r.remark||'',
     }, { onConflict: 'id', ignoreDuplicates: false });
     if(error && !error.message?.includes('duplicate key')) throw error;
   },
