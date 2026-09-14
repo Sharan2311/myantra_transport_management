@@ -42,6 +42,21 @@ const C = {
 const fmt   = n => "₹"+Number(n||0).toLocaleString("en-IN",{maximumFractionDigits:2});
 const today = () => new Date().toISOString().split("T")[0];
 const nowTs = () => new Date().toLocaleString("en-IN",{dateStyle:"short",timeStyle:"short"});
+// nowTs() produces "d/m/yy, h:mm am/pm" (en-IN locale, day first) — free text,
+// NOT chronologically sortable as a string (same problem already found and
+// fixed for mye_diesel_requests.created_at). Anything that needs to sort by
+// "when this record was actually added" must parse it into a real timestamp
+// first, not .localeCompare() the raw string.
+const parseCreatedAt = (s) => {
+  const m = String(s||"").match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4}),?\s*(\d{1,2}):(\d{2})\s*(am|pm)?/i);
+  if(!m) return 0;
+  let [, d, mo, y, h, mi, ap] = m;
+  d=+d; mo=+mo; y=+y; h=+h; mi=+mi;
+  if(y<100) y+=2000;
+  if(ap) { ap=ap.toLowerCase(); if(ap==="pm"&&h<12) h+=12; if(ap==="am"&&h===12) h=0; }
+  const t = new Date(y, mo-1, d, h, mi).getTime();
+  return Number.isFinite(t) ? t : 0;
+};
 const uid   = () => Math.random().toString(36).slice(2,9).toUpperCase();
 
 // Sentinel value for "advance given, but deliberately no wallet linked" — distinct
@@ -1812,6 +1827,11 @@ function AppMain() {
     } catch {}
     return "dashboard";
   });
+  // Cross-tab deep-link target — set by one tab (e.g. clicking a vehicle
+  // number or diesel indent badge from inside an expanded trip card),
+  // consumed and cleared by the destination tab on mount/change. Shape:
+  // {type:"vehicle", truckNo} | {type:"diesel", indentNo}.
+  const [navTarget, setNavTarget] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saveErr, setSaveErr] = useState("");
   const [selectedFY, setSelectedFY] = useState(currentFY()); // Financial year filter
@@ -2197,6 +2217,7 @@ function AppMain() {
     gypsumPayments, setGypsumPayments,
     user, log,
     allTripsLoaded, loadingAllTrips, loadAllTrips,
+    setTab, navTarget, setNavTarget,
   };
 
   // ── Retroactive auto-settle: runs whenever trips or driverPays change ─────────
@@ -7918,7 +7939,7 @@ function SealedInvoiceSheet({ trip, onMerge, onClose, embedded=false }) {
 
 
 // ─── TRIPS ────────────────────────────────────────────────────────────────────
-function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles, indents, setIndents, settings, tripType, user, log, driverPays, setDriverPays, employees, cashTransfers, setCashTransfers, allTripsLoaded, loadingAllTrips, loadAllTrips, dieselRequests=[], setDieselRequests, payments=[], invoiceRegistry=[], actionItems=[], setActionItems}) {
+function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles, indents, setIndents, settings, tripType, user, log, driverPays, setDriverPays, employees, cashTransfers, setCashTransfers, allTripsLoaded, loadingAllTrips, loadAllTrips, dieselRequests=[], setDieselRequests, payments=[], invoiceRegistry=[], actionItems=[], setActionItems, setTab, setNavTarget}) {
   const isIn = tripType === "inbound";
   const ac   = isIn ? C.teal : C.accent;
 
@@ -7935,6 +7956,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
   const [showDateFilter, setShowDateFilter] = useState(false);
   const [dateFrom,    setDateFrom]    = useState("");
   const [dateTo,      setDateTo]      = useState("");
+  const [tripSortMode, setTripSortMode] = useState("date"); // "date" (trip date) | "added" (most recently created)
   const [expandedIds, setExpandedIds] = useState(new Set()); // collapsed by default
   const toggleExpand = id => setExpandedIds(prev => {
     const next = new Set(prev);
@@ -9027,6 +9049,19 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         {(dateFrom||dateTo) && <button onClick={()=>{setDateFrom("");setDateTo("");}} style={{background:"none",border:"none",color:C.red,fontSize:11,cursor:"pointer"}}>✕ Clear dates</button>}
       </div>
 
+      <div style={{display:"flex",gap:6,alignItems:"center"}}>
+        <span style={{color:C.muted,fontSize:11,fontWeight:700}}>Sort:</span>
+        {[["date","Trip Date"],["added","Recently Added"]].map(([mode,label])=>(
+          <button key={mode} onClick={()=>setTripSortMode(mode)}
+            style={{padding:"4px 10px",borderRadius:16,fontSize:11,fontWeight:700,cursor:"pointer",
+              border:`1.5px solid ${tripSortMode===mode?C.teal:C.border}`,
+              background:tripSortMode===mode?C.teal+"22":"none",
+              color:tripSortMode===mode?C.teal:C.muted}}>
+            {label}
+          </button>
+        ))}
+      </div>
+
       {/* ── Load older trips banner ── */}
       {!allTripsLoaded && (
         <div style={{background:C.card,borderRadius:12,padding:"11px 14px",
@@ -9054,17 +9089,33 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
 
       {/* TRIP CARDS — date-grouped, LR-prominent, sorted newest first */}
       {(() => {
-        // Sort shown by date desc, then LR asc within same date
+        // "added" mode sorts/groups by createdAt (parsed — see parseCreatedAt,
+        // the raw string doesn't sort chronologically) instead of the trip's
+        // own date. Useful when trips get entered out of order (backfilling
+        // older dates today) and you want to see what actually landed most
+        // recently, not what happened most recently.
+        const addedDateKey = t => {
+          const ts = parseCreatedAt(t.createdAt);
+          if(!ts) return t.date||""; // fallback if createdAt is missing/unparseable
+          const dt = new Date(ts);
+          return dt.getFullYear()+"-"+String(dt.getMonth()+1).padStart(2,"0")+"-"+String(dt.getDate()).padStart(2,"0");
+        };
         const sorted = [...shown].sort((a,b) => {
+          if(tripSortMode==="added") {
+            const dc = parseCreatedAt(b.createdAt) - parseCreatedAt(a.createdAt);
+            if(dc!==0) return dc;
+            return (+a.lrNo||0) - (+b.lrNo||0);
+          }
           const dc = (b.date||"").localeCompare(a.date||"");
           if(dc!==0) return dc;
           return (+a.lrNo||0) - (+b.lrNo||0);
         });
 
-        // Group by date
+        // Group by date (trip date, or added date — whichever mode is active)
+        const groupKeyOf = t => tripSortMode==="added" ? addedDateKey(t) : (t.date||"");
         const groups = [];
         sorted.forEach(t => {
-          const d = t.date||"";
+          const d = groupKeyOf(t);
           if(!groups.length || groups[groups.length-1].date!==d)
             groups.push({date:d, trips:[]});
           groups[groups.length-1].trips.push(t);
@@ -9073,9 +9124,10 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         const todayStr = today();
         const yesterStr = new Date(Date.now()-864e5).toISOString().split("T")[0];
         const fmtDateHdr = d => {
-          if(d===todayStr) return "Today — "+new Date(d).toLocaleDateString("en-IN",{day:"numeric",month:"short",year:"numeric"});
-          if(d===yesterStr) return "Yesterday — "+new Date(d).toLocaleDateString("en-IN",{day:"numeric",month:"short"});
-          return new Date(d).toLocaleDateString("en-IN",{weekday:"short",day:"numeric",month:"short",year:"numeric"});
+          const prefix = tripSortMode==="added" ? "Added " : "";
+          if(d===todayStr) return prefix+"Today — "+new Date(d).toLocaleDateString("en-IN",{day:"numeric",month:"short",year:"numeric"});
+          if(d===yesterStr) return prefix+"Yesterday — "+new Date(d).toLocaleDateString("en-IN",{day:"numeric",month:"short"});
+          return prefix+new Date(d).toLocaleDateString("en-IN",{weekday:"short",day:"numeric",month:"short",year:"numeric"});
         };
 
         return groups.map(({date:grpDate, trips:grpTrips}) => (
@@ -9160,7 +9212,13 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                   <div style={{padding:"10px 14px 10px"}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
                       <div style={{flex:1,minWidth:0}}>
-                        <div style={{fontWeight:800,fontSize:15}}>{t.truckNo}
+                        <div style={{fontWeight:800,fontSize:15}}>
+                          {setNavTarget && setTab && can(user,"vehicles") ? (
+                            <span onClick={()=>{ setNavTarget({type:"vehicle", truckNo:t.truckNo}); setTab("vehicles"); }}
+                              style={{cursor:"pointer",textDecoration:"underline",textDecorationStyle:"dotted",textUnderlineOffset:3}}>
+                              {t.truckNo}
+                            </span>
+                          ) : t.truckNo}
                         <span style={{fontSize:11,fontWeight:400,color:clientColor(t.client||getDEFAULT_CLIENT(), C),marginLeft:8}}>
                           {(t.client||getDEFAULT_CLIENT())}
                         </span>
@@ -9337,7 +9395,14 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                       {t.shortage>0  && <Badge label={"⚠ "+t.shortage+"MT"}  color={C.red} />}
                       {t.advance>0   && <Badge label={"Adv "+fmt(t.advance)}  color={C.orange} />}
                       {(displayDiesel>0 || t.dieselIndentNo) && (
-                        <Badge label={`⛽${t.dieselIndentNo?" #"+t.dieselIndentNo.trim():""}${displayDiesel>0?" "+fmt(displayDiesel):""}`} color={C.orange} />
+                        t.dieselIndentNo && setNavTarget && setTab && can(user,"diesel") ? (
+                          <span onClick={()=>{ setNavTarget({type:"diesel", indentNo:t.dieselIndentNo.trim()}); setTab("diesel"); }}
+                            style={{cursor:"pointer"}}>
+                            <Badge label={`⛽ #${t.dieselIndentNo.trim()}${displayDiesel>0?" "+fmt(displayDiesel):""}`} color={C.orange} />
+                          </span>
+                        ) : (
+                          <Badge label={`⛽${t.dieselIndentNo?" #"+t.dieselIndentNo.trim():""}${displayDiesel>0?" "+fmt(displayDiesel):""}`} color={C.orange} />
+                        )
                       )}
                       {t.driverSettled   && <Badge label="✓ Settled"          color={C.green} />}
                       {t.diLines && t.diLines.length > 1 && <Badge label={t.diLines.length+" DIs"} color={C.teal} />}
@@ -15599,7 +15664,7 @@ function DieselReceiptReviewCard({ req, pumps, dieselRequests=[], user, log, vie
   );
 }
 
-function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, driverPays, setDriverPays, user, log, viewOnly=false, dieselRequests=[], setDieselRequests, settings, actionItems=[], setActionItems}) {
+function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, driverPays, setDriverPays, user, log, viewOnly=false, dieselRequests=[], setDieselRequests, settings, actionItems=[], setActionItems, navTarget, setNavTarget}) {
   const [view,        setView]        = useState("requests");
   // Daily verification checklist — owner-only, one-time permanent mark per
   // request ("I personally checked this request's attachment and amount").
@@ -15658,6 +15723,19 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
   const [editReqId,      setEditReqId]      = useState(null); // id of request being edited
   const [drSearch,       setDrSearch]       = useState(""); // search by truck/indent
   const [drStatusFilter, setDrStatusFilter] = useState("all"); // all | open | confirmed | attached | attached_unconfirmed
+
+  // Consume a deep-link from another tab (e.g. clicking a trip's diesel
+  // indent badge) — switches to Requests, clears any status filter that
+  // might hide it (the indent could be any status), and searches for it.
+  React.useEffect(() => {
+    if(navTarget?.type==="diesel" && navTarget.indentNo) {
+      setView("requests");
+      setDrStatusFilter("all");
+      setDrSearch(String(navTarget.indentNo));
+      setNavTarget(null);
+    }
+  }, [navTarget]);
+
   const [editTruckNo,    setEditTruckNo]    = useState("");
   const [editAmount,     setEditAmount]     = useState("");
   const [editDieselAmt,  setEditDieselAmt]  = useState("");
@@ -19435,7 +19513,7 @@ function DeductPerTripField({ownerVehs, ownerTruckNos, ownerDeductPerTrip, setVe
 }
 
 // ─── VEHICLES ─────────────────────────────────────────────────────────────────
-function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log, settings, setSettings, employees=[]}) {
+function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log, settings, setSettings, employees=[], navTarget, setNavTarget}) {
   const isOwner = user.role === "owner";
   const [sheet,    setSheet]    = useState(false);
   const [editId,   setEditId]   = useState(null);
@@ -19455,6 +19533,16 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
   // recovery). Both happen in practice and only the owner knows which, so the
   // choice is per row and defaults to neither being assumed correct.
   const [reconcileDir, setReconcileDir] = useState(new Map());
+
+  // Consume a deep-link from another tab (e.g. clicking a truck number
+  // inside an expanded trip card) — just drops it into this component's
+  // own search box, same as if the user had typed it.
+  React.useEffect(() => {
+    if(navTarget?.type==="vehicle" && navTarget.truckNo) {
+      setSearch(navTarget.truckNo);
+      setNavTarget(null);
+    }
+  }, [navTarget]);
 
   // Every trip's loan/shortage recovery must have a matching vehicle ledger
   // entry. Scanned continuously rather than only when the Fix button is
