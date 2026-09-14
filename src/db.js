@@ -618,8 +618,16 @@ export const DB = {
   // Diesel Requests
   getDieselRequests: async () => {
     try {
-      const { data, error } = await supabase.from('mye_diesel_requests').select('*').order('created_at', {ascending:false});
-      if(error) throw error;
+      // Was a plain select('*') with no pagination — Supabase/PostgREST caps
+      // that at 1000 rows silently, no error. With 1130+ rows in this table,
+      // roughly the last 130 by sort order were never being fetched into the
+      // app at all (confirmed: indent #1111, status "attached", landed at
+      // row 1027 under this exact sort — invisible everywhere, not a display
+      // bug). fetchPaginated pages through in 1000-row chunks; .order('id')
+      // added as a tiebreaker since created_at is free text with likely ties,
+      // and .range()-based pagination needs a fully deterministic order to
+      // avoid skipping/duplicating rows across pages.
+      const data = await fetchPaginated(() => supabase.from('mye_diesel_requests').select('*').order('created_at', {ascending:false}).order('id'));
       return (data||[]).map(r => ({
         id: r.id,
         indentNo: r.indent_no,

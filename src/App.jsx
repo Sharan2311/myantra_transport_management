@@ -15893,7 +15893,13 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
     // checkable (and countable) here too, not just once it's attached.
     const pIndents = (dieselRequests||[])
       .filter(r => r.pumpId===p.id && (r.status==="confirmed"||r.status==="attached"))
-      .map(r => ({...r, amount: pumpOwedAmount(r)})); // normalize .amount to the pump-owed portion for display below
+      .map(r => ({...r, amount: pumpOwedAmount(r)})) // normalize .amount to the pump-owed portion for display below
+      // Sorted by indentNo descending — NOT relying on DB fetch order, since
+      // created_at is stored as free text ("03/09/26, 2:54 pm") and doesn't
+      // sort chronologically across months. indentNo is a clean, always-
+      // increasing number, so this is what the "10 most recent" slice below
+      // actually uses to decide what counts as recent.
+      .sort((a,b) => (+b.indentNo||0) - (+a.indentNo||0));
     // Per explicit instruction: the amount owed to the pump only includes
     // requests the owner has personally checked off in the Verify tab
     // (ownerVerified). Unchecked ones are tracked separately below as
