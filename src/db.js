@@ -61,6 +61,11 @@ const tripFromDB = r => ({
   readyForBilling: r.ready_for_billing || false,
   readyForBillingBy: r.ready_for_billing_by || '',
   readyForBillingAt: r.ready_for_billing_at || '',
+  // Set true the moment a diesel request attaches to this trip. Once
+  // locked, only an owner-role edit may change or clear dieselIndentNo —
+  // see saveEdit(). Closes a real bug: a non-owner's stale edit-sheet
+  // state silently overwrote an already-attached indent back to empty.
+  dieselIndentLocked: r.diesel_indent_locked || false,
 })
 const tripToDB = t => ({
   id: t.id, type: t.type, lr_no: t.lrNo, di_no: t.diNo, truck_no: t.truckNo,
@@ -122,6 +127,7 @@ const tripToDB = t => ({
   ready_for_billing: t.readyForBilling || false,
   ready_for_billing_by: t.readyForBillingBy || '',
   ready_for_billing_at: t.readyForBillingAt || '',
+  diesel_indent_locked: t.dieselIndentLocked || false,
 })
 
 const vehicleFromDB = r => ({
