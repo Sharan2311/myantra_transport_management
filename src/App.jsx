@@ -19676,6 +19676,13 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
     loan:"0", loanRecovered:"0", deductPerTrip:"0", shortageDeductPerTrip:"0", tafalExempt:false, tafalOverride:"", pouchExempt:false, pouchOverride:"", accounts:[],
   };
   const [f, setF] = useState(blank);
+  // Snapshot of the ledger fields at the moment Edit was opened — lets the
+  // save handler tell "owner actually typed a new number" apart from "this
+  // form still holds whatever was live when it opened, untouched", so a
+  // Give Loan / Record Recovery / shortage action that fires while this
+  // sheet is open doesn't get silently reverted by an unrelated save. See
+  // the save handler below.
+  const [origLedger, setOrigLedger] = useState(null);
   const ff = k => v => setF(p => ({...p,[k]:v}));
 
   const fmt  = n => Number(n||0).toLocaleString("en-IN",{minimumFractionDigits:0,maximumFractionDigits:0});
@@ -20228,7 +20235,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
 
       {/* ── ADD / EDIT SHEET ── */}
       {sheet && (
-        <Sheet title={editId ? `Edit — ${f.truckNo}` : "Register Vehicle"} onClose={()=>{setSheet(false);setF(blank);setEditId(null);}}>
+        <Sheet title={editId ? `Edit — ${f.truckNo}` : "Register Vehicle"} onClose={()=>{setSheet(false);setF(blank);setEditId(null);setOrigLedger(null);}}>
           <div style={{display:"flex",flexDirection:"column",gap:13}}>
             <div style={{color:C.blue,fontSize:11,fontWeight:700,letterSpacing:1}}>TRUCK INFO</div>
             <div style={{display:"flex",gap:10}}>
@@ -20392,13 +20399,27 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
               if(rawPhone.length!==10){alert(`Driver Phone must be 10 digits (entered ${rawPhone.length}).\nಡ್ರೈವರ್ ಫೋನ್ 10 ಅಂಕಿಗಳಾಗಿರಬೇಕು (${rawPhone.length} ನಮೂದಿಸಲಾಗಿದೆ).`);return;}
               if(!/^[6-9]/.test(rawPhone)){alert("Driver Phone must start with 6, 7, 8 or 9");return;}
               if(editId) {
-                setVehicles(p=>p.map(v=>v.id===editId?{...v,...f,
-                  loan:+f.loan,loanRecovered:+f.loanRecovered,deductPerTrip:+f.deductPerTrip,
-                  shortageDeductPerTrip:+f.shortageDeductPerTrip||0,
-                  tafalOverride: f.tafalOverride!=='' ? +f.tafalOverride : null,
-                  pouchExempt: !!f.pouchExempt,
-                  pouchOverride: f.pouchOverride!=='' ? +f.pouchOverride : null,
-                  truckNo:f.truckNo.toUpperCase().trim()}:v));
+                // Ledger fields (loan/loanRecovered/deductPerTrip/shortageDeductPerTrip)
+                // are directly editable here for manual correction, but they're ALSO
+                // set by the separate Give Loan / Record Recovery / Shortage actions
+                // in this same component. If one of those fires while this Edit sheet
+                // is still open, f still holds whatever was live when the sheet
+                // opened — indistinguishable from an intentional edit unless we check
+                // against origLedger (the snapshot from open-time). Untouched fields
+                // defer to the vehicle's current live value instead of the form's.
+                const untouched = k => origLedger && String(f[k])===String(origLedger[k]);
+                setVehicles(p=>p.map(v=>{
+                  if(v.id!==editId) return v;
+                  return {...v,...f,
+                    loan: untouched("loan") ? v.loan : +f.loan,
+                    loanRecovered: untouched("loanRecovered") ? v.loanRecovered : +f.loanRecovered,
+                    deductPerTrip: untouched("deductPerTrip") ? v.deductPerTrip : +f.deductPerTrip,
+                    shortageDeductPerTrip: untouched("shortageDeductPerTrip") ? (v.shortageDeductPerTrip||0) : (+f.shortageDeductPerTrip||0),
+                    tafalOverride: f.tafalOverride!=='' ? +f.tafalOverride : null,
+                    pouchExempt: !!f.pouchExempt,
+                    pouchOverride: f.pouchOverride!=='' ? +f.pouchOverride : null,
+                    truckNo:f.truckNo.toUpperCase().trim()};
+                }));
                 log("EDIT VEHICLE",`${f.truckNo} updated`);
               } else {
                 const v={...f,id:uid(),
@@ -20412,7 +20433,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                 setVehicles(p=>[...(p||[]),v]);
                 log("ADD VEHICLE",`${v.truckNo} driver:${v.driverPhone}`);
               }
-              setF(blank); setSheet(false); setEditId(null);
+              setF(blank); setSheet(false); setEditId(null); setOrigLedger(null);
             }} full>{editId?"Save Changes":"Save Vehicle"}</Btn>
 
             {editId && isOwner && (
@@ -20928,7 +20949,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                   deductPerTrip:String(v.deductPerTrip||0),
                   shortageDeductPerTrip:String(v.shortageDeductPerTrip||0),
                   tafalExempt:v.tafalExempt||false, tafalOverride:v.tafalOverride!=null?String(v.tafalOverride):"", pouchExempt:v.pouchExempt||false, pouchOverride:v.pouchOverride!=null?String(v.pouchOverride):"", accounts:v.accounts||[],
-                });setEditId(v.id);setSheet(true);}}
+                });setOrigLedger({loan:String(v.loan||0),loanRecovered:String(v.loanRecovered||0),deductPerTrip:String(v.deductPerTrip||0),shortageDeductPerTrip:String(v.shortageDeductPerTrip||0)});setEditId(v.id);setSheet(true);}}
                   style={{background:"none",border:`1px solid ${C.muted}44`,borderRadius:6,
                     padding:"3px 8px",color:C.muted,cursor:"pointer",fontSize:11}}>✏ Edit</button>
               ) : (
