@@ -643,10 +643,20 @@ function useDB(fetcher, initial = [], delay = 0, enabled = true) {
     try {
       const result = await fetcher();
       console.log('[useDB] fetched:', result?.length, 'items', result?.[0]?.id||result?.[0]?.name||'');
-      // Merge: preserve locally-set party fields that may not be in DB yet
+      // Merge: preserve locally-set fields that may not have replicated back
+      // through a fresh read yet. This is the actual fix for a real
+      // production incident: a diesel indent correctly attached to a trip
+      // (dieselIndentNo) got silently wiped a poll cycle later, because that
+      // field wasn't in this list — the 45s poll below fetched a snapshot
+      // from before the attach's DB write had replicated, and this merge
+      // blindly trusted the server for anything not explicitly protected
+      // here. Same race is a latent risk for every unprotected field on
+      // every useDB-backed table, not just this one; PARTY_FIELDS already
+      // existed for exactly this reason on a different set of fields.
       const PARTY_FIELDS = ["receiptFilePath","receiptUploadedAt","mergedPdfPath",
         "orderType","grFilePath","invoiceFilePath","emailSentAt","partyEmail",
-        "district","state","sealedInvoicePath","confirmFollowupUserId","confirmPdfPath"];
+        "district","state","sealedInvoicePath","confirmFollowupUserId","confirmPdfPath",
+        "dieselIndentNo","dieselIndentLocked","dieselEstimate"];
       setData(prev => {
         if(!Array.isArray(result)||!Array.isArray(prev)) return result;
         const prevMap = {};
@@ -4393,6 +4403,8 @@ Rules:
           tafal:tafalVal,
           dieselEstimate: noDieselGroupIds.has(g.id) ? 0 : (+g.diesel||0),
           dieselIndentNo: noDieselGroupIds.has(g.id) ? "" : (g.dieselIndentNo.trim()||""),
+          dieselIndentLocked: !noDieselGroupIds.has(g.id) && !!g.dieselIndentNo.trim(),
+          noDieselConfirmed: noDieselGroupIds.has(g.id),
           noDieselConfirmedBy: noDieselGroupIds.has(g.id) ? user.name : "",
           noDieselConfirmedAt: noDieselGroupIds.has(g.id) ? nowTs() : "",
           cashEmpId:g.cashEmpId||"",
@@ -4564,7 +4576,7 @@ Rules:
               const attachOk = await saveDieselAttachSafe(setDieselRequests, chosenReq, updReq, {log, context:"auto-attach, batch"});
               if (attachOk) {
                 console.log(`[BATCH TIMING] ${g.truckNo}: auto-attach diesel saved at +${(performance.now()-_t0).toFixed(0)}ms`);
-                const updTrip = {...trip, dieselEstimate:effAmt, dieselIndentNo:String(chosenReq.indentNo)};
+                const updTrip = {...trip, dieselEstimate:effAmt, dieselIndentNo:String(chosenReq.indentNo), dieselIndentLocked:true};
                 setTrips(p=>p.map(t=>t.id===trip.id?updTrip:t));
                 await DB.saveTrip(updTrip);
                 log("DIESEL ATTACH", `Indent #${chosenReq.indentNo} → LR ${lrNo} · ₹${effAmt}${chosenReq.truckNo!==truckNo?" (truck mismatch: "+chosenReq.truckNo+"→"+truckNo+")":""}`);
@@ -4666,6 +4678,8 @@ Rules:
           tafal:tafalVal,
           dieselEstimate: noDieselGroupIds.has(g.id) ? 0 : (+g.diesel||0),
           dieselIndentNo: noDieselGroupIds.has(g.id) ? "" : (g.dieselIndentNo.trim()||""),
+          dieselIndentLocked: !noDieselGroupIds.has(g.id) && !!g.dieselIndentNo.trim(),
+          noDieselConfirmed: noDieselGroupIds.has(g.id),
           noDieselConfirmedBy: noDieselGroupIds.has(g.id) ? user.name : "",
           noDieselConfirmedAt: noDieselGroupIds.has(g.id) ? nowTs() : "",
           shortageRecovery:+g.shortageRecovery||0,
@@ -4786,7 +4800,7 @@ Rules:
               const attachOk = await saveDieselAttachSafe(setDieselRequests, chosenReq, updReq, {log, context:"auto-attach, merged path"});
               if (attachOk) {
                 console.log(`[BATCH TIMING] ${g.truckNo}: auto-attach diesel saved (merged path) at +${(performance.now()-_t0).toFixed(0)}ms`);
-                const updTrip = {...trip, dieselEstimate:effAmt, dieselIndentNo:String(chosenReq.indentNo)};
+                const updTrip = {...trip, dieselEstimate:effAmt, dieselIndentNo:String(chosenReq.indentNo), dieselIndentLocked:true};
                 setTrips(p=>p.map(t=>t.id===trip.id?updTrip:t));
                 await DB.saveTrip(updTrip);
                 log("DIESEL ATTACH", `Indent #${chosenReq.indentNo} → LR ${lrNo} · ₹${effAmt}${chosenReq.truckNo!==truckNo?" (truck mismatch: "+chosenReq.truckNo+"→"+truckNo+")":""}`);
@@ -8514,12 +8528,27 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         return;
       }
     }
+    // ── Diesel indent lock — once a diesel request is attached, only an
+    // owner edit may change or remove it. Closes a real bug: a non-owner's
+    // edit-sheet could hold a stale/blank dieselIndentNo (e.g. left over
+    // from before a related action attached one moments earlier in the same
+    // session) and silently wipe an already-attached indent on save.
+    const isLocked = !!origTrip?.dieselIndentLocked;
+    const requestedIndentNo = (editSheet.dieselIndentNo||"").trim();
+    const origIndentNo = (origTrip?.dieselIndentNo||"").trim();
+    const nonOwnerBlocked = isLocked && user.role!=="owner";
+    // What actually gets saved — non-owners can never change or clear a
+    // locked indent, regardless of what their form currently holds.
+    const effIndentNo = nonOwnerBlocked ? origIndentNo : requestedIndentNo;
+    const indentChanging = effIndentNo !== origIndentNo; // only true for an owner actually changing/clearing it
+
     // Sync dieselEstimate from live request amount (not stale editSheet snapshot)
-    const _saveIndNo = (editSheet.dieselIndentNo||"").trim();
-    const _saveReq = _saveIndNo ? (dieselRequests||[]).find(r=>String(r.indentNo)===_saveIndNo) : null;
-    const _liveDieselEst = _saveReq ? Number(_saveReq.amount||0) : +editSheet.dieselEstimate; // amount is always diesel+cash total
+    const _saveReq = effIndentNo ? (dieselRequests||[]).find(r=>String(r.indentNo)===effIndentNo) : null;
+    const _liveDieselEst = _saveReq ? Number(_saveReq.amount||0) : (nonOwnerBlocked ? +origTrip.dieselEstimate : +editSheet.dieselEstimate); // amount is always diesel+cash total
     setTrips(p => p.map(t => t.id===editSheet.id ? {
       ...editSheet,
+      dieselIndentNo: effIndentNo,
+      dieselIndentLocked: !!effIndentNo, // re-locks on a (re)attach, unlocks if the owner cleared it
       qty:+editSheet.qty, bags:+editSheet.bags,
       frRate: blendedFrRate || +editSheet.frRate,
       givenRate: blendedGivenRate,
@@ -8531,19 +8560,40 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       cashEmpId: editSheet.cashEmpId||"",
       editedBy:user.username, editedAt:nowTs(),
     } : t));
-    // ── Mark diesel indent as attached if dieselIndentNo changed ──
-    if (editSheet.dieselIndentNo?.trim() && typeof setDieselRequests === "function") {
-      const indentNo = parseInt(editSheet.dieselIndentNo.trim(), 10);
-      const matchReq = (dieselRequests||[]).find(r =>
-        r.indentNo === indentNo && r.status==="confirmed" // only confirmed requests can attach
-      );
-      if (matchReq) {
-        const updReq = {...matchReq, status:"attached", tripId:editSheet.id, lrNo:editSheet.lrNo||""};
-        setDieselRequests(p => p.map(r => r.id===matchReq.id ? updReq : r));
-        saveDieselAttachSafe(setDieselRequests, matchReq, updReq, {log, context:"edit save"}).then(ok => {
-          if (ok) log("DIESEL ATTACH", `Indent #${matchReq.indentNo} → LR ${editSheet.lrNo} (edit save)`);
-        });
+    // ── Diesel attach/detach, reflecting any change to the effective indent ──
+    if (indentChanging && typeof setDieselRequests === "function") {
+      // Detach the old one, if any — revert it to "confirmed" so it can be
+      // reattached elsewhere, rather than leaving it stuck "attached" to a
+      // trip that no longer references it.
+      if (origIndentNo) {
+        const oldReq = (dieselRequests||[]).find(r => String(r.indentNo)===origIndentNo && r.tripId===editSheet.id);
+        if (oldReq) {
+          const detached = {...oldReq, status:"confirmed", tripId:"", lrNo:""};
+          setDieselRequests(p => p.map(r => r.id===oldReq.id ? detached : r));
+          DB.saveDieselRequest(detached).catch(e=>console.error("saveDieselRequest detach (edit save):",e));
+          log&&log("DIESEL DETACH", `Indent #${oldReq.indentNo} ← LR ${editSheet.lrNo} (owner edit)`);
+        }
       }
+      // Attach the new one, if any
+      if (effIndentNo) {
+        const indentNo = parseInt(effIndentNo, 10);
+        const matchReq = (dieselRequests||[]).find(r =>
+          r.indentNo === indentNo && r.status==="confirmed" // only confirmed requests can attach
+        );
+        if (matchReq) {
+          const updReq = {...matchReq, status:"attached", tripId:editSheet.id, lrNo:editSheet.lrNo||""};
+          setDieselRequests(p => p.map(r => r.id===matchReq.id ? updReq : r));
+          saveDieselAttachSafe(setDieselRequests, matchReq, updReq, {log, context:"edit save"}).then(ok => {
+            if (ok) log("DIESEL ATTACH", `Indent #${matchReq.indentNo} → LR ${editSheet.lrNo} (edit save)`);
+          });
+        }
+      }
+    }
+    if (nonOwnerBlocked && requestedIndentNo !== origIndentNo) {
+      // Their form tried to change/clear it — we silently kept the
+      // original rather than pretend the field doesn't exist. Everything
+      // else in this edit still saved.
+      alert(`This trip's diesel indent (#${origIndentNo}) is locked — only the owner can change or remove it. Your other changes were saved.`);
     }
     // Sync vehicle ledger to exactly match this trip's current recovery fields.
     // Always runs (not just when the value changed) so it self-heals any prior
@@ -9145,8 +9195,18 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
               const v    = vehicles.find(x => x.truckNo===t.truckNo);
               const tripIndents = indents.filter(i => i.tripId===t.id && i.confirmed);
               const confirmedDiesel = tripIndents.reduce((s,i) => s+(i.amount||0), 0);
-              // Fall back to diesel estimate or diesel request amount if no confirmed DI record
-              const dieselReq = t.dieselIndentNo ? (dieselRequests||[]).find(r=>String(r.indentNo)===String(t.dieselIndentNo).trim()) : null;
+              // Fall back to diesel estimate or diesel request amount if no confirmed DI record.
+              // Two ways to find the linked request — by the trip's own dieselIndentNo field,
+              // AND by the diesel request's own tripId — because the trip-side field can end up
+              // wiped by an unrelated edit while the diesel request itself still correctly points
+              // back at this trip (real bug, seen in production: a stale edit-sheet save cleared
+              // dieselIndentNo a minute after it was correctly attached). Whichever finds it wins,
+              // and effectiveDieselIndentNo (used below for display and the click-to-navigate
+              // badge) reflects the live diesel_requests data even when the trip's own field doesn't.
+              const dieselReqByIndent = t.dieselIndentNo ? (dieselRequests||[]).find(r=>String(r.indentNo)===String(t.dieselIndentNo).trim()) : null;
+              const dieselReqByTripId = !dieselReqByIndent ? (dieselRequests||[]).find(r=>r.tripId===t.id && r.status==="attached") : null;
+              const dieselReq = dieselReqByIndent || dieselReqByTripId;
+              const effectiveDieselIndentNo = t.dieselIndentNo || (dieselReqByTripId ? String(dieselReqByTripId.indentNo) : "");
               const displayDiesel = confirmedDiesel>0 ? confirmedDiesel
                 : dieselReq ? (dieselReq.confirmedAmount??dieselReq.amount)
                 : (t.dieselEstimate||0);
@@ -9285,9 +9345,9 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                             </div>
                           );
                         })()}
-                        {t.noDieselConfirmedBy && (
+                        {t.noDieselConfirmed && !effectiveDieselIndentNo && (
                           <div style={{fontSize:11,marginTop:1,color:C.orange,fontWeight:600}}>
-                            ⛽ Uploader {t.noDieselConfirmedBy} confirmed "No Diesel"
+                            ⛽ Uploader {t.noDieselConfirmedByName||t.noDieselConfirmedBy} confirmed "No Diesel"
                           </div>
                         )}
                       </div>
@@ -9394,14 +9454,14 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                       })()}
                       {t.shortage>0  && <Badge label={"⚠ "+t.shortage+"MT"}  color={C.red} />}
                       {t.advance>0   && <Badge label={"Adv "+fmt(t.advance)}  color={C.orange} />}
-                      {(displayDiesel>0 || t.dieselIndentNo) && (
-                        t.dieselIndentNo && setNavTarget && setTab && can(user,"diesel") ? (
-                          <span onClick={()=>{ setNavTarget({type:"diesel", indentNo:t.dieselIndentNo.trim()}); setTab("diesel"); }}
+                      {(displayDiesel>0 || effectiveDieselIndentNo) && (
+                        effectiveDieselIndentNo && setNavTarget && setTab && can(user,"diesel") ? (
+                          <span onClick={()=>{ setNavTarget({type:"diesel", indentNo:effectiveDieselIndentNo}); setTab("diesel"); }}
                             style={{cursor:"pointer"}}>
-                            <Badge label={`⛽ #${t.dieselIndentNo.trim()}${displayDiesel>0?" "+fmt(displayDiesel):""}`} color={C.orange} />
+                            <Badge label={`⛽ #${effectiveDieselIndentNo}${displayDiesel>0?" "+fmt(displayDiesel):""}`} color={C.orange} />
                           </span>
                         ) : (
-                          <Badge label={`⛽${t.dieselIndentNo?" #"+t.dieselIndentNo.trim():""}${displayDiesel>0?" "+fmt(displayDiesel):""}`} color={C.orange} />
+                          <Badge label={`⛽${effectiveDieselIndentNo?" #"+effectiveDieselIndentNo:""}${displayDiesel>0?" "+fmt(displayDiesel):""}`} color={C.orange} />
                         )
                       )}
                       {t.driverSettled   && <Badge label="✓ Settled"          color={C.green} />}
@@ -18222,7 +18282,7 @@ This was already dispensed — only delete if it was recorded in error.`;
               // Use app's indentNo (not pump's), update dieselEstimate = diesel + cash
               const _attDiesel = Number(upd.dieselAmount ?? upd.amount ?? 0);
               const _attCash   = Number(upd.cashAmount   ?? 0);
-              const updTrip={...trip, dieselIndentNo:String(e.app.indentNo), dieselEstimate:_attDiesel+_attCash};
+              const updTrip={...trip, dieselIndentNo:String(e.app.indentNo), dieselIndentLocked:true, dieselEstimate:_attDiesel+_attCash};
               setTrips(p=>p.map(t=>t.id===trip.id?updTrip:t));
               DB.saveTrip(updTrip).catch(()=>{});
               log("RECON ATTACH",`#${e.app.indentNo} -> LR ${extra.lrNo} | dieselEst ₹${_attDiesel+_attCash}`);
@@ -18465,7 +18525,7 @@ This was already dispensed — only delete if it was recorded in error.`;
             saveDieselAttachSafe(setDieselRequests, a, upd, {log, context:"reconcile, saved"});
             const _saDiesel = Number(upd.dieselAmount ?? upd.amount ?? 0);
             const _saCash   = Number(upd.cashAmount   ?? 0);
-            const updTrip={...t, dieselIndentNo:String(a?.indentNo), dieselEstimate:_saDiesel+_saCash};
+            const updTrip={...t, dieselIndentNo:String(a?.indentNo), dieselIndentLocked:true, dieselEstimate:_saDiesel+_saCash};
             setTrips(pp=>pp.map(tt=>tt.id===t.id?updTrip:tt));
             DB.saveTrip(updTrip).catch(()=>{});
             log("RECON ATTACH",`Saved #${a?.indentNo} -> LR ${extra.lrNo} | dieselEst ₹${_saDiesel+_saCash}`);
@@ -19616,6 +19676,13 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
     loan:"0", loanRecovered:"0", deductPerTrip:"0", shortageDeductPerTrip:"0", tafalExempt:false, tafalOverride:"", pouchExempt:false, pouchOverride:"", accounts:[],
   };
   const [f, setF] = useState(blank);
+  // Snapshot of the ledger fields at the moment Edit was opened — lets the
+  // save handler tell "owner actually typed a new number" apart from "this
+  // form still holds whatever was live when it opened, untouched", so a
+  // Give Loan / Record Recovery / shortage action that fires while this
+  // sheet is open doesn't get silently reverted by an unrelated save. See
+  // the save handler below.
+  const [origLedger, setOrigLedger] = useState(null);
   const ff = k => v => setF(p => ({...p,[k]:v}));
 
   const fmt  = n => Number(n||0).toLocaleString("en-IN",{minimumFractionDigits:0,maximumFractionDigits:0});
@@ -20168,7 +20235,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
 
       {/* ── ADD / EDIT SHEET ── */}
       {sheet && (
-        <Sheet title={editId ? `Edit — ${f.truckNo}` : "Register Vehicle"} onClose={()=>{setSheet(false);setF(blank);setEditId(null);}}>
+        <Sheet title={editId ? `Edit — ${f.truckNo}` : "Register Vehicle"} onClose={()=>{setSheet(false);setF(blank);setEditId(null);setOrigLedger(null);}}>
           <div style={{display:"flex",flexDirection:"column",gap:13}}>
             <div style={{color:C.blue,fontSize:11,fontWeight:700,letterSpacing:1}}>TRUCK INFO</div>
             <div style={{display:"flex",gap:10}}>
@@ -20332,13 +20399,27 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
               if(rawPhone.length!==10){alert(`Driver Phone must be 10 digits (entered ${rawPhone.length}).\nಡ್ರೈವರ್ ಫೋನ್ 10 ಅಂಕಿಗಳಾಗಿರಬೇಕು (${rawPhone.length} ನಮೂದಿಸಲಾಗಿದೆ).`);return;}
               if(!/^[6-9]/.test(rawPhone)){alert("Driver Phone must start with 6, 7, 8 or 9");return;}
               if(editId) {
-                setVehicles(p=>p.map(v=>v.id===editId?{...v,...f,
-                  loan:+f.loan,loanRecovered:+f.loanRecovered,deductPerTrip:+f.deductPerTrip,
-                  shortageDeductPerTrip:+f.shortageDeductPerTrip||0,
-                  tafalOverride: f.tafalOverride!=='' ? +f.tafalOverride : null,
-                  pouchExempt: !!f.pouchExempt,
-                  pouchOverride: f.pouchOverride!=='' ? +f.pouchOverride : null,
-                  truckNo:f.truckNo.toUpperCase().trim()}:v));
+                // Ledger fields (loan/loanRecovered/deductPerTrip/shortageDeductPerTrip)
+                // are directly editable here for manual correction, but they're ALSO
+                // set by the separate Give Loan / Record Recovery / Shortage actions
+                // in this same component. If one of those fires while this Edit sheet
+                // is still open, f still holds whatever was live when the sheet
+                // opened — indistinguishable from an intentional edit unless we check
+                // against origLedger (the snapshot from open-time). Untouched fields
+                // defer to the vehicle's current live value instead of the form's.
+                const untouched = k => origLedger && String(f[k])===String(origLedger[k]);
+                setVehicles(p=>p.map(v=>{
+                  if(v.id!==editId) return v;
+                  return {...v,...f,
+                    loan: untouched("loan") ? v.loan : +f.loan,
+                    loanRecovered: untouched("loanRecovered") ? v.loanRecovered : +f.loanRecovered,
+                    deductPerTrip: untouched("deductPerTrip") ? v.deductPerTrip : +f.deductPerTrip,
+                    shortageDeductPerTrip: untouched("shortageDeductPerTrip") ? (v.shortageDeductPerTrip||0) : (+f.shortageDeductPerTrip||0),
+                    tafalOverride: f.tafalOverride!=='' ? +f.tafalOverride : null,
+                    pouchExempt: !!f.pouchExempt,
+                    pouchOverride: f.pouchOverride!=='' ? +f.pouchOverride : null,
+                    truckNo:f.truckNo.toUpperCase().trim()};
+                }));
                 log("EDIT VEHICLE",`${f.truckNo} updated`);
               } else {
                 const v={...f,id:uid(),
@@ -20352,7 +20433,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                 setVehicles(p=>[...(p||[]),v]);
                 log("ADD VEHICLE",`${v.truckNo} driver:${v.driverPhone}`);
               }
-              setF(blank); setSheet(false); setEditId(null);
+              setF(blank); setSheet(false); setEditId(null); setOrigLedger(null);
             }} full>{editId?"Save Changes":"Save Vehicle"}</Btn>
 
             {editId && isOwner && (
@@ -20868,7 +20949,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                   deductPerTrip:String(v.deductPerTrip||0),
                   shortageDeductPerTrip:String(v.shortageDeductPerTrip||0),
                   tafalExempt:v.tafalExempt||false, tafalOverride:v.tafalOverride!=null?String(v.tafalOverride):"", pouchExempt:v.pouchExempt||false, pouchOverride:v.pouchOverride!=null?String(v.pouchOverride):"", accounts:v.accounts||[],
-                });setEditId(v.id);setSheet(true);}}
+                });setOrigLedger({loan:String(v.loan||0),loanRecovered:String(v.loanRecovered||0),deductPerTrip:String(v.deductPerTrip||0),shortageDeductPerTrip:String(v.shortageDeductPerTrip||0)});setEditId(v.id);setSheet(true);}}
                   style={{background:"none",border:`1px solid ${C.muted}44`,borderRadius:6,
                     padding:"3px 8px",color:C.muted,cursor:"pointer",fontSize:11}}>✏ Edit</button>
               ) : (
@@ -26765,9 +26846,20 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
   const totalBalance = unpaidTrips.reduce((s,t)=>s+t.balance,0);
 
   // ── Startup: fix confirmed indents that are actually attached to trips ──────
+  // Also self-heals dieselIndentLocked for any trip that has a dieselIndentNo
+  // but isn't marked locked yet (e.g. existed before the lock feature).
   React.useEffect(() => {
     if(!(dieselRequests||[]).length || !(trips||[]).length) return;
     const tripsWithIndent = trips.filter(t=>t.dieselIndentNo && t.dieselIndentNo.trim());
+    const unlockedTrips = tripsWithIndent.filter(t=>!t.dieselIndentLocked);
+    if(unlockedTrips.length && setTrips) {
+      setTrips(prev=>prev.map(t=>{
+        if(!t.dieselIndentNo || !t.dieselIndentNo.trim() || t.dieselIndentLocked) return t;
+        const upd={...t, dieselIndentLocked:true};
+        DB.saveTrip(upd).catch(e=>console.error("saveTrip lock self-heal:",e));
+        return upd;
+      }));
+    }
     const staleConfirmed = (dieselRequests||[]).filter(r=>{
       if(r.status!=="open"&&r.status!=="confirmed") return false;
       const linkedTrip = tripsWithIndent.find(t=>String(t.dieselIndentNo).trim()===String(r.indentNo));
@@ -26784,6 +26876,29 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
       // (this LR already attached via a different indent) gets caught and
       // reverted instead of silently leaving mismatched local state.
       saveDieselAttachSafe(setDieselRequests, r, upd, {log, notify:false, context:"startup auto-heal"});
+      return upd;
+    }));
+  // eslint-disable-next-line
+  }, [!!dieselRequests?.length, !!trips?.length]);
+
+  // ── Startup: fix trips whose dieselIndentNo got wiped despite the diesel
+  // request still correctly pointing at them ── the exact corruption this
+  // whole lock feature exists to prevent going forward; this repairs any
+  // trip already in that state (including from before the fix shipped).
+  React.useEffect(() => {
+    if(!(dieselRequests||[]).length || !(trips||[]).length || !setTrips) return;
+    const attachedByTripId = new Map();
+    (dieselRequests||[]).forEach(r => {
+      if(r.status==="attached" && r.tripId) attachedByTripId.set(r.tripId, r);
+    });
+    const toFix = trips.filter(t => !t.dieselIndentNo && attachedByTripId.has(t.id));
+    if(!toFix.length) return;
+    setTrips(prev => prev.map(t => {
+      const req = attachedByTripId.get(t.id);
+      if(!req || t.dieselIndentNo) return t;
+      const upd = {...t, dieselIndentNo:String(req.indentNo), dieselIndentLocked:true};
+      DB.saveTrip(upd).catch(e=>console.error("saveTrip dieselIndentNo self-heal:",e));
+      log && log("DIESEL LINK SELF-HEAL", `LR:${t.lrNo} ${t.truckNo} — restored Indent #${req.indentNo} (was wiped)`);
       return upd;
     }));
   // eslint-disable-next-line
