@@ -643,10 +643,20 @@ function useDB(fetcher, initial = [], delay = 0, enabled = true) {
     try {
       const result = await fetcher();
       console.log('[useDB] fetched:', result?.length, 'items', result?.[0]?.id||result?.[0]?.name||'');
-      // Merge: preserve locally-set party fields that may not be in DB yet
+      // Merge: preserve locally-set fields that may not have replicated back
+      // through a fresh read yet. This is the actual fix for a real
+      // production incident: a diesel indent correctly attached to a trip
+      // (dieselIndentNo) got silently wiped a poll cycle later, because that
+      // field wasn't in this list — the 45s poll below fetched a snapshot
+      // from before the attach's DB write had replicated, and this merge
+      // blindly trusted the server for anything not explicitly protected
+      // here. Same race is a latent risk for every unprotected field on
+      // every useDB-backed table, not just this one; PARTY_FIELDS already
+      // existed for exactly this reason on a different set of fields.
       const PARTY_FIELDS = ["receiptFilePath","receiptUploadedAt","mergedPdfPath",
         "orderType","grFilePath","invoiceFilePath","emailSentAt","partyEmail",
-        "district","state","sealedInvoicePath","confirmFollowupUserId","confirmPdfPath"];
+        "district","state","sealedInvoicePath","confirmFollowupUserId","confirmPdfPath",
+        "dieselIndentNo","dieselIndentLocked","dieselEstimate"];
       setData(prev => {
         if(!Array.isArray(result)||!Array.isArray(prev)) return result;
         const prevMap = {};
