@@ -599,6 +599,14 @@ const ROLES = {
   operator:      {label:"Trip Operator",       color:C.teal,    perms:["trips","billing","diesel"]},
   accounts:      {label:"Accounts",            color:C.purple,  perms:["billing","payments","reports","diesel","tafal"]},
   pump_operator: {label:"Pump Operator",       color:C.orange,  perms:["pump_portal"]},
+  // Same pump_portal permission as pump_operator (reaches the same
+  // PumpPortal component), but restricted inside it to the receipt-upload
+  // path only — the driver-PIN-confirmation path is hidden entirely, and
+  // every upload requires owner/manager review before it counts as
+  // confirmed (see DieselReceiptScan and DieselReceiptReviewCard). Checked
+  // by role name directly (user.role==="pump_uploader"), same pattern as
+  // the existing user.role==="owner" checks elsewhere in PumpPortal.
+  pump_uploader: {label:"Pump Receipt Uploader",color:"#c2410c", perms:["pump_portal"]},
   party_manager: {label:"Party Bill Manager",  color:"#7c3aed", perms:["party_portal"]},
   email_followup:{label:"Email Followup",      color:"#0369a1", perms:["party_portal"]},
   viewer:        {label:"Viewer",              color:C.muted,   perms:["reports"]},
@@ -620,6 +628,16 @@ const can = (user, p) => {
   // with any other role's permissions (e.g. a fleet manager who is also a driver).
   if(p==="employees" && perms.has("employees_view")) return true;
   return false;
+};
+// Multi-role-aware: user.role can be a comma-separated list (e.g. an
+// owner who is also a driver), same parsing as can() above. Used to gate
+// content specifically to the owner/manager roles by name, not by a
+// shared permission — e.g. seeing an un-redacted driver PIN next to an
+// uploaded pump receipt for verification.
+const isOwnerOrManager = user => {
+  if(!user) return false;
+  const roleList = (user.role||"").split(",").map(r=>r.trim());
+  return roleList.includes("owner") || roleList.includes("manager");
 };
 const canEdit = (user, p) => {
   // Returns false for view-only perms — fleet_manager cannot add/edit diesel or driver pay
@@ -1830,7 +1848,7 @@ function AppMain() {
     try {
       const saved = localStorage.getItem("mye_user");
       const u = saved ? JSON.parse(saved) : null;
-      if(u?.role==="pump_operator") return "pump_portal";
+      if(u?.role==="pump_operator" || u?.role==="pump_uploader") return "pump_portal";
       if(isPureSelfWalletRole(u?.role)) return "employees";
       const roles = (u?.role||"").split(",").map(r=>r.trim());
       if(roles.length && roles.every(r=>["party_manager","email_followup"].includes(r))) return "party_portal";
@@ -1858,6 +1876,7 @@ function AppMain() {
   // every table any of their roles needs.
   const ROLE_TABLE_NEEDS = {
     pump_operator: new Set(["users","settings","pumps","dieselRequests"]),
+    pump_uploader: new Set(["users","settings","pumps","dieselRequests"]),
     // PartyPortal + PartyTripCard only ever destructure trips/employees —
     // confirmed by checking every reference inside both components' bodies.
     party_manager: new Set(["users","settings","trips","employees"]),
@@ -2472,7 +2491,7 @@ function AppMain() {
     return <Login onLogin={u=>{
       try { localStorage.setItem("mye_user", JSON.stringify(u)); } catch{}
       setUser(u);
-      if(u.role==="pump_operator") setTab("pump_portal");
+      if(u.role==="pump_operator" || u.role==="pump_uploader") setTab("pump_portal");
       if(isPureSelfWalletRole(u.role)) setTab("employees");
       if((u.role||"").split(",").every(r=>["party_manager","email_followup"].includes(r.trim()))) setTab("party_portal");
       log("LOGIN",`${u.name} signed in`);
@@ -12450,8 +12469,15 @@ function DieselReceiptScan({ selected, pumps, dieselRequests=[], cashAmount, use
       const pumpMismatch    = pump ? !pumpNamesMatch(data.pumpName, pump.name) : false;
       const dateMismatch    = dieselDateMismatch(data.date, selected.date);
       const anyMismatch     = vehicleMismatch || pumpMismatch || dateMismatch;
+      // pump_uploader can't do PIN confirmation at all — receipt upload is
+      // their only path — so their uploads must always land in manager
+      // review with the image kept, even on a clean match. Otherwise a
+      // clean-match upload would auto-confirm and redact the PIN
+      // immediately (see the branch below), leaving nothing for the
+      // owner/manager to actually verify.
+      const forceReview = user?.role==="pump_uploader";
 
-      if (!anyMismatch) {
+      if (!anyMismatch && !forceReview) {
         // Clean match → auto-confirm, override diesel amount, recalc total, no image stored
         const origDiesel = selected.dieselAmount ?? selected.amount;
         const origCash    = selected.cashAmount   ?? 0;
@@ -12491,7 +12517,8 @@ function DieselReceiptScan({ selected, pumps, dieselRequests=[], cashAmount, use
         return;
       }
 
-      // Mismatch → store the image, save extracted data + flags, request stays "open"
+      // Mismatch, or forced review for pump_uploader → store the image,
+      // save extracted data + flags, request stays "open"
       setState("uploading");
       const path = await DB.uploadDieselReceipt(selected.id, compressed);
       const updReq = {
@@ -12507,7 +12534,8 @@ function DieselReceiptScan({ selected, pumps, dieselRequests=[], cashAmount, use
       };
       setState("saving");
       await DB.saveDieselRequest(updReq);
-      log("PUMP RECEIPT MISMATCH", `Indent #${selected.indentNo} · ${selected.truckNo} · Sent for manager review${vehicleMismatch?" · vehicle":""}${pumpMismatch?" · pump":""}${dateMismatch?" · date":""}`);
+      log(anyMismatch ? "PUMP RECEIPT MISMATCH" : "PUMP RECEIPT UPLOADED",
+        `Indent #${selected.indentNo} · ${selected.truckNo} · Sent for manager review${vehicleMismatch?" · vehicle":""}${pumpMismatch?" · pump":""}${dateMismatch?" · date":""}${forceReview&&!anyMismatch?" (uploader role)":""}`);
       onPendingReview(updReq);
     } catch(e) {
       setError("Could not read receipt: " + e.message); setState("error");
@@ -15236,15 +15264,17 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
               </div>
               </>);
             })()}
-            <Btn onClick={()=>{
-              const _d = newDieselAmt !== "" ? +newDieselAmt : (selected.dieselAmount ?? selected.amount);
-              const _c = newCashAmt   !== "" ? +newCashAmt   : (selected.cashAmount   ?? 0);
-              const _changed = _d !== (selected.dieselAmount ?? selected.amount) || _c !== (selected.cashAmount ?? 0);
-              if(_changed && !reason){alert("Select a reason for the amount change");return;}
-              setStep("pin");
-            }} full color={C.teal}>
-              Proceed to Driver PIN Verification →
-            </Btn>
+            {user.role!=="pump_uploader" && (
+              <Btn onClick={()=>{
+                const _d = newDieselAmt !== "" ? +newDieselAmt : (selected.dieselAmount ?? selected.amount);
+                const _c = newCashAmt   !== "" ? +newCashAmt   : (selected.cashAmount   ?? 0);
+                const _changed = _d !== (selected.dieselAmount ?? selected.amount) || _c !== (selected.cashAmount ?? 0);
+                if(_changed && !reason){alert("Select a reason for the amount change");return;}
+                setStep("pin");
+              }} full color={C.teal}>
+                Proceed to Driver PIN Verification →
+              </Btn>
+            )}
             <Btn onClick={()=>{
               const _c = newCashAmt !== "" ? +newCashAmt : (selected.cashAmount ?? 0);
               const _cChanged = _c !== (selected.cashAmount ?? 0);
@@ -15666,6 +15696,17 @@ function DieselReceiptReviewCard({ req, pumps, dieselRequests=[], user, log, vie
               fontSize:11,fontWeight:700,borderRadius:6,padding:"4px 9px",cursor:"pointer"}}>
             🔍 Tap to zoom
           </div>
+        </div>
+      )}
+      {/* Driver PIN alongside the uploaded receipt — owner/manager only, so
+          they can verify the receipt against the PIN issued for this
+          indent before approving. Not shown to anyone else, and not shown
+          at all once the PIN's been redacted (already confirmed elsewhere). */}
+      {isOwnerOrManager(user) && req.pin && req.pin!=="****" && (
+        <div style={{background:C.teal+"18",border:`1px solid ${C.teal}44`,borderRadius:8,
+          padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:0.5}}>Driver PIN</span>
+          <span style={{fontFamily:"monospace",fontSize:16,fontWeight:800,color:C.teal,letterSpacing:4}}>{req.pin}</span>
         </div>
       )}
       {imgError && <div style={{color:C.muted,fontSize:12}}>Could not load receipt image.</div>}
