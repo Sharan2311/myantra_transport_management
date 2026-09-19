@@ -30342,11 +30342,15 @@ function UserAdmin({users, setUsers, user, log, pumps=[], employees=[]}) {
               <div style={{color:C.muted,fontSize:11,marginTop:4}}>✓ No restriction — can see all clients</div>
             )}
           </div>
-          {/* Assigned Pump — only shown for pump_operator role */}
-          {(f.role||"").split(",").map(r=>r.trim()).includes("pump_operator") && (
+          {/* Assigned Pump — shown for pump_operator and pump_uploader; both are
+              scoped by PumpPortal purely off assignedPumpId, no role check there */}
+          {(()=>{
+            const roleList = (f.role||"").split(",").map(r=>r.trim());
+            return roleList.includes("pump_operator") || roleList.includes("pump_uploader");
+          })() && (
             <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
               <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:6}}>
-                ASSIGNED PUMP <span style={{color:C.orange,fontWeight:400}}>(pump operator will only see this pump's data)</span>
+                ASSIGNED PUMP <span style={{color:C.orange,fontWeight:400}}>(this login will only see this pump's data)</span>
               </div>
               <select value={f.assignedPumpId||""} onChange={e=>setF(p=>({...p,assignedPumpId:e.target.value}))}
                 style={{width:"100%",background:C.card,border:`1.5px solid ${f.assignedPumpId?C.orange:C.border}`,
