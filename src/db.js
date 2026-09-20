@@ -66,6 +66,15 @@ const tripFromDB = r => ({
   // see saveEdit(). Closes a real bug: a non-owner's stale edit-sheet
   // state silently overwrote an already-attached indent back to empty.
   dieselIndentLocked: r.diesel_indent_locked || false,
+  // Set true when a non-owner's save would result in a negative net pay
+  // (calcNet(...).net < 0). The trip still saves with their submitted
+  // values, but is frozen from further billing/diesel/settle actions and
+  // hidden from non-owner edit until the owner approves it — either
+  // as-is or by editing the numbers themselves. Owner saves are never
+  // blocked by this, regardless of net.
+  pendingApproval: r.pending_approval || false,
+  pendingApprovalBy: r.pending_approval_by || '',
+  pendingApprovalAt: r.pending_approval_at || '',
 })
 const tripToDB = t => ({
   id: t.id, type: t.type, lr_no: t.lrNo, di_no: t.diNo, truck_no: t.truckNo,
@@ -128,6 +137,9 @@ const tripToDB = t => ({
   ready_for_billing_by: t.readyForBillingBy || '',
   ready_for_billing_at: t.readyForBillingAt || '',
   diesel_indent_locked: t.dieselIndentLocked || false,
+  pending_approval: t.pendingApproval || false,
+  pending_approval_by: t.pendingApprovalBy || '',
+  pending_approval_at: t.pendingApprovalAt || '',
 })
 
 const vehicleFromDB = r => ({

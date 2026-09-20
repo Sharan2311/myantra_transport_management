@@ -751,6 +751,12 @@ function calcNet(t, vehicle, confirmedDiesel) {
   const net              = gross - advance - tafal - diesel - shortageRecovery - loanRecovery - pouchBalance;
   return {gross, billed, tafal, loanDeduct, diesel, advance, shortageRecovery, loanRecovery, pouchBalance, net};
 }
+// Non-owner saves (create or edit) that would leave a trip's net pay
+// negative get flagged pendingApproval instead of being blocked outright —
+// the trip still saves with the submitted values. Owner saves are never
+// gated by this, regardless of net.
+const negativeNetNeedsApproval = (tripObj, vehicle, dieselAmt, user) =>
+  user?.role!=="owner" && calcNet(tripObj, vehicle, dieselAmt).net < 0;
 
 const mkTrip = (o) => ({
   id:uid(), type:"outbound", lrNo:"", diNo:"", truckNo:"", grNo:"",
@@ -761,6 +767,7 @@ const mkTrip = (o) => ({
   driverSettled:false, dieselEstimate:0,
   dieselIndentNo:"", assignedEmpId:"",
   diLines:[], // [{diNo, grNo, qty, bags, givenRate}] — for multi-DI trips
+  pendingApproval:false, pendingApprovalBy:"", pendingApprovalAt:"",
   createdBy:"system", createdAt:nowTs(), ...o
 });
 
@@ -4258,29 +4265,19 @@ Rules:
         }
       }
 
-      // Net to driver check per group
+      // Net to driver check per group — no longer blocks the save. Owner
+      // saves are never restricted by net; non-owner saves with a negative
+      // net get flagged pendingApproval when the trip object is built
+      // below (see negativeNetNeedsApproval), instead of being blocked
+      // outright. Just a heads-up here for the non-owner case.
       const totalQty  = groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0),0);
       const totalGross = groupItems.reduce((s,x)=>s+(+x.extracted?.qty||0)*(+x.givenRate||0),0);
       const _gVehForTafal = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
       const tafalVal  = g.tafal!==undefined && g.tafal!=="" ? +g.tafal : tafalAmountFor(_gVehForTafal, employees, settings, g.assignedEmpId||"");
       const _net = totalGross - (+g.advance||0) - tafalVal - (+g.diesel||0)
                  - (+g.shortageRecovery||0) - (+g.loanRecovery||0);
-      if(_net < 0) {
-        const dieselAmt = +g.diesel||0;
-        const empId = resolveWalletEmpId(g.cashEmpId, g.assignedEmpId);
-        const empName = empId ? (employees.find(e=>e.id===empId)?.name||"assigned employee") : null;
-        if(dieselAmt > 0 && empName) {
-          const excess = Math.abs(_net);
-          if(!window.confirm(
-            `Truck ${g.truckNo}: Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\n\n`+
-            `Diesel ₹${dieselAmt.toLocaleString("en-IN")} exceeds trip earnings after deductions.\n\n`+
-            `⛽ ₹${excess.toLocaleString("en-IN")} will be auto-debited as "Excess Diesel" to ${empName}'s wallet.\n\n`+
-            `Save and debit excess?`
-          )) return;
-        } else {
-          alert(`Truck ${g.truckNo}: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\nReduce Advance / Diesel / Recoveries.`);
-          return;
-        }
+      if(_net < 0 && user.role!=="owner") {
+        if(!window.confirm(`Truck ${g.truckNo}: Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\n\nThis trip will save, but needs owner approval before it can be billed or settled.\n\nContinue?`)) return;
       }
     }
 
@@ -4448,6 +4445,13 @@ Rules:
           transporterName: ex.transporterName || "",
           createdBy:user.username, createdAt:nowTs(),
         };
+        // Negative-net check — non-owner saves flag for approval rather than
+        // being blocked outright; the trip still saves with these values.
+        if(negativeNetNeedsApproval(trip, (vehicles||[]).find(v=>v.truckNo===trip.truckNo), trip.dieselEstimate, user)) {
+          trip.pendingApproval = true;
+          trip.pendingApprovalBy = user.username;
+          trip.pendingApprovalAt = nowTs();
+        }
         // ── Hard block: an advance with no wallet employee would silently
         // deduct on the trip/driver-pay side while never touching anyone's
         // wallet ledger — a permanent reconciliation gap. Block BEFORE the
@@ -4727,6 +4731,13 @@ Rules:
           transporterName: ex0.transporterName || "",
           createdBy:user.username, createdAt:nowTs(),
         };
+        // Negative-net check — non-owner saves flag for approval rather than
+        // being blocked outright; the trip still saves with these values.
+        if(negativeNetNeedsApproval(trip, (vehicles||[]).find(v=>v.truckNo===trip.truckNo), trip.dieselEstimate, user)) {
+          trip.pendingApproval = true;
+          trip.pendingApprovalBy = user.username;
+          trip.pendingApprovalAt = nowTs();
+        }
         // ── Hard block: same reasoning as the single-trip save path above —
         // never generate an LR for a trip whose advance can't be recorded
         // against a wallet.
@@ -8331,26 +8342,15 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       alert("An advance is entered — please select which employee's wallet it comes from (or choose \"None\" if it shouldn't deduct from any wallet).");
       return;
     }
-    // Validate: Est. Net to Driver — allow with excess diesel debit if employee assigned
+    // Net to Driver — no longer blocks the save. Owner saves are never
+    // restricted by net; non-owner saves with a negative net get flagged
+    // pendingApproval on the trip object below instead of being blocked
+    // outright. Just a heads-up here for the non-owner case.
     {
       const _gross = (+f.qty||0)*(+f.givenRate||0);
       const _net = _gross - (+f.advance||0) - (+f.tafal||0) - (+f.dieselEstimate||0) - (+f.shortageRecovery||0) - (+f.loanRecovery||0);
-      if(_net < 0){
-        const dieselAmt = +f.dieselEstimate||0;
-        const _empId = resolveWalletEmpId(f.cashEmpId, f.assignedEmpId);
-        const empName = _empId ? (employees.find(e=>e.id===_empId)?.name||"assigned employee") : null;
-        if(dieselAmt > 0 && empName) {
-          const excess = Math.abs(_net);
-          if(!window.confirm(
-            `Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\n\n`+
-            `Diesel ₹${dieselAmt.toLocaleString("en-IN")} exceeds trip earnings after deductions.\n\n`+
-            `⛽ ₹${excess.toLocaleString("en-IN")} will be auto-debited as "Excess Diesel" to ${empName}'s wallet.\n\n`+
-            `Save and debit excess?`
-          )) return;
-        } else {
-          alert(`Cannot save: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative). Please reduce Advance/Diesel/Recoveries.`);
-          return;
-        }
+      if(_net < 0 && user.role!=="owner"){
+        if(!window.confirm(`Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\n\nThis trip will save, but needs owner approval before it can be billed or settled.\n\nContinue?`)) return;
       }
     }
     const t = mkTrip({
@@ -8365,6 +8365,11 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       assignedEmpId: f.assignedEmpId||"",
       createdBy:user.username, createdAt:nowTs(),
     });
+    if(negativeNetNeedsApproval(t, (vehicles||[]).find(v=>v.truckNo===t.truckNo), t.dieselEstimate, user)) {
+      t.pendingApproval = true;
+      t.pendingApprovalBy = user.username;
+      t.pendingApprovalAt = nowTs();
+    }
     setTrips(p => [t, ...(p||[])]);
     log("ADD TRIP", `LR:${t.lrNo} ${t.truckNo}→${t.to} ${t.qty}MT`);
     // If net-to-driver is negative (advance > gross), record excess as a loan
@@ -8476,6 +8481,14 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       setEditSheet(null);
       return;
     }
+    // Frozen while pending owner approval too (negative net at last save) —
+    // only the owner can resolve it, by editing (which clears the flag
+    // below) or approving as-is from the trip card.
+    if(origTrip?.pendingApproval && user.role !== "owner") {
+      alert("This trip is pending owner approval (negative net pay) — only the owner can edit it until then.");
+      setEditSheet(null);
+      return;
+    }
     // For multi-DI trips, recalculate blended rates from diLines
     const diLines = editSheet.diLines || [];
     const isMultiDI = diLines.length > 1;
@@ -8511,22 +8524,12 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         ? _diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
         : (+editSheet.qty||0)*(+editSheet.givenRate||0);
       const _net = _gross - (+editSheet.advance||0) - (+editSheet.tafal||0) - (+editSheet.dieselEstimate||0) - (+editSheet.shortageRecovery||0) - (+editSheet.loanRecovery||0);
-      if(_net < 0){
-        const dieselAmt = +editSheet.dieselEstimate||0;
-        const _empId = resolveWalletEmpId(editSheet.cashEmpId, editSheet.assignedEmpId);
-        const empName = _empId ? (employees.find(e=>e.id===_empId)?.name||"assigned employee") : null;
-        if(dieselAmt > 0 && empName) {
-          const excess = Math.abs(_net);
-          if(!window.confirm(
-            `Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\n\n`+
-            `Diesel ₹${dieselAmt.toLocaleString("en-IN")} exceeds trip earnings after deductions.\n\n`+
-            `⛽ ₹${excess.toLocaleString("en-IN")} will be auto-debited as "Excess Diesel" to ${empName}'s wallet.\n\n`+
-            `Save and debit excess?`
-          )) return;
-        } else {
-          alert(`Cannot save: Est. Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative). Please reduce Advance/Diesel/Recoveries.`);
-          return;
-        }
+      // No longer blocks the save. Owner saves are never restricted by net;
+      // a non-owner save with a negative net gets flagged pendingApproval
+      // further down instead of being blocked outright. Just a heads-up
+      // here for the non-owner case.
+      if(_net < 0 && user.role!=="owner"){
+        if(!window.confirm(`Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\n\nThis trip will save, but needs owner approval before it can be billed or settled.\n\nContinue?`)) return;
       }
     }
     // ── Mandatory trip fields (feature flag) ──────────────────────────────
@@ -8564,6 +8567,13 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     // Sync dieselEstimate from live request amount (not stale editSheet snapshot)
     const _saveReq = effIndentNo ? (dieselRequests||[]).find(r=>String(r.indentNo)===effIndentNo) : null;
     const _liveDieselEst = _saveReq ? Number(_saveReq.amount||0) : (nonOwnerBlocked ? +origTrip.dieselEstimate : +editSheet.dieselEstimate); // amount is always diesel+cash total
+    // Pending-approval outcome — an owner save always resolves it (clears
+    // the flag) regardless of the resulting net, since the owner is never
+    // restricted by this. A non-owner save (only reachable here for a trip
+    // that wasn't already pending — see the freeze check above) gets
+    // flagged if the final net they're about to save is negative.
+    const _finalTripForNetCheck = {...editSheet, qty:+editSheet.qty, givenRate:blendedGivenRate, diLines:savedLines, advance:+editSheet.advance, tafal:+editSheet.tafal, dieselEstimate:_liveDieselEst, shortageRecovery:+editSheet.shortageRecovery||0, loanRecovery:+editSheet.loanRecovery||0};
+    const _needsApproval = user.role!=="owner" && negativeNetNeedsApproval(_finalTripForNetCheck, (vehicles||[]).find(v=>v.truckNo===editSheet.truckNo), _liveDieselEst, user);
     setTrips(p => p.map(t => t.id===editSheet.id ? {
       ...editSheet,
       dieselIndentNo: effIndentNo,
@@ -8577,6 +8587,9 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       shortageRecovery:+editSheet.shortageRecovery||0, loanRecovery:+editSheet.loanRecovery||0,
       dieselEstimate:_liveDieselEst,
       cashEmpId: editSheet.cashEmpId||"",
+      pendingApproval: _needsApproval,
+      pendingApprovalBy: _needsApproval ? user.username : "",
+      pendingApprovalAt: _needsApproval ? nowTs() : "",
       editedBy:user.username, editedAt:nowTs(),
     } : t));
     // ── Diesel attach/detach, reflecting any change to the effective indent ──
@@ -9254,6 +9267,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                     <div style={{flex:1,minWidth:0}}>
                       <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
                         <span style={{fontWeight:700,fontSize:13}}>{t.truckNo}</span>
+                        {t.pendingApproval && <span style={{fontSize:10,color:C.red,fontWeight:700}}>⚠ Pending Approval</span>}
                         {t.driverSettled && <span style={{fontSize:10,color:C.green,fontWeight:600}}>✓ Settled</span>}
                         {t.diLines&&t.diLines.length>1 && <span style={{fontSize:10,color:C.teal,fontWeight:600}}>{t.diLines.length} DIs</span>}
                         {t.orderType==="party" && <span style={{fontSize:10,color:C.accent,fontWeight:600}}>🤝</span>}
@@ -9374,8 +9388,22 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                         {!(((t.grade||"").toLowerCase().includes("clinker") || ((t.consignee||"").toLowerCase().includes("patas") && (t.consignee||"").toLowerCase().includes("shree cement")))) && (
                           <Badge label={t.status} color={SC(t.status)} />
                         )}
-                        {t.driverSettled && user.role!=="owner" ? (
-                          <div title="Trip is frozen — driver payment complete. Only Owner can edit."
+                        {t.pendingApproval && (
+                          <Badge label="⚠ Pending Approval" color={C.red} />
+                        )}
+                        {t.pendingApproval && user.role==="owner" && (
+                          <button onClick={()=>{
+                            const upd = {...t, pendingApproval:false, pendingApprovalBy:"", pendingApprovalAt:""};
+                            setTrips(p=>p.map(x=>x.id===t.id?upd:x));
+                            DB.saveTrip(upd).catch(e=>console.error("saveTrip approve:",e));
+                            log&&log("TRIP APPROVED", `LR:${t.lrNo} ${t.truckNo} — negative net pay accepted by owner`);
+                          }} style={{background:C.green+"18",border:`1px solid ${C.green}`,borderRadius:8,
+                            color:C.green,padding:"5px 10px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+                            ✓ Approve
+                          </button>
+                        )}
+                        {(t.driverSettled || t.pendingApproval) && user.role!=="owner" ? (
+                          <div title={t.pendingApproval ? "Pending owner approval — negative net pay. Only Owner can edit or approve." : "Trip is frozen — driver payment complete. Only Owner can edit."}
                             style={{background:C.dim,borderRadius:8,color:C.muted+"66",padding:"5px 8px",
                               fontSize:14,cursor:"not-allowed",opacity:0.4,display:"flex",alignItems:"center"}}>
                             🔒
@@ -10064,10 +10092,13 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                         // LR is auto-assigned from DB — no manual duplicate check needed
                         const _gross=(+f.qty||0)*(+f.givenRate||0);
                         const _net=_gross-(+f.advance||0)-(+f.tafal||0)-(+f.dieselEstimate||0)-(+f.shortageRecovery||0)-(+f.loanRecovery||0);
-                        if(_net<0){
-                          const isOnlyDiesel=(+f.dieselEstimate||0)>0&&(+f.advance||0)===0&&(+f.shortageRecovery||0)===0&&(+f.loanRecovery||0)===0;
-                          if(isOnlyDiesel){if(!window.confirm(`Est. Net to Driver is negative (likely diesel spans multiple DIs). Save anyway?`))return;}
-                          else{alert("Cannot save: Est. Net to Driver is negative.\nಡ್ರೈವರ್‌ಗೆ ನಿವ್ವಳ ಮೊತ್ತ ಋಣಾತ್ಮಕ — ಸೇವ್ ಸಾಧ್ಯವಿಲ್ಲ.");return;}
+                        // No longer blocks the save. Owner saves are never
+                        // restricted by net; a non-owner save with a
+                        // negative net gets flagged pendingApproval where
+                        // the trip object is built further down, instead
+                        // of being blocked outright.
+                        if(_net<0 && user.role!=="owner"){
+                          if(!window.confirm(`Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\n\nThis trip will save, but needs owner approval before it can be billed or settled.\n\nContinue?`))return;
                         }
                         if(!f.district||!f.state){alert("District and State are required for Party orders.\nಪಾರ್ಟಿ ಆರ್ಡರ್‌ಗೆ ಜಿಲ್ಲೆ ಮತ್ತು ರಾಜ್ಯ ಕಡ್ಡಾಯ.");return;}
                         // Validate GR and Invoice files are present for party orders
@@ -10155,6 +10186,11 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                             receiptFilePath:"", receiptUploadedAt:"",
                             createdBy:user.username, createdAt:nowTs(),
                           });
+                          if(negativeNetNeedsApproval(t, (vehicles||[]).find(v=>v.truckNo===t.truckNo), t.dieselEstimate, user)) {
+                            t.pendingApproval = true;
+                            t.pendingApprovalBy = user.username;
+                            t.pendingApprovalAt = nowTs();
+                          }
                           setTrips(p=>[t,...(p||[])]);
                           log("ADD PARTY TRIP",`LR:${t.lrNo} ${t.truckNo}`);
                           const tn2=(t.truckNo||"").toUpperCase().trim();
@@ -11602,9 +11638,13 @@ function Billing({trips, setTrips, fyTrips, selectedClient, user, log}) {
 function Settlement({trips, setTrips, vehicles, setVehicles, settlements, setSettlements, indents, user, log, paymentRequests, setPaymentRequests}) {
   const [sel, setSel]   = useState(null);
   const [notes, setNotes] = useState("");
-  const unsettled = trips.filter(t => !t.driverSettled);
+  const unsettled = trips.filter(t => !t.driverSettled && (!t.pendingApproval || user.role==="owner"));
 
   const settle = t => {
+    if(t.pendingApproval && user.role!=="owner") {
+      alert("This trip is pending owner approval (negative net pay) and cannot be settled yet.");
+      return;
+    }
     const v = vehicles.find(x => x.truckNo===t.truckNo);
     const tripIndents = indents.filter(i => i.tripId===t.id && i.confirmed);
     const confirmedDiesel = tripIndents.reduce((s,i) => s+(i.amount||0), 0);
@@ -26357,6 +26397,10 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPaym
 
   const runRecovery = () => {
     if(recoverTrips.length===0 || recoverTotal<=0) return;
+    if(user.role!=="owner" && recoverTrips.some(t=>t.pendingApproval)) {
+      alert("One or more selected trips are pending owner approval (negative net pay) and can't be settled yet. Deselect them, or ask the owner to approve first.");
+      return;
+    }
     const note = `Paid against employee loan/wallet — ${emp?.name||"employee"}`;
     // 1) Zero out each selected trip's balance via a driverPays record
     const newPays = recoverTrips.map(t => ({
