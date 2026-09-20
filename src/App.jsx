@@ -9303,8 +9303,8 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                   {isExpanded && (
                   <div style={{borderTop:`1px solid ${C.border}33`}}>
                   <div style={{padding:"10px 14px 10px"}}>
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
-                      <div style={{flex:1,minWidth:0}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",rowGap:8}}>
+                      <div style={{flex:"1 1 200px",minWidth:0}}>
                         <div style={{fontWeight:800,fontSize:15}}>
                           {setNavTarget && setTab && can(user,"vehicles") ? (
                             <span onClick={()=>{ setNavTarget({type:"vehicle", truckNo:t.truckNo}); setTab("vehicles"); }}
@@ -9384,7 +9384,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                           </div>
                         )}
                       </div>
-                      <div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0}}>
+                      <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",justifyContent:"flex-end"}}>
                         {!(((t.grade||"").toLowerCase().includes("clinker") || ((t.consignee||"").toLowerCase().includes("patas") && (t.consignee||"").toLowerCase().includes("shree cement")))) && (
                           <Badge label={t.status} color={SC(t.status)} />
                         )}
@@ -10910,6 +10910,29 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
           </div>
         )}
       </div>
+      {(employees||[]).length>0 && (
+        <div>
+          <label style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,display:"block",marginBottom:4}}>
+            👤 Assigned Employee
+          </label>
+          {user.role==="owner" ? (
+            <select value={f.assignedEmpId||""} onChange={e=>ff("assignedEmpId")(e.target.value)}
+              style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,
+                borderRadius:10,color:f.assignedEmpId?C.text:C.muted,padding:"10px 12px",fontSize:13,outline:"none"}}>
+              <option value="">— Unassigned —</option>
+              {(employees||[]).map(e => (
+                <option key={e.id} value={e.id}>{e.name}</option>
+              ))}
+            </select>
+          ) : (
+            <div style={{background:C.dim,border:`1.5px solid ${C.border}`,borderRadius:10,
+              padding:"10px 12px",fontSize:13,color:f.assignedEmpId?C.text:C.muted,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span>{f.assignedEmpId ? ((employees||[]).find(e=>e.id===f.assignedEmpId)?.name||"—") : "— Unassigned —"}</span>
+              <span style={{fontSize:10,color:C.muted}}>🔒 Owner only</span>
+            </div>
+          )}
+        </div>
+      )}
       {+f.advance>0 && (employees||[]).length>0 && (
         <div>
           <label style={{color:f.cashEmpId?C.green:C.red,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,display:"block",marginBottom:4}}>
