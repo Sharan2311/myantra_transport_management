@@ -9391,17 +9391,6 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                         {t.pendingApproval && (
                           <Badge label="⚠ Pending Approval" color={C.red} />
                         )}
-                        {t.pendingApproval && user.role==="owner" && (
-                          <button onClick={()=>{
-                            const upd = {...t, pendingApproval:false, pendingApprovalBy:"", pendingApprovalAt:""};
-                            setTrips(p=>p.map(x=>x.id===t.id?upd:x));
-                            DB.saveTrip(upd).catch(e=>console.error("saveTrip approve:",e));
-                            log&&log("TRIP APPROVED", `LR:${t.lrNo} ${t.truckNo} — negative net pay accepted by owner`);
-                          }} style={{background:C.green+"18",border:`1px solid ${C.green}`,borderRadius:8,
-                            color:C.green,padding:"5px 10px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
-                            ✓ Approve
-                          </button>
-                        )}
                         {(t.driverSettled || t.pendingApproval) && user.role!=="owner" ? (
                           <div title={t.pendingApproval ? "Pending owner approval — negative net pay. Only Owner can edit or approve." : "Trip is frozen — driver payment complete. Only Owner can edit."}
                             style={{background:C.dim,borderRadius:8,color:C.muted+"66",padding:"5px 8px",
