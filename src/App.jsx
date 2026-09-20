@@ -14936,23 +14936,30 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
     setReason("");
     setStep("receipt");
   };
-  // Lets whoever's using this portal (pump_operator/pump_uploader) clean up
-  // their own mistaken or test entry directly, rather than needing the
-  // owner to do it from the Verify tab. Extra warning if the request is
-  // already linked to a trip (status "attached") — deleting it here would
-  // orphan that trip's diesel reference.
-  const deleteRequest = (req) => {
-    const amt = req.confirmedAmount ?? req.amount;
-    const linkedWarning = req.status==="attached" && req.lrNo
-      ? `\n\n⚠ This is already linked to LR ${req.lrNo}. Deleting it will leave that trip's diesel record pointing at nothing.`
-      : "";
-    if(!window.confirm(`Delete diesel indent #${req.indentNo} (${req.truckNo}, ${fmt(amt)})?${linkedWarning}\n\nThis cannot be undone.`)) return;
-    setDieselRequests(prev=>(prev||[]).filter(r=>r.id!==req.id));
-    DB.deleteDieselRequest(req.id).catch(e=>{
-      alert("Failed to delete: "+e.message);
-      setDieselRequests(prev=>[req, ...(prev||[])]);
+  // Lets whoever's using this portal (pump_operator/pump_uploader) undo
+  // their own wrong upload directly, rather than needing the owner to do
+  // it from the Verify tab. Deliberately does NOT delete the diesel
+  // request itself — only clears the receipt image and everything the
+  // scan extracted from it, reverting the request to its pre-upload state
+  // (indent number, truck, amount, pump all stay exactly as they were).
+  // That keeps this safe to use freely: the indent number never gets
+  // reused/orphaned, and nothing downstream (a trip's diesel link, etc.)
+  // is ever affected by clearing a receipt alone.
+  const clearReceipt = (req) => {
+    if(!window.confirm(`Clear the uploaded receipt for indent #${req.indentNo} (${req.truckNo})?\n\nThe request itself stays — you'll be able to upload a new photo. This can't be undone.`)) return;
+    const cleared = {...req,
+      receiptImagePath:"", receiptNo:"",
+      extractedVehicleNo:"", extractedAmount:null, extractedDate:"", extractedPumpName:"",
+      vehicleMismatch:false, pumpMismatch:false, dateMismatch:false,
+      confirmationMethod:"",
+      rejectedReason:"", rejectedBy:"", rejectedAt:"",
+    };
+    setDieselRequests(prev=>(prev||[]).map(r=>r.id===req.id?cleared:r));
+    DB.saveDieselRequest(cleared).catch(e=>{
+      alert("Failed to clear receipt: "+e.message);
+      setDieselRequests(prev=>prev.map(r=>r.id===req.id?req:r));
     });
-    log&&log("DIESEL REQUEST DELETED", `Indent #${req.indentNo} · ${req.truckNo} deleted by ${user?.name||user?.username} (Pump Portal)`);
+    log&&log("DIESEL RECEIPT CLEARED", `Indent #${req.indentNo} · ${req.truckNo} receipt cleared by ${user?.name||user?.username} (Pump Portal)`);
   };
   const keyPress = (k) => {
     if(confirming) return; // a confirmation is already saving — ignore all input until it resolves
@@ -15258,11 +15265,13 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
                     {isAttachedUnconfirmed ? "⚠ Confirm Attached Indent" : "Open & Confirm"}
                   </Btn>
                 )}
-                <button onClick={()=>deleteRequest(req)}
-                  style={{width:"100%",marginTop:6,padding:"7px",borderRadius:8,border:`1px solid ${C.red}55`,
-                    background:"transparent",color:C.red,fontWeight:700,fontSize:11,cursor:"pointer"}}>
-                  🗑 Delete
-                </button>
+                {isPendingReceiptReview && (
+                  <button onClick={()=>clearReceipt(req)}
+                    style={{width:"100%",marginTop:6,padding:"7px",borderRadius:8,border:`1px solid ${C.red}55`,
+                      background:"transparent",color:C.red,fontWeight:700,fontSize:11,cursor:"pointer"}}>
+                    🗑 Clear Receipt
+                  </button>
+                )}
               </div>
             );
           })}
