@@ -1159,7 +1159,7 @@ const MAIN_IDS = ["dashboard","trips","billing","diesel","more"];
 function BottomNav({tab, setTab, user, trips, driverPays, vehicles, dieselRequests=[]}) {
   const roles = (user?.role||"").split(",").map(r=>r.trim());
   const isFleet = roles.includes("fleet_manager") || roles.includes("cement_fleet_mgr");
-  const isPump  = roles.includes("pump_operator");
+  const isPump  = roles.includes("pump_operator") || roles.includes("pump_uploader");
   const isEmployeeSelf = roles.includes("employee_self");
   const isPartyOnly = roles.every(r=>["party_manager","email_followup"].includes(r));
   const hasPartyRole = roles.some(r=>["party_manager","email_followup"].includes(r));
@@ -2596,7 +2596,7 @@ function AppMain() {
 
       <div style={{padding:"14px 16px 8px"}}>
         <ErrorBoundary>
-        {tab==="dashboard"  && user?.role!=="pump_operator" && !isPureSelfWalletRole(user?.role) && !isParty && <Dashboard {...sp} setTab={setTab} />}
+        {tab==="dashboard"  && user?.role!=="pump_operator" && user?.role!=="pump_uploader" && !isPureSelfWalletRole(user?.role) && !isParty && <Dashboard {...sp} setTab={setTab} />}
         {tab==="trips"      && can(user,"trips")      && <Trips      {...sp} tripType="outbound" />}
         {tab==="inbound"    && can(user,"inbound")    && <Trips      {...sp} tripType="inbound" />}
         {tab==="billing"    && can(user,"billing")    && <Billing    {...sp} />}
