@@ -14895,6 +14895,18 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
     setReason("");
     setPinEntry(""); setPinError(false); setStep("review");
   };
+  // For a request that already has a receipt uploaded and is sitting in
+  // manager review (status still "open" until approved) — jumps straight
+  // to the upload screen instead of the amount-review step, since the
+  // whole point is a fast one-tap fix for "I uploaded the wrong photo",
+  // not re-entering amounts that were already confirmed.
+  const startReupload = (req) => {
+    setSelected(req);
+    setNewDieselAmt(String(req.dieselAmount ?? req.amount));
+    setNewCashAmt(String(req.cashAmount ?? 0));
+    setReason("");
+    setStep("receipt");
+  };
   const keyPress = (k) => {
     if(confirming) return; // a confirmation is already saving — ignore all input until it resolves
     if(pinEntry.length >= 4) return;
@@ -15144,9 +15156,14 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
           {openRequests.map(req=>{
             const p = pumps.find(x=>x.id===req.pumpId);
             const isAttachedUnconfirmed = req.status==="attached" && req.confirmedAmount==null;
+            // Receipt uploaded, status still "open" until a manager approves it
+            // (see pendingReceiptReviews in DieselMod) — without this, there's
+            // no way to tell "already uploaded, waiting on the manager" apart
+            // from "haven't touched this one yet" on this list.
+            const isPendingReceiptReview = !!req.receiptImagePath && req.status==="open";
             return (
               <div key={req.id} style={{background:C.card,borderRadius:12,padding:"14px 16px",
-                borderLeft:`3px solid ${isAttachedUnconfirmed?"#d97706":C.orange}`}}>
+                borderLeft:`3px solid ${isAttachedUnconfirmed?"#d97706":isPendingReceiptReview?C.blue:C.orange}`}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
                   <div>
                     <div style={{fontWeight:800,fontSize:15,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
@@ -15155,6 +15172,12 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
                         <span style={{background:"#fef3c7",color:"#92400e",fontSize:10,fontWeight:700,
                           borderRadius:4,padding:"2px 7px",border:"1px solid #f59e0b"}}>
                           ⚠ Trip Attached · Confirm PIN
+                        </span>
+                      )}
+                      {isPendingReceiptReview && (
+                        <span style={{background:C.blue+"18",color:C.blue,fontSize:10,fontWeight:700,
+                          borderRadius:4,padding:"2px 7px",border:`1px solid ${C.blue}55`}}>
+                          📤 Uploaded · Awaiting Review
                         </span>
                       )}
                     </div>
@@ -15179,9 +15202,15 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
                   </div>
                   <div style={{fontWeight:800,fontSize:18,color:C.text}}>{fmt(req.amount)}</div>
                 </div>
-                <Btn onClick={()=>startEdit(req)} full color={isAttachedUnconfirmed?"#d97706":C.orange}>
-                  {isAttachedUnconfirmed ? "⚠ Confirm Attached Indent" : "Open & Confirm"}
-                </Btn>
+                {isPendingReceiptReview ? (
+                  <Btn onClick={()=>startReupload(req)} full color={C.blue}>
+                    🔄 Re-upload Receipt (wrong photo?)
+                  </Btn>
+                ) : (
+                  <Btn onClick={()=>startEdit(req)} full color={isAttachedUnconfirmed?"#d97706":C.orange}>
+                    {isAttachedUnconfirmed ? "⚠ Confirm Attached Indent" : "Open & Confirm"}
+                  </Btn>
+                )}
               </div>
             );
           })}
