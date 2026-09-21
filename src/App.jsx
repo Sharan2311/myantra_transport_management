@@ -16595,7 +16595,8 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
       const qUpper = q.toUpperCase();
       return String(r.truckNo||"").toUpperCase().includes(qUpper)
           || String(r.indentNo||"").includes(q)
-          || String(r.lrNo||"").toUpperCase().includes(qUpper);
+          || String(r.lrNo||"").toUpperCase().includes(qUpper)
+          || String(r.remark||"").toUpperCase().includes(qUpper);
     })
     .sort((a,b)=>(b.indentNo||0)-(a.indentNo||0));
   const verifiedCount = (dieselRequests||[]).filter(r => (r.status==="confirmed"||r.status==="attached") && r.ownerVerified).length;
@@ -17042,6 +17043,74 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
   const [pumpReportFrom,    setPumpReportFrom]    = useState("");
   const [pumpReportTo,      setPumpReportTo]      = useState("");
 
+  // Exports whatever the Verify tab is currently showing — respects every
+  // active filter (checked/not-checked, pump, and the search box, which
+  // also matches remark/comment keywords) — as a printable PDF with a
+  // total for exactly what's displayed, not the whole table.
+  const exportVerifyListPDF = (rows, activeFilters) => {
+    const {verifyFilter, verifyPumpFilter, verifySearch, pumps} = activeFilters;
+    const total = rows.reduce((s,r)=>s+pumpOwedAmount(r),0);
+    const filterDesc = [
+      verifyFilter==="checked" ? "Checked only" : verifyFilter==="not_checked" ? "Not checked only" : "All",
+      verifyPumpFilter!=="all" ? (pumps.find(p=>p.id===verifyPumpFilter)?.name||"—") : "All pumps",
+      verifySearch.trim() ? `Keyword: "${verifySearch.trim()}"` : null,
+    ].filter(Boolean).join(" · ");
+
+    const bodyRows = rows.map(r => {
+      const pump = pumps.find(p=>p.id===r.pumpId);
+      const amt = pumpOwedAmount(r);
+      return `<tr>
+        <td>${r.indentNo||"—"}</td>
+        <td>${r.truckNo||"—"}</td>
+        <td>${pump?.name||"—"}</td>
+        <td>${r.date||"—"}</td>
+        <td>${r.lrNo||"—"}</td>
+        <td style="text-align:center">${r.ownerVerified?"✓":"—"}</td>
+        <td style="text-align:right">${fmt(amt)}</td>
+        <td>${r.remark||""}</td>
+      </tr>`;
+    }).join("");
+
+    const html = `<style>
+      body{font-family:'Segoe UI',Arial,sans-serif;font-size:11px;color:#111;margin:20px}
+      .kpis{display:flex;gap:12px;margin:12px 0;flex-wrap:wrap}
+      .kpi{border:1px solid #ddd;border-radius:6px;padding:8px 14px;min-width:120px;text-align:center}
+      .kpi .val{font-size:16px;font-weight:800} .kpi .lbl{font-size:9px;color:#888;margin-top:2px}
+      table{width:100%;border-collapse:collapse;margin-bottom:10px;font-size:10px}
+      th{background:#1565c0;color:white;padding:5px 7px;text-align:left;border:1px solid #1565c0;font-size:9px;text-transform:uppercase}
+      td{padding:4px 7px;border:1px solid #e0e0e0}
+      tfoot td{font-weight:800;background:#f3f4f6}
+      .footer{margin-top:20px;font-size:9px;color:#aaa;border-top:1px solid #eee;padding-top:8px}
+      .logo-img{width:52px;height:52px;border-radius:8px;object-fit:cover}
+      @media print { * { -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; } }
+    </style>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;padding-bottom:8px;border-bottom:2px solid #1565c0">
+      <img src="${RC.logoSrc}" class="logo-img" alt="${RC.companyShort}" />
+      <div>
+        <div style="font-size:7px;text-transform:uppercase;letter-spacing:2px;color:#1565c0;font-weight:700">${RC.companyName}</div>
+        <div style="font-size:20px;font-weight:800;line-height:1.2">Diesel Verify — Filtered Report</div>
+        <div style="font-size:10px;color:#888">Generated ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})} · Filters: ${filterDesc}</div>
+      </div>
+    </div>
+
+    <div class="kpis">
+      <div class="kpi"><div class="val">${rows.length}</div><div class="lbl">REQUESTS SHOWN</div></div>
+      <div class="kpi"><div class="val" style="color:#1565c0">₹${fmt(total)}</div><div class="lbl">TOTAL</div></div>
+    </div>
+
+    ${rows.length===0 ? '<div style="color:#999;font-style:italic">No requests match this filter.</div>' : `<table>
+      <tr><th>Indent#</th><th>Truck</th><th>Pump</th><th>Date</th><th>LR</th><th>Checked</th><th style="text-align:right">Amount</th><th>Remark</th></tr>
+      ${bodyRows}
+      <tfoot><tr><td colspan="6">TOTAL</td><td style="text-align:right">${fmt(total)}</td><td></td></tr></tfoot>
+    </table>`}
+
+    <div class="footer">${RC.companyName} · Report generated ${new Date().toLocaleString("en-IN")}</div>`;
+
+    const w = window.open("","_blank");
+    w.document.write(`<!DOCTYPE html><html><head><title>Diesel Verify — Filtered Report</title></head><body onload="window.print()">${html}</body></html>`);
+    w.document.close();
+  };
+
   const exportPumpReport = (pump, pIndentsAll, pPaymentsAll, repFrom="", repTo="") => {
     const indentsInRange  = (pIndentsAll||[]).filter(i => (!repFrom || i.date>=repFrom) && (!repTo || i.date<=repTo));
     const paymentsInRange = (pPaymentsAll||[]).filter(pp => (!repFrom || pp.date>=repFrom) && (!repTo || pp.date<=repTo));
@@ -17410,14 +17479,27 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
             <option value="all">All Pumps</option>
             {pumps.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
-          {/* Search by vehicle number, indent number, or LR number */}
+          {/* Search by vehicle number, indent number, LR number, or remark keyword */}
           <div style={{background:C.card,borderRadius:10,padding:"8px 12px",display:"flex",alignItems:"center",gap:8,border:`1px solid ${C.border}`}}>
             <span style={{color:C.muted}}>🔍</span>
             <input value={verifySearch} onChange={e=>setVerifySearch(e.target.value)}
-              placeholder="Search by vehicle no, indent no, or LR no…"
+              placeholder="Search vehicle no, indent no, LR no, or remark…"
               style={{flex:1,background:"none",border:"none",outline:"none",fontSize:13,color:C.text}}/>
             {verifySearch && <span onClick={()=>setVerifySearch("")} style={{color:C.muted,cursor:"pointer",fontSize:18}}>×</span>}
           </div>
+          {verifiableRequests.length>0 && (
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:C.card,
+              borderRadius:10,padding:"8px 12px",border:`1px solid ${C.border}`}}>
+              <div style={{fontSize:12,color:C.muted}}>
+                {verifiableRequests.length} shown · Total <b style={{color:C.text}}>{fmt(verifiableRequests.reduce((s,r)=>s+pumpOwedAmount(r),0))}</b>
+              </div>
+              <button onClick={()=>exportVerifyListPDF(verifiableRequests, {verifyFilter, verifyPumpFilter, verifySearch, pumps})}
+                style={{padding:"6px 12px",borderRadius:8,border:`1px solid ${C.blue}`,background:"transparent",
+                  color:C.blue,fontWeight:700,fontSize:11,cursor:"pointer"}}>
+                📄 Export PDF
+              </button>
+            </div>
+          )}
           {verifiableRequests.length===0 && (
             <div style={{textAlign:"center",color:C.muted,padding:32}}>
               {verifyFilter==="not_checked" ? "Nothing left to check ✓" : "No requests match this filter"}
