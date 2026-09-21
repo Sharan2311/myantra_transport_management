@@ -889,6 +889,28 @@ export const DB = {
   }), ai),
   deleteActionItem: id => deleteOne('mye_action_items', id),
 
+  // Generic task-assignment system — owner/manager creates a task, assigns
+  // it to an employee, tracks pending/done. type defaults to "manual"
+  // (freeform, owner-created); other types (e.g. auto-derived trackers)
+  // can be added later without a schema change.
+  getTasks: async () => {
+    try { return await fetchAll('mye_tasks', r => ({
+      id: r.id, title: r.title||'', description: r.description||'',
+      type: r.type||'manual', assignedTo: r.assigned_to||'',
+      status: r.status||'pending', dueDate: r.due_date||'',
+      createdBy: r.created_by||'', createdAt: r.created_at||'',
+      completedBy: r.completed_by||'', completedAt: r.completed_at||'',
+    })); } catch(e) { console.warn('mye_tasks not ready:', e.message); return []; }
+  },
+  saveTask: async (t) => upsertOne('mye_tasks', t => ({
+    id: t.id, title: t.title||'', description: t.description||'',
+    type: t.type||'manual', assigned_to: t.assignedTo||'',
+    status: t.status||'pending', due_date: t.dueDate||'',
+    created_by: t.createdBy||'', created_at: t.createdAt||'',
+    completed_by: t.completedBy||'', completed_at: t.completedAt||'',
+  }), t),
+  deleteTask: id => deleteOne('mye_tasks', id),
+
   // Invoice registry — an independent record of invoice existence, separate
   // from trips.diLines (which holds the actual billing detail). Used purely
   // as a cross-check signal: does this diLine's invoiceNo still correspond to

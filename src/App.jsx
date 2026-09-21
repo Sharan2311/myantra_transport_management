@@ -535,6 +535,7 @@ const FEATURE_CATALOG = [
   {key:"multi_client",      label:"Multi-Client Support",          cat:"Core Operations",     plans:["pro","enterprise"]},
   {key:"inbound_trips",     label:"Inbound / Raw Material",        cat:"Core Operations",     plans:["pro","enterprise"]},
   {key:"gypsum_trips",      label:"Gypsum Trips",                  cat:"Core Operations",     plans:["pro","enterprise"]},
+  {key:"task_management",   label:"Task Management",               cat:"Core Operations",     plans:["pro","enterprise"]},
   // AI Scanning
   {key:"payment_scan",      label:"Payment Scan",                  cat:"AI Scanning",         plans:["enterprise"]},
   {key:"gr_particulars",    label:"GR Particulars",                cat:"AI Scanning",         plans:["pro","enterprise"]},
@@ -592,8 +593,8 @@ function computeEffectiveFeatures(plan, overrides={}, rcFeatures={}) {
 
 // ─── ROLES ────────────────────────────────────────────────────────────────────
 const ROLES = {
-  owner:         {label:"Owner",               color:C.accent,  perms:["trips","inbound","gypsum","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","admin","driverPay","party_portal","unbilled_oversight"]},
-  manager:       {label:"Manager",             color:C.blue,    perms:["trips","inbound","gypsum","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","driverPay","party_portal","unbilled_oversight"]},
+  owner:         {label:"Owner",               color:C.accent,  perms:["trips","inbound","gypsum","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","admin","driverPay","party_portal","unbilled_oversight","tasks"]},
+  manager:       {label:"Manager",             color:C.blue,    perms:["trips","inbound","gypsum","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","driverPay","party_portal","unbilled_oversight","tasks"]},
   fleet_manager: {label:"Cement Fleet Manager",color:C.teal,    perms:["cement_trips","billing","diesel","driverPay_view"]},
   fleet_mgr_nd:  {label:"Fleet Mgr (No Diesel Req)",color:"#0891b2", perms:["cement_trips","billing","diesel_view","driverPay_view"]},
   operator:      {label:"Trip Operator",       color:C.teal,    perms:["trips","billing","diesel"]},
@@ -1258,6 +1259,7 @@ const MORE_TABS = [
   {id:"daily_ops",   icon:"📋",label:"Daily Ops",     perm:"reports",      group:"ops",     feat:"daily_ops"},
   {id:"inbound",      icon:"🏭",label:"Raw Material",   perm:"inbound",      group:"ops",     feat:"inbound_trips"},
   {id:"gypsum",       icon:"⛰️",label:"Gypsum",         perm:"gypsum",       group:"ops",     feat:"gypsum_trips"},
+  {id:"tasks",        icon:"✅",label:"Tasks",          perm:"tasks",        group:"ops",     feat:"task_management"},
   {id:"party_portal", icon:"📋",label:"Party Portal",   perm:"party_portal", group:"ops",     feat:"party_billing"},
   {id:"driverPay", icon:"🏧",label:"Driver Pay",     perm:"driverPay",    group:"money",   feat:"driver_pay"},
   {id:"settlement",icon:"💵",label:"Settlement",     perm:"settlement",   group:"money",   feat:"driver_pay"},
@@ -1934,6 +1936,7 @@ function AppMain() {
   const [pumps,       setPumps,       rPu,reloadPumps]       = useDB(DB.getPumps,       [],             300, tableEnabled("pumps"));
   const [indents,        setIndents,        rI,  reloadIndents]       = useDB(DB.getIndents,       [],  300, tableEnabled("indents"));
   const [dieselRequests, setDieselRequests, rDR, reloadDieselRequests] = useDB(DB.getDieselRequests, [], 300, tableEnabled("dieselRequests"));
+  const [tasks, setTasks, rTasks, reloadTasks] = useDB(DB.getTasks, [], 300, tableEnabled("tasks"));
 
   // ── Phase 3 (650ms) — 6 connections ──────────────────────────────────────────
   const [settlements, setSettlements, rS, reloadSettlements] = useDB(DB.getSettlements, [],             650, tableEnabled("settlements"));
@@ -2254,6 +2257,7 @@ function AppMain() {
     user, log,
     allTripsLoaded, loadingAllTrips, loadAllTrips,
     setTab, navTarget, setNavTarget,
+    tasks, setTasks,
   };
 
   // ── Retroactive auto-settle: runs whenever trips or driverPays change ─────────
@@ -2606,6 +2610,7 @@ function AppMain() {
         {tab==="pump_portal"&& can(user,"pump_portal")&& <PumpPortal {...sp} />}
         {tab==="party_portal"&&can(user,"party_portal")&&<PartyPortal {...sp} users={users} />}
         {tab==="gypsum"      && can(user,"gypsum")      && <GypsumTrips {...sp} />}
+        {tab==="tasks"       && can(user,"tasks")       && <TasksMod    {...sp} />}
         {tab==="vehicles"   && can(user,"vehicles")   && <Vehicles   {...sp} />}
         {tab==="employees"  && can(user,"employees")  && <Employees  {...sp} />}
         {tab==="payments"   && can(user,"payments")   && <Payments   {...sp} />}
@@ -13143,6 +13148,376 @@ function PartyTripCard({t, selected, toggle, isOwner, isPartyMgr, employees, ope
 // Shortage/balance tracking and the payment ledger come in later stages —
 // this stage is trip capture + getting the rate history right, since every
 // later stage depends on rateEffectiveOn() being correct.
+// ─── TASK ASSIGNMENT SYSTEM ──────────────────────────────────────────────────
+// Generic: owner/manager creates a task, assigns to an employee, tracks
+// pending/done — a numbers dashboard, not a Kanban board (per explicit
+// instruction). type:"manual" is the only kind right now; the Party ePOD
+// Follow-up view is NOT stored as task rows at all — it's computed live
+// from existing trip data (trip.orderType==="party" + partyDiRowsFor's
+// epodDone), since that data already exists and duplicating it into task
+// rows would just be another thing to keep in sync. The "assignee" for
+// that one is a single global setting (settings.partyEpodAssigneeId) —
+// one person responsible for follow-up, changeable by the owner.
+function TasksMod({tasks=[], setTasks, employees=[], trips=[], settings, setSettings, user, log}) {
+  const [view, setView] = useState("manual"); // manual | party_epod
+  const [newSheet, setNewSheet] = useState(false);
+  const [nf, setNf] = useState({title:"", description:"", assignedTo:"", dueDate:""});
+  const [statusFilter, setStatusFilter] = useState("pending"); // pending | done | all
+  const [assigneeFilter, setAssigneeFilter] = useState("all");
+
+  const manualTasks = (tasks||[]).filter(t=>t.type==="manual");
+
+  const createTask = () => {
+    if(!nf.title.trim()) { alert("Enter a title."); return; }
+    if(!nf.assignedTo) { alert("Select who this is assigned to."); return; }
+    const t = {
+      id: uid(), title: nf.title.trim(), description: nf.description.trim(),
+      type: "manual", assignedTo: nf.assignedTo, status: "pending",
+      dueDate: nf.dueDate||"", createdBy: user.username, createdAt: nowTs(),
+      completedBy: "", completedAt: "",
+    };
+    setTasks(p=>[t, ...(p||[])]);
+    DB.saveTask(t).catch(e=>console.error("saveTask:",e));
+    log&&log("TASK CREATED", `"${t.title}" → ${employees.find(e=>e.id===t.assignedTo)?.name||"—"}`);
+    setNf({title:"",description:"",assignedTo:"",dueDate:""});
+    setNewSheet(false);
+  };
+
+  const toggleTask = (t) => {
+    const done = t.status!=="done";
+    const upd = {...t, status: done?"done":"pending",
+      completedBy: done?(user.name||user.username):"", completedAt: done?nowTs():""};
+    setTasks(p=>p.map(x=>x.id===t.id?upd:x));
+    DB.saveTask(upd).catch(e=>console.error("saveTask toggle:",e));
+    log&&log(done?"TASK COMPLETED":"TASK REOPENED", t.title);
+  };
+
+  const removeTask = (t) => {
+    if(!window.confirm(`Delete task "${t.title}"? This can't be undone.`)) return;
+    setTasks(p=>(p||[]).filter(x=>x.id!==t.id));
+    DB.deleteTask(t.id).catch(e=>console.error("deleteTask:",e));
+    log&&log("TASK DELETED", t.title);
+  };
+
+  const filteredTasks = manualTasks
+    .filter(t => (statusFilter==="all" || t.status===statusFilter) && (assigneeFilter==="all" || t.assignedTo===assigneeFilter))
+    .sort((a,b) => parseCreatedAt(b.createdAt) - parseCreatedAt(a.createdAt));
+
+  const todayStr = today();
+  const isToday = ts => { const p = parseCreatedAt(ts); return p && new Date(p).toISOString().slice(0,10)===todayStr; };
+  const todayCreated   = manualTasks.filter(t=>isToday(t.createdAt)).length;
+  const todayCompleted = manualTasks.filter(t=>t.completedAt && isToday(t.completedAt)).length;
+  const totalPending   = manualTasks.filter(t=>t.status==="pending").length;
+
+  const perEmployee = employees.map(e=>{
+    const mine = manualTasks.filter(t=>t.assignedTo===e.id);
+    return {emp:e, pending:mine.filter(t=>t.status==="pending").length, done:mine.filter(t=>t.status==="done").length};
+  }).filter(x=>x.pending>0 || x.done>0).sort((a,b)=>b.pending-a.pending);
+
+  // ── Party ePOD Follow-up — computed live from trips, not stored ──────────
+  const [epodDayCount, setEpodDayCount] = useState(30);
+  const [epodEmpFilter, setEpodEmpFilter] = useState("all");
+  const [epodStatusFilter, setEpodStatusFilter] = useState("all"); // all | pending | done
+  const partyEpodStartDate = settings?.partyEpodStartDate||"";
+  const setPartyEpodStartDate = (dateStr) => {
+    setSettings(p=>{
+      const updated = {...(p||{}), partyEpodStartDate: dateStr};
+      DB.saveSettings(updated).catch(e=>console.error("saveSettings partyEpodStartDate:",e));
+      return updated;
+    });
+  };
+  // All three filters applied up front, before aggregating — so the day-wise
+  // stat cards and the expanded per-trip lists always agree with each other
+  // (e.g. filtering to "Pending" means every count and every row shown
+  // reflects only pending ones, not a mix).
+  const epodByDate = {};
+  (trips||[]).forEach(t => {
+    if(!t.date) return;
+    if(partyEpodStartDate && t.date < partyEpodStartDate) return;
+    if(epodEmpFilter!=="all" && t.assignedEmpId!==epodEmpFilter) return;
+    partyDiRowsFor(t).forEach(d => {
+      if(epodStatusFilter==="pending" && d.epodDone) return;
+      if(epodStatusFilter==="done" && !d.epodDone) return;
+      if(!epodByDate[t.date]) epodByDate[t.date] = {total:0, done:0, rows:[]};
+      epodByDate[t.date].total++;
+      if(d.epodDone) epodByDate[t.date].done++;
+      epodByDate[t.date].rows.push({truckNo:t.truckNo, lrNo:t.lrNo, diNo:d.diNo, epodDone:d.epodDone, tripId:t.id});
+    });
+  });
+  const epodDates = Object.keys(epodByDate).sort((a,b)=>b.localeCompare(a)).slice(0, epodDayCount);
+  const [expandedEpodDate, setExpandedEpodDate] = useState(null);
+  const partyEpodAssigneeId = settings?.partyEpodAssigneeId||"";
+  const setPartyEpodAssignee = (empId) => {
+    setSettings(p=>{
+      const updated = {...(p||{}), partyEpodAssigneeId: empId};
+      DB.saveSettings(updated).catch(e=>console.error("saveSettings partyEpodAssigneeId:",e));
+      return updated;
+    });
+  };
+  const epodTotalPending = epodDates.reduce((s,d)=>s+(epodByDate[d].total-epodByDate[d].done),0);
+  const epodTodayRow = epodByDate[todayStr];
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:14,padding:"14px 14px 90px"}}>
+      <div style={{display:"flex",gap:8}}>
+        {[["manual","📋 Tasks"],["party_epod","🚚 Party ePOD Follow-up"]].map(([k,l])=>(
+          <button key={k} onClick={()=>setView(k)}
+            style={{flex:1,padding:"10px 8px",borderRadius:10,cursor:"pointer",fontWeight:700,fontSize:13,
+              background:view===k?C.teal:"transparent",border:`1.5px solid ${C.teal}`,
+              color:view===k?"#fff":C.teal}}>
+            {l}
+          </button>
+        ))}
+      </div>
+
+      {view==="manual" && (<>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+          <div style={{background:C.card,borderRadius:12,padding:"12px 10px",textAlign:"center"}}>
+            <div style={{fontSize:20,fontWeight:800,color:C.blue}}>{todayCreated}</div>
+            <div style={{fontSize:10,color:C.muted}}>Created Today</div>
+          </div>
+          <div style={{background:C.card,borderRadius:12,padding:"12px 10px",textAlign:"center"}}>
+            <div style={{fontSize:20,fontWeight:800,color:C.green}}>{todayCompleted}</div>
+            <div style={{fontSize:10,color:C.muted}}>Completed Today</div>
+          </div>
+          <div style={{background:C.card,borderRadius:12,padding:"12px 10px",textAlign:"center"}}>
+            <div style={{fontSize:20,fontWeight:800,color:C.orange}}>{totalPending}</div>
+            <div style={{fontSize:10,color:C.muted}}>Total Pending</div>
+          </div>
+        </div>
+
+        {perEmployee.length>0 && (
+          <div style={{background:C.card,borderRadius:12,padding:"12px 14px"}}>
+            <div style={{fontSize:11,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:8}}>By Person</div>
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {perEmployee.map(({emp,pending,done})=>(
+                <div key={emp.id} style={{display:"flex",justifyContent:"space-between",fontSize:13}}>
+                  <span style={{fontWeight:600}}>{emp.name}</span>
+                  <span><span style={{color:C.orange,fontWeight:700}}>{pending} pending</span> <span style={{color:C.muted}}>·</span> <span style={{color:C.green,fontWeight:700}}>{done} done</span></span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {user.role==="owner" && (
+          <Btn onClick={()=>setNewSheet(true)} full color={C.teal}>+ New Task</Btn>
+        )}
+
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+          {[["pending","Pending"],["done","Done"],["all","All"]].map(([k,l])=>(
+            <button key={k} onClick={()=>setStatusFilter(k)}
+              style={{padding:"5px 12px",borderRadius:16,fontSize:11,fontWeight:700,cursor:"pointer",
+                border:`1.5px solid ${statusFilter===k?C.teal:C.border}`,
+                background:statusFilter===k?C.teal+"22":"none",
+                color:statusFilter===k?C.teal:C.muted}}>
+              {l}
+            </button>
+          ))}
+          <select value={assigneeFilter} onChange={e=>setAssigneeFilter(e.target.value)}
+            style={{padding:"5px 10px",borderRadius:16,fontSize:11,fontWeight:700,background:C.card,
+              border:`1.5px solid ${C.border}`,color:C.text,outline:"none"}}>
+            <option value="all">Everyone</option>
+            {employees.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
+          </select>
+        </div>
+
+        {filteredTasks.length===0 && (
+          <div style={{textAlign:"center",color:C.muted,padding:32}}>No tasks match this filter.</div>
+        )}
+        {filteredTasks.map(t=>{
+          const emp = employees.find(e=>e.id===t.assignedTo);
+          const canAct = user.role==="owner" || user.assignedEmployeeId===t.assignedTo;
+          return (
+            <div key={t.id} style={{background:C.card,borderRadius:12,padding:"12px 14px",
+              border:`1.5px solid ${t.status==="done"?C.green+"44":C.border}`}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontWeight:800,fontSize:14,textDecoration:t.status==="done"?"line-through":"none",color:t.status==="done"?C.muted:C.text}}>
+                    {t.title}
+                  </div>
+                  {t.description && <div style={{color:C.muted,fontSize:12,marginTop:3}}>{t.description}</div>}
+                  <div style={{display:"flex",gap:10,marginTop:6,fontSize:11,color:C.muted,flexWrap:"wrap"}}>
+                    <span>👤 {emp?.name||"Unassigned"}</span>
+                    {t.dueDate && <span>📅 Due {t.dueDate}</span>}
+                    {t.status==="done" && <span style={{color:C.green}}>✓ by {t.completedBy}</span>}
+                  </div>
+                </div>
+                <div style={{display:"flex",flexDirection:"column",gap:6,alignItems:"flex-end",flexShrink:0}}>
+                  {canAct && (
+                    <button onClick={()=>toggleTask(t)}
+                      style={{padding:"6px 12px",borderRadius:8,border:`1.5px solid ${t.status==="done"?C.orange:C.green}`,
+                        background:"transparent",color:t.status==="done"?C.orange:C.green,fontWeight:700,fontSize:11,cursor:"pointer"}}>
+                      {t.status==="done" ? "↺ Reopen" : "✓ Mark Done"}
+                    </button>
+                  )}
+                  {user.role==="owner" && (
+                    <button onClick={()=>removeTask(t)}
+                      style={{padding:"5px 10px",borderRadius:8,border:`1px solid ${C.red}55`,
+                        background:"transparent",color:C.red,fontWeight:700,fontSize:10,cursor:"pointer"}}>
+                      🗑 Delete
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </>)}
+
+      {view==="party_epod" && (<>
+        <div style={{background:C.card,borderRadius:12,padding:"12px 14px"}}>
+          <div style={{fontSize:11,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:6}}>
+            Responsible For Follow-up
+          </div>
+          {user.role==="owner" ? (
+            <select value={partyEpodAssigneeId} onChange={e=>setPartyEpodAssignee(e.target.value)}
+              style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,
+                padding:"9px 12px",fontSize:13,color:partyEpodAssigneeId?C.text:C.muted,outline:"none"}}>
+              <option value="">— Unassigned —</option>
+              {employees.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
+            </select>
+          ) : (
+            <div style={{fontSize:13,fontWeight:700}}>{employees.find(e=>e.id===partyEpodAssigneeId)?.name||"— Unassigned —"}</div>
+          )}
+        </div>
+
+        {user.role==="owner" && (
+          <div style={{background:C.card,borderRadius:12,padding:"12px 14px"}}>
+            <div style={{fontSize:11,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:6}}>
+              Count Numbers From <span style={{fontWeight:400,textTransform:"none"}}>(owner only)</span>
+            </div>
+            <div style={{display:"flex",gap:8,alignItems:"center"}}>
+              <input type="date" value={partyEpodStartDate} onChange={e=>setPartyEpodStartDate(e.target.value)}
+                style={{flex:1,background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,
+                  padding:"9px 12px",fontSize:13,color:C.text,outline:"none"}} />
+              {partyEpodStartDate && (
+                <button onClick={()=>setPartyEpodStartDate("")}
+                  style={{padding:"9px 12px",borderRadius:8,border:`1px solid ${C.border}`,
+                    background:"none",color:C.muted,fontSize:12,cursor:"pointer"}}>
+                  Clear
+                </button>
+              )}
+            </div>
+            {!partyEpodStartDate && <div style={{fontSize:11,color:C.muted,marginTop:4}}>No start date set — showing all party trips.</div>}
+          </div>
+        )}
+
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+          <select value={epodEmpFilter} onChange={e=>setEpodEmpFilter(e.target.value)}
+            style={{padding:"6px 10px",borderRadius:16,fontSize:11,fontWeight:700,background:C.card,
+              border:`1.5px solid ${C.border}`,color:C.text,outline:"none"}}>
+            <option value="all">All Employees</option>
+            {employees.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
+          </select>
+          {[["all","All"],["pending","Pending"],["done","Done"]].map(([k,l])=>(
+            <button key={k} onClick={()=>setEpodStatusFilter(k)}
+              style={{padding:"6px 12px",borderRadius:16,fontSize:11,fontWeight:700,cursor:"pointer",
+                border:`1.5px solid ${epodStatusFilter===k?C.teal:C.border}`,
+                background:epodStatusFilter===k?C.teal+"22":"none",
+                color:epodStatusFilter===k?C.teal:C.muted}}>
+              {l}
+            </button>
+          ))}
+        </div>
+
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+          <div style={{background:C.card,borderRadius:12,padding:"12px 10px",textAlign:"center"}}>
+            <div style={{fontSize:20,fontWeight:800,color:C.blue}}>{epodTodayRow?epodTodayRow.total:0}</div>
+            <div style={{fontSize:10,color:C.muted}}>Party DIs Today</div>
+          </div>
+          <div style={{background:C.card,borderRadius:12,padding:"12px 10px",textAlign:"center"}}>
+            <div style={{fontSize:20,fontWeight:800,color:C.orange}}>{epodTotalPending}</div>
+            <div style={{fontSize:10,color:C.muted}}>Pending (shown below)</div>
+          </div>
+        </div>
+
+        <div style={{color:C.muted,fontSize:11}}>
+          Counted per DI (a multi-DI trip with some party, some godown lines only counts its party DIs). "Done" = Confirmation Email ePOD received.
+        </div>
+
+        {epodDates.length===0 && (
+          <div style={{textAlign:"center",color:C.muted,padding:32}}>No party trips yet.</div>
+        )}
+        {epodDates.map(d=>{
+          const row = epodByDate[d];
+          const pending = row.total-row.done;
+          const isExpanded = expandedEpodDate===d;
+          return (
+            <div key={d} style={{background:C.card,borderRadius:12,padding:"12px 14px"}}>
+              <div onClick={()=>setExpandedEpodDate(isExpanded?null:d)} style={{display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer"}}>
+                <div>
+                  <div style={{fontWeight:700,fontSize:13}}>{d===todayStr?"Today — ":""}{d}</div>
+                  <div style={{fontSize:11,color:C.muted}}>{row.total} party DI{row.total!==1?"s":""}</div>
+                </div>
+                <div style={{display:"flex",gap:10,alignItems:"center"}}>
+                  <span style={{color:C.green,fontWeight:700,fontSize:13}}>{row.done} done</span>
+                  <span style={{color:pending>0?C.orange:C.muted,fontWeight:700,fontSize:13}}>{pending} pending</span>
+                  <span style={{color:C.muted}}>{isExpanded?"▲":"▼"}</span>
+                </div>
+              </div>
+              {isExpanded && (
+                <div style={{marginTop:10,paddingTop:10,borderTop:`1px solid ${C.border}44`,display:"flex",flexDirection:"column",gap:6}}>
+                  {row.rows.map((r,i)=>(
+                    <div key={i} style={{display:"flex",justifyContent:"space-between",fontSize:12}}>
+                      <span>{r.truckNo} · LR {r.lrNo||"—"}{r.diNo?" · DI "+r.diNo:""}</span>
+                      <span style={{color:r.epodDone?C.green:C.orange,fontWeight:700}}>{r.epodDone?"✓ Done":"⏳ Pending"}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {Object.keys(epodByDate).length > epodDayCount && (
+          <button onClick={()=>setEpodDayCount(p=>p+30)}
+            style={{width:"100%",padding:"10px",borderRadius:10,border:`1px solid ${C.border}`,
+              background:"none",color:C.blue,fontWeight:700,fontSize:12,cursor:"pointer"}}>
+            Load 30 more days
+          </button>
+        )}
+      </>)}
+
+      {newSheet && (
+        <Sheet title="+ New Task" onClose={()=>setNewSheet(false)}>
+          <div style={{display:"flex",flexDirection:"column",gap:13}}>
+            <div>
+              <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:4}}>TITLE</div>
+              <input value={nf.title} onChange={e=>setNf(p=>({...p,title:e.target.value}))}
+                placeholder="e.g. Follow up with Shree Cement on pending GR"
+                style={{width:"100%",background:C.card,border:`1.5px solid ${C.border}`,borderRadius:8,
+                  padding:"9px 12px",fontSize:13,color:C.text,outline:"none"}} />
+            </div>
+            <div>
+              <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:4}}>DESCRIPTION (optional)</div>
+              <textarea value={nf.description} onChange={e=>setNf(p=>({...p,description:e.target.value}))}
+                rows={3} style={{width:"100%",background:C.card,border:`1.5px solid ${C.border}`,borderRadius:8,
+                  padding:"9px 12px",fontSize:13,color:C.text,outline:"none",resize:"vertical"}} />
+            </div>
+            <div>
+              <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:4}}>ASSIGN TO</div>
+              <select value={nf.assignedTo} onChange={e=>setNf(p=>({...p,assignedTo:e.target.value}))}
+                style={{width:"100%",background:C.card,border:`1.5px solid ${C.teal}`,borderRadius:8,
+                  padding:"9px 12px",fontSize:13,color:C.text,outline:"none",fontWeight:700}}>
+                <option value="">— select employee —</option>
+                {employees.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:4}}>DUE DATE (optional)</div>
+              <input type="date" value={nf.dueDate} onChange={e=>setNf(p=>({...p,dueDate:e.target.value}))}
+                style={{width:"100%",background:C.card,border:`1.5px solid ${C.border}`,borderRadius:8,
+                  padding:"9px 12px",fontSize:13,color:C.text,outline:"none"}} />
+            </div>
+            <Btn onClick={createTask} full color={C.teal}>Create Task</Btn>
+          </div>
+        </Sheet>
+      )}
+    </div>
+  );
+}
+
+
 function GypsumTrips({gypsumTrips=[], setGypsumTrips, gypsumShreeRates=[], setGypsumShreeRates, gypsumDriverRates=[], setGypsumDriverRates, gypsumPayments=[], setGypsumPayments, employees=[], settings, setSettings, user, log}) {
   const [view, setView] = useState("trips"); // trips | rates
   const isOwner = user?.role==="owner" || user?.role==="manager";
