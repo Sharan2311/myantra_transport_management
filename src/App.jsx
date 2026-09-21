@@ -13216,10 +13216,28 @@ function TasksMod({tasks=[], setTasks, employees=[], trips=[], settings, setSett
 
   // ── Party ePOD Follow-up — computed live from trips, not stored ──────────
   const [epodDayCount, setEpodDayCount] = useState(30);
+  const [epodEmpFilter, setEpodEmpFilter] = useState("all");
+  const [epodStatusFilter, setEpodStatusFilter] = useState("all"); // all | pending | done
+  const partyEpodStartDate = settings?.partyEpodStartDate||"";
+  const setPartyEpodStartDate = (dateStr) => {
+    setSettings(p=>{
+      const updated = {...(p||{}), partyEpodStartDate: dateStr};
+      DB.saveSettings(updated).catch(e=>console.error("saveSettings partyEpodStartDate:",e));
+      return updated;
+    });
+  };
+  // All three filters applied up front, before aggregating — so the day-wise
+  // stat cards and the expanded per-trip lists always agree with each other
+  // (e.g. filtering to "Pending" means every count and every row shown
+  // reflects only pending ones, not a mix).
   const epodByDate = {};
   (trips||[]).forEach(t => {
     if(!t.date) return;
+    if(partyEpodStartDate && t.date < partyEpodStartDate) return;
+    if(epodEmpFilter!=="all" && t.assignedEmpId!==epodEmpFilter) return;
     partyDiRowsFor(t).forEach(d => {
+      if(epodStatusFilter==="pending" && d.epodDone) return;
+      if(epodStatusFilter==="done" && !d.epodDone) return;
       if(!epodByDate[t.date]) epodByDate[t.date] = {total:0, done:0, rows:[]};
       epodByDate[t.date].total++;
       if(d.epodDone) epodByDate[t.date].done++;
@@ -13364,6 +13382,45 @@ function TasksMod({tasks=[], setTasks, employees=[], trips=[], settings, setSett
           )}
         </div>
 
+        {user.role==="owner" && (
+          <div style={{background:C.card,borderRadius:12,padding:"12px 14px"}}>
+            <div style={{fontSize:11,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:6}}>
+              Count Numbers From <span style={{fontWeight:400,textTransform:"none"}}>(owner only)</span>
+            </div>
+            <div style={{display:"flex",gap:8,alignItems:"center"}}>
+              <input type="date" value={partyEpodStartDate} onChange={e=>setPartyEpodStartDate(e.target.value)}
+                style={{flex:1,background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,
+                  padding:"9px 12px",fontSize:13,color:C.text,outline:"none"}} />
+              {partyEpodStartDate && (
+                <button onClick={()=>setPartyEpodStartDate("")}
+                  style={{padding:"9px 12px",borderRadius:8,border:`1px solid ${C.border}`,
+                    background:"none",color:C.muted,fontSize:12,cursor:"pointer"}}>
+                  Clear
+                </button>
+              )}
+            </div>
+            {!partyEpodStartDate && <div style={{fontSize:11,color:C.muted,marginTop:4}}>No start date set — showing all party trips.</div>}
+          </div>
+        )}
+
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+          <select value={epodEmpFilter} onChange={e=>setEpodEmpFilter(e.target.value)}
+            style={{padding:"6px 10px",borderRadius:16,fontSize:11,fontWeight:700,background:C.card,
+              border:`1.5px solid ${C.border}`,color:C.text,outline:"none"}}>
+            <option value="all">All Employees</option>
+            {employees.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
+          </select>
+          {[["all","All"],["pending","Pending"],["done","Done"]].map(([k,l])=>(
+            <button key={k} onClick={()=>setEpodStatusFilter(k)}
+              style={{padding:"6px 12px",borderRadius:16,fontSize:11,fontWeight:700,cursor:"pointer",
+                border:`1.5px solid ${epodStatusFilter===k?C.teal:C.border}`,
+                background:epodStatusFilter===k?C.teal+"22":"none",
+                color:epodStatusFilter===k?C.teal:C.muted}}>
+              {l}
+            </button>
+          ))}
+        </div>
+
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
           <div style={{background:C.card,borderRadius:12,padding:"12px 10px",textAlign:"center"}}>
             <div style={{fontSize:20,fontWeight:800,color:C.blue}}>{epodTodayRow?epodTodayRow.total:0}</div>
@@ -13371,7 +13428,7 @@ function TasksMod({tasks=[], setTasks, employees=[], trips=[], settings, setSett
           </div>
           <div style={{background:C.card,borderRadius:12,padding:"12px 10px",textAlign:"center"}}>
             <div style={{fontSize:20,fontWeight:800,color:C.orange}}>{epodTotalPending}</div>
-            <div style={{fontSize:10,color:C.muted}}>Pending (last {epodDayCount}d)</div>
+            <div style={{fontSize:10,color:C.muted}}>Pending (shown below)</div>
           </div>
         </div>
 
