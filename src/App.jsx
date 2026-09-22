@@ -2234,6 +2234,7 @@ function AppMain() {
     selectedClient, setSelectedClient,
     vehicles, setVehicles:dbSetVehicles,
     employees, setEmployees:dbSetEmployees,
+    users, setUsers,
     payments, setPayments:dbSetPayments,
     settlements, setSettlements:dbSetSettlements,
     activity, setActivity,
@@ -13158,7 +13159,7 @@ function PartyTripCard({t, selected, toggle, isOwner, isPartyMgr, employees, ope
 // rows would just be another thing to keep in sync. The "assignee" for
 // that one is a single global setting (settings.partyEpodAssigneeId) —
 // one person responsible for follow-up, changeable by the owner.
-function TasksMod({tasks=[], setTasks, employees=[], trips=[], settings, setSettings, user, log}) {
+function TasksMod({tasks=[], setTasks, employees=[], users=[], trips=[], settings, setSettings, user, log}) {
   const [view, setView] = useState("manual"); // manual | party_epod
   const [newSheet, setNewSheet] = useState(false);
   const [nf, setNf] = useState({title:"", description:"", assignedTo:"", dueDate:""});
@@ -13215,6 +13216,19 @@ function TasksMod({tasks=[], setTasks, employees=[], trips=[], settings, setSett
   }).filter(x=>x.pending>0 || x.done>0).sort((a,b)=>b.pending-a.pending);
 
   // ── Party ePOD Follow-up — computed live from trips, not stored ──────────
+  // "Employee linked to it" here means whoever the Party Portal actually
+  // assigned as follow-up on that trip — trip.confirmFollowupUserId, set
+  // via "Assign Followup" there — NOT trip.assignedEmpId, which is an
+  // unrelated field (tafal/wallet, populated on most trips regardless of
+  // who's chasing confirmation). Filtering by assignedEmpId looked like it
+  // wasn't filtering at all because it mostly wasn't the field that
+  // actually varies by who's responsible for follow-up. The picker list
+  // matches Party Portal's own followupEmps exactly: active users with
+  // role email_followup or party_manager, keyed by username (falling back
+  // to id) — not the employees table.
+  const followupUsers = (users||[]).filter(u=>
+    u.active!==false && ((u.role||"").includes("email_followup") || (u.role||"").includes("party_manager"))
+  );
   const [epodDayCount, setEpodDayCount] = useState(30);
   const [epodEmpFilter, setEpodEmpFilter] = useState("all");
   const [epodStatusFilter, setEpodStatusFilter] = useState("all"); // all | pending | done
@@ -13234,14 +13248,15 @@ function TasksMod({tasks=[], setTasks, employees=[], trips=[], settings, setSett
   (trips||[]).forEach(t => {
     if(!t.date) return;
     if(partyEpodStartDate && t.date < partyEpodStartDate) return;
-    if(epodEmpFilter!=="all" && t.assignedEmpId!==epodEmpFilter) return;
+    if(epodEmpFilter!=="all" && t.confirmFollowupUserId!==epodEmpFilter) return;
     partyDiRowsFor(t).forEach(d => {
       if(epodStatusFilter==="pending" && d.epodDone) return;
       if(epodStatusFilter==="done" && !d.epodDone) return;
       if(!epodByDate[t.date]) epodByDate[t.date] = {total:0, done:0, rows:[]};
       epodByDate[t.date].total++;
       if(d.epodDone) epodByDate[t.date].done++;
-      epodByDate[t.date].rows.push({truckNo:t.truckNo, lrNo:t.lrNo, diNo:d.diNo, epodDone:d.epodDone, tripId:t.id});
+      epodByDate[t.date].rows.push({truckNo:t.truckNo, lrNo:t.lrNo, diNo:d.diNo, epodDone:d.epodDone, tripId:t.id,
+        followupName: t.confirmFollowupUserId ? (followupUsers.find(u=>(u.username||u.id)===t.confirmFollowupUserId)?.name || t.confirmFollowupUserId) : ""});
     });
   });
   const epodDates = Object.keys(epodByDate).sort((a,b)=>b.localeCompare(a)).slice(0, epodDayCount);
@@ -13407,8 +13422,8 @@ function TasksMod({tasks=[], setTasks, employees=[], trips=[], settings, setSett
           <select value={epodEmpFilter} onChange={e=>setEpodEmpFilter(e.target.value)}
             style={{padding:"6px 10px",borderRadius:16,fontSize:11,fontWeight:700,background:C.card,
               border:`1.5px solid ${C.border}`,color:C.text,outline:"none"}}>
-            <option value="all">All Employees</option>
-            {employees.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
+            <option value="all">All Followup Staff</option>
+            {followupUsers.map(u=><option key={u.id} value={u.username||u.id}>{u.name||u.username}</option>)}
           </select>
           {[["all","All"],["pending","Pending"],["done","Done"]].map(([k,l])=>(
             <button key={k} onClick={()=>setEpodStatusFilter(k)}
@@ -13460,7 +13475,7 @@ function TasksMod({tasks=[], setTasks, employees=[], trips=[], settings, setSett
                 <div style={{marginTop:10,paddingTop:10,borderTop:`1px solid ${C.border}44`,display:"flex",flexDirection:"column",gap:6}}>
                   {row.rows.map((r,i)=>(
                     <div key={i} style={{display:"flex",justifyContent:"space-between",fontSize:12}}>
-                      <span>{r.truckNo} · LR {r.lrNo||"—"}{r.diNo?" · DI "+r.diNo:""}</span>
+                      <span>{r.truckNo} · LR {r.lrNo||"—"}{r.diNo?" · DI "+r.diNo:""}{r.followupName?<span style={{color:C.muted}}> · 👤 {r.followupName}</span>:null}</span>
                       <span style={{color:r.epodDone?C.green:C.orange,fontWeight:700}}>{r.epodDone?"✓ Done":"⏳ Pending"}</span>
                     </div>
                   ))}
