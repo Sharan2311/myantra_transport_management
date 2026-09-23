@@ -2234,14 +2234,13 @@ function AppMain() {
     selectedClient, setSelectedClient,
     vehicles, setVehicles:dbSetVehicles,
     employees, setEmployees:dbSetEmployees,
-    users, setUsers,
     payments, setPayments:dbSetPayments,
     settlements, setSettlements:dbSetSettlements,
     activity, setActivity,
     pumps, setPumps:dbSetPumps,
     indents, setIndents:dbSetIndents,
     pumpPayments, setPumpPayments:dbSetPumpPayments,
-    dieselRequests, setDieselRequests:dbSetDieselRequests,
+    dieselRequests, setDieselRequests:dbSetDieselRequests, dieselRequestsReady: rDR,
     settings:settings||{tafalPerTrip:300}, setSettings:dbSetSettings,
     driverPays, setDriverPays:dbSetDriverPays,
     expenses, setExpenses:dbSetExpenses,
@@ -13159,7 +13158,7 @@ function PartyTripCard({t, selected, toggle, isOwner, isPartyMgr, employees, ope
 // rows would just be another thing to keep in sync. The "assignee" for
 // that one is a single global setting (settings.partyEpodAssigneeId) —
 // one person responsible for follow-up, changeable by the owner.
-function TasksMod({tasks=[], setTasks, employees=[], users=[], trips=[], settings, setSettings, user, log}) {
+function TasksMod({tasks=[], setTasks, employees=[], trips=[], settings, setSettings, user, log}) {
   const [view, setView] = useState("manual"); // manual | party_epod
   const [newSheet, setNewSheet] = useState(false);
   const [nf, setNf] = useState({title:"", description:"", assignedTo:"", dueDate:""});
@@ -13216,19 +13215,14 @@ function TasksMod({tasks=[], setTasks, employees=[], users=[], trips=[], setting
   }).filter(x=>x.pending>0 || x.done>0).sort((a,b)=>b.pending-a.pending);
 
   // ── Party ePOD Follow-up — computed live from trips, not stored ──────────
-  // "Employee linked to it" here means whoever the Party Portal actually
-  // assigned as follow-up on that trip — trip.confirmFollowupUserId, set
-  // via "Assign Followup" there — NOT trip.assignedEmpId, which is an
-  // unrelated field (tafal/wallet, populated on most trips regardless of
-  // who's chasing confirmation). Filtering by assignedEmpId looked like it
-  // wasn't filtering at all because it mostly wasn't the field that
-  // actually varies by who's responsible for follow-up. The picker list
-  // matches Party Portal's own followupEmps exactly: active users with
-  // role email_followup or party_manager, keyed by username (falling back
-  // to id) — not the employees table.
-  const followupUsers = (users||[]).filter(u=>
-    u.active!==false && ((u.role||"").includes("email_followup") || (u.role||"").includes("party_manager"))
-  );
+  // "Party trips ASSIGNED to that employee" = trip.assignedEmpId — the
+  // "Assigned Employee" field on the Edit Trip form (owner-editable).
+  // A previous pass here mistakenly switched this to
+  // trip.confirmFollowupUserId (the Party Portal's separate "Assign
+  // Followup" mechanism, a different field entirely, keyed by username
+  // against a narrow email_followup/party_manager user subset) based on a
+  // guess about which field "linked to him" meant. Reverted per explicit
+  // correction — assignedEmpId, against the full employees list, is right.
   const [epodDayCount, setEpodDayCount] = useState(30);
   const [epodEmpFilter, setEpodEmpFilter] = useState("all");
   const [epodStatusFilter, setEpodStatusFilter] = useState("all"); // all | pending | done
@@ -13248,7 +13242,7 @@ function TasksMod({tasks=[], setTasks, employees=[], users=[], trips=[], setting
   (trips||[]).forEach(t => {
     if(!t.date) return;
     if(partyEpodStartDate && t.date < partyEpodStartDate) return;
-    if(epodEmpFilter!=="all" && t.confirmFollowupUserId!==epodEmpFilter) return;
+    if(epodEmpFilter!=="all" && t.assignedEmpId!==epodEmpFilter) return;
     partyDiRowsFor(t).forEach(d => {
       if(epodStatusFilter==="pending" && d.epodDone) return;
       if(epodStatusFilter==="done" && !d.epodDone) return;
@@ -13256,7 +13250,7 @@ function TasksMod({tasks=[], setTasks, employees=[], users=[], trips=[], setting
       epodByDate[t.date].total++;
       if(d.epodDone) epodByDate[t.date].done++;
       epodByDate[t.date].rows.push({truckNo:t.truckNo, lrNo:t.lrNo, diNo:d.diNo, epodDone:d.epodDone, tripId:t.id,
-        followupName: t.confirmFollowupUserId ? (followupUsers.find(u=>(u.username||u.id)===t.confirmFollowupUserId)?.name || t.confirmFollowupUserId) : ""});
+        followupName: t.assignedEmpId ? (employees.find(e=>e.id===t.assignedEmpId)?.name || "") : ""});
     });
   });
   const epodDates = Object.keys(epodByDate).sort((a,b)=>b.localeCompare(a)).slice(0, epodDayCount);
@@ -13422,8 +13416,8 @@ function TasksMod({tasks=[], setTasks, employees=[], users=[], trips=[], setting
           <select value={epodEmpFilter} onChange={e=>setEpodEmpFilter(e.target.value)}
             style={{padding:"6px 10px",borderRadius:16,fontSize:11,fontWeight:700,background:C.card,
               border:`1.5px solid ${C.border}`,color:C.text,outline:"none"}}>
-            <option value="all">All Followup Staff</option>
-            {followupUsers.map(u=><option key={u.id} value={u.username||u.id}>{u.name||u.username}</option>)}
+            <option value="all">All Employees</option>
+            {employees.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
           </select>
           {[["all","All"],["pending","Pending"],["done","Done"]].map(([k,l])=>(
             <button key={k} onClick={()=>setEpodStatusFilter(k)}
@@ -16268,7 +16262,7 @@ function DieselReceiptReviewCard({ req, pumps, dieselRequests=[], user, log, vie
   );
 }
 
-function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, driverPays, setDriverPays, user, log, viewOnly=false, dieselRequests=[], setDieselRequests, settings, actionItems=[], setActionItems, navTarget, setNavTarget}) {
+function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, driverPays, setDriverPays, user, log, viewOnly=false, dieselRequests=[], setDieselRequests, dieselRequestsReady=false, settings, actionItems=[], setActionItems, navTarget, setNavTarget}) {
   const [view,        setView]        = useState("requests");
   // Daily verification checklist — owner-only, one-time permanent mark per
   // request ("I personally checked this request's attachment and amount").
@@ -16853,6 +16847,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
   // were fully handled by a previous upload.
   const applyStatementResults = async () => {
     if(!stmtResults || user?.role!=="owner") return;
+    if(!dieselRequestsReady) { alert("Still loading existing indent numbers — please wait a moment and try again."); return; }
     setStmtApplying(true);
     let checkedCount=0, createdCount=0;
     const usedNos = new Set((dieselRequests||[]).map(r=>r.indentNo).filter(Boolean));
@@ -18024,6 +18019,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
 
         const createRequest = async () => {
           if (!drTruckNo.trim() || drTruckNo.trim().length < 6) { alert("Enter complete truck number (min 6 characters)"); return; }
+          if (!dieselRequestsReady) { alert("Still loading existing indent numbers — please wait a moment and try again."); return; }
           const dieselComp = +drDieselAmt || 0;
           const cashComp   = +drCashAmt   || 0;
           const totalAmt   = dieselComp + cashComp;
@@ -18206,12 +18202,22 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                   const _diesel  = (+drDieselAmt||0) > 0;
                   const _cash    = drCashAmt !== "";
                   const _pump    = !!drPumpId;
-                  const _ready   = _truck && _diesel && _cash && _pump;
+                  // dieselRequestsReady guards a real bug that happened in production:
+                  // useDB starts with an empty array until its first fetch resolves, and
+                  // nextNo (above) is recomputed from whatever's in dieselRequests on every
+                  // render, uncached. A user who opened the app and generated an indent
+                  // before that first fetch completed saw nextNo=1 (empty list → "no
+                  // numbers used yet") and got a real indent record with that number —
+                  // reusing #1, an old deleted test entry's number, instead of continuing
+                  // the real sequence. This flag comes from useDB's own ready signal
+                  // (same one already used elsewhere in this file for an identical race).
+                  const _ready   = _truck && _diesel && _cash && _pump && dieselRequestsReady;
                   const checks = [
                     {ok:_truck,  msg:"Truck number (min 6 chars)"},
                     {ok:_diesel, msg:"Diesel amount > ₹0"},
                     {ok:_cash,   msg:"Cash amount (enter 0 if none)"},
                     {ok:_pump,   msg:"Petrol pump selected"},
+                    {ok:dieselRequestsReady, msg:"Existing indent numbers loaded"},
                   ];
                   return (
                     <>
@@ -18233,7 +18239,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                         disabled={!_ready}
                         style={{opacity:_ready?1:0.4,cursor:_ready?"pointer":"not-allowed",
                           transition:"opacity 0.2s"}}>
-                        ⛽ Generate Indent #{nextNo||"—"} + Driver PIN
+                        {!dieselRequestsReady ? "⏳ Loading existing indents…" : `⛽ Generate Indent #${nextNo||"—"} + Driver PIN`}
                       </Btn>
                     </>
                   );
