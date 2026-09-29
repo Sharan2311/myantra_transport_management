@@ -11,7 +11,14 @@ This PDF uses a fixed-width table layout. When a cell value is too long, it WRAP
 to the next line WITHIN THE SAME CELL. Read column-by-column, NOT line-by-line.
 
 Table columns (in order):
-S.No | DI NO | INV NO | DATE | TRUCK NO | GR NO | CONSIGNEE NAME | STATION | GRADE | DESP QTY | FRT RATE | FRT AMT
+S.No | DI NO | INV NO | DATE | TRUCK NO | GR NO | CONSIGNEE NAME | STATION | GRADE | DESP QTY | FRT RATE | FRT AMT | KA TAX | TOLL TAX | BORDER ENTRY CHARGES | IGST 18.0% | CGST 9.0% | SGST 9.0% | TotalTax AMT
+
+IMPORTANT — the row does NOT end at FRT AMT. FRT AMT is followed by five more columns:
+KA TAX, TOLL TAX, BORDER ENTRY CHARGES (these three are usually 0.00 or blank), then
+IGST 18.0%, CGST 9.0%, SGST 9.0%, and finally TotalTax AMT. On invoices where only IGST
+applies, TotalTax AMT equals the IGST value — a MUCH smaller number than FRT AMT (it is
+roughly 18% of FRT AMT, not the freight amount itself). Never extract IGST, CGST, SGST,
+or TotalTax AMT as frtAmt — those are tax columns near the right edge of the row.
 
 FIELD RULES — copy values exactly, null if not clearly readable:
 
@@ -35,7 +42,11 @@ CONSIGNEE NAME:
 
 DESP QTY: decimal number in MT (e.g. 36.00)
 FRT RATE: rate per MT (e.g. 1219.00)
-FRT AMT: should equal DESP QTY × FRT RATE — if not, flag it
+FRT AMT: should equal DESP QTY × FRT RATE — if not, flag it. This is the freight amount
+  column, immediately to the right of FRT RATE and immediately to the LEFT of KA TAX/TOLL TAX/
+  BORDER ENTRY CHARGES/IGST/CGST/SGST/TotalTax AMT. If a candidate number does not roughly
+  equal DESP QTY × FRT RATE, it is NOT the FRT AMT — keep looking, do not default to a nearby
+  tax column.
 DATE: trip date
 
 STRICT RULES:
