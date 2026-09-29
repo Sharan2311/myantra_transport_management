@@ -41,11 +41,14 @@ GR NO:
 CONSIGNEE NAME: May wrap across 2-3 lines — join all parts
 DESP QTY: decimal number in MT (e.g. 36.00)
 FRT RATE: rate per MT (e.g. 1219.00)
-FRT AMT: should equal DESP QTY x FRT RATE. This is the freight amount column, immediately
-  to the right of FRT RATE and immediately to the LEFT of KA TAX/TOLL TAX/BORDER ENTRY
-  CHARGES/IGST/CGST/SGST/TotalTax AMT. If a candidate number does not roughly equal
-  DESP QTY x FRT RATE, it is NOT the FRT AMT — keep looking, do not default to a nearby
-  tax column.
+FRT AMT: the freight amount column, immediately to the right of FRT RATE and immediately
+  to the LEFT of KA TAX/TOLL TAX/BORDER ENTRY CHARGES/IGST/CGST/SGST/TotalTax AMT. Copy the
+  number PRINTED in that column exactly as shown — never compute it, never substitute
+  DESP QTY x FRT RATE in its place. The equation DESP QTY x FRT RATE is only a sanity check
+  for WHICH column you are looking at: if a candidate number is wildly different from that
+  product (not merely rounded slightly differently), you have the wrong column — look again
+  for the actual FRT AMT cell instead of a nearby tax column. Once you have found the right
+  column, report the digits printed there, not a recalculated value.
 DATE: trip date
 
 STRICT RULES:
