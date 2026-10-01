@@ -675,7 +675,8 @@ function useDB(fetcher, initial = [], delay = 0, enabled = true) {
       const PARTY_FIELDS = ["receiptFilePath","receiptUploadedAt","mergedPdfPath",
         "orderType","grFilePath","invoiceFilePath","emailSentAt","partyEmail",
         "district","state","sealedInvoicePath","confirmFollowupUserId","confirmPdfPath",
-        "dieselIndentNo","dieselIndentLocked","dieselEstimate"];
+        "dieselIndentNo","dieselIndentLocked","dieselEstimate",
+        "dieselIndentNo2","dieselEstimate2"];
       setData(prev => {
         if(!Array.isArray(result)||!Array.isArray(prev)) return result;
         const prevMap = {};
@@ -767,6 +768,11 @@ const mkTrip = (o) => ({
   status:"Pending Bill", invoiceNo:"", paymentStatus:"Unpaid",
   driverSettled:false, dieselEstimate:0,
   dieselIndentNo:"", assignedEmpId:"",
+  // Second diesel indent on the same LR — owner-only, manual-only (never
+  // auto-attached). dieselEstimate2 is indent 2's OWN portion; dieselEstimate
+  // stays the COMBINED total (indent1 + indent2) so every existing net-pay/
+  // report site that just reads dieselEstimate keeps working unchanged.
+  dieselIndentNo2:"", dieselEstimate2:0,
   diLines:[], // [{diNo, grNo, qty, bags, givenRate}] — for multi-DI trips
   pendingApproval:false, pendingApprovalBy:"", pendingApprovalAt:"",
   createdBy:"system", createdAt:nowTs(), ...o
@@ -8033,6 +8039,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
 
   const blankForm = (isParty=false) => ({
     type:tripType, lrNo:"", diNo:"", truckNo:"", grNo:"", dieselIndentNo:"",
+    dieselIndentNo2:"", dieselEstimate2:"0",
     client: isIn ? getDEFAULT_CLIENT() : getDEFAULT_CLIENT(),
     consignee: isIn ? (RC.defaultConsignee || "") : "",
     from: isIn ? "" : "Kodla", to: isIn ? "Kodla" : "",
@@ -8342,6 +8349,19 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         return;
       }
     }
+    // Validate: 2nd diesel indent (owner-only, manual-only) — same uniqueness
+    // guarantee as the 1st, plus it can't be the same indent as slot 1.
+    if (f.dieselIndentNo2 && f.dieselIndentNo2.trim()) {
+      if (f.dieselIndentNo2.trim() === (f.dieselIndentNo||"").trim()) {
+        alert("2nd Diesel Indent can't be the same as the 1st.");
+        return;
+      }
+      if (trips.some(t => (t.dieselIndentNo && t.dieselIndentNo.trim()===f.dieselIndentNo2.trim())
+                        || (t.dieselIndentNo2 && t.dieselIndentNo2.trim()===f.dieselIndentNo2.trim()))) {
+        alert(`Indent No "${f.dieselIndentNo2}" already exists on another trip. Each indent number must be unique.`);
+        return;
+      }
+    }
     // Advance given — must explicitly pick an employee wallet, or explicit "None"
     if((+f.advance||0) > 0 && !f.cashEmpId) {
       alert("An advance is entered — please select which employee's wallet it comes from (or choose \"None\" if it shouldn't deduct from any wallet).");
@@ -8366,6 +8386,8 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       shortageRecovery:+f.shortageRecovery||0, loanRecovery:+f.loanRecovery||0,
       dieselEstimate:+f.dieselEstimate,
       dieselIndentNo: (f.dieselIndentNo||"").trim(),
+      dieselIndentNo2: (f.dieselIndentNo2||"").trim(),
+      dieselEstimate2: +f.dieselEstimate2||0,
       cashEmpId: f.cashEmpId||"",
       assignedEmpId: f.assignedEmpId||"",
       createdBy:user.username, createdAt:nowTs(),
@@ -8475,6 +8497,20 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         });
       }
     }
+    // ── 2nd diesel indent attach — owner-only, manual-only, same LR as slot 1 ──
+    if (t.dieselIndentNo2 && typeof setDieselRequests === "function") {
+      const indentNo2 = parseInt(t.dieselIndentNo2, 10);
+      const matchReq2 = (dieselRequests||[]).find(r =>
+        r.indentNo === indentNo2 && (r.status==="confirmed" || (r.status==="attached" && r.lrNo===t.lrNo))
+      );
+      if (matchReq2) {
+        const updReq2 = {...matchReq2, status:"attached", tripId:t.id, lrNo:t.lrNo||""};
+        setDieselRequests(p => p.map(r => r.id===matchReq2.id ? updReq2 : r));
+        saveDieselAttachSafe(setDieselRequests, matchReq2, updReq2, {log, context:"trip form, 2nd indent"}).then(ok => {
+          if (ok) log("DIESEL ATTACH (2ND)", `Indent #${matchReq2.indentNo} → LR ${t.lrNo} · ₹${matchReq2.confirmedAmount??matchReq2.amount} (trip form)`);
+        });
+      }
+    }
     setF(blankForm()); setAddSheet(false); setWasScanned(false);
   };
 
@@ -8569,9 +8605,19 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     const effIndentNo = nonOwnerBlocked ? origIndentNo : requestedIndentNo;
     const indentChanging = effIndentNo !== origIndentNo; // only true for an owner actually changing/clearing it
 
+    // ── Same lock protection, extended to the 2nd (owner-only, manual-only)
+    // indent — a stale/blank editSheet from a non-owner must never wipe it.
+    const requestedIndentNo2 = (editSheet.dieselIndentNo2||"").trim();
+    const origIndentNo2 = (origTrip?.dieselIndentNo2||"").trim();
+    const effIndentNo2 = nonOwnerBlocked ? origIndentNo2 : requestedIndentNo2;
+    const indentChanging2 = effIndentNo2 !== origIndentNo2;
+
     // Sync dieselEstimate from live request amount (not stale editSheet snapshot)
     const _saveReq = effIndentNo ? (dieselRequests||[]).find(r=>String(r.indentNo)===effIndentNo) : null;
-    const _liveDieselEst = _saveReq ? Number(_saveReq.amount||0) : (nonOwnerBlocked ? +origTrip.dieselEstimate : +editSheet.dieselEstimate); // amount is always diesel+cash total
+    const _liveDieselEst1 = _saveReq ? Number(_saveReq.amount||0) : (nonOwnerBlocked ? +origTrip.dieselEstimate - (+origTrip.dieselEstimate2||0) : +editSheet.dieselEstimate - (+editSheet.dieselEstimate2||0)); // amount is always diesel+cash total
+    const _saveReq2 = effIndentNo2 ? (dieselRequests||[]).find(r=>String(r.indentNo)===effIndentNo2) : null;
+    const _liveDieselEst2 = _saveReq2 ? Number(_saveReq2.amount||0) : (nonOwnerBlocked ? +origTrip.dieselEstimate2||0 : +editSheet.dieselEstimate2||0);
+    const _liveDieselEst = _liveDieselEst1 + _liveDieselEst2; // combined total — what every net-pay/report site reads
     // Pending-approval outcome — an owner save always resolves it (clears
     // the flag) regardless of the resulting net, since the owner is never
     // restricted by this. A non-owner save (only reachable here for a trip
@@ -8582,7 +8628,8 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     setTrips(p => p.map(t => t.id===editSheet.id ? {
       ...editSheet,
       dieselIndentNo: effIndentNo,
-      dieselIndentLocked: !!effIndentNo, // re-locks on a (re)attach, unlocks if the owner cleared it
+      dieselIndentNo2: effIndentNo2,
+      dieselIndentLocked: !!(effIndentNo||effIndentNo2), // re-locks on a (re)attach of either slot, unlocks only once both are cleared
       qty:+editSheet.qty, bags:+editSheet.bags,
       frRate: blendedFrRate || +editSheet.frRate,
       givenRate: blendedGivenRate,
@@ -8591,6 +8638,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       shortage:+editSheet.shortage, tafal:+editSheet.tafal,
       shortageRecovery:+editSheet.shortageRecovery||0, loanRecovery:+editSheet.loanRecovery||0,
       dieselEstimate:_liveDieselEst,
+      dieselEstimate2:_liveDieselEst2,
       cashEmpId: editSheet.cashEmpId||"",
       pendingApproval: _needsApproval,
       pendingApprovalBy: _needsApproval ? user.username : "",
@@ -8626,11 +8674,36 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         }
       }
     }
-    if (nonOwnerBlocked && requestedIndentNo !== origIndentNo) {
+    // ── Same attach/detach diffing, for the 2nd indent ──────────────────────
+    if (indentChanging2 && typeof setDieselRequests === "function") {
+      if (origIndentNo2) {
+        const oldReq2 = (dieselRequests||[]).find(r => String(r.indentNo)===origIndentNo2 && r.tripId===editSheet.id);
+        if (oldReq2) {
+          const detached2 = {...oldReq2, status:"confirmed", tripId:"", lrNo:""};
+          setDieselRequests(p => p.map(r => r.id===oldReq2.id ? detached2 : r));
+          DB.saveDieselRequest(detached2).catch(e=>console.error("saveDieselRequest detach 2nd (edit save):",e));
+          log&&log("DIESEL DETACH (2ND)", `Indent #${oldReq2.indentNo} ← LR ${editSheet.lrNo} (owner edit)`);
+        }
+      }
+      if (effIndentNo2) {
+        const indentNo2 = parseInt(effIndentNo2, 10);
+        const matchReq2 = (dieselRequests||[]).find(r =>
+          r.indentNo === indentNo2 && r.status==="confirmed"
+        );
+        if (matchReq2) {
+          const updReq2 = {...matchReq2, status:"attached", tripId:editSheet.id, lrNo:editSheet.lrNo||""};
+          setDieselRequests(p => p.map(r => r.id===matchReq2.id ? updReq2 : r));
+          saveDieselAttachSafe(setDieselRequests, matchReq2, updReq2, {log, context:"edit save, 2nd indent"}).then(ok => {
+            if (ok) log("DIESEL ATTACH (2ND)", `Indent #${matchReq2.indentNo} → LR ${editSheet.lrNo} (edit save)`);
+          });
+        }
+      }
+    }
+    if (nonOwnerBlocked && (requestedIndentNo !== origIndentNo || requestedIndentNo2 !== origIndentNo2)) {
       // Their form tried to change/clear it — we silently kept the
       // original rather than pretend the field doesn't exist. Everything
       // else in this edit still saved.
-      alert(`This trip's diesel indent (#${origIndentNo}) is locked — only the owner can change or remove it. Your other changes were saved.`);
+      alert(`This trip's diesel indent${origIndentNo2?"s":""} (#${origIndentNo}${origIndentNo2?`, #${origIndentNo2}`:""}) ${origIndentNo2?"are":"is"} locked — only the owner can change or remove them. Your other changes were saved.`);
     }
     // Sync vehicle ledger to exactly match this trip's current recovery fields.
     // Always runs (not just when the value changed) so it self-heals any prior
@@ -9244,8 +9317,13 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
               const dieselReqByTripId = !dieselReqByIndent ? (dieselRequests||[]).find(r=>r.tripId===t.id && r.status==="attached") : null;
               const dieselReq = dieselReqByIndent || dieselReqByTripId;
               const effectiveDieselIndentNo = t.dieselIndentNo || (dieselReqByTripId ? String(dieselReqByTripId.indentNo) : "");
+              // 2nd diesel indent (owner-only, manual-only) — its live amount is added
+              // on top of indent 1's below, so this badge never undercounts once a
+              // trip has two indents attached.
+              const dieselReq2 = t.dieselIndentNo2 ? (dieselRequests||[]).find(r=>String(r.indentNo)===String(t.dieselIndentNo2).trim()) : null;
+              const liveDiesel2 = dieselReq2 ? Number(dieselReq2.confirmedAmount??dieselReq2.amount??0) : (t.dieselEstimate2||0);
               const displayDiesel = confirmedDiesel>0 ? confirmedDiesel
-                : dieselReq ? (dieselReq.confirmedAmount??dieselReq.amount)
+                : dieselReq ? (Number(dieselReq.confirmedAmount??dieselReq.amount??0) + liveDiesel2)
                 : (t.dieselEstimate||0);
               const calc = calcNet(t, v, confirmedDiesel > 0 ? confirmedDiesel : null);
               const paidSoFar = (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
@@ -9499,10 +9577,10 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                         effectiveDieselIndentNo && setNavTarget && setTab && can(user,"diesel") ? (
                           <span onClick={()=>{ setNavTarget({type:"diesel", indentNo:effectiveDieselIndentNo}); setTab("diesel"); }}
                             style={{cursor:"pointer"}}>
-                            <Badge label={`⛽ #${effectiveDieselIndentNo}${displayDiesel>0?" "+fmt(displayDiesel):""}`} color={C.orange} />
+                            <Badge label={`⛽ #${effectiveDieselIndentNo}${t.dieselIndentNo2?`+#${t.dieselIndentNo2}`:""}${displayDiesel>0?" "+fmt(displayDiesel):""}`} color={C.orange} />
                           </span>
                         ) : (
-                          <Badge label={`⛽${effectiveDieselIndentNo?" #"+effectiveDieselIndentNo:""}${displayDiesel>0?" "+fmt(displayDiesel):""}`} color={C.orange} />
+                          <Badge label={`⛽${effectiveDieselIndentNo?" #"+effectiveDieselIndentNo:""}${t.dieselIndentNo2?`+#${t.dieselIndentNo2}`:""}${displayDiesel>0?" "+fmt(displayDiesel):""}`} color={C.orange} />
                         )
                       )}
                       {t.driverSettled   && <Badge label="✓ Settled"          color={C.green} />}
@@ -10083,6 +10161,12 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                           if((indents||[]).some(i=>i.indentNo&&String(i.indentNo).trim()===f.dieselIndentNo.trim()))
                             {alert(`Indent No "${f.dieselIndentNo}" already exists in Diesel records.\nIndent No ಡೀಸೆಲ್ ರೆಕಾರ್ಡ್‌ನಲ್ಲಿ ಇದೆ.`);return;}
                         }
+                        if(f.dieselIndentNo2&&f.dieselIndentNo2.trim()){
+                          if(f.dieselIndentNo2.trim()===(f.dieselIndentNo||"").trim())
+                            {alert("2nd Diesel Indent can't be the same as the 1st.");return;}
+                          if(trips.some(t=>(t.dieselIndentNo&&t.dieselIndentNo.trim()===f.dieselIndentNo2.trim())||(t.dieselIndentNo2&&t.dieselIndentNo2.trim()===f.dieselIndentNo2.trim())))
+                            {alert(`Indent No "${f.dieselIndentNo2}" already exists on another trip.`);return;}
+                        }
                         // LR is auto-assigned from DB — no manual duplicate check needed
                         const _gross=(+f.qty||0)*(+f.givenRate||0);
                         const _net=_gross-(+f.advance||0)-(+f.tafal||0)-(+f.dieselEstimate||0)-(+f.shortageRecovery||0)-(+f.loanRecovery||0);
@@ -10173,6 +10257,8 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                             shortageRecovery:+f.shortageRecovery||0, loanRecovery:+f.loanRecovery||0,
                             dieselEstimate:+f.dieselEstimate,
                             dieselIndentNo:(f.dieselIndentNo||"").trim(),
+                            dieselIndentNo2:(f.dieselIndentNo2||"").trim(),
+                            dieselEstimate2:+f.dieselEstimate2||0,
                             orderType:"party", district:f.district||"", state:f.state||"",
                             client: f.client||getDEFAULT_CLIENT(),
                             grFilePath:grUrl, invoiceFilePath:invUrl, mergedPdfPath:"",
@@ -11299,6 +11385,97 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
           </div>
         );
       })()}
+
+      {/* ⛽ 2nd Diesel Indent — owner-only, manual-only. Never auto-attached;
+          only shows up once a 1st indent is already attached, for the rare
+          case of a second fill-up on the same LR. dieselEstimate stays the
+          COMBINED total of both indents; dieselEstimate2 is indent 2's own
+          portion, kept so it can be split back out when editing/removing. */}
+      {isOwner && (f.dieselIndentNo||"").trim() && (()=>{
+        const truck = (f.truckNo||"").trim().toUpperCase();
+        const val1  = (f.dieselIndentNo||"").trim();
+        const val2  = (f.dieselIndentNo2||"").trim();
+        const req1  = val1 ? (dieselRequests||[]).find(r=>String(r.indentNo)===val1) : null;
+        const amt1Live = req1
+          ? Number(req1.dieselAmount??req1.confirmedAmount??req1.amount??0) + Number(req1.cashAmount||0)
+          : Math.max(0, (+f.dieselEstimate||0) - (+f.dieselEstimate2||0));
+        const req2 = val2 ? (dieselRequests||[]).find(r=>String(r.indentNo)===val2) : null;
+
+        const attachReq2 = (r) => {
+          const _rd = Number(r.dieselAmount??r.confirmedAmount??r.amount??0);
+          const _rc = Number(r.cashAmount||0);
+          const amt2 = _rd+_rc;
+          ff("dieselIndentNo2")(String(r.indentNo));
+          ff("dieselEstimate2")(String(amt2));
+          ff("dieselEstimate")(String(amt1Live+amt2));
+        };
+        const clearReq2 = () => {
+          ff("dieselIndentNo2")("");
+          ff("dieselEstimate2")("0");
+          ff("dieselEstimate")(String(amt1Live));
+        };
+
+        // Confirmed requests for the same truck, excluding whichever is slot 1,
+        // and excluding anything attached elsewhere unless it's already slot 2.
+        const candidates2 = (dieselRequests||[]).filter(r =>
+          r.truckNo===truck && String(r.indentNo)!==val1 &&
+          (r.status==="confirmed" || (r.status==="attached" && val2 && String(r.indentNo)===val2)));
+        const dupTrip2 = trips.find(t=>t.id!==f.id && (
+          (t.dieselIndentNo &&t.dieselIndentNo.trim()===val2) ||
+          (t.dieselIndentNo2&&t.dieselIndentNo2.trim()===val2)));
+
+        return (
+          <div style={{display:"flex",flexDirection:"column",gap:6,marginTop:-4}}>
+            <div style={{fontSize:11,color:C.muted,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>
+              ⛽ 2nd Diesel Indent (optional) <span style={{color:C.orange,fontSize:10}}>🔒 Owner only · manual</span>
+            </div>
+
+            {val2 && (
+              <div style={{background:C.teal+"11",border:`1.5px solid ${C.teal}`,borderRadius:8,padding:"9px 12px",
+                display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+                <div style={{flex:1}}>
+                  <div style={{fontWeight:700,fontSize:13,color:C.teal}}>#{val2}</div>
+                  <div style={{fontSize:11,color:C.muted,marginTop:2}}>₹{(+f.dieselEstimate2||0).toLocaleString("en-IN")}
+                    {req2 && <span style={{marginLeft:6}}>{req2.status==="confirmed"||req2.status==="attached"?"✓ Confirmed":"⚠ Not confirmed"}</span>}
+                  </div>
+                </div>
+                <button onClick={clearReq2}
+                  style={{background:"none",border:`1px solid ${C.red}44`,borderRadius:6,
+                    color:C.red,cursor:"pointer",fontSize:12,padding:"3px 8px",flexShrink:0}}>
+                  ✕ Remove
+                </button>
+              </div>
+            )}
+
+            {!val2 && candidates2.length>0 && (
+              <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                {candidates2.map(r=>{
+                  const amt = r.confirmedAmount??r.amount;
+                  return (
+                    <div key={r.id} onClick={()=>attachReq2(r)}
+                      style={{background:C.teal+"11",border:`1.5px solid ${C.teal}66`,borderRadius:8,
+                        padding:"9px 12px",cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontWeight:700,fontSize:13,color:C.teal}}>#{r.indentNo}</div>
+                        <div style={{fontSize:11,color:C.muted,marginTop:2}}>₹{amt.toLocaleString("en-IN")}</div>
+                      </div>
+                      <div style={{fontSize:12,fontWeight:700,color:C.teal,flexShrink:0}}>Attach</div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {!val2 && candidates2.length===0 && (
+              <div style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,
+                padding:"8px 12px",fontSize:11,color:C.muted,fontStyle:"italic"}}>
+                No other confirmed diesel requests for {truck||"this truck"} to attach as a 2nd indent.
+              </div>
+            )}
+            {dupTrip2&&<div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:8,padding:"7px 12px",fontSize:12,color:C.red,fontWeight:600}}>⚠ Indent already used on LR {dupTrip2.lrNo||"—"} ({dupTrip2.truckNo} · {dupTrip2.date})</div>}
+          </div>
+        );
+      })()}
+
       {showStatus && (
         user?.role==="owner"
           ? <Field label="Status" value={f.status||"Pending Bill"} onChange={ff("status")}
@@ -18550,9 +18727,11 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                         {user.role==="owner" && !isEditing && (
                           <button onClick={async()=>{
                             const indentStr = String(req.indentNo);
-                            // Find any trips that reference this indent
+                            // Find any trips that reference this indent, in EITHER slot —
+                            // a trip can have this indent as its 1st or 2nd diesel attach.
                             const linkedTrips = (trips||[]).filter(t =>
-                              t.dieselIndentNo && t.dieselIndentNo.trim() === indentStr
+                              (t.dieselIndentNo && t.dieselIndentNo.trim() === indentStr) ||
+                              (t.dieselIndentNo2 && t.dieselIndentNo2.trim() === indentStr)
                             );
                             const linkedLRs = linkedTrips.map(t=>t.lrNo||t.truckNo).join(", ");
                             const msg = req.status==="open"
@@ -18562,22 +18741,27 @@ The number will be reused for the next request.`
                                 ? `Delete confirmed indent #${req.indentNo} for ${req.truckNo}?
 
 ⚠ This indent is linked to LR: ${linkedLRs}
-Deleting will clear the Diesel Estimate and Indent No from that trip.
+Deleting will clear it from that trip's diesel total${linkedTrips.some(t=>(t.dieselIndentNo2||"").trim()===indentStr || (t.dieselIndentNo||"").trim())===false?"":" (the other diesel indent on that trip, if any, is kept)"}.
 
 Only delete if recorded in error.`
                                 : `Delete confirmed indent #${req.indentNo} for ${req.truckNo}?
 This was already dispensed — only delete if it was recorded in error.`;
                             if(!window.confirm(msg)) return;
-                            // Cascade: clear dieselEstimate + dieselIndentNo on any linked trips
+                            // Cascade: clear ONLY the matching slot on each linked trip,
+                            // subtracting just that slot's own portion from the combined
+                            // dieselEstimate total — never zeroing out the other indent.
                             if(linkedTrips.length>0) {
                               const updatedTrips = (trips||[]).map(t => {
-                                if(t.dieselIndentNo && t.dieselIndentNo.trim()===indentStr) {
-                                  const cleared = {...t, dieselEstimate:0, dieselIndentNo:""};
-                                  DB.saveTrip(cleared).catch(e=>console.error("cascade saveTrip:",e));
-                                  log("INDENT CASCADE CLEAR", `LR ${t.lrNo||t.truckNo} — diesel cleared (indent #${req.indentNo} deleted)`);
-                                  return cleared;
-                                }
-                                return t;
+                                const isSlot1 = t.dieselIndentNo && t.dieselIndentNo.trim()===indentStr;
+                                const isSlot2 = t.dieselIndentNo2 && t.dieselIndentNo2.trim()===indentStr;
+                                if(!isSlot1 && !isSlot2) return t;
+                                const est2 = +t.dieselEstimate2||0;
+                                const cleared = isSlot2
+                                  ? {...t, dieselIndentNo2:"", dieselEstimate2:0, dieselEstimate:Math.max(0,(+t.dieselEstimate||0)-est2)}
+                                  : {...t, dieselIndentNo:"", dieselEstimate:est2, dieselIndentLocked:!!t.dieselIndentNo2};
+                                DB.saveTrip(cleared).catch(e=>console.error("cascade saveTrip:",e));
+                                log("INDENT CASCADE CLEAR", `LR ${t.lrNo||t.truckNo} — diesel ${isSlot2?"2nd indent":""} cleared (indent #${req.indentNo} deleted)`);
+                                return cleared;
                               });
                               setTrips(updatedTrips);
                             }
@@ -27398,10 +27582,20 @@ function BulkSettleSheet({ unpaidTrips=[], employees=[], vehicles=[], user, onSa
       (a.date||"").localeCompare(b.date||"") || (a.createdAt||"").localeCompare(b.createdAt||""));
   }, [unpaidTrips, filterMode, selEmpId, vehicleQ]);
 
+  // Identity key for the candidate set, by trip id — NOT the array itself.
+  // `unpaidTrips` is recomputed inline on every DriverPayments render (not
+  // memoized), and the 45s background poll in useDB replaces `trips` with a
+  // brand-new array reference every cycle even when nothing changed. Without
+  // this, `candidates` below gets a new reference on every poll tick, and an
+  // effect keyed on that reference would silently re-fire and wipe out any
+  // trip the owner had just manually unchecked — this is exactly that bug.
+  const candidateIdsKey = React.useMemo(() => candidates.map(t=>t.id).join("|"), [candidates]);
+
   // Re-run the oldest-first (allow slight overshoot) auto-pick whenever the
-  // filter or amount changes. This only sets the STARTING checkbox state —
-  // the owner's own clicks afterward are never overwritten by this effect
-  // unless the filter/amount itself changes again.
+  // actual SET of candidate trips or the amount changes. This only sets the
+  // STARTING checkbox state — the owner's own clicks afterward are never
+  // overwritten by this effect unless the candidate set or amount itself
+  // genuinely changes (not merely re-rendered with the same trips).
   React.useEffect(() => {
     const amt = +amount || 0;
     if (amt <= 0 || candidates.length === 0) { setCheckedIds(new Set()); return; }
@@ -27418,7 +27612,7 @@ function BulkSettleSheet({ unpaidTrips=[], employees=[], vehicles=[], user, onSa
     }
     setCheckedIds(ids);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [candidates, amount]);
+  }, [candidateIdsKey, amount]);
 
   // Default "Paid To" from the chosen employee/vehicle's driver — only while
   // the owner hasn't typed their own value into that field.
