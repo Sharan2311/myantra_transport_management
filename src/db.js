@@ -16,6 +16,10 @@ const tripFromDB = r => ({
   createdBy: r.created_by, createdAt: r.created_at,
   diLines: r.di_lines || [],
   dieselIndentNo: r.diesel_indent_no || "",
+  // 2nd diesel indent on the same LR — owner-only, manual-only (never
+  // auto-attached). See mkTrip() in App.jsx for the full field contract.
+  dieselIndentNo2: r.diesel_indent_no_2 || "",
+  dieselEstimate2: +(r.diesel_estimate_2||0),
   lr: r.lr || r.lr_no || "",
   truck: r.truck || r.truck_no || "",
   billedToShree: +(r.billed_to_shree||0),
@@ -91,6 +95,8 @@ const tripToDB = t => ({
   created_by: t.createdBy, created_at: t.createdAt,
   di_lines: t.diLines || [],
   diesel_indent_no: t.dieselIndentNo || "",
+  diesel_indent_no_2: t.dieselIndentNo2 || "",
+  diesel_estimate_2: t.dieselEstimate2 || 0,
   lr: t.lr || t.lrNo || "",
   truck: t.truck || t.truckNo || "",
   billed_to_shree: t.billedToShree || 0,
