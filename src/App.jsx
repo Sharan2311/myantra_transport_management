@@ -7899,7 +7899,7 @@ function SealedInvoiceSheet({ trip, onMerge, onClose, embedded=false }) {
                 background:C.card,borderRadius:8,padding:"7px 10px",marginBottom:6}}>
                 <span style={{color:C.text,fontSize:12,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{f.name}</span>
                 <button onClick={()=>removeFileFromDI(diIdx,fi)}
-                  style={{background:"none",border:"none",color:C.red,fontSize:16,cursor:"pointer",marginLeft:6}}>�</button>
+                  style={{background:"none",border:"none",color:C.red,fontSize:16,cursor:"pointer",marginLeft:6}}>�</button>
               </div>
             ))}
             <FileSourcePicker onFile={f=>addFileToDI(diIdx,f)} accept="image/*,application/pdf"
@@ -7919,7 +7919,7 @@ function SealedInvoiceSheet({ trip, onMerge, onClose, embedded=false }) {
               background:C.card,borderRadius:8,padding:"8px 10px",marginBottom:6}}>
               <span style={{color:C.text,fontSize:12,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{f.name}</span>
               <button onClick={()=>removeFileFromDI(0,i)}
-                style={{background:"none",border:"none",color:C.red,fontSize:16,cursor:"pointer",marginLeft:6}}>�</button>
+                style={{background:"none",border:"none",color:C.red,fontSize:16,cursor:"pointer",marginLeft:6}}>�</button>
             </div>
           ))}
           <FileSourcePicker onFile={f=>addFileToDI(0,f)} accept="image/*,application/pdf"
@@ -27321,6 +27321,178 @@ const DIESEL_GATE_TXT = {
   },
 };
 
+// ─── BULK SETTLE BY AMOUNT ──────────────────────────────────────────────────
+// Owner enters an amount paid + picks an employee or a vehicle number; this
+// pre-selects that employee's/vehicle's oldest unpaid trips (oldest first,
+// allowing the running total to slightly overshoot the entered amount rather
+// than stop short) so the owner isn't ticking boxes one by one. The owner can
+// still tick/untick any trip before confirming — nothing is settled until
+// they hit the final button. One shared Transaction ID is recorded against
+// every selected trip's own payment record (each trip is paid its own full
+// balance — this doesn't split or prorate the entered amount across trips).
+function BulkSettleSheet({ unpaidTrips=[], employees=[], vehicles=[], user, onSave, onCancel }) {
+  const [filterMode, setFilterMode] = useState("employee"); // employee | vehicle
+  const [selEmpId,   setSelEmpId]   = useState("");
+  const [vehicleQ,   setVehicleQ]   = useState("");
+  const [amount,     setAmount]     = useState("");
+  const [utr,        setUtr]        = useState("");
+  const [date,       setDate]       = useState(today());
+  const [paidTo,     setPaidTo]     = useState("");
+  const [notes,      setNotes]      = useState("");
+  const [checkedIds, setCheckedIds] = useState(new Set());
+  const [touchedPaidTo, setTouchedPaidTo] = useState(false); // stop auto-fill once owner edits it by hand
+
+  const candidates = React.useMemo(() => {
+    let list;
+    if (filterMode === "employee") {
+      if (!selEmpId) return [];
+      list = unpaidTrips.filter(t => t.assignedEmpId === selEmpId);
+    } else {
+      const q = vehicleQ.trim().toUpperCase();
+      if (!q) return [];
+      list = unpaidTrips.filter(t => (t.truckNo||"").toUpperCase() === q);
+    }
+    return [...list].sort((a,b) =>
+      (a.date||"").localeCompare(b.date||"") || (a.createdAt||"").localeCompare(b.createdAt||""));
+  }, [unpaidTrips, filterMode, selEmpId, vehicleQ]);
+
+  // Re-run the oldest-first (allow slight overshoot) auto-pick whenever the
+  // filter or amount changes. This only sets the STARTING checkbox state —
+  // the owner's own clicks afterward are never overwritten by this effect
+  // unless the filter/amount itself changes again.
+  React.useEffect(() => {
+    const amt = +amount || 0;
+    if (amt <= 0 || candidates.length === 0) { setCheckedIds(new Set()); return; }
+    let running = 0;
+    const ids = new Set();
+    for (const t of candidates) {
+      if (running >= amt) break;
+      const withIt     = running + t.balance;
+      const shortBefore = amt - running;
+      const overAfter   = withIt - amt;
+      if (overAfter > 0 && overAfter > shortBefore) break; // overshooting would move further away than stopping short
+      ids.add(t.id);
+      running = withIt;
+    }
+    setCheckedIds(ids);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [candidates, amount]);
+
+  // Default "Paid To" from the chosen employee/vehicle's driver — only while
+  // the owner hasn't typed their own value into that field.
+  React.useEffect(() => {
+    if (touchedPaidTo) return;
+    if (filterMode === "employee") {
+      const emp = employees.find(e=>e.id===selEmpId);
+      if (emp) setPaidTo(emp.name);
+    } else {
+      const veh = vehicles.find(v=>(v.truckNo||"").toUpperCase()===vehicleQ.trim().toUpperCase());
+      if (veh?.driverName) setPaidTo(veh.driverName);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterMode, selEmpId, vehicleQ, touchedPaidTo]);
+
+  const toggle = id => setCheckedIds(prev => {
+    const n = new Set(prev);
+    n.has(id) ? n.delete(id) : n.add(id);
+    return n;
+  });
+
+  const checkedTrips  = candidates.filter(t => checkedIds.has(t.id));
+  const runningTotal  = checkedTrips.reduce((s,t)=>s+t.balance, 0);
+  const amt           = +amount || 0;
+  const diff          = runningTotal - amt;
+  const filterChosen  = filterMode==="employee" ? !!selEmpId : !!vehicleQ.trim();
+
+  const [saving, setSaving] = useState(false);
+  const handleSettle = async () => {
+    if (saving) return;
+    if (checkedTrips.length === 0) { alert("Select at least one trip to settle."); return; }
+    if (!window.confirm(
+      `Settle ${checkedTrips.length} trip${checkedTrips.length!==1?"s":""} totalling ${fmt(runningTotal)}`+
+      `${utr.trim()?` with Transaction ID "${utr.trim()}"`:""}?\n\n`+
+      `Each selected trip's full remaining balance will be recorded as paid.`
+    )) return;
+    const payments = checkedTrips.map(t => ({
+      id: uid(), tripId: t.id, truckNo: t.truckNo, lrNo: t.lrNo,
+      amount: t.balance, utr: utr.trim(), date, paidTo: paidTo.trim(), notes: notes.trim(),
+    }));
+    setSaving(true);
+    try { await onSave(payments); } finally { setSaving(false); }
+  };
+
+  return (
+    <Sheet title="💰 Settle by Amount" onClose={onCancel}>
+      <div style={{display:"flex",flexDirection:"column",gap:14}}>
+        <div style={{display:"flex",gap:8}}>
+          {[{id:"employee",label:"👤 By Employee"},{id:"vehicle",label:"🚛 By Vehicle"}].map(m=>(
+            <button key={m.id} onClick={()=>{
+                setFilterMode(m.id); setSelEmpId(""); setVehicleQ(""); setCheckedIds(new Set());
+              }}
+              style={{flex:1,padding:"9px 0",borderRadius:8,fontWeight:700,fontSize:12,cursor:"pointer",border:"none",
+                background:filterMode===m.id?C.purple:C.card, color:filterMode===m.id?"#fff":C.muted}}>
+              {m.label}
+            </button>
+          ))}
+        </div>
+
+        {filterMode==="employee" ? (
+          <div>
+            <div style={{color:C.muted,fontSize:11,marginBottom:4,fontWeight:700}}>EMPLOYEE</div>
+            <select value={selEmpId} onChange={e=>setSelEmpId(e.target.value)}
+              style={{width:"100%",background:C.bg,border:`1.5px solid ${selEmpId?C.purple:C.border}`,
+                borderRadius:8,color:C.text,padding:"9px 12px",fontSize:13,outline:"none"}}>
+              <option value="">— Choose employee —</option>
+              {employees.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
+            </select>
+          </div>
+        ) : (
+          <Field label="Vehicle Number" value={vehicleQ} onChange={v=>setVehicleQ(v.toUpperCase())} placeholder="e.g. KA28AA1234" />
+        )}
+
+        <Field label="Amount Paid ₹" value={amount} onChange={setAmount} type="number" />
+
+        {filterChosen && amt>0 && (
+          <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:C.muted,marginBottom:6,flexWrap:"wrap",gap:4}}>
+              <span>{candidates.length} unpaid trip{candidates.length!==1?"s":""} found</span>
+              <span>Selected: <b style={{color:C.text}}>{fmt(runningTotal)}</b>
+                {diff!==0 && <span style={{color:diff>0?C.orange:C.blue,marginLeft:4}}>({diff>0?"+":""}{fmt(diff)})</span>}
+              </span>
+            </div>
+            {candidates.length===0 && <div style={{color:C.muted,fontSize:12}}>No unpaid trips match this filter.</div>}
+            <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:280,overflowY:"auto"}}>
+              {candidates.map(t=>(
+                <label key={t.id} style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",
+                  background:checkedIds.has(t.id)?C.purple+"11":C.card,
+                  border:`1px solid ${checkedIds.has(t.id)?C.purple+"55":C.border}`,borderRadius:8,padding:"8px 10px"}}>
+                  <input type="checkbox" checked={checkedIds.has(t.id)} onChange={()=>toggle(t.id)} />
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontWeight:700,fontSize:13}}>{t.truckNo} <span style={{color:C.muted,fontWeight:400}}>LR:{t.lrNo||"—"}</span></div>
+                    <div style={{color:C.muted,fontSize:11}}>{t.date} · {t.from}→{t.to}</div>
+                  </div>
+                  <div style={{fontWeight:700,color:C.accent,whiteSpace:"nowrap"}}>{fmt(t.balance)}</div>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div style={{display:"flex",gap:10}}>
+          <Field label="Transaction ID" value={utr} onChange={setUtr} placeholder="UTR / Ref no." half />
+          <Field label="Date" value={date} onChange={setDate} type="date" half />
+        </div>
+        <Field label="Paid To" value={paidTo} onChange={v=>{setPaidTo(v); setTouchedPaidTo(true);}} placeholder="Recipient name…" />
+        <Field label="Notes" value={notes} onChange={setNotes} placeholder="Optional" />
+
+        <Btn onClick={handleSettle} full color={C.green} disabled={checkedTrips.length===0||saving}>
+          {saving ? "Settling…" : `✓ Settle ${checkedTrips.length} Trip${checkedTrips.length!==1?"s":""} — ${fmt(runningTotal)}`}
+        </Btn>
+      </div>
+    </Sheet>
+  );
+}
+
 function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, vehicles, setVehicles, employees, setEmployees, cashTransfers, setCashTransfers, paymentRequests=[], setPaymentRequests, indents=[], dieselRequests=[], setDieselRequests, settings, user, log, viewOnly=false, setTab}) {
   const [filter,    setFilter]    = useState("unpaid");
   // Party-order sub-filter + bulk "mark settled" (owner only) — for party trips
@@ -27329,6 +27501,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
   const [orderTypeFilter, setOrderTypeFilter] = useState("all"); // all | party | godown
   const [selectMode,      setSelectMode]      = useState(false);
   const [selectedTripIds, setSelectedTripIds] = useState(new Set());
+  const [bulkSettleSheet, setBulkSettleSheet]  = useState(false); // owner: settle-by-amount sheet open?
   const [paySheet,  setPaySheet]  = useState(null);
   const [payReqSheet,   setPayReqSheet]   = useState(null); // trip for request payment
   // ── Return Pouch / Confirmation deadline gate ──────────────────────────────
@@ -27961,13 +28134,18 @@ This will auto-recover in the next trip.`);
             ))}
           </div>
           {filter==="unpaid" && (
-            <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
               <button onClick={()=>{setSelectMode(m=>!m); setSelectedTripIds(new Set());}}
                 style={{padding:"6px 14px",borderRadius:8,fontSize:12,fontWeight:700,cursor:"pointer",
                   background:selectMode?C.purple+"22":"transparent",
                   border:`1.5px solid ${selectMode?C.purple:C.border}`,
                   color:selectMode?C.purple:C.muted}}>
                 {selectMode?"✓ Selecting…":"☑ Select Multiple"}
+              </button>
+              <button onClick={()=>setBulkSettleSheet(true)}
+                style={{padding:"6px 14px",borderRadius:8,fontSize:12,fontWeight:700,cursor:"pointer",
+                  background:"transparent",border:`1.5px solid ${C.green}`,color:C.green}}>
+                💰 Settle by Amount
               </button>
               {selectMode && selectedTripIds.size>0 && (
                 <Btn onClick={()=>{
@@ -28685,6 +28863,18 @@ This will auto-recover in the next trip.`);
           log={log}
           onSave={saveMultiPayment}
           onCancel={()=>setSplitSheet(null)}
+        />
+      )}
+
+      {/* ── BULK SETTLE BY AMOUNT (owner) ── */}
+      {bulkSettleSheet && (
+        <BulkSettleSheet
+          unpaidTrips={unpaidTrips}
+          employees={employees||[]}
+          vehicles={vehicles||[]}
+          user={user}
+          onSave={async (payments) => { await saveMultiPayment(payments); setBulkSettleSheet(false); }}
+          onCancel={()=>setBulkSettleSheet(false)}
         />
       )}
     </div>
