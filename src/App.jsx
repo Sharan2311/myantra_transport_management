@@ -20288,7 +20288,8 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
   const [lAmt,  setLAmt]  = useState(""); const [lDate,  setLDate]  = useState(new Date().toISOString().slice(0,10));
   const [lRef,  setLRef]  = useState(""); const [lAcct,  setLAcct]  = useState("");
   const [lAcct2,setLAcct2]= useState(""); // vehicle selector for multi-vehicle owner
-  // Recovery form  
+  const [lEmpId,setLEmpId]= useState(""); // employee this specific loan is held against (optional)
+  // Recovery form
   const [rAmt,  setRAmt]  = useState(""); const [rDate,  setRDate]  = useState(new Date().toISOString().slice(0,10));
   const [rLR,   setRLR]   = useState(""); const [rRef,   setRRef]   = useState("");
   // Shortage form
@@ -20296,6 +20297,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
   const [shManual, setShManual] = useState(false); // manual LR mode for prev-year indents
   const [shManualLR, setShManualLR] = useState(""); // manually typed LR number
   const [shManualRate, setShManualRate] = useState(""); // rate for manual LR
+  const [shEmpId, setShEmpId] = useState(""); // employee this specific shortage is held against (optional)
   // Shortage recovery form
   const [srAmt, setSrAmt] = useState(""); const [srLR,   setSrLR]   = useState("");
   const [sdptVal,   setSdptVal]   = useState("0");
@@ -20335,8 +20337,8 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
     return false;
   });
 
-  const resetLoanForm = () => { setLAmt(""); setLDate(today()); setLRef(""); setLAcct(""); setLAcct2(""); setRAmt(""); setRDate(today()); setRLR(""); setRRef(""); };
-  const resetShForm   = () => { setShAmt(""); setShTrip(""); setSrAmt(""); setSrLR(""); };
+  const resetLoanForm = () => { setLAmt(""); setLDate(today()); setLRef(""); setLAcct(""); setLAcct2(""); setLEmpId(""); setRAmt(""); setRDate(today()); setRLR(""); setRRef(""); };
+  const resetShForm   = () => { setShAmt(""); setShTrip(""); setShEmpId(""); setSrAmt(""); setSrLR(""); };
 
   // Phone-only edit for non-owners
   const [phoneEditId,  setPhoneEditId]  = useState(null);
@@ -21167,10 +21169,14 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                     onChange={val=>setLAcct2(val)}
                     opts={ownerVehs.map(x=>({v:x.id,l:x.truckNo}))} />
                 )}
+                {(employees||[]).length>0 && (
+                  <Field label="Hold Employee Responsible (optional)" value={lEmpId} onChange={setLEmpId}
+                    opts={[{v:"",l:"— Not linked to an employee —"},...employees.map(e=>({v:e.id,l:e.name}))]} />
+                )}
                 <Btn onClick={()=>{
                   if(!lAmt||+lAmt<=0){alert("Enter loan amount.\nಸಾಲದ ಮೊತ್ತ ನಮೂದಿಸಿ.");return;}
                   const targetId = (ownerVehs.length>1 && lAcct2) ? lAcct2 : v.id;
-                  const txn={id:uid(),type:"given",date:lDate,amount:+lAmt,ref:lRef,accountName:lAcct,note:""};
+                  const txn={id:uid(),type:"given",date:lDate,amount:+lAmt,ref:lRef,accountName:lAcct,empId:lEmpId,note:""};
                   setVehicles(p=>p.map(x=>{
                     if(x.id!==targetId) return x;
                     const updated={...x, loan:(x.loan||0)+ +lAmt, loanTxns:[...(x.loanTxns||[]),txn]};
@@ -21178,8 +21184,9 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                     return updated;
                   }));
                   const targetTruck = ownerVehs.find(x=>x.id===targetId)?.truckNo||v.truckNo;
-                  log("ADD LOAN",`${ownerName||targetTruck} via ${targetTruck} ₹${fmt(+lAmt)} ref:${lRef||"—"}`);
-                  setLAmt(""); setLDate(today()); setLRef(""); setLAcct(""); setLAcct2("");
+                  const empTag = (employees||[]).find(e=>e.id===lEmpId);
+                  log("ADD LOAN",`${ownerName||targetTruck} via ${targetTruck} ₹${fmt(+lAmt)} ref:${lRef||"—"}${empTag?` — held: ${empTag.name}`:""}`);
+                  setLAmt(""); setLDate(today()); setLRef(""); setLAcct(""); setLAcct2(""); setLEmpId("");
                   setLSheet(null);
                 }} color={C.red} full>Add Loan</Btn>
               </div>
@@ -21269,6 +21276,22 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                         {tx.accountName&&<div style={{fontSize:11,color:C.muted}}>Acct: {tx.accountName}</div>}
                         {tx._truckNo&&ownerVehs.length>1&&<div style={{fontSize:11,color:C.blue}}>🚛 {tx._truckNo}</div>}
                         {tx.lrNo&&<div style={{fontSize:11,color:C.teal}}>LR: {tx.lrNo}</div>}
+                        {tx.type==="given" && isOwner && (employees||[]).length>0 && (
+                          <select value={tx.empId||""} onClick={e=>e.stopPropagation()}
+                            onChange={e=>{
+                              const newEmpId = e.target.value;
+                              const targetVeh = vehicles.find(x=>x.id===tx._vehicleId);
+                              if(!targetVeh) return;
+                              const updated = {...targetVeh, loanTxns:(targetVeh.loanTxns||[]).map(t=>t.id===tx.id?{...t,empId:newEmpId}:t)};
+                              setVehicles(p=>p.map(x=>x.id===tx._vehicleId?updated:x));
+                              DB.saveVehicle(updated).catch(err=>console.error("saveVehicle reassign loan empId:",err));
+                            }}
+                            style={{marginTop:4,background:C.card,border:`1px solid ${C.border}`,borderRadius:6,
+                              color:tx.empId?C.text:C.muted,fontSize:10,padding:"2px 4px",maxWidth:160}}>
+                            <option value="">— Hold employee responsible —</option>
+                            {employees.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
+                          </select>
+                        )}
                       </div>
                       {isOwner&&<button onClick={()=>{
                         if(tx.type==="recovery"){
@@ -21387,6 +21410,10 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                       half placeholder={`Search LR… (${vtrips.length} available)`} />
                   </div>
                 )}
+                {(employees||[]).length>0 && (
+                  <Field label="Hold Employee Responsible (optional)" value={shEmpId} onChange={setShEmpId}
+                    opts={[{v:"",l:"— Not linked to an employee —"},...employees.map(e=>({v:e.id,l:e.name}))]} />
+                )}
                 <Btn onClick={()=>{
                   if(!shAmt||+shAmt<=0){alert("Enter shortage amount.");return;}
                   let lrNo, amount, txnDate;
@@ -21402,7 +21429,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                     amount  = +shAmt;
                     txnDate = trip?.date||today();
                   }
-                  const txn={id:uid(),type:"shortage",date:txnDate,qty:0,lrNo,amount,note:shManual?"Manual/prev-year LR":""};
+                  const txn={id:uid(),type:"shortage",date:txnDate,qty:0,lrNo,amount,empId:shEmpId,note:shManual?"Manual/prev-year LR":""};
                   setVehicles(p=>p.map(x=>{
                     if(x.id!==sSheet) return x;
                     const updated={...x,
@@ -21411,8 +21438,9 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                     DB.saveVehicle(updated).catch(e=>console.error("saveVehicle shortage:",e));
                     return updated;
                   }));
-                  log("SHORTAGE",`${v.truckNo} ₹${amount} LR:${lrNo}${shManual?" [manual]":""}`);
-                  setShAmt(""); setShTrip(""); setShManualLR(""); setShManualRate("");
+                  const empTag = (employees||[]).find(e=>e.id===shEmpId);
+                  log("SHORTAGE",`${v.truckNo} ₹${amount} LR:${lrNo}${shManual?" [manual]":""}${empTag?` — held: ${empTag.name}`:""}`);
+                  setShAmt(""); setShTrip(""); setShManualLR(""); setShManualRate(""); setShEmpId("");
                   setSSheet(null);
                 }} color={C.red} full>Record Shortage</Btn>
               </div>
@@ -21485,6 +21513,20 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                         </div>
                         <div style={{fontSize:11,color:C.muted}}>{fmtD(tx.date)}</div>
                         {tx.lrNo&&<div style={{fontSize:11,color:C.blue}}>LR: {tx.lrNo}</div>}
+                        {tx.type==="shortage" && isOwner && (employees||[]).length>0 && (
+                          <select value={tx.empId||""} onClick={e=>e.stopPropagation()}
+                            onChange={e=>{
+                              const newEmpId = e.target.value;
+                              const updated = {...v, shortageTxns:(v.shortageTxns||[]).map(t=>t.id===tx.id?{...t,empId:newEmpId}:t)};
+                              setVehicles(p=>p.map(x=>x.id===sSheet?updated:x));
+                              DB.saveVehicle(updated).catch(err=>console.error("saveVehicle reassign shortage empId:",err));
+                            }}
+                            style={{marginTop:4,background:C.card,border:`1px solid ${C.border}`,borderRadius:6,
+                              color:tx.empId?C.text:C.muted,fontSize:10,padding:"2px 4px",maxWidth:160}}>
+                            <option value="">— Hold employee responsible —</option>
+                            {employees.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
+                          </select>
+                        )}
                       </div>
                       {isOwner&&<button onClick={()=>{
                         if(tx.type==="recovery"){
@@ -28897,7 +28939,13 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], trips=[],
   // sharing the SAME date/FY filter state above rather than duplicating it —
   // whatever period you were looking at carries straight through.
   const [showShortageDash, setShowShortageDash] = useState(false);
+  const [showLoanDash,     setShowLoanDash]     = useState(false); // Loan Recovery Dashboard — vehicle.loan ledger, not an expense category
   const [employeeFilter, setEmployeeFilter] = useState(""); // "" = all employees, else empId ("unassigned" is a valid value too)
+  const [loanEmployeeFilter, setLoanEmployeeFilter] = useState(""); // separate filter state for the Loan Dashboard, same shape as employeeFilter
+  // "Not Regular" idle threshold — shared by both the Loan and Shortage
+  // dashboards' irregularity flag (owner-adjustable, defaults to 20 days
+  // per the example given: no trip AND no recovery in that long).
+  const [idleThresholdDays, setIdleThresholdDays] = useState(20);
 
   const manualExps = Array.isArray(expenses) ? expenses : [];
   const bucketCats = bucket==="payment_advice" ? PA_DEBIT_DASHBOARD_CATEGORIES : MYANTRA_EXPENSE_CATEGORIES;
@@ -28952,21 +29000,54 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], trips=[],
     ? (actionItems||[]).filter(ai=>ai.type==="unassigned_shortage"&&ai.status==="open"&&inRange(ai.invoiceDate||"")).reduce((s,ai)=>s+(ai.amount||0),0)
     : 0;
 
+  // ── "Not Regular" idle flag — shared by Loan and Shortage dashboards ──────
+  // A vehicle is flagged only when it has a pending balance AND both signals
+  // have gone stale: no trip in idleThresholdDays, and no recovery entry in
+  // idleThresholdDays either. "Never happened" counts as infinitely stale so
+  // it doesn't block the flag — a vehicle that's never once been recovered
+  // against and also hasn't shown up for trips is exactly the case this is
+  // meant to catch.
+  const lastTripDateByTruck = {};
+  (trips||[]).forEach(t=>{
+    if(!t.truckNo || !t.date) return;
+    if(!lastTripDateByTruck[t.truckNo] || t.date > lastTripDateByTruck[t.truckNo]) lastTripDateByTruck[t.truckNo] = t.date;
+  });
+  const daysSinceOrInfinite = dateStr => dateStr ? daysSinceDate(dateStr) : Infinity;
+  const isVehicleIdle = (truckNo, lastRecoveryDate, pendingBalance) => {
+    if(pendingBalance <= 0) return false;
+    const dSinceTrip    = daysSinceOrInfinite(lastTripDateByTruck[truckNo]);
+    const dSinceRecover = daysSinceOrInfinite(lastRecoveryDate);
+    return dSinceTrip > idleThresholdDays && dSinceRecover > idleThresholdDays;
+  };
+
   // ── Shortage recovery breakdown — by vehicle and by employee ──────────────
+  // A manual empId set directly on a "shortage" txn (owner picked it when
+  // recording the shortage, or reassigned it later) always wins over the
+  // trip-inferred employee below — that's the explicit per-entry link the
+  // owner asked for, so it overrides the guess.
   const shortageByVehicle = (vehicles||[]).map(v=>{
-    let owed=0, recovered=0, noTripLinkedNet=0, lastLinkedEmpId="", hadLinkedTxn=false, hadUnlinkedTxn=false;
+    let owed=0, recovered=0, noTripLinkedNet=0, lastLinkedEmpId="", lastManualEmpId="", hadLinkedTxn=false, hadUnlinkedTxn=false;
     (v.shortageTxns||[]).forEach(t=>{
       if(!txnInPeriod(t)) return;
       const trip = linkedTripFor(t);
       const amt = t.amount||0;
       if(t.type==="recovery") recovered += amt; else owed += amt;
+      if(t.type==="shortage" && t.empId) lastManualEmpId = t.empId;
       if(trip) { hadLinkedTxn = true; lastLinkedEmpId = trip.assignedEmpId || lastLinkedEmpId; }
       else { hadUnlinkedTxn = true; noTripLinkedNet += (t.type==="recovery") ? -amt : amt; }
     });
-    const empId = hadLinkedTxn ? (lastLinkedEmpId || resolveEmpForTruck(v.truckNo, trips))
+    const empId = lastManualEmpId || (hadLinkedTxn ? (lastLinkedEmpId || resolveEmpForTruck(v.truckNo, trips))
                 : hadUnlinkedTxn ? NO_TRIP_KEY
-                : resolveEmpForTruck(v.truckNo, trips);
-    return { truckNo:v.truckNo, ownerName:v.ownerName||"", empId, owed, recovered, net:owed-recovered, noTripLinkedNet };
+                : resolveEmpForTruck(v.truckNo, trips));
+    // Idle check uses the ALL-TIME last shortage-recovery date on the vehicle,
+    // not just the ones falling inside any active date/FY filter — a filter
+    // narrows which totals are COUNTED, it shouldn't also hide genuinely
+    // recent recovery activity from the irregularity check.
+    const lastRecoveryDate = (v.shortageTxns||[])
+      .filter(t=>t.type==="recovery").map(t=>t.date).sort().slice(-1)[0] || "";
+    const net = owed-recovered;
+    return { truckNo:v.truckNo, ownerName:v.ownerName||"", empId, owed, recovered, net, noTripLinkedNet,
+      idle: isVehicleIdle(v.truckNo, lastRecoveryDate, net) };
   }).filter(x=>x.owed>0||x.recovered>0);
 
 
@@ -28975,7 +29056,7 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], trips=[],
     (v.shortageTxns||[]).forEach(t=>{
       if(!txnInPeriod(t)) return;
       const trip = linkedTripFor(t);
-      const key = trip ? (trip.assignedEmpId || "unassigned") : NO_TRIP_KEY;
+      const key = (t.type==="shortage" && t.empId) ? t.empId : (trip ? (trip.assignedEmpId || "unassigned") : NO_TRIP_KEY);
       if(!shortageByEmployee[key]) shortageByEmployee[key] = {empId:key, owed:0, recovered:0, net:0, trucks:new Set()};
       const amt = t.amount||0;
       if(t.type==="recovery") shortageByEmployee[key].recovered += amt; else shortageByEmployee[key].owed += amt;
@@ -28989,6 +29070,53 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], trips=[],
     .sort((a,b)=>b.net-a.net);
   const topEmployee = shortageByEmployeeList.find(x=>x.empId!==NO_TRIP_KEY);
   const topVehicle = [...shortageByVehicle].sort((a,b)=>b.net-a.net)[0];
+
+  // ── Loan recovery breakdown — mirrors the shortage breakdown above, but
+  // reads straight from vehicle.loan/loanRecovered/loanTxns (loans aren't an
+  // expense category, so none of the date/FY/bucket filtering above applies
+  // to them — this is always the live, all-time picture). Each "given" txn
+  // can carry its own empId (the owner picks it when giving the loan, or
+  // reassigns it later); when a vehicle's loans are split across more than
+  // one employee, a recovery is allocated across them in proportion to each
+  // employee's share of that vehicle's total given amount — exact for the
+  // common case of one employee per vehicle, approximate only when a
+  // vehicle's loans are deliberately split across people.
+  const loanByVehicle = (vehicles||[]).map(v=>{
+    const given     = v.loan||0;
+    const recovered = v.loanRecovered||0;
+    const pending   = Math.max(0, given-recovered);
+    const lastRecoveryDate = (v.loanTxns||[])
+      .filter(t=>t.type==="recovery").map(t=>t.date).sort().slice(-1)[0] || "";
+    const givenTxns = (v.loanTxns||[]).filter(t=>t.type==="given");
+    const empShares = {};
+    givenTxns.forEach(t=>{ const k=t.empId||"unassigned"; empShares[k]=(empShares[k]||0)+(t.amount||0); });
+    return {
+      truckNo:v.truckNo, ownerName:v.ownerName||"", given, recovered, net:pending,
+      empShares, lastRecoveryDate,
+      idle: isVehicleIdle(v.truckNo, lastRecoveryDate, pending),
+    };
+  }).filter(x=>x.given>0||x.recovered>0);
+
+  const loanByEmployee = {};
+  loanByVehicle.forEach(v=>{
+    const totalGivenThisVeh = Object.values(v.empShares).reduce((s,x)=>s+x,0) || 1;
+    Object.entries(v.empShares).forEach(([empId, givenShare])=>{
+      const ratio = givenShare / totalGivenThisVeh;
+      if(!loanByEmployee[empId]) loanByEmployee[empId] = {empId, given:0, recovered:0, net:0, trucks:new Set()};
+      loanByEmployee[empId].given     += givenShare;
+      loanByEmployee[empId].recovered += v.recovered * ratio;
+      loanByEmployee[empId].net        = loanByEmployee[empId].given - loanByEmployee[empId].recovered;
+      loanByEmployee[empId].trucks.add(v.truckNo);
+    });
+  });
+  const loanByEmployeeList = Object.values(loanByEmployee)
+    .map(x=>({...x, trucks:[...x.trucks]}))
+    .sort((a,b)=>b.net-a.net);
+  const loanMultiEmpVehicles = loanByVehicle.filter(v=>Object.keys(v.empShares).filter(k=>k!=="unassigned").length>1);
+  const topLoanEmployee = loanByEmployeeList.find(x=>x.empId!=="unassigned");
+  const topLoanVehicle  = [...loanByVehicle].sort((a,b)=>b.net-a.net)[0];
+  const idleLoanVehicles     = loanByVehicle.filter(x=>x.idle);
+  const idleShortageVehicles = shortageByVehicle.filter(x=>x.idle);
 
   const byCat = {};
   bucketCats.forEach(c=>{ byCat[c]=0; });
@@ -29078,7 +29206,29 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], trips=[],
           </select>
         </div>
 
+        {/* "Not Regular" idle threshold — owner-adjustable, shared with the Loan Dashboard */}
+        <div style={{background:C.card,borderRadius:12,padding:"10px 14px",display:"flex",alignItems:"center",gap:10}}>
+          <span style={{fontSize:12,color:C.muted,flex:1}}>Flag a vehicle as "Not Regular" if idle more than</span>
+          <input type="number" min={1} value={idleThresholdDays}
+            onChange={e=>setIdleThresholdDays(Math.max(1,+e.target.value||1))}
+            style={{width:56,background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:7,
+              padding:"5px 6px",fontSize:12,color:C.text,textAlign:"center"}} />
+          <span style={{fontSize:12,color:C.muted}}>days</span>
+        </div>
+
         <KPI icon="⚠" label={employeeFilter?`To Recover — ${empName(employeeFilter)}`:"Total To Recover"} value={fmt(filteredTotal)} color={C.red} />
+
+        {idleShortageVehicles.length>0 && (
+          <div style={{background:C.red+"11",border:`1px solid ${C.red}44`,borderRadius:10,padding:"10px 14px"}}>
+            <div style={{color:C.red,fontWeight:700,fontSize:12,marginBottom:6}}>🚩 Not Regular — {idleShortageVehicles.length} vehicle{idleShortageVehicles.length>1?"s":""} idle &gt;{idleThresholdDays} days with a pending balance</div>
+            {idleShortageVehicles.map(x=>(
+              <div key={x.truckNo} style={{display:"flex",justifyContent:"space-between",fontSize:12,padding:"3px 0"}}>
+                <span>{x.truckNo}{x.ownerName?` · ${x.ownerName}`:""} <span style={{color:C.muted,fontSize:10}}>· {empName(x.empId||"unassigned")}</span></span>
+                <span style={{color:C.red,fontWeight:700}}>{fmt(x.net)}</span>
+              </div>
+            ))}
+          </div>
+        )}
 
         {!employeeFilter && topEmployee && (
           <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.red}44`}}>
@@ -29120,7 +29270,9 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], trips=[],
           {filteredVehRows.map(x=>(
             <div key={x.truckNo} style={{padding:"7px 4px",borderBottom:`1px solid ${C.border}22`}}>
               <div style={{display:"flex",justifyContent:"space-between"}}>
-                <span style={{fontSize:13}}>{x.truckNo}{x.ownerName?` · ${x.ownerName}`:""} <span style={{color:x.empId===NO_TRIP_KEY?C.orange:C.muted,fontSize:10}}>· {empName(x.empId||"unassigned")}</span></span>
+                <span style={{fontSize:13}}>{x.truckNo}{x.ownerName?` · ${x.ownerName}`:""} <span style={{color:x.empId===NO_TRIP_KEY?C.orange:C.muted,fontSize:10}}>· {empName(x.empId||"unassigned")}</span>
+                  {x.idle && <span style={{color:C.red,fontSize:10,marginLeft:6,fontWeight:700}}>🚩 Not Regular</span>}
+                </span>
                 <span style={{color:C.red,fontWeight:700}}>{fmt(x.net)}</span>
               </div>
               {x.noTripLinkedNet>0 && x.empId!==NO_TRIP_KEY && (
@@ -29140,12 +29292,145 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], trips=[],
     );
   }
 
+  // ── Loan Recovery Dashboard — reached via its own always-visible button ───
+  if(showLoanDash) {
+    const loanEmpName = id => id==="unassigned" ? "Not linked to an employee" : ((employees||[]).find(e=>e.id===id)?.name || id);
+    const filteredLoanEmpRows = loanEmployeeFilter ? loanByEmployeeList.filter(x=>x.empId===loanEmployeeFilter) : loanByEmployeeList;
+    const filteredLoanVehRows = (loanEmployeeFilter
+        ? loanByVehicle.filter(v=>Object.keys(v.empShares).includes(loanEmployeeFilter))
+        : loanByVehicle)
+      .sort((a,b)=>b.net-a.net);
+    const totalGiven     = loanByVehicle.reduce((s,x)=>s+x.given,0);
+    const totalRecovered = loanByVehicle.reduce((s,x)=>s+x.recovered,0);
+    const totalPending   = loanByVehicle.reduce((s,x)=>s+x.net,0);
+
+    return (
+      <div style={{display:"flex",flexDirection:"column",gap:12}}>
+        <button onClick={()=>{setShowLoanDash(false);setLoanEmployeeFilter("");}}
+          style={{alignSelf:"flex-start",background:"none",border:`1px solid ${C.border}`,borderRadius:8,
+            color:C.muted,fontSize:12,padding:"5px 10px",cursor:"pointer"}}>
+          ← Back to Expense Dashboard
+        </button>
+        <div style={{color:C.red,fontWeight:800,fontSize:16}}>📋 Loan Recovery Dashboard</div>
+        <div style={{color:C.muted,fontSize:11}}>Always the full, all-time picture — loans aren't tied to the date/FY filter above.</div>
+
+        {/* Employee filter */}
+        <div>
+          <select value={loanEmployeeFilter} onChange={e=>setLoanEmployeeFilter(e.target.value)}
+            style={{width:"100%",background:C.bg,border:`1.5px solid ${loanEmployeeFilter?C.blue:C.border}`,
+              borderRadius:8,padding:"9px 10px",fontSize:12,color:C.text,outline:"none"}}>
+            <option value="">— All Employees —</option>
+            {loanByEmployeeList.map(x=><option key={x.empId} value={x.empId}>{loanEmpName(x.empId)}</option>)}
+          </select>
+        </div>
+
+        {/* "Not Regular" idle threshold — shared with the Shortage Dashboard */}
+        <div style={{background:C.card,borderRadius:12,padding:"10px 14px",display:"flex",alignItems:"center",gap:10}}>
+          <span style={{fontSize:12,color:C.muted,flex:1}}>Flag a vehicle as "Not Regular" if idle more than</span>
+          <input type="number" min={1} value={idleThresholdDays}
+            onChange={e=>setIdleThresholdDays(Math.max(1,+e.target.value||1))}
+            style={{width:56,background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:7,
+              padding:"5px 6px",fontSize:12,color:C.text,textAlign:"center"}} />
+          <span style={{fontSize:12,color:C.muted}}>days</span>
+        </div>
+
+        <div style={{display:"flex",gap:8}}>
+          <KPI icon="💰" label="Total Given" value={fmt(totalGiven)} color={C.text} />
+          <KPI icon="✅" label="Recovered" value={fmt(totalRecovered)} color={C.green} />
+        </div>
+        <KPI icon="⚠" label="Pending to Recover" value={fmt(totalPending)} color={C.red} />
+
+        {idleLoanVehicles.length>0 && (
+          <div style={{background:C.red+"11",border:`1px solid ${C.red}44`,borderRadius:10,padding:"10px 14px"}}>
+            <div style={{color:C.red,fontWeight:700,fontSize:12,marginBottom:6}}>🚩 Not Regular — {idleLoanVehicles.length} vehicle{idleLoanVehicles.length>1?"s":""} idle &gt;{idleThresholdDays} days with a pending balance</div>
+            {idleLoanVehicles.map(x=>(
+              <div key={x.truckNo} style={{display:"flex",justifyContent:"space-between",fontSize:12,padding:"3px 0"}}>
+                <span>{x.truckNo}{x.ownerName?` · ${x.ownerName}`:""}</span>
+                <span style={{color:C.red,fontWeight:700}}>{fmt(x.net)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {!loanEmployeeFilter && topLoanEmployee && (
+          <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.red}44`}}>
+            <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>Highest — Employee</div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontWeight:700,fontSize:14}}>{loanEmpName(topLoanEmployee.empId)}</span>
+              <span style={{color:C.red,fontWeight:800,fontSize:16}}>{fmt(topLoanEmployee.net)}</span>
+            </div>
+          </div>
+        )}
+        {topLoanVehicle && (
+          <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.red}44`}}>
+            <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>Highest — Vehicle</div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontWeight:700,fontSize:14}}>{topLoanVehicle.truckNo}{topLoanVehicle.ownerName?` · ${topLoanVehicle.ownerName}`:""}</span>
+              <span style={{color:C.red,fontWeight:800,fontSize:16}}>{fmt(topLoanVehicle.net)}</span>
+            </div>
+          </div>
+        )}
+
+        {/* By employee */}
+        {!loanEmployeeFilter && (
+          <div style={{background:C.card,borderRadius:12,padding:"14px 16px"}}>
+            <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>By Employee</div>
+            {filteredLoanEmpRows.map(x=>(
+              <div key={x.empId} onClick={()=>setLoanEmployeeFilter(x.empId)}
+                style={{display:"flex",justifyContent:"space-between",padding:"7px 4px",borderBottom:`1px solid ${C.border}22`,cursor:"pointer"}}>
+                <span style={{fontSize:13}}>{loanEmpName(x.empId)} <span style={{color:C.muted,fontSize:10}}>({x.trucks.length} truck{x.trucks.length>1?"s":""})</span></span>
+                <span style={{color:C.red,fontWeight:700}}>{fmt(x.net)}</span>
+              </div>
+            ))}
+            {filteredLoanEmpRows.length===0 && <div style={{color:C.muted,fontSize:13}}>No loan activity.</div>}
+          </div>
+        )}
+
+        {/* By vehicle */}
+        <div style={{background:C.card,borderRadius:12,padding:"14px 16px"}}>
+          <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>By Vehicle</div>
+          {filteredLoanVehRows.map(x=>{
+            const empIds = Object.keys(x.empShares).filter(k=>k!=="unassigned");
+            return (
+              <div key={x.truckNo} style={{padding:"7px 4px",borderBottom:`1px solid ${C.border}22`}}>
+                <div style={{display:"flex",justifyContent:"space-between"}}>
+                  <span style={{fontSize:13}}>{x.truckNo}{x.ownerName?` · ${x.ownerName}`:""}
+                    {empIds.length>0 && <span style={{color:C.muted,fontSize:10}}> · {empIds.map(loanEmpName).join(", ")}</span>}
+                    {x.idle && <span style={{color:C.red,fontSize:10,marginLeft:6,fontWeight:700}}>🚩 Not Regular</span>}
+                  </span>
+                  <span style={{color:C.red,fontWeight:700}}>{fmt(x.net)}</span>
+                </div>
+              </div>
+            );
+          })}
+          {filteredLoanVehRows.length===0 && <div style={{color:C.muted,fontSize:13}}>No loan activity.</div>}
+        </div>
+
+        {loanMultiEmpVehicles.length>0 && (
+          <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:10,padding:"10px 14px",fontSize:11,color:C.orange}}>
+            ⚠ {loanMultiEmpVehicles.length} vehicle{loanMultiEmpVehicles.length>1?"s have":" has"} loans split across more than one employee ({loanMultiEmpVehicles.map(v=>v.truckNo).join(", ")}) — the "By Employee" recovered/pending figures for those are allocated in proportion to each employee's share of that vehicle's given amount, not tracked as separate recoveries.
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div style={{color:C.red,fontWeight:800,fontSize:16}}>🧮 Expense Dashboard</div>
         {bucket==="myantra" && <Btn onClick={()=>setSheet(true)} sm outline color={C.red}>+ Add</Btn>}
       </div>
+
+      {/* Loans aren't a stored expense category — they're a vehicle.loan ledger
+          — so unlike Shortage there's no row in "By Category" to click. This
+          is its own always-visible entry point into the Loan Dashboard. */}
+      <button onClick={()=>setShowLoanDash(true)}
+        style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 14px",
+          display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer",color:C.text}}>
+        <span style={{fontWeight:700,fontSize:13}}>📋 Loan Recovery Dashboard</span>
+        <span style={{color:C.blue,fontSize:11}}>view →</span>
+      </button>
 
       {/* Grand total — combined across both buckets, respects the date/FY
           filter below but not the bucket switch or category filter, so it's
