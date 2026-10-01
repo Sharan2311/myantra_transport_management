@@ -10273,6 +10273,37 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                           }
                           setTrips(p=>[t,...(p||[])]);
                           log("ADD PARTY TRIP",`LR:${t.lrNo} ${t.truckNo}`);
+                          // ── Auto-attach diesel request(s) if set from the dropdown — same
+                          // save-time attach the godown trip flow has always done; party
+                          // trips never had this, so a selected indent never actually got
+                          // marked "attached" in dieselRequests even though the trip's own
+                          // field showed it. ──────────────────────────────────────────────
+                          if (t.dieselIndentNo && typeof setDieselRequests === "function") {
+                            const indentNo = parseInt(t.dieselIndentNo, 10);
+                            const matchReq = (dieselRequests||[]).find(r =>
+                              r.indentNo === indentNo && r.status==="confirmed"
+                            );
+                            if (matchReq) {
+                              const updReq = {...matchReq, status:"attached", tripId:t.id, lrNo:t.lrNo||""};
+                              setDieselRequests(p => p.map(r => r.id===matchReq.id ? updReq : r));
+                              saveDieselAttachSafe(setDieselRequests, matchReq, updReq, {log, context:"party trip form"}).then(ok => {
+                                if (ok) log("DIESEL ATTACH", `Indent #${matchReq.indentNo} → LR ${t.lrNo} · ₹${matchReq.confirmedAmount??matchReq.amount} (party trip form)`);
+                              });
+                            }
+                          }
+                          if (t.dieselIndentNo2 && typeof setDieselRequests === "function") {
+                            const indentNo2 = parseInt(t.dieselIndentNo2, 10);
+                            const matchReq2 = (dieselRequests||[]).find(r =>
+                              r.indentNo === indentNo2 && (r.status==="confirmed" || (r.status==="attached" && r.lrNo===t.lrNo))
+                            );
+                            if (matchReq2) {
+                              const updReq2 = {...matchReq2, status:"attached", tripId:t.id, lrNo:t.lrNo||""};
+                              setDieselRequests(p => p.map(r => r.id===matchReq2.id ? updReq2 : r));
+                              saveDieselAttachSafe(setDieselRequests, matchReq2, updReq2, {log, context:"party trip form, 2nd indent"}).then(ok => {
+                                if (ok) log("DIESEL ATTACH (2ND)", `Indent #${matchReq2.indentNo} → LR ${t.lrNo} · ₹${matchReq2.confirmedAmount??matchReq2.amount} (party trip form)`);
+                              });
+                            }
+                          }
                           const tn2=(t.truckNo||"").toUpperCase().trim();
                           if(tn2&&!vehicles.find(v=>v.truckNo===tn2)){
                             const nv={id:uid(),truckNo:tn2,ownerName:"",phone:"",driverName:"",driverPhone:"",
@@ -27568,6 +27599,18 @@ function BulkSettleSheet({ unpaidTrips=[], employees=[], vehicles=[], user, onSa
   const [checkedIds, setCheckedIds] = useState(new Set());
   const [touchedPaidTo, setTouchedPaidTo] = useState(false); // stop auto-fill once owner edits it by hand
 
+  // Vehicles with ANY loan or shortage activity — active balance or fully-
+  // settled history, doesn't matter — are excluded from bulk settle entirely.
+  // These need the owner's eye on each trip individually (a recovery might
+  // need deducting, or the vehicle's track record just warrants a closer
+  // look before a lump payment goes out), not a bulk oldest-first pick.
+  const excludedTruckSet = React.useMemo(() => {
+    const hasHistory = v =>
+      (v.loan||0)>0 || (v.loanRecovered||0)>0 || (v.loanTxns||[]).length>0 ||
+      (v.shortageOwed||0)>0 || (v.shortageRecovered||0)>0 || (v.shortageTxns||[]).length>0;
+    return new Set((vehicles||[]).filter(hasHistory).map(v=>(v.truckNo||"").toUpperCase()));
+  }, [vehicles]);
+
   const candidates = React.useMemo(() => {
     let list;
     if (filterMode === "employee") {
@@ -27578,9 +27621,28 @@ function BulkSettleSheet({ unpaidTrips=[], employees=[], vehicles=[], user, onSa
       if (!q) return [];
       list = unpaidTrips.filter(t => (t.truckNo||"").toUpperCase() === q);
     }
+    list = list.filter(t => !excludedTruckSet.has((t.truckNo||"").toUpperCase()));
     return [...list].sort((a,b) =>
       (a.date||"").localeCompare(b.date||"") || (a.createdAt||"").localeCompare(b.createdAt||""));
-  }, [unpaidTrips, filterMode, selEmpId, vehicleQ]);
+  }, [unpaidTrips, filterMode, selEmpId, vehicleQ, excludedTruckSet]);
+
+  // How many trips this filter would otherwise have matched, before the
+  // loan/shortage-history exclusion — purely informational, so the owner
+  // doesn't mistake "excluded" for "no unpaid trips at all".
+  const excludedCount = React.useMemo(() => {
+    let raw;
+    if (filterMode === "employee") {
+      if (!selEmpId) return 0;
+      raw = unpaidTrips.filter(t => t.assignedEmpId === selEmpId);
+    } else {
+      const q = vehicleQ.trim().toUpperCase();
+      if (!q) return 0;
+      raw = unpaidTrips.filter(t => (t.truckNo||"").toUpperCase() === q);
+    }
+    return raw.filter(t => excludedTruckSet.has((t.truckNo||"").toUpperCase())).length;
+  }, [unpaidTrips, filterMode, selEmpId, vehicleQ, excludedTruckSet]);
+
+  const vehicleQExcluded = filterMode==="vehicle" && vehicleQ.trim() && excludedTruckSet.has(vehicleQ.trim().toUpperCase());
 
   // Identity key for the candidate set, by trip id — NOT the array itself.
   // `unpaidTrips` is recomputed inline on every DriverPayments render (not
@@ -27688,7 +27750,13 @@ function BulkSettleSheet({ unpaidTrips=[], employees=[], vehicles=[], user, onSa
 
         <Field label="Amount Paid ₹" value={amount} onChange={setAmount} type="number" />
 
-        {filterChosen && amt>0 && (
+        {vehicleQExcluded && (
+          <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:10,padding:"10px 12px",fontSize:12,color:C.orange}}>
+            ⚠ {vehicleQ.trim().toUpperCase()} has loan or shortage history (active or past) — excluded from bulk settle. Settle its trips individually from the list instead.
+          </div>
+        )}
+
+        {filterChosen && amt>0 && !vehicleQExcluded && (
           <div style={{background:C.bg,borderRadius:10,padding:"10px 12px"}}>
             <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:C.muted,marginBottom:6,flexWrap:"wrap",gap:4}}>
               <span>{candidates.length} unpaid trip{candidates.length!==1?"s":""} found</span>
@@ -27696,6 +27764,11 @@ function BulkSettleSheet({ unpaidTrips=[], employees=[], vehicles=[], user, onSa
                 {diff!==0 && <span style={{color:diff>0?C.orange:C.blue,marginLeft:4}}>({diff>0?"+":""}{fmt(diff)})</span>}
               </span>
             </div>
+            {excludedCount>0 && (
+              <div style={{color:C.orange,fontSize:11,marginBottom:6}}>
+                ⚠ {excludedCount} more trip{excludedCount!==1?"s":""} excluded — vehicle{excludedCount!==1?"s have":" has"} loan or shortage history. Settle individually.
+              </div>
+            )}
             {candidates.length===0 && <div style={{color:C.muted,fontSize:12}}>No unpaid trips match this filter.</div>}
             <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:280,overflowY:"auto"}}>
               {candidates.map(t=>(
