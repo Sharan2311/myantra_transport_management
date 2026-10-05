@@ -1,5 +1,14 @@
 // netlify/functions/scan-di.js
 
+// Known-good Consignor PAN/GST pairs for Shree Cement plants. A DI/GR whose
+// consignor is "Shree Cement" but whose PAN/GST doesn't exactly match one of
+// these is rejected outright — this is what actually pins the document to a
+// real, known plant instead of trusting whatever text the OCR/AI produced.
+const SHREE_CONSIGNOR_WHITELIST = [
+  { plant: "Shree Cement Kodla",  pan: "AACCS8796G", gst: "29AACCS8796G1ZN" },
+  { plant: "Shree Cement Guntur", pan: "AACCS8796G", gst: "37AACCS8796G1ZQ" },
+];
+
 const DI_PROMPT = `You are reading a Shree Cement Delivery Instruction (DI) / GR Copy PDF.
 
 Your ONLY job is to locate specific labelled fields and copy their values exactly.
@@ -12,6 +21,8 @@ FIELDS TO EXTRACT — find each label and copy the value next to it verbatim:
 3. Truck/Vehicle registration number → uppercase no spaces (e.g. KA28AA4790)
 4. Consignee name → full name as printed
 5. Consignor / Plant name → e.g. "Shree Cement Limited KODLA" or "KARNATAKA CEMENT PROJECT"
+5b. Consignor PAN No → the PAN printed directly under/beside the CONSIGNOR block specifically (the cement plant, e.g. "Shree Cement Limited ... KODLA"). Do NOT use the PAN from the transporter's own letterhead (top-left of GR copies) or from the consignee block — those are different companies with different PAN/GST. Format like AACCS8796G.
+5c. Consignor GST No → the GST/GSTN printed directly under/beside the CONSIGNOR block specifically, same rules as 5b. Format like 29AACCS8796G1ZN.
 6. Transporter name → this document is one of two formats, check in this order:
    a) INVOICE format: look for an explicitly labeled field such as "Transported By", "Transporter", or "Carrier" — usually near "Transportation Mode/Type", "Delivery Term", "E-way Bill No". Use the exact company name from that field.
    b) GR/RECEIPT format: has NO such labeled field. Instead the document is PRINTED/ISSUED BY the transporter, so their name is the company letterhead at the very TOP-LEFT of the page (above the Consignor/Consignee table) — usually followed by an address line and "PAN No / GSTN" on the next line, and it repeats near "For [Company Name] / Authorized Signatory" at the bottom.
@@ -26,6 +37,7 @@ FIELDS TO EXTRACT — find each label and copy the value next to it verbatim:
 13. Number of bags → number only, 0 if not shown
 14. Freight rate per MT → number from "Rate PMT" or "Rate/MT" column — THIS document's rate only, do not reuse from memory
 15. Date → in YYYY-MM-DD format
+16. Party Name (Ship To) → ONLY relevant for INVOICE-format documents. Find the "Ship To" address block specifically — this is different from "Bill To" (the billing entity) and different from the Consignor. Copy the company/party name printed at the top of the Ship To block. Leave null if the document has no Ship To section (e.g. a GR copy).
 
 STRICT RULES:
 - diNo: must be exactly 10 digits. Count the digits — if wrapped across lines in the PDF, join them.
@@ -49,6 +61,8 @@ Return ONLY this JSON, no markdown, no explanation:
   "truckNo": "<uppercase no spaces or null>",
   "consignee": "<full name or null>",
   "consignor": "<plant name or null>",
+  "consignorPAN": "<PAN from the CONSIGNOR block specifically, e.g. AACCS8796G, or null>",
+  "consignorGST": "<GST from the CONSIGNOR block specifically, e.g. 29AACCS8796G1ZN, or null>",
   "transporterName": "<transporter company name — from an explicit 'Transported By'/'Transporter' field if the document has one (common on invoices), otherwise the company letterhead at the very top-left of the document (common on GRs). null if genuinely unclear>",
   "from": "<loading location or null>",
   "to": "<destination or null>",
@@ -58,7 +72,8 @@ Return ONLY this JSON, no markdown, no explanation:
   "qty": <number or null>,
   "bags": <number or null>,
   "frRate": <number or null>,
-  "date": "<YYYY-MM-DD or null>"
+  "date": "<YYYY-MM-DD or null>",
+  "partyName": "<company/party name from the Ship To block on an invoice, or null>"
 }`;
 
 const PUMP_PROMPT = `You are reading a diesel pump statement Excel screenshot.
@@ -89,7 +104,7 @@ exports.handler = async (event) => {
 
   try {
     const body_parsed = JSON.parse(event.body);
-    const { base64, mediaType, promptType, expectedDI, expectedTransporter } = body_parsed;
+    const { base64, mediaType, promptType, expectedDI, expectedTransporter, docType } = body_parsed;
     const apiKey = body_parsed.anthropicKey || process.env.ANTHROPIC_API_KEY;
     if (!apiKey) {
       return { statusCode: 500, body: JSON.stringify({ error: "ANTHROPIC_API_KEY not set" }) };
@@ -156,30 +171,23 @@ exports.handler = async (event) => {
     const text = (data.content || []).find(b => b.type === "text")?.text || "";
     const clean = text.replace(/```json|```/g, "").trim();
 
-    // For DI scans, post-process and validate
-    if (promptType === "di" || (!promptType && !clientPrompt)) {
-      let parsed;
-      try { parsed = JSON.parse(clean); } catch(e) {
+    // For DI scans, post-process and validate. This runs whenever the response
+    // is DI-shaped (a single object carrying a diNo or grNo key) regardless of
+    // whether promptType==="di" or a caller supplied its own richer clientPrompt
+    // (e.g. BatchDIScanner/DIUploader on the client) — validation must not be
+    // skippable just by omitting promptType, since that was previously a hole
+    // that let unvalidated hallucinated data through. Non-DI callers on this
+    // same endpoint (payment-screenshot scan, pump-slip scan without promptType)
+    // return arrays or objects with no diNo/grNo key and fall through untouched.
+    let parsedProbe;
+    try { parsedProbe = JSON.parse(clean); } catch(e) { parsedProbe = null; }
+    const isDIShaped = parsedProbe && !Array.isArray(parsedProbe) &&
+      ("diNo" in parsedProbe || "grNo" in parsedProbe);
+
+    if (promptType === "di" || isDIShaped) {
+      let parsed = parsedProbe;
+      if (!parsed) {
         return { statusCode: 200, body: JSON.stringify({ error: "Could not parse DI details. Please fill manually." }) };
-      }
-
-      // Validate DI number — must be 10 digits
-      if (parsed.diNo != null) {
-        const digits = String(parsed.diNo).replace(/\D/g, "");
-        if (digits.length === 10) {
-          parsed.diNo = digits;
-        } else {
-          parsed._diNoWarning = `${digits.length} digits extracted, expected 10`;
-          parsed.diNo = digits || null;
-        }
-      }
-
-      // Validate GR number — must have 2 slashes
-      if (parsed.grNo != null) {
-        const slashes = (String(parsed.grNo).match(/\//g) || []).length;
-        if (slashes !== 2) {
-          parsed._grNoWarning = `GR "${parsed.grNo}" has ${slashes} slash(es), expected 2`;
-        }
       }
 
       // Normalise truckNo
@@ -201,15 +209,66 @@ exports.handler = async (event) => {
         }
       }
 
-      // Both DI and GR numbers are mandatory — a trip saved with either missing
-      // breaks downstream duplicate-detection (which keys off these fields).
-      const missing = [];
-      if (!parsed.diNo) missing.push("DI No");
-      if (!parsed.grNo) missing.push("GR No");
-      if (missing.length) {
+      // ── HARD VALIDATION — any failure here rejects the document outright.  ──
+      // These are not warnings the caller can choose to ignore; a document
+      // that fails any of these is not saved as a trip, period.
+      const rejections = [];
+
+      // diNo: exactly 10 digits AND must start with "9" (Shree's DI numbering scheme).
+      // Reject rather than "extract what digits we found" — a partial/garbled
+      // extraction (e.g. 7 digits from a hallucinated read) must not sneak through.
+      const diDigits = parsed.diNo != null ? String(parsed.diNo).replace(/\D/g, "") : "";
+      if (diDigits.length !== 10 || diDigits[0] !== "9") {
+        rejections.push(`DI No "${parsed.diNo ?? "(not found)"}" is invalid — must be exactly 10 digits starting with 9`);
+        parsed.diNo = null;
+      } else {
+        parsed.diNo = diDigits;
+      }
+
+      // grNo: exactly 2 slashes, shape like 1070/MYE/3169 or 1070/KOR/354
+      const grPattern = /^\d{2,5}\/[A-Z]{2,5}\/\d{1,6}$/;
+      const grClean = parsed.grNo != null ? String(parsed.grNo).trim().toUpperCase() : "";
+      if (!grPattern.test(grClean)) {
+        rejections.push(`GR No "${parsed.grNo ?? "(not found)"}" is invalid — expected format like 1070/MYE/3169`);
+        parsed.grNo = null;
+      } else {
+        parsed.grNo = grClean;
+      }
+
+      // Mandatory presence — a trip with any of these missing is not usable data
+      if (!parsed.consignee) rejections.push("Consignee is missing or unreadable");
+      if (!parsed.qty || Number(parsed.qty) <= 0) rejections.push("Quantity (qty) is missing or zero");
+      if (!parsed.date) rejections.push("Date is missing or unreadable");
+
+      // Consignor identity — if the consignor is Shree Cement, its PAN/GST must
+      // exactly match one of the known plants. This is what actually pins the
+      // document to a real plant rather than trusting the printed plant name text.
+      // ONLY applied to GR documents. Invoices are validated a different way —
+      // by DI-number cross-check against the already-verified GR (done
+      // client-side in verifyPartyFileDI) and the Transported By check above —
+      // since an invoice's own printed PAN/GST can legitimately differ from
+      // what's on the GR (different template/software) without that meaning
+      // the invoice is fraudulent.
+      if (docType !== "invoice") {
+        const consignorNorm = String(parsed.consignor || "").toUpperCase();
+        if (consignorNorm.includes("SHREE CEMENT")) {
+          const pan = String(parsed.consignorPAN || "").trim().toUpperCase();
+          const gst = String(parsed.consignorGST || "").trim().toUpperCase();
+          const match = SHREE_CONSIGNOR_WHITELIST.find(w => w.pan === pan && w.gst === gst);
+          if (!pan || !gst) {
+            rejections.push("Consignor PAN/GST could not be read from the document");
+          } else if (!match) {
+            rejections.push(`Consignor PAN/GST (${pan} / ${gst}) does not match any known Shree Cement plant`);
+          } else {
+            parsed._consignorPlant = match.plant;
+          }
+        }
+      }
+
+      if (rejections.length) {
         return {
           statusCode: 200,
-          body: JSON.stringify({ error: `Could not clearly read: ${missing.join(" and ")}. Please retake a clearer photo/scan — these fields are mandatory and can't be left blank.` })
+          body: JSON.stringify({ error: `Document rejected — ${rejections.join("; ")}.` })
         };
       }
 

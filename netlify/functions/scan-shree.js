@@ -11,7 +11,14 @@ This PDF uses a fixed-width table layout. When a cell value is too long, it WRAP
 to the next line WITHIN THE SAME CELL. Read column-by-column, NOT line-by-line.
 
 Table columns (in order):
-S.No | DI NO | INV NO | DATE | TRUCK NO | GR NO | CONSIGNEE NAME | STATION | GRADE | DESP QTY | FRT RATE | FRT AMT
+S.No | DI NO | INV NO | DATE | TRUCK NO | GR NO | CONSIGNEE NAME | STATION | GRADE | DESP QTY | FRT RATE | FRT AMT | KA TAX | TOLL TAX | BORDER ENTRY CHARGES | IGST 18.0% | CGST 9.0% | SGST 9.0% | TotalTax AMT
+
+IMPORTANT — the row does NOT end at FRT AMT. FRT AMT is followed by five more columns:
+KA TAX, TOLL TAX, BORDER ENTRY CHARGES (these three are usually 0.00 or blank), then
+IGST 18.0%, CGST 9.0%, SGST 9.0%, and finally TotalTax AMT. On invoices where only IGST
+applies, TotalTax AMT equals the IGST value — a MUCH smaller number than FRT AMT (it is
+roughly 18% of FRT AMT, not the freight amount itself). Never extract IGST, CGST, SGST,
+or TotalTax AMT as frtAmt — those are tax columns near the right edge of the row.
 
 FIELD RULES — copy values exactly, null if not clearly readable:
 
@@ -35,7 +42,14 @@ CONSIGNEE NAME:
 
 DESP QTY: decimal number in MT (e.g. 36.00)
 FRT RATE: rate per MT (e.g. 1219.00)
-FRT AMT: should equal DESP QTY × FRT RATE — if not, flag it
+FRT AMT: the freight amount column, immediately to the right of FRT RATE and immediately
+  to the LEFT of KA TAX/TOLL TAX/BORDER ENTRY CHARGES/IGST/CGST/SGST/TotalTax AMT. Copy the
+  number PRINTED in that column exactly as shown — never compute it, never substitute
+  DESP QTY × FRT RATE in its place. The equation DESP QTY × FRT RATE is only a sanity check
+  for WHICH column you are looking at: if a candidate number is wildly different from that
+  product (not merely rounded slightly differently), you have the wrong column — look again
+  for the actual FRT AMT cell instead of a nearby tax column. Once you have found the right
+  column, report the digits printed there, not a recalculated value.
 DATE: trip date
 
 STRICT RULES:
@@ -97,7 +111,8 @@ Return ONLY this JSON, no markdown, no explanation:
     { "lrNo": "<LR number or null>", "tonnes": <number or null>, "deduction": <number or null>, "ref": "<reference or null>" }
   ],
   "expenses": [
-    { "description": "<description or null>", "amount": <number or null> }
+    { "description": "<description or null>", "amount": <number or null>,
+      "categoryHint": "<your best guess at ONE of: Rent, Rebidding Charges, SD Deposit, Electricity, Penalties, TDS, Miscellaneous — based on the description text, or null if unclear>" }
   ],
   "penalties": []
 }`;

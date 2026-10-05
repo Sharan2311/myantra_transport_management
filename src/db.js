@@ -16,6 +16,10 @@ const tripFromDB = r => ({
   createdBy: r.created_by, createdAt: r.created_at,
   diLines: r.di_lines || [],
   dieselIndentNo: r.diesel_indent_no || "",
+  // 2nd diesel indent on the same LR — owner-only, manual-only (never
+  // auto-attached). See mkTrip() in App.jsx for the full field contract.
+  dieselIndentNo2: r.diesel_indent_no_2 || "",
+  dieselEstimate2: +(r.diesel_estimate_2||0),
   lr: r.lr || r.lr_no || "",
   truck: r.truck || r.truck_no || "",
   billedToShree: +(r.billed_to_shree||0),
@@ -52,6 +56,29 @@ const tripFromDB = r => ({
   noDieselConfirmedByName: r.no_diesel_confirmed_by_name || '',
   noDieselFor: r.no_diesel_for || '',
   noDieselAt: r.no_diesel_at || '',
+  epodDone: r.epod_done || false,
+  epodDoneBy: r.epod_done_by || '',
+  epodDoneAt: r.epod_done_at || '',
+  epodPouchDone: r.epod_pouch_done || false,
+  epodPouchBy: r.epod_pouch_by || '',
+  epodPouchAt: r.epod_pouch_at || '',
+  readyForBilling: r.ready_for_billing || false,
+  readyForBillingBy: r.ready_for_billing_by || '',
+  readyForBillingAt: r.ready_for_billing_at || '',
+  // Set true the moment a diesel request attaches to this trip. Once
+  // locked, only an owner-role edit may change or clear dieselIndentNo —
+  // see saveEdit(). Closes a real bug: a non-owner's stale edit-sheet
+  // state silently overwrote an already-attached indent back to empty.
+  dieselIndentLocked: r.diesel_indent_locked || false,
+  // Set true when a non-owner's save would result in a negative net pay
+  // (calcNet(...).net < 0). The trip still saves with their submitted
+  // values, but is frozen from further billing/diesel/settle actions and
+  // hidden from non-owner edit until the owner approves it — either
+  // as-is or by editing the numbers themselves. Owner saves are never
+  // blocked by this, regardless of net.
+  pendingApproval: r.pending_approval || false,
+  pendingApprovalBy: r.pending_approval_by || '',
+  pendingApprovalAt: r.pending_approval_at || '',
 })
 const tripToDB = t => ({
   id: t.id, type: t.type, lr_no: t.lrNo, di_no: t.diNo, truck_no: t.truckNo,
@@ -68,6 +95,8 @@ const tripToDB = t => ({
   created_by: t.createdBy, created_at: t.createdAt,
   di_lines: t.diLines || [],
   diesel_indent_no: t.dieselIndentNo || "",
+  diesel_indent_no_2: t.dieselIndentNo2 || "",
+  diesel_estimate_2: t.dieselEstimate2 || 0,
   lr: t.lr || t.lrNo || "",
   truck: t.truck || t.truckNo || "",
   billed_to_shree: t.billedToShree || 0,
@@ -104,6 +133,19 @@ const tripToDB = t => ({
   no_diesel_confirmed_by_name: t.noDieselConfirmedByName || '',
   no_diesel_for: t.noDieselFor || '',
   no_diesel_at: t.noDieselAt || '',
+  epod_done: t.epodDone || false,
+  epod_done_by: t.epodDoneBy || '',
+  epod_done_at: t.epodDoneAt || '',
+  epod_pouch_done: t.epodPouchDone || false,
+  epod_pouch_by: t.epodPouchBy || '',
+  epod_pouch_at: t.epodPouchAt || '',
+  ready_for_billing: t.readyForBilling || false,
+  ready_for_billing_by: t.readyForBillingBy || '',
+  ready_for_billing_at: t.readyForBillingAt || '',
+  diesel_indent_locked: t.dieselIndentLocked || false,
+  pending_approval: t.pendingApproval || false,
+  pending_approval_by: t.pendingApprovalBy || '',
+  pending_approval_at: t.pendingApprovalAt || '',
 })
 
 const vehicleFromDB = r => ({
@@ -138,6 +180,7 @@ const employeeFromDB = r => ({
   accounts: r.accounts||[],
   loanTxns: r.loan_txns||[],
   tafalExempt: r.tafal_exempt||false,
+  pouchDeadlineEnforced: r.pouch_deadline_enforced !== false, // default true
 })
 const employeeToDB = e => ({
   id: e.id, name: e.name, phone: e.phone, role: e.role,
@@ -146,6 +189,7 @@ const employeeToDB = e => ({
   accounts: e.accounts||[],
   loan_txns: e.loanTxns||[],
   tafal_exempt: e.tafalExempt||false,
+  pouch_deadline_enforced: e.pouchDeadlineEnforced !== false,
 })
 
 const paymentFromDB = r => ({
@@ -241,13 +285,64 @@ const driverPayToDB = p => ({
 
 const expenseFromDB = r => ({
   id: r.id, date: r.date, label: r.label, amount: +r.amount,
-  category: r.category, notes: r.notes, utr: r.utr||'',
+  category: r.category, source: r.source||'myantra', notes: r.notes, utr: r.utr||'',
   createdBy: r.created_by, createdAt: r.created_at,
 })
 const expenseToDB = e => ({
   id: e.id, date: e.date, label: e.label, amount: e.amount,
-  category: e.category, notes: e.notes||'', utr: e.utr||'',
+  category: e.category, source: e.source||'myantra', notes: e.notes||'', utr: e.utr||'',
   created_by: e.createdBy, created_at: e.createdAt,
+})
+
+const gypsumTripFromDB = r => ({
+  id: r.id, date: r.date||'', truckNo: r.truck_no||'', driverName: r.driver_name||'',
+  empId: r.emp_id||'', toCompany: r.to_company||'', invoiceNo: r.invoice_no||'',
+  invoiceFilePath: r.invoice_file_path||'', qty: +r.qty||0, status: r.status||'not_billed',
+  holdbackAmount: +r.holdback_amount||0, shortageAmount: +r.shortage_amount||0,
+  shortageRecordedBy: r.shortage_recorded_by||'', shortageRecordedAt: r.shortage_recorded_at||'',
+  settled: !!r.settled,
+  createdBy: r.created_by||'', createdAt: r.created_at||'', updatedAt: r.updated_at||'',
+})
+const gypsumTripToDB = t => ({
+  id: t.id, date: t.date||'', truck_no: t.truckNo||'', driver_name: t.driverName||'',
+  emp_id: t.empId||'', to_company: t.toCompany||'', invoice_no: t.invoiceNo||'',
+  invoice_file_path: t.invoiceFilePath||'', qty: t.qty||0, status: t.status||'not_billed',
+  holdback_amount: t.holdbackAmount||0, shortage_amount: t.shortageAmount||0,
+  shortage_recorded_by: t.shortageRecordedBy||'', shortage_recorded_at: t.shortageRecordedAt||'',
+  settled: t.settled||false,
+  created_by: t.createdBy||'', created_at: t.createdAt||'', updated_at: t.updatedAt||'',
+})
+
+const gypsumPaymentFromDB = r => ({
+  id: r.id, empId: r.emp_id||'', driverName: r.driver_name||'', amount: +r.amount||0,
+  utr: r.utr||'', tripIds: r.trip_ids||[], note: r.note||'',
+  paidBy: r.paid_by||'', paidAt: r.paid_at||'',
+})
+const gypsumPaymentToDB = p => ({
+  id: p.id, emp_id: p.empId||'', driver_name: p.driverName||'', amount: p.amount||0,
+  utr: p.utr||'', trip_ids: p.tripIds||[], note: p.note||'',
+  paid_by: p.paidBy||'', paid_at: p.paidAt||'',
+})
+
+// Rate audit trails — every entry is a permanent historical record, never
+// edited/overwritten. "Setting a new rate" means inserting a new row with
+// its own effective_from date; the trip-time lookup (rateEffectiveOn, in
+// App.jsx) finds whichever entry was active on a given date.
+const gypsumShreeRateFromDB = r => ({
+  id: r.id, company: r.company||'', rate: +r.rate||0, effectiveFrom: r.effective_from||'',
+  setBy: r.set_by||'', setAt: r.set_at||'',
+})
+const gypsumShreeRateToDB = r => ({
+  id: r.id, company: r.company||'', rate: r.rate||0, effective_from: r.effectiveFrom||'',
+  set_by: r.setBy||'', set_at: r.setAt||'',
+})
+const gypsumDriverRateFromDB = r => ({
+  id: r.id, rate: +r.rate||0, effectiveFrom: r.effective_from||'',
+  setBy: r.set_by||'', setAt: r.set_at||'',
+})
+const gypsumDriverRateToDB = r => ({
+  id: r.id, rate: r.rate||0, effective_from: r.effectiveFrom||'',
+  set_by: r.setBy||'', set_at: r.setAt||'',
 })
 
 const gstFromDB = r => ({
@@ -521,6 +616,17 @@ export const DB = {
   saveExpense:     e  => upsertOne('mye_expenses', expenseToDB, e),
   deleteExpense:   id => deleteOne('mye_expenses', id),
 
+  getGypsumTrips:    () => fetchRecent('mye_gypsum_trips', gypsumTripFromDB, 'date'),
+  saveGypsumTrip:    t  => upsertOne('mye_gypsum_trips', gypsumTripToDB, t),
+  deleteGypsumTrip:  id => deleteOne('mye_gypsum_trips', id),
+  getGypsumPayments:  () => fetchRecent('mye_gypsum_payments', gypsumPaymentFromDB, 'paid_at'),
+  saveGypsumPayment:  p  => upsertOne('mye_gypsum_payments', gypsumPaymentToDB, p),
+  deleteGypsumPayment:id => deleteOne('mye_gypsum_payments', id),
+  getGypsumShreeRates:   () => fetchRecent('mye_gypsum_shree_rates', gypsumShreeRateFromDB, 'effective_from'),
+  saveGypsumShreeRate:   r  => upsertOne('mye_gypsum_shree_rates', gypsumShreeRateToDB, r),
+  getGypsumDriverRates:  () => fetchRecent('mye_gypsum_driver_rates', gypsumDriverRateFromDB, 'effective_from'),
+  saveGypsumDriverRate:  r  => upsertOne('mye_gypsum_driver_rates', gypsumDriverRateToDB, r),
+
   getGstReleases:  () => fetchRecent('mye_gst_releases', gstFromDB, 'date'),
   saveGstRelease:  g  => upsertOne('mye_gst_releases', gstToDB, g),
   deleteGstRelease:id => deleteOne('mye_gst_releases', id),
@@ -536,8 +642,16 @@ export const DB = {
   // Diesel Requests
   getDieselRequests: async () => {
     try {
-      const { data, error } = await supabase.from('mye_diesel_requests').select('*').order('created_at', {ascending:false});
-      if(error) throw error;
+      // Was a plain select('*') with no pagination — Supabase/PostgREST caps
+      // that at 1000 rows silently, no error. With 1130+ rows in this table,
+      // roughly the last 130 by sort order were never being fetched into the
+      // app at all (confirmed: indent #1111, status "attached", landed at
+      // row 1027 under this exact sort — invisible everywhere, not a display
+      // bug). fetchPaginated pages through in 1000-row chunks; .order('id')
+      // added as a tiebreaker since created_at is free text with likely ties,
+      // and .range()-based pagination needs a fully deterministic order to
+      // avoid skipping/duplicating rows across pages.
+      const data = await fetchPaginated(() => supabase.from('mye_diesel_requests').select('*').order('created_at', {ascending:false}).order('id'));
       return (data||[]).map(r => ({
         id: r.id,
         indentNo: r.indent_no,
@@ -574,6 +688,17 @@ export const DB = {
         rejectedReason: r.rejected_reason||'',
         rejectedBy: r.rejected_by||'',
         rejectedAt: r.rejected_at||'',
+        // Owner's manual daily verification — separate from the automated
+        // confirmation/attachment status above. This is a human sign-off
+        // ("I personally checked this request's attachment and amount"),
+        // one-time and permanent once set.
+        ownerVerified: r.owner_verified||false,
+        ownerVerifiedBy: r.owner_verified_by||'',
+        ownerVerifiedAt: r.owner_verified_at||'',
+        // Free-text note the owner can attach to a request for anything
+        // that doesn't fit a structured field — e.g. "raised on wrong pump,
+        // corrected" or "driver confirmed by phone".
+        remark: r.remark||'',
       }));
     } catch(e) { console.warn('mye_diesel_requests not ready:', e.message); return []; }
   },
@@ -657,6 +782,10 @@ export const DB = {
       rejected_reason: r.rejectedReason||null,
       rejected_by: r.rejectedBy||null,
       rejected_at: r.rejectedAt||null,
+      owner_verified: r.ownerVerified||false,
+      owner_verified_by: r.ownerVerifiedBy||'',
+      owner_verified_at: r.ownerVerifiedAt||'',
+      remark: r.remark||'',
     }, { onConflict: 'id', ignoreDuplicates: false });
     if(error && !error.message?.includes('duplicate key')) throw error;
   },
@@ -737,6 +866,9 @@ export const DB = {
   // Action Items — created when invoice scan can't cleanly bill a DI:
   //  type "missing_di"     → DI on the invoice has no matching trip in the app
   //  type "amount_mismatch"→ DI matched, but invoice amount != app's expected amount
+  //  type "diesel_no_lr"   → diesel request confirmed/attached but no LR yet;
+  //                          uses dieselIndentNo (its own column), NOT diNo —
+  //                          di_no is reserved for real Shree DI numbers.
   getActionItems: async () => {
     try { return await fetchAll('mye_action_items', r => ({
       id: r.id, type: r.type, status: r.status||'open',
@@ -744,6 +876,8 @@ export const DB = {
       invoiceNo: r.invoice_no||'', invoiceDate: r.invoice_date||'',
       invoiceAmt: +(r.invoice_amt||0), expectedAmt: +(r.expected_amt||0),
       empId: r.emp_id||'', tripId: r.trip_id||'',
+      amount: +(r.amount||0), lrNo: r.lr_no||'',
+      dieselIndentNo: r.diesel_indent_no||'',
       note: r.note||'',
       createdAt: r.created_at, resolvedAt: r.resolved_at||'',
     })); } catch(e) { console.warn('mye_action_items not ready:', e.message); return []; }
@@ -754,10 +888,34 @@ export const DB = {
     invoice_no: ai.invoiceNo||'', invoice_date: ai.invoiceDate||'',
     invoice_amt: ai.invoiceAmt||0, expected_amt: ai.expectedAmt||0,
     emp_id: ai.empId||'', trip_id: ai.tripId||'',
+    amount: ai.amount||0, lr_no: ai.lrNo||'',
+    diesel_indent_no: ai.dieselIndentNo||'',
     note: ai.note||'',
     created_at: ai.createdAt, resolved_at: ai.resolvedAt||'',
   }), ai),
   deleteActionItem: id => deleteOne('mye_action_items', id),
+
+  // Generic task-assignment system — owner/manager creates a task, assigns
+  // it to an employee, tracks pending/done. type defaults to "manual"
+  // (freeform, owner-created); other types (e.g. auto-derived trackers)
+  // can be added later without a schema change.
+  getTasks: async () => {
+    try { return await fetchAll('mye_tasks', r => ({
+      id: r.id, title: r.title||'', description: r.description||'',
+      type: r.type||'manual', assignedTo: r.assigned_to||'',
+      status: r.status||'pending', dueDate: r.due_date||'',
+      createdBy: r.created_by||'', createdAt: r.created_at||'',
+      completedBy: r.completed_by||'', completedAt: r.completed_at||'',
+    })); } catch(e) { console.warn('mye_tasks not ready:', e.message); return []; }
+  },
+  saveTask: async (t) => upsertOne('mye_tasks', t => ({
+    id: t.id, title: t.title||'', description: t.description||'',
+    type: t.type||'manual', assigned_to: t.assignedTo||'',
+    status: t.status||'pending', due_date: t.dueDate||'',
+    created_by: t.createdBy||'', created_at: t.createdAt||'',
+    completed_by: t.completedBy||'', completed_at: t.completedAt||'',
+  }), t),
+  deleteTask: id => deleteOne('mye_tasks', id),
 
   // Invoice registry — an independent record of invoice existence, separate
   // from trips.diLines (which holds the actual billing detail). Used purely
@@ -884,6 +1042,7 @@ export const DB = {
           confirmedAmount: r.confirmed_amount!=null ? +(r.confirmed_amount) : null,
           confirmedReason: r.confirmed_reason, confirmedAt: r.confirmed_at,
           tripId: r.trip_id, lrNo: r.lr_no, createdBy: r.created_by, createdAt: r.created_at,
+          ownerVerified: r.owner_verified||false, ownerVerifiedBy: r.owner_verified_by||'', ownerVerifiedAt: r.owner_verified_at||'',
         }));
       }),
     ]);
@@ -892,7 +1051,7 @@ export const DB = {
     await sleep(350);
 
     // ── Phase 3: background — driver pays, expenses, wallet, activity etc ─────
-    const [driverPays, cashTransfers, pumpPayments, settlements, paymentRequests, activity, actionItems] = await Promise.all([
+    const [driverPays, cashTransfers, pumpPayments, settlements, paymentRequests, activity, actionItems, gypsumTrips, gypsumShreeRates, gypsumDriverRates] = await Promise.all([
       safe(() => fetchRecent('mye_driver_payments', driverPayFromDB, 'date')),
       safe(async () => {
         try { return await fetchRecent('mye_cash_transfers', cashTransferFromDB, 'date'); }
@@ -931,7 +1090,19 @@ export const DB = {
           createdAt: r.created_at, resolvedAt: r.resolved_at||'',
         })); } catch(e) { console.warn('mye_action_items not ready:', e.message); return []; }
       }),
+      safe(async () => {
+        try { return await fetchRecent('mye_gypsum_trips', gypsumTripFromDB, 'date'); }
+        catch(e) { console.warn('mye_gypsum_trips not ready:', e.message); return []; }
+      }),
+      safe(async () => {
+        try { return await fetchRecent('mye_gypsum_shree_rates', gypsumShreeRateFromDB, 'effective_from'); }
+        catch(e) { console.warn('mye_gypsum_shree_rates not ready:', e.message); return []; }
+      }),
+      safe(async () => {
+        try { return await fetchRecent('mye_gypsum_driver_rates', gypsumDriverRateFromDB, 'effective_from'); }
+        catch(e) { console.warn('mye_gypsum_driver_rates not ready:', e.message); return []; }
+      }),
     ]);
-    onPhase?.({ driverPays, cashTransfers, pumpPayments, settlements, paymentRequests, activity, actionItems });
+    onPhase?.({ driverPays, cashTransfers, pumpPayments, settlements, paymentRequests, activity, actionItems, gypsumTrips, gypsumShreeRates, gypsumDriverRates });
   },
 }
