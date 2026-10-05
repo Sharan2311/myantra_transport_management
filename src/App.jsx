@@ -23363,21 +23363,27 @@ const SearchBar = ({value,onChange,placeholder}) => (
 // Runs the Netlify background scan (same pipeline as the Shree invoice/advice
 // scan) and polls the admin DB for the result. Returns the parsed result.
 const scanViaBackground = async (file, scanType) => {
-  const base64 = await new Promise((res,rej)=>{
-    const r = new FileReader();
-    r.onload = ()=>res(r.result.split(",")[1]);
-    r.onerror = ()=>rej(new Error("File read failed"));
-    r.readAsDataURL(file);
-  });
   const jobId = (typeof crypto!=="undefined"&&crypto.randomUUID)?crypto.randomUUID():Date.now().toString(36)+Math.random().toString(36).slice(2);
-  const bgResp = await fetch("/.netlify/functions/scan-shree-background",{
-    method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({
-      jobId, base64, anthropicKey:RC.anthropicKey, mediaType:file.type||"application/pdf", scanType,
-      clientId: RC.clientId, adminSupabaseUrl: RC.adminSupabaseUrl, adminSupabaseAnonKey: RC.adminSupabaseAnonKey,
-    }),
-  });
-  if(!bgResp.ok && bgResp.status!==202) throw new Error("Could not start scan (status "+bgResp.status+")");
+  // The bill PDF can be far larger than the background function's request-size cap
+  // (that returned HTTP 413), so upload it to a temp storage path and send only its URL.
+  const tmpPath = `scan_tmp/${jobId}.pdf`;
+  const {error:upErr} = await supabase.storage.from("trip-files").upload(tmpPath, file, {upsert:true, contentType:"application/pdf"});
+  if(upErr) throw new Error("Could not upload the bill for scanning: "+upErr.message);
+  const fileUrl = supabase.storage.from("trip-files").getPublicUrl(tmpPath).data?.publicUrl;
+  const cleanup = () => { supabase.storage.from("trip-files").remove([tmpPath]).catch(()=>{}); };
+  try {
+    const bgResp = await fetch("/.netlify/functions/scan-shree-background",{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({
+        jobId, fileUrl, anthropicKey:RC.anthropicKey, mediaType:"application/pdf", scanType,
+        clientId: RC.clientId, adminSupabaseUrl: RC.adminSupabaseUrl, adminSupabaseAnonKey: RC.adminSupabaseAnonKey,
+      }),
+    });
+    if(!bgResp.ok && bgResp.status!==202) throw new Error("Could not start scan (status "+bgResp.status+")");
+    return await pollScanResult(jobId);
+  } finally { cleanup(); }
+};
+const pollScanResult = async (jobId) => {
   const aUrl = RC.adminSupabaseUrl, aKey = RC.adminSupabaseAnonKey;
   const hdrs = {"apikey":aKey,"Authorization":"Bearer "+aKey};
   let elapsed = 0;
@@ -23680,6 +23686,9 @@ function ManualInvoiceSheet({ setTrips, invoiceRegistry=[], setInvoiceRegistry, 
               </Btn>
             </div>
           )}
+          {err && err.startsWith("Scan failed") && (
+            <div style={{marginTop:8,background:C.red+"11",border:`1px solid ${C.red}44`,borderRadius:8,padding:"8px 10px",color:C.red,fontSize:12}}>⚠ {err}</div>
+          )}
           {scanInfo && (
             <div style={{marginTop:8,background:C.bg,borderRadius:10,padding:"10px 12px",fontSize:12,lineHeight:1.7}}>
               <div style={{fontWeight:800,color:scanInfo.unmatched.length===0?C.green:C.orange}}>
@@ -23757,7 +23766,7 @@ function ManualInvoiceSheet({ setTrips, invoiceRegistry=[], setInvoiceRegistry, 
           )}
         </div>
 
-        {err && <div style={{background:C.red+"11",border:`1px solid ${C.red}44`,borderRadius:8,padding:"8px 10px",color:C.red,fontSize:12}}>⚠ {err}</div>}
+        {err && !err.startsWith("Scan failed") && <div style={{background:C.red+"11",border:`1px solid ${C.red}44`,borderRadius:8,padding:"8px 10px",color:C.red,fontSize:12}}>⚠ {err}</div>}
         <Btn full disabled={!canSave} loading={saving} onClick={save}>
           {saving ? "Saving…" : `Save invoice & mark ${selectedRows.length} DI(s) billed`}
         </Btn>

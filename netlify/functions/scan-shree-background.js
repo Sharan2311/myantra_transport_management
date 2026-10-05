@@ -163,10 +163,14 @@ exports.handler = async (event) => {
     adminUrl = process.env.ADMIN_SUPABASE_URL  || body.adminSupabaseUrl;
     adminKey = process.env.ADMIN_SUPABASE_ANON_KEY || body.adminSupabaseAnonKey;
     clientId = body.clientId;
-    const { base64, mediaType, scanType, anthropicKey } = body;
+    const { base64, mediaType, scanType, anthropicKey, fileUrl } = body;
 
     const prompt = scanType === "invoice" ? INVOICE_PROMPT : scanType === "manual_invoice" ? MANUAL_INVOICE_PROMPT : PAYMENT_PROMPT;
-    const contentBlock = { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } };
+    // Large PDFs exceed the background-function request-size cap, so the client can upload the
+    // file to storage and send only a URL — Anthropic fetches the PDF from that URL itself.
+    const contentBlock = fileUrl
+      ? { type: "document", source: { type: "url", url: fileUrl } }
+      : { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } };
 
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
