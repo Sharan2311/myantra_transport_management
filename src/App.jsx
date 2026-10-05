@@ -23353,6 +23353,429 @@ const SearchBar = ({value,onChange,placeholder}) => (
   </div>
 );
 
+// ── Manual Invoice ──────────────────────────────────────────────────────────
+// For bills whose DI numbers can't be read/matched by the scanner: the owner
+// picks the DIs by hand, enters the invoice no/date, uploads the bill PDF, and
+// freight total + GST are computed from the selection. Billing is applied with
+// the SAME per-DI rules as the scan flow (multi-DI trips: only the picked
+// diLine is billed; single-DI trips: the trip is billed). A DI that is already
+// billed is never offered, and is re-checked against fresh DB data on save.
+// Runs the Netlify background scan (same pipeline as the Shree invoice/advice
+// scan) and polls the admin DB for the result. Returns the parsed result.
+const scanViaBackground = async (file, scanType) => {
+  const jobId = (typeof crypto!=="undefined"&&crypto.randomUUID)?crypto.randomUUID():Date.now().toString(36)+Math.random().toString(36).slice(2);
+  // The bill PDF can be far larger than the background function's request-size cap
+  // (that returned HTTP 413), so upload it to a temp storage path and send only its URL.
+  const tmpPath = `scan_tmp/${jobId}.pdf`;
+  const {error:upErr} = await supabase.storage.from("trip-files").upload(tmpPath, file, {upsert:true, contentType:"application/pdf"});
+  if(upErr) throw new Error("Could not upload the bill for scanning: "+upErr.message);
+  const fileUrl = supabase.storage.from("trip-files").getPublicUrl(tmpPath).data?.publicUrl;
+  const cleanup = () => { supabase.storage.from("trip-files").remove([tmpPath]).catch(()=>{}); };
+  try {
+    const bgResp = await fetch("/.netlify/functions/scan-shree-background",{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({
+        jobId, fileUrl, anthropicKey:RC.anthropicKey, mediaType:"application/pdf", scanType,
+        clientId: RC.clientId, adminSupabaseUrl: RC.adminSupabaseUrl, adminSupabaseAnonKey: RC.adminSupabaseAnonKey,
+      }),
+    });
+    if(!bgResp.ok && bgResp.status!==202) throw new Error("Could not start scan (status "+bgResp.status+")");
+    return await pollScanResult(jobId);
+  } finally { cleanup(); }
+};
+const pollScanResult = async (jobId) => {
+  const aUrl = RC.adminSupabaseUrl, aKey = RC.adminSupabaseAnonKey;
+  const hdrs = {"apikey":aKey,"Authorization":"Bearer "+aKey};
+  let elapsed = 0;
+  while(elapsed < 180000) {
+    await new Promise(r=>setTimeout(r,3000)); elapsed += 3000;
+    let job = null;
+    try {
+      const pr = await fetch(`${aUrl}/rest/v1/scan_results?id=eq.${jobId}&select=status,result_json`,{headers:hdrs});
+      const rows = await pr.json();
+      job = Array.isArray(rows)?rows[0]:null;
+    } catch(_) { continue; } // transient network/parse hiccup — keep polling
+    if(job?.status==="done"||job?.status==="error") {
+      const result = JSON.parse(job.result_json||"{}");
+      fetch(`${aUrl}/rest/v1/scan_results?id=eq.${jobId}`,{method:"DELETE",headers:hdrs}).catch(()=>{});
+      if(job.status==="error"||result.error) throw new Error(result.error||"Scan failed");
+      return result;
+    }
+  }
+  throw new Error("Scan timed out after 3 minutes.");
+};
+
+// "14-05-2026", "14/05/2026", "14-May-2026", "2026-05-14" -> "2026-05-14"; "" if unreadable.
+const toISODate = (s) => {
+  const v = String(s||"").trim();
+  if(!v) return "";
+  if(/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+  const mon={jan:"01",feb:"02",mar:"03",apr:"04",may:"05",jun:"06",jul:"07",aug:"08",sep:"09",oct:"10",nov:"11",dec:"12"};
+  let m = v.match(/^(\d{1,2})[\-\/\.\s]([A-Za-z]{3})[A-Za-z]*[\-\/\.\s,]*(\d{4})$/);
+  if(m && mon[m[2].toLowerCase()]) return `${m[3]}-${mon[m[2].toLowerCase()]}-${m[1].padStart(2,"0")}`;
+  m = v.match(/^(\d{1,2})[\-\/\.](\d{1,2})[\-\/\.](\d{4})$/);
+  if(m) return `${m[3]}-${m[2].padStart(2,"0")}-${m[1].padStart(2,"0")}`;
+  return "";
+};
+const dayDiff = (a,b) => { const x=Date.parse(a), y=Date.parse(b); return isNaN(x)||isNaN(y) ? Infinity : Math.abs(x-y)/86400000; };
+
+const manualInvPath = (invNo) => `manual_invoices/${String(invNo||"").trim().replace(/[^A-Za-z0-9._-]+/g,"_")}.pdf`;
+
+function ManualInvoiceSheet({ setTrips, invoiceRegistry=[], setInvoiceRegistry, user, log, onClose }) {
+  const [allTrips, setAllTrips] = useState(null);
+  const [loadErr, setLoadErr]   = useState("");
+  const [invNo, setInvNo]       = useState("");
+  const [invDate, setInvDate]   = useState("");
+  const [client, setClient]     = useState("");
+  const [material, setMaterial] = useState("Cement");
+  const [gstPct, setGstPct]     = useState("18");
+  const [billTotal, setBillTotal] = useState("");
+  const [file, setFile]         = useState(null);
+  const [q, setQ]               = useState("");
+  const [allClients, setAllClients] = useState(false);
+  const [sel, setSel]           = useState({});   // rowKey -> amount string (presence = selected)
+  const [saving, setSaving]     = useState(false);
+  const [err, setErr]           = useState("");
+  const [done, setDone]         = useState(null);
+  const [scanning, setScanning] = useState(false);
+  const [scanInfo, setScanInfo] = useState(null); // {lines, matchedCount, unmatched:[{line,reason}], fuzzy:Set, totalFreight}
+
+  useEffect(() => {
+    let alive = true;
+    DB.getTripsAll().then(t => { if(alive) setAllTrips(t); })
+      .catch(e => { if(alive) setLoadErr(e.message||"Could not load trips"); });
+    return () => { alive = false; };
+  }, []);
+
+  const money = n => Number(n||0).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2});
+  const r2 = n => Math.round(Number(n||0)*100)/100;
+
+  // One candidate row per UNBILLED DI (diLine for multi-DI trips, trip for single-DI).
+  const buildRows = (trips) => {
+    const rows = [];
+    (trips||[]).forEach(t => {
+      if(t.prevFY) return;
+      const lines = t.diLines||[];
+      if(lines.length > 0) {
+        lines.forEach(d => {
+          if(d.billed || d.paid) return;
+          const rate = Number(d.frRate||t.frRate||0);
+          rows.push({key:t.id+"__"+normalizeDI(d.diNo), tripId:t.id, multi:true, diNo:normalizeDI(d.diNo), grNo:d.grNo||t.grNo||"",
+            lrNo:t.lrNo||"", truckNo:t.truckNo||"", consignee:t.consignee||"", to:t.to||"", date:t.date||"",
+            qty:Number(d.qty||0), amount:r2(Number(d.qty||0)*rate), client:t.client||getDEFAULT_CLIENT()});
+        });
+      } else {
+        if(t.status==="Billed" || t.status==="Paid" || t.status==="Partially Paid") return;
+        rows.push({key:t.id, tripId:t.id, multi:false, diNo:normalizeDI(t.diNo), grNo:t.grNo||"",
+          lrNo:t.lrNo||"", truckNo:t.truckNo||"", consignee:t.consignee||"", to:t.to||"", date:t.date||"",
+          qty:Number(t.qty||0), amount:r2(Number(t.qty||0)*Number(t.frRate||0)), client:t.client||getDEFAULT_CLIENT()});
+      }
+    });
+    return rows.sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+  };
+  const rows = useMemo(() => allTrips ? buildRows(allTrips) : [], [allTrips]);
+
+  const ql = q.trim().toLowerCase();
+  const visible = rows.filter(r => {
+    if(client && !allClients && r.client!==client) return false;
+    if(!ql) return true;
+    return [r.diNo,r.grNo,r.lrNo,r.truckNo,r.consignee,r.to].some(v=>String(v||"").toLowerCase().includes(ql));
+  });
+
+  const selectedRows = rows.filter(r => r.key in sel);
+  const amtOf = r => { const v = sel[r.key]; return v===undefined||v==="" ? 0 : Number(v); };
+  const freight = r2(selectedRows.reduce((s,r)=>s+amtOf(r),0));
+  const pct = Number(gstPct||0);
+  const half = r2(freight*pct/200);
+  const gstTotal = r2(half*2);
+  const grand = r2(freight+gstTotal);
+  const diff = billTotal!=="" ? r2(freight-Number(billTotal)) : null;
+
+  const toggle = r => setSel(p => { const n={...p}; if(r.key in n) delete n[r.key]; else n[r.key]=String(r.amount||""); return n; });
+  const allVisibleSelected = visible.length>0 && visible.every(r=>r.key in sel);
+  const toggleAllVisible = () => setSel(p => {
+    const n={...p};
+    if(allVisibleSelected) visible.forEach(r=>{ delete n[r.key]; });
+    else visible.forEach(r=>{ if(!(r.key in n)) n[r.key]=String(r.amount||""); });
+    return n;
+  });
+
+  const canSave = !!(invNo.trim() && invDate && client && material && file && selectedRows.length>0
+    && selectedRows.every(r=>amtOf(r)>0) && pct>=0 && !saving);
+
+  // Scan the uploaded bill, read every DI row, and auto-select the matching unbilled DIs.
+  // Match order per line: DI no -> GR no -> (truck + qty + date within 3 days, only if
+  // exactly one candidate). Amount comes from the bill's own Freight column.
+  const scanBill = async () => {
+    if(!file || !allTrips) return;
+    setScanning(true); setErr(""); setScanInfo(null);
+    try {
+      const res = await scanViaBackground(file, "manual_invoice");
+      const lines = res.trips||[];
+      if(res.invoiceNo && !invNo.trim()) setInvNo(String(res.invoiceNo).trim());
+      const iso = toISODate(res.invoiceDate);
+      if(iso && !invDate) setInvDate(iso);
+      if(res.totalFreight!=null && billTotal==="") setBillTotal(String(res.totalFreight));
+
+      // DI -> billed invoice, so lines that are already billed are reported clearly.
+      const billedDi = new Map();
+      allTrips.forEach(t => {
+        if((t.diLines||[]).length>0) t.diLines.forEach(d=>{ if(d.billed) billedDi.set(normalizeDI(d.diNo), d.invoiceNo||"?"); });
+        else if(t.status==="Billed"||t.status==="Paid"||t.status==="Partially Paid")
+          String(t.diNo||"").split("+").map(x=>x.trim()).filter(Boolean).forEach(di=>billedDi.set(di, t.invoiceNo||"?"));
+      });
+      const tokens = v => String(v||"").split("+").map(x=>x.trim()).filter(Boolean);
+      const used = new Set();
+      const newSel = {};
+      const fuzzy = new Set();
+      const unmatched = [];
+      let matched = 0;
+      lines.forEach(line => {
+        const di = normalizeDI(line.diNo), gr = normalizeDI(line.grNo);
+        const amt = Number(line.frtAmt||0);
+        let row = null, how = "";
+        if(di) row = rows.find(r=>!used.has(r.key) && tokens(r.diNo).includes(di));
+        if(row) how = "DI";
+        if(!row && gr) {
+          row = rows.find(r=>!used.has(r.key) && tokens(r.grNo).includes(gr)
+            && !(di && r.diNo && !tokens(r.diNo).includes(di)));
+          if(row) how = "GR";
+        }
+        if(!row && line.truckNo && line.qty!=null) {
+          const d0 = toISODate(line.grDate||line.date);
+          const cands = rows.filter(r=>!used.has(r.key)
+            && String(r.truckNo).replace(/\s+/g,"").toUpperCase()===String(line.truckNo).replace(/\s+/g,"").toUpperCase()
+            && Math.abs(r.qty-Number(line.qty))<0.01 && (!d0 || dayDiff(r.date,d0)<=3));
+          if(cands.length===1) { row = cands[0]; how = "truck+qty+date"; }
+        }
+        if(row && amt>0) {
+          used.add(row.key); newSel[row.key] = String(amt); matched++;
+          if(how!=="DI") fuzzy.add(row.key);
+        } else {
+          const b = di && billedDi.get(di);
+          unmatched.push({line, reason: b ? `already billed under ${b}` : (row ? "amount unreadable" : "no matching unbilled DI in the app")});
+        }
+      });
+      setSel(newSel);
+      setScanInfo({lines, matchedCount:matched, unmatched, fuzzy, totalFreight:res.totalFreight, scanSum:r2(lines.reduce((s,l)=>s+Number(l.frtAmt||0),0))});
+      log && log(`Manual invoice scan: ${lines.length} lines read, ${matched} matched`);
+    } catch(e) {
+      setErr("Scan failed: "+(e.message||e)+" — you can still select DIs by hand below.");
+    } finally { setScanning(false); }
+  };
+
+  const save = async () => {
+    setErr("");
+    const no = invNo.trim();
+    if((invoiceRegistry||[]).some(i=>i.invoiceNo===no && i.status==="active")) { setErr(`Invoice ${no} already exists. Use a different number.`); return; }
+    if(file.type && file.type!=="application/pdf" && !/\.pdf$/i.test(file.name||"")) { setErr("Please upload the bill as a PDF."); return; }
+    setSaving(true);
+    try {
+      // Fresh, authoritative data — never bill from possibly-stale screen state.
+      const fresh = await DB.getTripsAll();
+      if(fresh.some(t => (t.invoiceNo===no && t.status==="Billed") || (t.diLines||[]).some(d=>d.billed && d.invoiceNo===no))) {
+        throw new Error(`Invoice ${no} is already used on billed trips. Use a different number.`);
+      }
+      const freshRows = new Map(buildRows(fresh).map(r=>[r.key,r]));
+      const gone = selectedRows.filter(r=>!freshRows.has(r.key));
+      if(gone.length>0) throw new Error(`${gone.length} selected DI(s) were billed or changed by someone else (${gone.slice(0,5).map(r=>r.diNo||r.lrNo).join(", ")}). Reopen and reselect.`);
+
+      // Upload the bill first — if it fails, nothing is billed.
+      const path = manualInvPath(no);
+      const {error:upErr} = await supabase.storage.from("trip-files").upload(path, file, {upsert:true, contentType:"application/pdf"});
+      if(upErr) throw new Error("Bill upload failed: "+upErr.message);
+
+      const ts = nowTs();
+      const typeOverride = material==="Cement" ? "outbound" : material==="Raw Material" ? "inbound" : null;
+      const byTrip = new Map();
+      selectedRows.forEach(r => { if(!byTrip.has(r.tripId)) byTrip.set(r.tripId, []); byTrip.get(r.tripId).push(r); });
+      const updated = [];
+      byTrip.forEach((rs, tripId) => {
+        const t = fresh.find(x=>x.id===tripId);
+        if(!t) return;
+        let u;
+        if(rs[0].multi) {
+          const amtByDi = new Map(rs.map(r=>[r.diNo, amtOf(r)]));
+          const newLines = (t.diLines||[]).map(d => amtByDi.has(normalizeDI(d.diNo))
+            ? {...d, billed:true, invoiceNo:no, invoiceDate:invDate, billedAmt:amtByDi.get(normalizeDI(d.diNo))} : d);
+          u = {...t, diLines:newLines, invoiceNo:no, invoiceDate:invDate, client,
+            ...(typeOverride?{type:typeOverride}:{})};
+          u.status = tripBillingStatus(u);
+          u.billedToShree = tripBilledAmount(u);
+          if(u.status==="Billed") { u.billedBy="manual"; u.billedAt=ts; u.shreeStatus="billed"; }
+        } else {
+          u = {...t, invoiceNo:no, invoiceDate:invDate, status:"Billed", billedBy:"manual", billedAt:ts,
+            shreeStatus:"billed", client, ...(typeOverride?{type:typeOverride}:{}), billedToShree:amtOf(rs[0])};
+        }
+        updated.push(u);
+      });
+
+      // Save every trip; abort loudly (and don't register the invoice) if any fails.
+      const results = await Promise.allSettled(updated.map(u=>DB.saveTrip(u)));
+      const failed = results.filter(x=>x.status==="rejected");
+      if(failed.length>0) throw new Error(`${failed.length} trip(s) failed to save: ${failed[0].reason?.message||failed[0].reason}. Invoice not registered — check Invoices before retrying.`);
+
+      const updMap = new Map(updated.map(u=>[u.id,u]));
+      setTrips(prev => (prev||[]).map(t=>updMap.get(t.id)||t));
+
+      const reg = {id:no, invoiceNo:no, invoiceDate:invDate, client, material, totalAmt:grand,
+        diCount:selectedRows.length, status:"active", createdAt:ts, createdBy:user?.name||"", deletedAt:"", deletedBy:""};
+      setInvoiceRegistry && setInvoiceRegistry(prev=>[reg, ...(prev||[]).filter(i=>i.invoiceNo!==no)]);
+      await DB.saveInvoiceRegistry(reg).catch(e=>console.error("saveInvoiceRegistry:",e));
+
+      log && log(`Manual invoice ${no} — ${selectedRows.length} DI(s) billed · freight ₹${money(freight)} + GST ₹${money(gstTotal)} = ₹${money(grand)} · ${client} · ${material}`);
+      setDone({invNo:no, count:selectedRows.length, freight, gstTotal, grand, path});
+    } catch(e) {
+      setErr(e.message||String(e));
+    } finally { setSaving(false); }
+  };
+
+  const viewBill = (path) => {
+    const {data} = supabase.storage.from("trip-files").getPublicUrl(path);
+    if(data?.publicUrl) window.open(data.publicUrl, "_blank");
+  };
+
+  if(done) return (
+    <Sheet title="✅ Invoice saved" onClose={onClose}>
+      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+        <div style={{fontWeight:800,fontSize:15,color:C.green}}>Invoice {done.invNo}</div>
+        <div style={{fontSize:13,color:C.text}}>{done.count} DI(s) marked billed.</div>
+        <div style={{background:C.bg,borderRadius:10,padding:"10px 12px",fontSize:13,lineHeight:1.8}}>
+          Freight ₹{money(done.freight)}<br/>GST {gstPct}% ₹{money(done.gstTotal)}<br/><b>Total ₹{money(done.grand)}</b>
+        </div>
+        <Btn outline onClick={()=>viewBill(done.path)}>📄 View uploaded bill</Btn>
+        <Btn onClick={onClose}>Done</Btn>
+      </div>
+    </Sheet>
+  );
+
+  const lbl = {color:C.muted,fontSize:11,marginBottom:4,fontWeight:700};
+  return (
+    <Sheet title="✍️ Manual Invoice" onClose={onClose}>
+      <div style={{display:"flex",flexDirection:"column",gap:12}}>
+        <div style={{display:"flex",gap:8}}>
+          <div style={{flex:1}}><Field label="Invoice No *" value={invNo} onChange={setInvNo} placeholder="e.g. FGL/MYE/27/1"/></div>
+          <div style={{flex:1}}><Field label="Invoice Date *" value={invDate} onChange={setInvDate} type="date"/></div>
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <div style={{flex:1}}>
+            <div style={lbl}>CLIENT *</div>
+            <select value={client} onChange={e=>setClient(e.target.value)}
+              style={{width:"100%",background:C.bg,border:`1px solid ${client?C.teal:C.orange}`,borderRadius:8,color:C.text,padding:"9px 10px",fontSize:13,outline:"none"}}>
+              <option value="">— Select —</option>
+              {getCLIENTS().map(c=><option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          <div style={{flex:1}}>
+            <div style={lbl}>MATERIAL *</div>
+            <select value={material} onChange={e=>setMaterial(e.target.value)}
+              style={{width:"100%",background:C.bg,border:`1px solid ${C.teal}`,borderRadius:8,color:C.text,padding:"9px 10px",fontSize:13,outline:"none"}}>
+              {["Cement","Raw Material","Husk"].map(m=><option key={m} value={m}>{m}</option>)}
+            </select>
+          </div>
+          <div style={{width:80}}><Field label="GST %" value={gstPct} onChange={setGstPct} type="number"/></div>
+        </div>
+        <div>
+          <div style={lbl}>BILL PDF *</div>
+          <input type="file" accept="application/pdf,.pdf" onChange={e=>setFile(e.target.files?.[0]||null)} style={{fontSize:12,color:C.text}}/>
+          {file && <div style={{fontSize:11,color:C.green,marginTop:3}}>✓ {file.name}</div>}
+          {file && (
+            <div style={{marginTop:8}}>
+              <Btn full outline disabled={scanning||allTrips===null} loading={scanning} onClick={scanBill}>
+                {scanning ? "Reading the bill… (up to 3 min)" : "🔍 Scan bill & auto-select DIs"}
+              </Btn>
+            </div>
+          )}
+          {err && err.startsWith("Scan failed") && (
+            <div style={{marginTop:8,background:C.red+"11",border:`1px solid ${C.red}44`,borderRadius:8,padding:"8px 10px",color:C.red,fontSize:12}}>⚠ {err}</div>
+          )}
+          {scanInfo && (
+            <div style={{marginTop:8,background:C.bg,borderRadius:10,padding:"10px 12px",fontSize:12,lineHeight:1.7}}>
+              <div style={{fontWeight:800,color:scanInfo.unmatched.length===0?C.green:C.orange}}>
+                Read {scanInfo.lines.length} lines from the bill · {scanInfo.matchedCount} matched &amp; selected
+                {scanInfo.unmatched.length>0 && ` · ${scanInfo.unmatched.length} need your attention`}
+              </div>
+              {scanInfo.fuzzy.size>0 && <div style={{color:C.orange}}>{scanInfo.fuzzy.size} matched by GR / truck+qty instead of DI — marked “check” below.</div>}
+              {scanInfo.unmatched.length>0 && (
+                <div style={{marginTop:4}}>
+                  {scanInfo.unmatched.map((u,i)=>(
+                    <div key={i} style={{color:C.muted}}>
+                      • Sr {u.line.sr??"?"} · DI {u.line.diNo||"?"} · GR {u.line.grNo||"?"} · {u.line.truckNo||"?"} · {u.line.qty??"?"} MT · ₹{money(u.line.frtAmt)} — <span style={{color:C.orange}}>{u.reason}</span>
+                    </div>
+                  ))}
+                  <div style={{color:C.muted,marginTop:3}}>Find these in the list below (search by truck / DI) and tick them manually, or leave them out.</div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div style={{borderTop:`1px solid ${C.border}`,paddingTop:10}}>
+          <div style={lbl}>SELECT DIs ({selectedRows.length} selected)</div>
+          {!client && <div style={{fontSize:11,color:C.orange,marginBottom:6}}>Choose a client to list its unbilled DIs (or tick “All clients”).</div>}
+          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search DI, GR, LR, truck, consignee, destination…"
+            style={{width:"100%",boxSizing:"border-box",background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,color:C.text,padding:"9px 10px",fontSize:13,outline:"none"}}/>
+          <div style={{display:"flex",gap:12,alignItems:"center",margin:"8px 0",fontSize:12,color:C.muted,flexWrap:"wrap"}}>
+            <label style={{display:"flex",gap:5,alignItems:"center",cursor:"pointer"}}>
+              <input type="checkbox" checked={allVisibleSelected} onChange={toggleAllVisible}/> Select all shown ({visible.length})
+            </label>
+            <label style={{display:"flex",gap:5,alignItems:"center",cursor:"pointer"}}>
+              <input type="checkbox" checked={allClients} onChange={e=>setAllClients(e.target.checked)}/> All clients
+            </label>
+            {selectedRows.length>0 && <button onClick={()=>setSel({})} style={{background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:12}}>Clear</button>}
+          </div>
+          {allTrips===null && !loadErr && <div style={{color:C.muted,fontSize:12,padding:10}}>Loading trips…</div>}
+          {loadErr && <div style={{color:C.red,fontSize:12,padding:10}}>⚠ {loadErr}</div>}
+          <div style={{maxHeight:320,overflowY:"auto",border:`1px solid ${C.border}`,borderRadius:8}}>
+            {visible.length===0 && allTrips && <div style={{color:C.muted,fontSize:12,padding:12}}>No unbilled DIs match.</div>}
+            {visible.map(r => {
+              const on = r.key in sel;
+              return (
+                <div key={r.key} style={{display:"flex",gap:8,alignItems:"center",padding:"8px 10px",borderBottom:`1px solid ${C.border}`,
+                  background:on?C.accent+"11":"transparent"}}>
+                  <input type="checkbox" checked={on} onChange={()=>toggle(r)} style={{flexShrink:0}}/>
+                  <div style={{flex:1,minWidth:0,cursor:"pointer"}} onClick={()=>toggle(r)}>
+                    <div style={{fontSize:12,fontWeight:700,color:C.text}}>DI {r.diNo||"—"} · {r.truckNo} · {r.qty} MT{on && scanInfo?.fuzzy?.has(r.key) && <span style={{color:C.orange,marginLeft:6}}>⚠ check</span>}</div>
+                    <div style={{fontSize:11,color:C.muted,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                      {r.date||"—"} · {r.lrNo||"no LR"} · {r.consignee||"—"} → {r.to||"—"}
+                    </div>
+                  </div>
+                  {on ? (
+                    <input type="number" value={sel[r.key]} onChange={e=>setSel(p=>({...p,[r.key]:e.target.value}))}
+                      style={{width:90,background:C.bg,border:`1px solid ${amtOf(r)>0?C.teal:C.red}`,borderRadius:6,color:C.text,padding:"5px 6px",fontSize:12,textAlign:"right"}}/>
+                  ) : <div style={{fontSize:11,color:C.muted,width:90,textAlign:"right"}}>₹{money(r.amount)}</div>}
+                </div>
+              );
+            })}
+          </div>
+          <div style={{fontSize:10,color:C.muted,marginTop:4}}>Amount defaults to qty × freight rate. Edit it on selected rows to match the bill exactly.</div>
+        </div>
+
+        <div style={{background:C.bg,borderRadius:10,padding:"10px 12px",fontSize:13,lineHeight:1.9}}>
+          <div style={{display:"flex",justifyContent:"space-between"}}><span>Freight ({selectedRows.length} DIs)</span><b>₹{money(freight)}</b></div>
+          <div style={{display:"flex",justifyContent:"space-between",color:C.muted}}><span>CGST {pct/2}%</span><span>₹{money(half)}</span></div>
+          <div style={{display:"flex",justifyContent:"space-between",color:C.muted}}><span>SGST {pct/2}%</span><span>₹{money(half)}</span></div>
+          <div style={{display:"flex",justifyContent:"space-between",borderTop:`1px solid ${C.border}`,marginTop:4,paddingTop:4,fontSize:15}}><b>Invoice total</b><b style={{color:C.green}}>₹{money(grand)}</b></div>
+        </div>
+        <div>
+          <Field label="Freight total on the bill (optional — to cross-check)" value={billTotal} onChange={setBillTotal} type="number"/>
+          {diff!==null && (
+            <div style={{fontSize:12,marginTop:4,fontWeight:700,color:diff===0?C.green:C.orange}}>
+              {diff===0 ? "✓ Selection matches the bill" : `Difference ₹${money(Math.abs(diff))} — selected is ${diff>0?"higher":"lower"} than the bill`}
+            </div>
+          )}
+        </div>
+
+        {err && !err.startsWith("Scan failed") && <div style={{background:C.red+"11",border:`1px solid ${C.red}44`,borderRadius:8,padding:"8px 10px",color:C.red,fontSize:12}}>⚠ {err}</div>}
+        <Btn full disabled={!canSave} loading={saving} onClick={save}>
+          {saving ? "Saving…" : `Save invoice & mark ${selectedRows.length} DI(s) billed`}
+        </Btn>
+        <div style={{fontSize:10,color:C.muted}}>Required: invoice no, date, client, PDF, and at least one DI with an amount.</div>
+      </div>
+    </Sheet>
+  );
+}
+
 function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, setVehicles, gstReleases, setGstReleases, expenses, setExpenses, user, log, employees=[], actionItems=[], setActionItems, invoiceRegistry=[], setInvoiceRegistry, clinkerBills=[], setClinkerBills}) {
 
   const [activeTab,   setActiveTab]   = useState("overview");
@@ -23360,6 +23783,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
   const [scanning,    setScanning]    = useState(false);
   const [scanError,   setScanError]   = useState(null);
   const [applyingInvoice, setApplyingInvoice] = useState(false);
+  const [showManualInv, setShowManualInv] = useState(false);
   const [showAlert,   setShowAlert]   = useState(true);
   const [newExp,      setNewExp]      = useState({tripId:"", label:"", amount:""});
   // Clinker Bill state
@@ -24578,6 +25002,10 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
       <div style={{padding:14}}>
 
         {/* ══ OVERVIEW ══════════════════════════════════════════════ */}
+        {showManualInv && isOwner && (
+          <ManualInvoiceSheet setTrips={setTrips} invoiceRegistry={invoiceRegistry} setInvoiceRegistry={setInvoiceRegistry}
+            user={user} log={log} onClose={()=>setShowManualInv(false)} />
+        )}
         {/* ══ CLINKER BILL SHEET ══════════════════════════════════════════════ */}
         {showClinkerBill && isOwner && (()=>{
           const cb = clinkerBill;
@@ -25613,6 +26041,13 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         {/* ══ INVOICES ══════════════════════════════════════════════ */}
         {activeTab==="invoices"&&(
           <div>
+            {isOwner && (
+              <button onClick={()=>setShowManualInv(true)}
+                style={{width:"100%",marginBottom:8,background:C.accent+"18",border:`1px dashed ${C.accent}`,borderRadius:10,
+                  color:C.accent,fontWeight:800,fontSize:13,cursor:"pointer",padding:"10px 0"}}>
+                ✍️ Add Manual Invoice (select DIs by hand)
+              </button>
+            )}
             <SearchBar value={searchInv} onChange={setSearchInv} placeholder="Search invoice no, LR, date…"/>
             {/* Date filter + PDF */}
             <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:8,flexWrap:"wrap"}}>
