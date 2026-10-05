@@ -76,6 +76,41 @@ Return ONLY this JSON, no markdown, no explanation:
   ]
 }`;
 
+const MANUAL_INVOICE_PROMPT = `You are reading a freight "Tax Invoice" / bill PDF issued BY M Yantra Enterprises TO Shree Cement Limited for transportation of cement (GTA). The page is printed ROTATED 90 degrees (landscape table) — mentally rotate it so the header "Tax Invoice" reads normally before extracting. The table CONTINUES onto the next page(s): extract EVERY numbered row on ALL pages, and stop at the row labelled TOTAL.
+
+HEADER (top / right-hand block): FREIGHT BILL NO (e.g. FGL/MYE/27/1), BILL DATE, and the document number.
+
+TABLE COLUMNS (left to right after rotation):
+Sr | SHIPMENT | Inv Date | GR/TR No | GR Date | DI No | Truck No | Consignee | Destination | Weight (MT) | Rate/MT | Freight | Total Amount | CGST 9% | SGST 9% | IGST 18% | Sht-BG/Wt
+
+There is also a "DI - NOTE" column printed down the far edge that repeats the DI numbers — use it only to cross-check the DI No column.
+
+FIELD RULES — copy exactly, null if not clearly readable, NEVER guess:
+- diNo: the "DI No" column, exactly 10 digits, normally starting with 9 (e.g. 9002126867). Do NOT confuse it with SHIPMENT, which also has 10 digits but starts with 13 (e.g. 1301661495). Never put the shipment number in diNo.
+- shipment: the SHIPMENT column value (10 digits starting 13...).
+- grNo: the "GR/TR No" column, format 1070/MYE/XXXX (two forward slashes), e.g. 1070/MYE/2375.
+- grDate: the "GR Date" column, as printed (DD-MM-YYYY).
+- truckNo: uppercase, no spaces (e.g. KA32B4418). Join wrapped parts.
+- consigneeName: join wrapped lines.  to: the Destination column.
+- qty: Weight (MT) column (e.g. 35.00).  frRate: Rate/MT column.
+- frtAmt: the FREIGHT column — the amount BEFORE GST. Copy the printed number exactly. It is NOT the Total Amount column (which is usually equal for these bills) and NOT CGST/SGST. Sanity check: qty x frRate should be close to frtAmt.
+- sr: the Sr number of the row.
+
+Return ONLY this JSON, no markdown, no explanation:
+{
+  "type": "manual_invoice",
+  "invoiceNo": "<FREIGHT BILL NO or null>",
+  "invoiceDate": "<BILL DATE as printed or null>",
+  "totalFreight": <freight total from the TOTAL row or null>,
+  "gstTotal": <GST Total shown near the bottom or null>,
+  "totalAmount": <grand Total Amt shown near the bottom or null>,
+  "trips": [
+    { "sr": <number or null>, "diNo": "<10 digits or null>", "shipment": "<or null>", "grNo": "<1070/MYE/XXXX or null>",
+      "grDate": "<as printed or null>", "truckNo": "<or null>", "consigneeName": "<or null>", "to": "<or null>",
+      "qty": <number or null>, "frRate": <number or null>, "frtAmt": <number or null>, "date": "<same as grDate or null>" }
+  ]
+}`;
+
 const PAYMENT_PROMPT = `You are reading a payment advice / remittance advice PDF from Shree Cement or Ultratech to M Yantra Enterprises.
 This PDF may have wrapped cell values — read each cell completely before moving to the next column.
 STRICT RULES: Copy all values exactly as printed. Return null for any field not clearly readable.
@@ -130,7 +165,7 @@ exports.handler = async (event) => {
     clientId = body.clientId;
     const { base64, mediaType, scanType, anthropicKey } = body;
 
-    const prompt = scanType === "invoice" ? INVOICE_PROMPT : PAYMENT_PROMPT;
+    const prompt = scanType === "invoice" ? INVOICE_PROMPT : scanType === "manual_invoice" ? MANUAL_INVOICE_PROMPT : PAYMENT_PROMPT;
     const contentBlock = { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } };
 
     const response = await fetch("https://api.anthropic.com/v1/messages", {
@@ -208,7 +243,7 @@ exports.handler = async (event) => {
     }
 
     parsed._costInr = _costInr;
-    parsed._scanType = scanType === "invoice" ? "shree_scan" : "shree_payment_scan";
+    parsed._scanType = (scanType === "invoice" || scanType === "manual_invoice") ? "shree_scan" : "shree_payment_scan";
     await saveResult(adminUrl, adminKey, jobId, clientId, "done", parsed);
 
   } catch(e) {
