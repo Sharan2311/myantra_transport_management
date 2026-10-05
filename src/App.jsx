@@ -23360,6 +23360,59 @@ const SearchBar = ({value,onChange,placeholder}) => (
 // the SAME per-DI rules as the scan flow (multi-DI trips: only the picked
 // diLine is billed; single-DI trips: the trip is billed). A DI that is already
 // billed is never offered, and is re-checked against fresh DB data on save.
+// Runs the Netlify background scan (same pipeline as the Shree invoice/advice
+// scan) and polls the admin DB for the result. Returns the parsed result.
+const scanViaBackground = async (file, scanType) => {
+  const base64 = await new Promise((res,rej)=>{
+    const r = new FileReader();
+    r.onload = ()=>res(r.result.split(",")[1]);
+    r.onerror = ()=>rej(new Error("File read failed"));
+    r.readAsDataURL(file);
+  });
+  const jobId = (typeof crypto!=="undefined"&&crypto.randomUUID)?crypto.randomUUID():Date.now().toString(36)+Math.random().toString(36).slice(2);
+  const bgResp = await fetch("/.netlify/functions/scan-shree-background",{
+    method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({
+      jobId, base64, anthropicKey:RC.anthropicKey, mediaType:file.type||"application/pdf", scanType,
+      clientId: RC.clientId, adminSupabaseUrl: RC.adminSupabaseUrl, adminSupabaseAnonKey: RC.adminSupabaseAnonKey,
+    }),
+  });
+  if(!bgResp.ok && bgResp.status!==202) throw new Error("Could not start scan (status "+bgResp.status+")");
+  const aUrl = RC.adminSupabaseUrl, aKey = RC.adminSupabaseAnonKey;
+  const hdrs = {"apikey":aKey,"Authorization":"Bearer "+aKey};
+  let elapsed = 0;
+  while(elapsed < 180000) {
+    await new Promise(r=>setTimeout(r,3000)); elapsed += 3000;
+    let job = null;
+    try {
+      const pr = await fetch(`${aUrl}/rest/v1/scan_results?id=eq.${jobId}&select=status,result_json`,{headers:hdrs});
+      const rows = await pr.json();
+      job = Array.isArray(rows)?rows[0]:null;
+    } catch(_) { continue; } // transient network/parse hiccup — keep polling
+    if(job?.status==="done"||job?.status==="error") {
+      const result = JSON.parse(job.result_json||"{}");
+      fetch(`${aUrl}/rest/v1/scan_results?id=eq.${jobId}`,{method:"DELETE",headers:hdrs}).catch(()=>{});
+      if(job.status==="error"||result.error) throw new Error(result.error||"Scan failed");
+      return result;
+    }
+  }
+  throw new Error("Scan timed out after 3 minutes.");
+};
+
+// "14-05-2026", "14/05/2026", "14-May-2026", "2026-05-14" -> "2026-05-14"; "" if unreadable.
+const toISODate = (s) => {
+  const v = String(s||"").trim();
+  if(!v) return "";
+  if(/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+  const mon={jan:"01",feb:"02",mar:"03",apr:"04",may:"05",jun:"06",jul:"07",aug:"08",sep:"09",oct:"10",nov:"11",dec:"12"};
+  let m = v.match(/^(\d{1,2})[\-\/\.\s]([A-Za-z]{3})[A-Za-z]*[\-\/\.\s,]*(\d{4})$/);
+  if(m && mon[m[2].toLowerCase()]) return `${m[3]}-${mon[m[2].toLowerCase()]}-${m[1].padStart(2,"0")}`;
+  m = v.match(/^(\d{1,2})[\-\/\.](\d{1,2})[\-\/\.](\d{4})$/);
+  if(m) return `${m[3]}-${m[2].padStart(2,"0")}-${m[1].padStart(2,"0")}`;
+  return "";
+};
+const dayDiff = (a,b) => { const x=Date.parse(a), y=Date.parse(b); return isNaN(x)||isNaN(y) ? Infinity : Math.abs(x-y)/86400000; };
+
 const manualInvPath = (invNo) => `manual_invoices/${String(invNo||"").trim().replace(/[^A-Za-z0-9._-]+/g,"_")}.pdf`;
 
 function ManualInvoiceSheet({ setTrips, invoiceRegistry=[], setInvoiceRegistry, user, log, onClose }) {
@@ -23378,6 +23431,8 @@ function ManualInvoiceSheet({ setTrips, invoiceRegistry=[], setInvoiceRegistry, 
   const [saving, setSaving]     = useState(false);
   const [err, setErr]           = useState("");
   const [done, setDone]         = useState(null);
+  const [scanning, setScanning] = useState(false);
+  const [scanInfo, setScanInfo] = useState(null); // {lines, matchedCount, unmatched:[{line,reason}], fuzzy:Set, totalFreight}
 
   useEffect(() => {
     let alive = true;
@@ -23441,6 +23496,67 @@ function ManualInvoiceSheet({ setTrips, invoiceRegistry=[], setInvoiceRegistry, 
 
   const canSave = !!(invNo.trim() && invDate && client && material && file && selectedRows.length>0
     && selectedRows.every(r=>amtOf(r)>0) && pct>=0 && !saving);
+
+  // Scan the uploaded bill, read every DI row, and auto-select the matching unbilled DIs.
+  // Match order per line: DI no -> GR no -> (truck + qty + date within 3 days, only if
+  // exactly one candidate). Amount comes from the bill's own Freight column.
+  const scanBill = async () => {
+    if(!file || !allTrips) return;
+    setScanning(true); setErr(""); setScanInfo(null);
+    try {
+      const res = await scanViaBackground(file, "manual_invoice");
+      const lines = res.trips||[];
+      if(res.invoiceNo && !invNo.trim()) setInvNo(String(res.invoiceNo).trim());
+      const iso = toISODate(res.invoiceDate);
+      if(iso && !invDate) setInvDate(iso);
+      if(res.totalFreight!=null && billTotal==="") setBillTotal(String(res.totalFreight));
+
+      // DI -> billed invoice, so lines that are already billed are reported clearly.
+      const billedDi = new Map();
+      allTrips.forEach(t => {
+        if((t.diLines||[]).length>0) t.diLines.forEach(d=>{ if(d.billed) billedDi.set(normalizeDI(d.diNo), d.invoiceNo||"?"); });
+        else if(t.status==="Billed"||t.status==="Paid"||t.status==="Partially Paid")
+          String(t.diNo||"").split("+").map(x=>x.trim()).filter(Boolean).forEach(di=>billedDi.set(di, t.invoiceNo||"?"));
+      });
+      const tokens = v => String(v||"").split("+").map(x=>x.trim()).filter(Boolean);
+      const used = new Set();
+      const newSel = {};
+      const fuzzy = new Set();
+      const unmatched = [];
+      let matched = 0;
+      lines.forEach(line => {
+        const di = normalizeDI(line.diNo), gr = normalizeDI(line.grNo);
+        const amt = Number(line.frtAmt||0);
+        let row = null, how = "";
+        if(di) row = rows.find(r=>!used.has(r.key) && tokens(r.diNo).includes(di));
+        if(row) how = "DI";
+        if(!row && gr) {
+          row = rows.find(r=>!used.has(r.key) && tokens(r.grNo).includes(gr)
+            && !(di && r.diNo && !tokens(r.diNo).includes(di)));
+          if(row) how = "GR";
+        }
+        if(!row && line.truckNo && line.qty!=null) {
+          const d0 = toISODate(line.grDate||line.date);
+          const cands = rows.filter(r=>!used.has(r.key)
+            && String(r.truckNo).replace(/\s+/g,"").toUpperCase()===String(line.truckNo).replace(/\s+/g,"").toUpperCase()
+            && Math.abs(r.qty-Number(line.qty))<0.01 && (!d0 || dayDiff(r.date,d0)<=3));
+          if(cands.length===1) { row = cands[0]; how = "truck+qty+date"; }
+        }
+        if(row && amt>0) {
+          used.add(row.key); newSel[row.key] = String(amt); matched++;
+          if(how!=="DI") fuzzy.add(row.key);
+        } else {
+          const b = di && billedDi.get(di);
+          unmatched.push({line, reason: b ? `already billed under ${b}` : (row ? "amount unreadable" : "no matching unbilled DI in the app")});
+        }
+      });
+      setSel(newSel);
+      setScanInfo({lines, matchedCount:matched, unmatched, fuzzy, totalFreight:res.totalFreight, scanSum:r2(lines.reduce((s,l)=>s+Number(l.frtAmt||0),0))});
+      log && log(`Manual invoice scan: ${lines.length} lines read, ${matched} matched`);
+    } catch(e) {
+      setErr("Scan failed: "+(e.message||e)+" — you can still select DIs by hand below.");
+    } finally { setScanning(false); }
+  };
 
   const save = async () => {
     setErr("");
@@ -23557,6 +23673,32 @@ function ManualInvoiceSheet({ setTrips, invoiceRegistry=[], setInvoiceRegistry, 
           <div style={lbl}>BILL PDF *</div>
           <input type="file" accept="application/pdf,.pdf" onChange={e=>setFile(e.target.files?.[0]||null)} style={{fontSize:12,color:C.text}}/>
           {file && <div style={{fontSize:11,color:C.green,marginTop:3}}>✓ {file.name}</div>}
+          {file && (
+            <div style={{marginTop:8}}>
+              <Btn full outline disabled={scanning||allTrips===null} loading={scanning} onClick={scanBill}>
+                {scanning ? "Reading the bill… (up to 3 min)" : "🔍 Scan bill & auto-select DIs"}
+              </Btn>
+            </div>
+          )}
+          {scanInfo && (
+            <div style={{marginTop:8,background:C.bg,borderRadius:10,padding:"10px 12px",fontSize:12,lineHeight:1.7}}>
+              <div style={{fontWeight:800,color:scanInfo.unmatched.length===0?C.green:C.orange}}>
+                Read {scanInfo.lines.length} lines from the bill · {scanInfo.matchedCount} matched &amp; selected
+                {scanInfo.unmatched.length>0 && ` · ${scanInfo.unmatched.length} need your attention`}
+              </div>
+              {scanInfo.fuzzy.size>0 && <div style={{color:C.orange}}>{scanInfo.fuzzy.size} matched by GR / truck+qty instead of DI — marked “check” below.</div>}
+              {scanInfo.unmatched.length>0 && (
+                <div style={{marginTop:4}}>
+                  {scanInfo.unmatched.map((u,i)=>(
+                    <div key={i} style={{color:C.muted}}>
+                      • Sr {u.line.sr??"?"} · DI {u.line.diNo||"?"} · GR {u.line.grNo||"?"} · {u.line.truckNo||"?"} · {u.line.qty??"?"} MT · ₹{money(u.line.frtAmt)} — <span style={{color:C.orange}}>{u.reason}</span>
+                    </div>
+                  ))}
+                  <div style={{color:C.muted,marginTop:3}}>Find these in the list below (search by truck / DI) and tick them manually, or leave them out.</div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         <div style={{borderTop:`1px solid ${C.border}`,paddingTop:10}}>
@@ -23584,7 +23726,7 @@ function ManualInvoiceSheet({ setTrips, invoiceRegistry=[], setInvoiceRegistry, 
                   background:on?C.accent+"11":"transparent"}}>
                   <input type="checkbox" checked={on} onChange={()=>toggle(r)} style={{flexShrink:0}}/>
                   <div style={{flex:1,minWidth:0,cursor:"pointer"}} onClick={()=>toggle(r)}>
-                    <div style={{fontSize:12,fontWeight:700,color:C.text}}>DI {r.diNo||"—"} · {r.truckNo} · {r.qty} MT</div>
+                    <div style={{fontSize:12,fontWeight:700,color:C.text}}>DI {r.diNo||"—"} · {r.truckNo} · {r.qty} MT{on && scanInfo?.fuzzy?.has(r.key) && <span style={{color:C.orange,marginLeft:6}}>⚠ check</span>}</div>
                     <div style={{fontSize:11,color:C.muted,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
                       {r.date||"—"} · {r.lrNo||"no LR"} · {r.consignee||"—"} → {r.to||"—"}
                     </div>
