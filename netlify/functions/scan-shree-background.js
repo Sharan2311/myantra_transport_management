@@ -23,6 +23,14 @@ or TotalTax AMT as frtAmt — those are tax columns near the right edge of the r
 
 FIELD RULES — copy values exactly, null if not clearly readable:
 
+INVOICE NUMBER (the top-level "invoiceNo" field):
+- Read it from the page HEADER, printed next to the label "Freight Bill No" (e.g. SKOR107027100034
+  or a similar PMYE/SMYE/SKOR... style number). Copy it exactly, uppercase, no spaces.
+- It is NOT the per-row "INV NO" column in the table (values like KR2602004407) — those are the
+  supplier's individual invoice numbers for each row and must never be used as the invoiceNo.
+- If the header has no "Freight Bill No" label, use the bill/invoice number printed in the header.
+- Return null only if no such header number is clearly readable.
+
 DI NO:
 - Always exactly 10 digits (e.g. 9003367634)
 - Often wraps: "90033676" line 1, "34" line 2 → join to "9003367634"
@@ -58,7 +66,7 @@ STRICT RULES:
 Return ONLY this JSON, no markdown, no explanation:
 {
   "type": "invoice",
-  "invoiceNo": "<invoice number from header or null>",
+  "invoiceNo": "<Freight Bill No from the header, NOT the INV NO table column, or null>",
   "invoiceDate": "<date from header or null>",
   "totalAmount": <total amount as number or null>,
   "trips": [
