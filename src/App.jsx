@@ -228,6 +228,16 @@ const tripPouchReceived = t => {
 // this name before the Return Pouch vs Confirmation Email split.
 const tripConfirmReceived = tripPouchReceived;
 
+// A party trip whose party DIs are ALL billed under an invoice number can have its
+// pouch balance requested even before the sealed invoice / confirmation is uploaded.
+// Used ONLY for the payment hold/request rules — pouch-received tracking, the 8-day
+// pouch deadline and the Party Portal still follow the real upload (tripConfirmReceived).
+const tripBilledWithInvoice = t => {
+  const partyLines = diRowsFor(t).filter(d=>d.orderType==="party");
+  return partyLines.length>0 && partyLines.every(d=>d.billed && String(d.invoiceNo||"").trim()!=="");
+};
+const tripPouchPayable = t => tripConfirmReceived(t) || tripBilledWithInvoice(t);
+
 // ─── CONFIRMATION EMAIL — drives the Ready for Billing auto-trigger. ─────────
 // Received if the document is uploaded, OR the DI's own epodDone (the
 // original EPOD fields) is set. Confirmation Email stays TRIP-level by
@@ -27093,7 +27103,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
   // uploaded — no other condition unlocks it. A trip being marked settled by
   // the owner does not release the pouch; it closes the trip out entirely
   // (see the bulk "Mark Settled" action, which zeroes pouchBalance directly).
-  const _hasMerged = tripConfirmReceived(t);
+  const _hasMerged = tripPouchPayable(t);
   const _pouchHold = (t.orderType==="party"&&!_hasMerged) ? (t.pouchBalance||0) : 0;
   const _deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)+(t.shortageRecovery||0)+(t.loanRecovery||0)+_pouchHold;
   const _netDue  = Math.max(0, _diGross - _deducts);
@@ -27211,7 +27221,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
     // ── Pouch balance validation: block if only pouch remains and no confirmation ──
     if(t.orderType==="party" && (t.pouchBalance||0)>0) {
       if(!_hasMerged && _balance <= 0) {
-        alert("⚠ Cannot request payment.\n\nThe remaining balance (₹"+_balance.toLocaleString("en-IN")+") is only the pouch balance.\nPlease upload sealed invoice or confirmation email first.");
+        alert("⚠ Cannot request payment.\n\nThe remaining balance (₹"+_balance.toLocaleString("en-IN")+") is only the pouch balance.\nPlease upload the sealed invoice or confirmation email, or bill the trip with an invoice number, first.");
         return;
       }
     }
@@ -28298,7 +28308,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
     // that upload, so this is the one legitimate case where a genuinely new,
     // unpaid amount can exist on an already-"settled" trip. Don't block that.
     const hasGenuinePouchClaim = (t) => {
-      return t.orderType==="party" && tripConfirmReceived(t) && (t.pouchBalance||0)>0;
+      return t.orderType==="party" && tripPouchPayable(t) && (t.pouchBalance||0)>0;
     };
     if (list.some(t => t.driverSettled && !hasGenuinePouchClaim(t))) {
       alert("This trip is already marked as settled — no further payment can be requested for it.");
@@ -28497,7 +28507,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
   React.useEffect(() => {
     const tripForLR = (lrNo) => (trips||[]).find(x=>x.lrNo && x.lrNo===lrNo) || null;
     const hasGenuinePouchClaim = (t) => {
-      return t.orderType==="party" && tripConfirmReceived(t) && (t.pouchBalance||0)>0;
+      return t.orderType==="party" && tripPouchPayable(t) && (t.pouchBalance||0)>0;
     };
     const balanceForTrip = (t) => {
       const gross = (t.diLines&&t.diLines.length>1)
@@ -28505,7 +28515,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
         : (t.qty||0)*(t.givenRate||0);
       // Pouch counts toward netDue once merged — same rule as RequestPaymentSheet
       // — so a fully-paid main balance doesn't mask a genuinely outstanding pouch.
-      const pouchHold = (t.orderType==="party" && !tripConfirmReceived(t)) ? (t.pouchBalance||0) : 0;
+      const pouchHold = (t.orderType==="party" && !tripPouchPayable(t)) ? (t.pouchBalance||0) : 0;
       const deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)
         +((t.shortage||0)*(t.givenRate||0))+(t.shortageRecovery||0)+(t.loanRecovery||0)+pouchHold;
       const netDue = Math.max(0, gross - deducts);
@@ -29233,7 +29243,7 @@ This will auto-recover in the next trip.`);
                 upload, so this is the one case a "settled" trip can still have a
                 genuine, unpaid amount. t.balance itself won't reflect this (it's
                 never pouch-aware), so this checks pouchBalance directly instead. */}
-            {t.driverSettled && t.orderType==="party" && (t.pouchBalance||0)>0 && tripConfirmReceived(t) && (
+            {t.driverSettled && t.orderType==="party" && (t.pouchBalance||0)>0 && tripPouchPayable(t) && (
               <Btn onClick={()=>requestPaymentGuarded(t, t)} sm outline color={C.purple}>📋 Request Payment</Btn>
             )}
             {t.balance>0&&t.driverSettled&&(
