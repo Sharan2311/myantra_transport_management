@@ -24230,6 +24230,10 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
   const applyInvoiceScan = async () => {
     if(!scanResult || scanResult.type!=="invoice") return;
     const invNo = scanResult.invoiceNo;
+    if(!String(invNo||"").trim()){
+      alert("Invoice number could not be read from this PDF. Nothing was billed. Please rescan, or use Add Manual Invoice.");
+      return;
+    }
     const invDate = parseDD(scanResult.invoiceDate);
     const chosenClient   = scanClient   || "";
     const chosenMaterial = scanMaterial || "";
@@ -25692,7 +25696,8 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                           return (actionItems||[]).some(ai=>ai.invoiceNo===scanResult.invoiceNo && ai.status==="open" && normalizeDI(ai.diNo)===normalizeDI(st.diNo));
                         };
                         const alreadySaved = lines.length>0 && lines.every(lineAlreadyResolvedPreview);
-                        const canApply = lines.length>0 && !alreadySaved && scanClient && scanMaterial;
+                        const hasInvNo = String(scanResult.invoiceNo||"").trim()!=="";
+                        const canApply = lines.length>0 && !alreadySaved && scanClient && scanMaterial && hasInvNo;
                         return (<>
                           <div style={{marginTop:8,padding:"8px 0",display:"flex",gap:12,flexWrap:"wrap",
                             fontSize:11,borderTop:`1px solid ${C.border}`}}>
@@ -25731,6 +25736,11 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                               </select>
                             </div>
                           </div>
+                          {!hasInvNo && (
+                            <div style={{fontSize:11,color:C.red,fontWeight:700,marginTop:4}}>
+                              ⛔ Invoice number could not be read from this PDF — cannot bill. Rescan or use Add Manual Invoice.
+                            </div>
+                          )}
                           {(!scanClient||!scanMaterial) && (
                             <div style={{fontSize:10,color:C.orange,fontWeight:600,marginTop:4}}>
                               ⚠ Select client and material before saving
