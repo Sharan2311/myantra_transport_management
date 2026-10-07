@@ -102,3 +102,28 @@ export function printHuskReport({ title, subtitle, summary = [], columns, rows, 
   w.document.write(`<!DOCTYPE html><html><head><title>${esc(title)}</title></head><body onload="window.print()">${html}</body></html>`);
   w.document.close();
 }
+
+// ── Financial year (India: 1 Apr – 31 Mar) ───────────────────────────────────
+export const fyStartYear = iso => { const m = String(iso || "").match(/^(\d{4})-(\d{2})/); return m ? (+m[2] >= 4 ? +m[1] : +m[1] - 1) : null; };
+export const fyRange = y => ({ from: `${y}-04-01`, to: `${+y + 1}-03-31` });
+export const fyLabel = y => `FY ${y}-${String(+y + 1).slice(2)}`;
+// Picks a financial year by filling From / To. The select shows the FY that the
+// current dates match exactly, otherwise "All time / custom dates".
+export function FYPick({ from, to, onPick, data }) {
+  const { Field } = UI;
+  const years = new Set();
+  const cur = fyStartYear(new Date().toISOString().slice(0, 10));
+  years.add(cur);
+  [...(data.trips || []).map(t => t.entryDate), ...(data.payments || []).map(p => p.date), ...(data.openings || []).map(o => o.asOf), ...(data.loans || []).map(l => l.date)]
+    .forEach(d => { const y = fyStartYear(d); if (y) years.add(y); });
+  const list = [...years].sort((a, b) => b - a);
+  const match = list.find(y => { const r = fyRange(y); return r.from === from && r.to === to; });
+  return <Field label="Financial year" value={match ? String(match) : ""}
+    onChange={v => { if (!v) onPick("", ""); else { const r = fyRange(+v); onPick(r.from, r.to); } }}
+    opts={[{ v: "", l: "All time / custom dates" }, ...list.map(y => ({ v: String(y), l: fyLabel(y) }))]} />;
+}
+export const periodText = (from, to) => {
+  const y = fyStartYear(from);
+  if (y && from === fyRange(y).from && to === fyRange(y).to) return fyLabel(y);
+  return [from && `From ${fmtDay(from)}`, to && `To ${fmtDay(to)}`].filter(Boolean).join(" · ");
+};
