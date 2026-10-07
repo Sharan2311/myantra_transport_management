@@ -1106,3 +1106,86 @@ export const DB = {
     onPhase?.({ driverPays, cashTransfers, pumpPayments, settlements, paymentRequests, activity, actionItems, gypsumTrips, gypsumShreeRates, gypsumDriverRates });
   },
 }
+
+// ─── HUSK MODULE ─────────────────────────────────────────────────────────────
+// Rice / tuvar / soya … husk supply. Twelve mye_husk_* tables (see
+// supabase/migrations/2026_10_husk_module.sql). Same conventions as above:
+// camelCase in the app, snake_case in the DB, dates as text, ts = epoch ms
+// used only to order rows created on the same date.
+const nz = v => +(v || 0);
+const HUSK = {
+  materials: { table: 'mye_husk_materials',
+    from: r => ({ id: r.id, name: r.name || '', active: r.active !== false, ts: nz(r.ts), createdBy: r.created_by || '', createdAt: r.created_at || '' }),
+    to: o => ({ id: o.id, name: o.name || '', active: o.active !== false, ts: nz(o.ts), created_by: o.createdBy || '', created_at: o.createdAt || '' }) },
+  companies: { table: 'mye_husk_companies',
+    from: r => ({ id: r.id, name: r.name || '', contact: r.contact || '', active: r.active !== false, ts: nz(r.ts), createdBy: r.created_by || '', createdAt: r.created_at || '' }),
+    to: o => ({ id: o.id, name: o.name || '', contact: o.contact || '', active: o.active !== false, ts: nz(o.ts), created_by: o.createdBy || '', created_at: o.createdAt || '' }) },
+  customers: { table: 'mye_husk_customers',
+    from: r => ({ id: r.id, name: r.name || '', phone: r.phone || '', loanPerTrip: nz(r.loan_per_trip), active: r.active !== false, ts: nz(r.ts), createdBy: r.created_by || '', createdAt: r.created_at || '' }),
+    to: o => ({ id: o.id, name: o.name || '', phone: o.phone || '', loan_per_trip: nz(o.loanPerTrip), active: o.active !== false, ts: nz(o.ts), created_by: o.createdBy || '', created_at: o.createdAt || '' }) },
+  vehicles: { table: 'mye_husk_vehicles',
+    from: r => ({ id: r.id, truckNo: r.truck_no || '', customerId: r.customer_id || '', ts: nz(r.ts), createdBy: r.created_by || '', createdAt: r.created_at || '' }),
+    to: o => ({ id: o.id, truck_no: o.truckNo || '', customer_id: o.customerId || '', ts: nz(o.ts), created_by: o.createdBy || '', created_at: o.createdAt || '' }) },
+  vehicleOwners: { table: 'mye_husk_vehicle_owners',
+    from: r => ({ id: r.id, vehicleId: r.vehicle_id, customerId: r.customer_id, fromDate: r.from_date || '', toDate: r.to_date || '', ts: nz(r.ts), createdBy: r.created_by || '' }),
+    to: o => ({ id: o.id, vehicle_id: o.vehicleId, customer_id: o.customerId, from_date: o.fromDate || '', to_date: o.toDate || '', ts: nz(o.ts), created_by: o.createdBy || '' }) },
+  companyRates: { table: 'mye_husk_company_rates',
+    from: r => ({ id: r.id, companyId: r.company_id, materialId: r.material_id, rate: nz(r.rate), effectiveFrom: r.effective_from || '', ts: nz(r.ts), createdBy: r.created_by || '', createdAt: r.created_at || '' }),
+    to: o => ({ id: o.id, company_id: o.companyId, material_id: o.materialId, rate: nz(o.rate), effective_from: o.effectiveFrom || '', ts: nz(o.ts), created_by: o.createdBy || '', created_at: o.createdAt || '' }) },
+  customerRates: { table: 'mye_husk_customer_rates',
+    from: r => ({ id: r.id, customerId: r.customer_id, materialId: r.material_id, companyId: r.company_id, rate: nz(r.rate), effectiveFrom: r.effective_from || '', ts: nz(r.ts), createdBy: r.created_by || '', createdAt: r.created_at || '' }),
+    to: o => ({ id: o.id, customer_id: o.customerId, material_id: o.materialId, company_id: o.companyId, rate: nz(o.rate), effective_from: o.effectiveFrom || '', ts: nz(o.ts), created_by: o.createdBy || '', created_at: o.createdAt || '' }) },
+  trips: { table: 'mye_husk_trips',
+    from: r => ({
+      id: r.id, entryDate: r.entry_date || '', companyId: r.company_id, materialId: r.material_id,
+      vehicleId: r.vehicle_id || '', truckNo: r.truck_no || '', customerId: r.customer_id,
+      tons: nz(r.tons), companyRate: nz(r.company_rate), customerRate: nz(r.customer_rate),
+      companyAmount: nz(r.company_amount), customerAmount: nz(r.customer_amount),
+      loanDeduction: nz(r.loan_deduction), customerDeduction: nz(r.customer_deduction),
+      dedPaymentId: r.ded_payment_id || '', netPayable: nz(r.net_payable), note: r.note || '',
+      enteredBy: r.entered_by || '', enteredAt: r.entered_at || '', editedBy: r.edited_by || '', editedAt: r.edited_at || '', ts: nz(r.ts),
+    }),
+    to: o => ({
+      id: o.id, entry_date: o.entryDate || '', company_id: o.companyId, material_id: o.materialId,
+      vehicle_id: o.vehicleId || '', truck_no: o.truckNo || '', customer_id: o.customerId,
+      tons: nz(o.tons), company_rate: nz(o.companyRate), customer_rate: nz(o.customerRate),
+      company_amount: nz(o.companyAmount), customer_amount: nz(o.customerAmount),
+      loan_deduction: nz(o.loanDeduction), customer_deduction: nz(o.customerDeduction),
+      ded_payment_id: o.dedPaymentId || '', net_payable: nz(o.netPayable), note: o.note || '',
+      entered_by: o.enteredBy || '', entered_at: o.enteredAt || '', edited_by: o.editedBy || '', edited_at: o.editedAt || '', ts: nz(o.ts),
+    }) },
+  payments: { table: 'mye_husk_payments',
+    from: r => ({ id: r.id, kind: r.kind, date: r.date || '', companyId: r.company_id || '', materialId: r.material_id || '', customerId: r.customer_id || '', amount: nz(r.amount), deduction: nz(r.deduction), deductionReason: r.deduction_reason || '', mode: r.mode || '', note: r.note || '', createdBy: r.created_by || '', createdAt: r.created_at || '', ts: nz(r.ts) }),
+    to: o => ({ id: o.id, kind: o.kind, date: o.date || '', company_id: o.companyId || '', material_id: o.materialId || '', customer_id: o.customerId || '', amount: nz(o.amount), deduction: nz(o.deduction), deduction_reason: o.deductionReason || '', mode: o.mode || '', note: o.note || '', created_by: o.createdBy || '', created_at: o.createdAt || '', ts: nz(o.ts) }) },
+  openings: { table: 'mye_husk_openings',
+    from: r => ({ id: r.id, partyType: r.party_type, partyId: r.party_id, companyId: r.company_id || '', materialId: r.material_id || '', amount: nz(r.amount), asOf: r.as_of || '', note: r.note || '', createdBy: r.created_by || '', ts: nz(r.ts) }),
+    to: o => ({ id: o.id, party_type: o.partyType, party_id: o.partyId, company_id: o.companyId || '', material_id: o.materialId || '', amount: nz(o.amount), as_of: o.asOf || '', note: o.note || '', created_by: o.createdBy || '', ts: nz(o.ts) }) },
+  loans: { table: 'mye_husk_loans',
+    from: r => ({ id: r.id, customerId: r.customer_id, kind: r.kind, amount: nz(r.amount), date: r.date || '', tripId: r.trip_id || '', note: r.note || '', createdBy: r.created_by || '', ts: nz(r.ts) }),
+    to: o => ({ id: o.id, customer_id: o.customerId, kind: o.kind, amount: nz(o.amount), date: o.date || '', trip_id: o.tripId || '', note: o.note || '', created_by: o.createdBy || '', ts: nz(o.ts) }) },
+  changelog: { table: 'mye_husk_changelog',
+    from: r => ({ id: r.id, ts: nz(r.ts), at: r.at || '', by: r.by || '', tableName: r.table_name || '', recordId: r.record_id || '', action: r.action || '', before: r.before || null, after: r.after || null }),
+    to: o => ({ id: o.id, ts: nz(o.ts), at: o.at || '', by: o.by || '', table_name: o.tableName || '', record_id: o.recordId || '', action: o.action || '', before: o.before ?? null, after: o.after ?? null }) },
+};
+export const HUSK_KEYS = Object.keys(HUSK);
+
+export const HuskDB = {
+  // Loads every Husk table. A table that does not exist yet (SQL not run on this
+  // project) comes back as [] and is listed in `missing`, so the screen can say so.
+  loadAll: async () => {
+    const out = {}; const missing = [];
+    await Promise.all(HUSK_KEYS.map(async k => {
+      try { out[k] = await fetchAll(HUSK[k].table, HUSK[k].from); }
+      catch (e) { out[k] = []; missing.push(HUSK[k].table); console.warn(HUSK[k].table + ' not ready:', e.message); }
+    }));
+    out.missing = missing;
+    return out;
+  },
+  save: (key, rec) => withRetry(() => upsertOne(HUSK[key].table, HUSK[key].to, rec)),
+  saveMany: async (key, recs) => {
+    if (!recs.length) return;
+    const { error } = await supabase.from(HUSK[key].table).upsert(recs.map(HUSK[key].to), { onConflict: 'id' });
+    if (error) throw error;
+  },
+  remove: (key, id) => withRetry(() => deleteOne(HUSK[key].table, id)),
+};
