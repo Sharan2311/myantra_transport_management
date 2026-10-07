@@ -5,7 +5,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { HuskDB } from "./db.js";
 import * as L from "./husk_logic.js";
-import { setHuskUI, ui, Card, Muted, Empty, Warn, DateInput, fmtDay, fmtTons, money, printHuskReport } from "./husk_ui.jsx";
+import { setHuskUI, ui, Card, Muted, Empty, Warn, DateInput, fmtDay, fmtTons, money, printHuskReport, FYPick, periodText } from "./husk_ui.jsx";
 
 const nm = (list, id) => (list.find(x => x.id === id) || {}).name || "—";
 const normTruck = s => String(s || "").toUpperCase().replace(/\s+/g, "");
@@ -308,7 +308,7 @@ function EntriesTab({ h }) {
 
   const pdf = () => printHuskReport({
     title: "Husk vehicle entries",
-    subtitle: [from && `From ${fmtDay(from)}`, to && `To ${fmtDay(to)}`, cFilter && nm(D.companies, cFilter), mFilter && nm(D.materials, mFilter)].filter(Boolean).join(" · ") || "All entries",
+    subtitle: [periodText(from, to), cFilter && nm(D.companies, cFilter), mFilter && nm(D.materials, mFilter)].filter(Boolean).join(" · ") || "All entries",
     summary: [{ label: "Entries", value: String(rows.length) }, { label: "Tons", value: fmtTons(totalTons) }],
     columns: [{ key: "d", label: "Date" }, { key: "v", label: "Vehicle" }, { key: "c", label: "Customer" }, { key: "co", label: "Company · Material" }, { key: "t", label: "Tons", right: true }, { key: "cr", label: "Co. rate", right: true }, { key: "pr", label: "Cust. rate", right: true }, { key: "n", label: "Net payable", right: true }],
     rows: rows.map(t => ({ d: fmtDay(t.entryDate), v: t.truckNo, c: nm(D.customers, t.customerId), co: nm(D.companies, t.companyId) + " · " + nm(D.materials, t.materialId), t: String(t.tons), cr: String(t.companyRate), pr: String(t.customerRate), n: fmt(t.netPayable) })),
@@ -323,6 +323,7 @@ function EntriesTab({ h }) {
       {P.entry && <Btn full onClick={() => setForm("new")}>＋ New vehicle entry</Btn>}
       <Card>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+          <FYPick from={from} to={to} data={D} onPick={(a, b) => { setFrom(a); setTo(b); }} />
           <DateInput label="From" value={from} onChange={setFrom} half />
           <DateInput label="To" value={to} onChange={setTo} half />
           <Field label="Company" value={cFilter} onChange={setCFilter} opts={opt(D.companies)} half />
@@ -539,7 +540,7 @@ function LedgersTab({ h }) {
   const ready = !needsParty || f.partyId;
   const L2 = ready ? buildLedger(D, mode, f) : null;
 
-  const subtitle = L2 ? [L2.who, f.from && `From ${fmtDay(f.from)}`, f.to && `To ${fmtDay(f.to)}`, mode !== "company" && mode !== "material" && f.companyId && nm(D.companies, f.companyId), f.materialId && mode !== "material" && nm(D.materials, f.materialId)].filter(Boolean).join(" · ") : "";
+  const subtitle = L2 ? [L2.who, periodText(f.from, f.to), mode !== "company" && mode !== "material" && f.companyId && nm(D.companies, f.companyId), f.materialId && mode !== "material" && nm(D.materials, f.materialId)].filter(Boolean).join(" · ") : "";
   const pdf = () => {
     if (!L2) return;
     const bal = L2.res.balance;
@@ -558,6 +559,7 @@ function LedgersTab({ h }) {
           {(mode === "customer" || mode === "deduction") && <Field label="Company" value={f.companyId} onChange={set("companyId")} opts={opt(D.companies)} half />}
           {mode === "material" && <Field label="Company" value={f.companyId} onChange={set("companyId")} opts={opt(D.companies)} half />}
           {(mode === "customer" || mode === "company" || mode === "deduction") && <Field label="Material" value={f.materialId} onChange={set("materialId")} opts={opt(D.materials)} half />}
+          <FYPick from={f.from} to={f.to} data={D} onPick={(a, b) => setF(p => ({ ...p, from: a, to: b }))} />
           <DateInput label="From" value={f.from} onChange={set("from")} half />
           <DateInput label="To" value={f.to} onChange={set("to")} half />
         </div>
@@ -732,7 +734,7 @@ function LoansTab({ h }) {
 
 // ═══════════════════════════ PROFIT TAB ═════════════════════════════════════
 function ProfitTab({ h }) {
-  const { C, Field, PillBar, KPI, fmt } = ui();
+  const { C, Btn, Field, PillBar, KPI, fmt } = ui();
   const { data: D } = h;
   const [f, setF] = useState({ from: "", to: "", companyId: "", materialId: "", customerId: "", vehicleId: "" });
   const [dim, setDim] = useState("company");
@@ -741,10 +743,19 @@ function ProfitTab({ h }) {
   const s = L.profitSummary(D, filt);
   const rows = L.profitBy(D, dim, filt);
   const label = id => dim === "company" ? nm(D.companies, id) : dim === "customer" ? nm(D.customers, id) : dim === "material" ? nm(D.materials, id) : (D.vehicles.find(v => v.id === id) || {}).truckNo || "—";
+  const pdf = () => printHuskReport({
+    title: "Husk profit report",
+    subtitle: [periodText(f.from, f.to) || "All time", f.companyId && nm(D.companies, f.companyId), f.materialId && nm(D.materials, f.materialId), f.customerId && nm(D.customers, f.customerId), f.vehicleId && (D.vehicles.find(v => v.id === f.vehicleId) || {}).truckNo].filter(Boolean).join(" · "),
+    summary: [{ label: "Profit", value: fmt(s.profit) }, { label: "Tons", value: fmtTons(s.tons) }, { label: "Per ton", value: fmt(s.perTon) }, { label: "Billed to companies", value: fmt(s.billed) }, { label: "Payable to customers", value: fmt(s.payable) }, { label: "Rate margin", value: fmt(s.margin) }, ...(s.deductionsAttributed ? [{ label: "Deductions", value: fmt(s.deductions) }, { label: "Recovered", value: fmt(s.recovered) }] : [])],
+    columns: [{ key: "n", label: { company: "Company", customer: "Customer", material: "Material", vehicle: "Vehicle" }[dim] }, { key: "t", label: "Tons", right: true }, { key: "m", label: "Rate margin", right: true }, { key: "d", label: "Deductions", right: true }, { key: "r", label: "Recovered", right: true }, { key: "p", label: "Profit", right: true }],
+    rows: rows.map(r => ({ n: label(r.id), t: String(r.tons), m: fmt(r.margin), d: r.deductionsAttributed && (dim === "company" || dim === "material") ? fmt(r.deductions) : "—", r: r.deductionsAttributed && (dim === "company" || dim === "material") ? fmt(r.recovered) : "—", p: fmt(r.profit) })),
+    note: s.deductionsAttributed ? "" : "Company deductions belong to company payments, so this cut shows the rate margin only.",
+  });
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <Card>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+          <FYPick from={f.from} to={f.to} data={D} onPick={(a, b) => setF(p => ({ ...p, from: a, to: b }))} />
           <DateInput label="From" value={f.from} onChange={set("from")} half />
           <DateInput label="To" value={f.to} onChange={set("to")} half />
           <Field label="Company" value={f.companyId} onChange={set("companyId")} opts={opt(D.companies)} half />
@@ -761,6 +772,7 @@ function ProfitTab({ h }) {
         <KPI label="Rate margin" value={fmt(s.margin)} />
         {s.deductionsAttributed && <KPI label="Deductions − recovered" value={fmt(s.deductions - s.recovered)} sub={`${fmt(s.deductions)} deducted, ${fmt(s.recovered)} recovered`} color={C.orange} />}
       </div>
+      <Btn sm outline onClick={pdf}>⬇ Download PDF</Btn>
       {!s.deductionsAttributed && <Muted>Company deductions belong to company payments, not to a customer or vehicle, so this view shows the rate margin only.</Muted>}
       <Card>
         <div style={{ display: "flex", justifyContent: "space-between" }}>
