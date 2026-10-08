@@ -5,7 +5,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { HuskDB } from "./db.js";
 import * as L from "./husk_logic.js";
-import { setHuskUI, ui, Card, Muted, Empty, Warn, DateInput, fmtDay, fmtTons, money, printHuskReport, periodText, fyRange, fyLabel, fyStartYear } from "./husk_ui.jsx";
+import { setHuskUI, ui, Card, Muted, Empty, Warn, DateInput, BTable, SummaryBoxes, fmtDay, fmtTons, money, printHuskReport, periodText, fyRange, fyLabel, fyStartYear } from "./husk_ui.jsx";
 
 const nm = (list, id) => (list.find(x => x.id === id) || {}).name || "—";
 const normTruck = s => String(s || "").toUpperCase().replace(/\s+/g, "");
@@ -52,7 +52,7 @@ function FYBar({ data, fy, setFy }) {
 }
 
 // ── Generic form sheet ───────────────────────────────────────────────────────
-function FormSheet({ title, fields, init, onSave, onClose, validate, hint, saveLabel = "Save" }) {
+function FormSheet({ title, fields, init, onSave, onClose, validate, hint, header, saveLabel = "Save" }) {
   const { Btn, Sheet, Field } = ui();
   const [v, setV] = useState(init);
   const [busy, setBusy] = useState(false);
@@ -66,6 +66,7 @@ function FormSheet({ title, fields, init, onSave, onClose, validate, hint, saveL
   };
   return (
     <Sheet title={title} onClose={onClose}>
+      {header && <div style={{ marginBottom: 12 }}>{header(v, setV)}</div>}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
         {fl.map(f => f.type === "date"
           ? <DateInput key={f.k} label={f.label} value={v[f.k]} onChange={set(f.k)} half={f.half} />
@@ -458,8 +459,28 @@ function EntriesTab({ h }) {
       (!e.from || t.entryDate >= e.from) && (!e.to || t.entryDate <= e.to) &&
       (!cFilter || t.companyId === cFilter) && (!mFilter || t.materialId === mFilter) &&
       (!k || t.truckNo.toLowerCase().includes(k) || nm(D.customers, t.customerId).toLowerCase().includes(k))
-    ).sort((a, b) => b.entryDate.localeCompare(a.entryDate) || b.ts - a.ts);
+    ).sort((a, b) => b.entryDate.localeCompare(a.entryDate) || a.ts - b.ts);
   }, [D, e.from, e.to, cFilter, mFilter, search]);
+
+  // Serial number of each entry within its day (1, 2, 3 … in the order they were made),
+  // counted over all entries of the day so it does not change with the filters.
+  const serial = useMemo(() => {
+    const byDay = {};
+    D.trips.forEach(t => { (byDay[t.entryDate] = byDay[t.entryDate] || []).push(t); });
+    const m = new Map();
+    Object.values(byDay).forEach(list => list.sort((a, b) => a.ts - b.ts).forEach((t, i) => m.set(t.id, i + 1)));
+    return m;
+  }, [D.trips]);
+  const dayName = iso => new Date(iso + "T00:00:00").toLocaleDateString("en-IN", { weekday: "short" });
+  const groupDays = list => {
+    const out = [];
+    list.forEach(t => {
+      const g = out[out.length - 1];
+      if (g && g.date === t.entryDate) g.trips.push(t); else out.push({ date: t.entryDate, trips: [t] });
+    });
+    return out;
+  };
+  const dayLine = g => `${dayName(g.date)} ${fmtDay(g.date)} · ${g.trips.length} trip${g.trips.length === 1 ? "" : "s"} · ${fmtTons(g.trips.reduce((s, t) => s + t.tons, 0))}`;
 
   const totalTons = rows.reduce((s, t) => s + t.tons, 0);
   const thisMonth = D.trips.filter(t => t.entryDate.slice(0, 7) === today().slice(0, 7));
@@ -475,13 +496,21 @@ function EntriesTab({ h }) {
     } catch (e) { alert("Could not delete: " + (e.message || e)); }
   };
 
-  const pdf = () => printHuskReport({
-    title: "Husk vehicle entries",
-    subtitle: [periodText(e.from, e.to), cFilter && nm(D.companies, cFilter), mFilter && nm(D.materials, mFilter)].filter(Boolean).join(" · ") || "All entries",
-    summary: [{ label: "Entries", value: String(rows.length) }, { label: "Tons", value: fmtTons(totalTons) }],
-    columns: [{ key: "d", label: "Date" }, { key: "v", label: "Vehicle" }, { key: "c", label: "Customer" }, { key: "co", label: "Company · Material" }, { key: "t", label: "Tons", right: true }, { key: "cr", label: "Co. rate", right: true }, { key: "pr", label: "Cust. rate", right: true }, { key: "n", label: "Net payable", right: true }],
-    rows: rows.map(t => ({ d: fmtDay(t.entryDate), v: t.truckNo, c: nm(D.customers, t.customerId), co: nm(D.companies, t.companyId) + " · " + nm(D.materials, t.materialId), t: String(t.tons), cr: String(t.companyRate), pr: String(t.customerRate), n: fmt(t.netPayable) })),
-  });
+  const pdf = () => {
+    const days = groupDays(rows);
+    const pr = [];
+    days.forEach(g => {
+      pr.push({ _group: `${dayLine(g)} · net payable ${fmt(g.trips.reduce((x, t) => x + t.netPayable, 0))}` });
+      g.trips.forEach(t => pr.push({ sn: String(serial.get(t.id)), v: t.truckNo, c: nm(D.customers, t.customerId), co: nm(D.companies, t.companyId), m: nm(D.materials, t.materialId), t: String(t.tons), cr: fmt(t.companyRate), pr: fmt(t.customerRate), ca: fmt(t.companyAmount), n: fmt(t.netPayable) }));
+    });
+    printHuskReport({
+      title: "Husk vehicle entries (day-wise)",
+      subtitle: [periodText(e.from, e.to), cFilter && nm(D.companies, cFilter), mFilter && nm(D.materials, mFilter)].filter(Boolean).join(" · ") || "All entries",
+      summary: [{ label: "Days", value: String(days.length) }, { label: "Entries", value: String(rows.length) }, { label: "Tons", value: fmtTons(totalTons) }, { label: "Net payable to customers", value: fmt(rows.reduce((x, t) => x + t.netPayable, 0)) }],
+      columns: [{ key: "sn", label: "#" }, { key: "v", label: "Vehicle" }, { key: "c", label: "Customer" }, { key: "co", label: "Company" }, { key: "m", label: "Material" }, { key: "t", label: "Tons", right: true }, { key: "cr", label: "Co. rate", right: true }, { key: "pr", label: "Cust. rate", right: true }, { key: "ca", label: "Company amount", right: true }, { key: "n", label: "Net payable", right: true }],
+      rows: pr,
+    });
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -501,27 +530,35 @@ function EntriesTab({ h }) {
         <div style={{ marginTop: 10 }}><Btn sm outline onClick={pdf}>⬇ PDF report</Btn></div>
       </Card>
       {rows.length === 0 && <Empty>No entries yet.</Empty>}
-      {rows.slice(0, shown).map(t => (
-        <Card key={t.id}>
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-            <div style={{ fontWeight: 800, color: C.text }}>{t.truckNo}</div>
-            <div style={{ fontWeight: 800, color: C.accent }}>{fmtTons(t.tons)}</div>
+      {groupDays(rows.slice(0, shown)).map(g => (
+        <div key={g.date} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ background: C.card2, border: `1px solid ${C.border}`, borderRadius: 10, padding: "8px 12px", display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
+            <b style={{ color: C.text }}>{dayName(g.date)}, {fmtDay(g.date)}</b>
+            <span style={{ color: C.muted, fontSize: 12 }}>{g.trips.length} trip{g.trips.length === 1 ? "" : "s"} · {fmtTons(g.trips.reduce((x, t) => x + t.tons, 0))}</span>
           </div>
-          <Muted>{fmtDay(t.entryDate)} · {fyLabel(fyStartYear(t.entryDate))} · {nm(D.customers, t.customerId)}</Muted>
-          <Muted>{nm(D.companies, t.companyId)} · {nm(D.materials, t.materialId)}</Muted>
-          <Muted>Company {fmt(t.companyRate)}/t = {fmt(t.companyAmount)} · Customer {fmt(t.customerRate)}/t = {fmt(t.customerAmount)}</Muted>
-          {t.loanDeduction > 0 && <Muted>Loan deducted −{fmt(t.loanDeduction)}</Muted>}
-          {t.customerDeduction > 0 && <Muted>Company deduction recovered −{fmt(t.customerDeduction)}</Muted>}
-          <div style={{ marginTop: 4, fontWeight: 800, color: C.green }}>Net payable {fmt(t.netPayable)}</div>
-          {t.note && <Muted>{t.note}</Muted>}
-          {t.editedBy && <Muted>Edited by {t.editedBy} · {t.editedAt}</Muted>}
-          {P.admin && (
-            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-              <Btn sm outline onClick={() => setForm(t)}>Edit</Btn>
-              <Btn sm outline color={C.red} onClick={() => del(t)}>Delete</Btn>
-            </div>
-          )}
-        </Card>
+          {g.trips.map(t => (
+            <Card key={t.id}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                <div style={{ fontWeight: 800, color: C.text }}><span style={{ color: C.muted, fontWeight: 700 }}>#{serial.get(t.id)}</span> · {t.truckNo}</div>
+                <div style={{ fontWeight: 800, color: C.accent }}>{fmtTons(t.tons)}</div>
+              </div>
+              <Muted>{fyLabel(fyStartYear(t.entryDate))} · {nm(D.customers, t.customerId)}</Muted>
+              <Muted>{nm(D.companies, t.companyId)} · {nm(D.materials, t.materialId)}</Muted>
+              <Muted>Company {fmt(t.companyRate)}/t = {fmt(t.companyAmount)} · Customer {fmt(t.customerRate)}/t = {fmt(t.customerAmount)}</Muted>
+              {t.loanDeduction > 0 && <Muted>Loan deducted −{fmt(t.loanDeduction)}</Muted>}
+              {t.customerDeduction > 0 && <Muted>Company deduction recovered −{fmt(t.customerDeduction)}</Muted>}
+              <div style={{ marginTop: 4, fontWeight: 800, color: C.green }}>Net payable {fmt(t.netPayable)}</div>
+              {t.note && <Muted>{t.note}</Muted>}
+              {t.editedBy && <Muted>Edited by {t.editedBy} · {t.editedAt}</Muted>}
+              {P.admin && (
+                <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                  <Btn sm outline onClick={() => setForm(t)}>Edit</Btn>
+                  <Btn sm outline color={C.red} onClick={() => del(t)}>Delete</Btn>
+                </div>
+              )}
+            </Card>
+          ))}
+        </div>
       ))}
       {rows.length > shown && <Btn outline onClick={() => setShown(s => s + 40)}>Show more</Btn>}
       {form && <EntryForm h={h} edit={form === "new" ? null : form} onClose={() => setForm(null)} />}
@@ -530,8 +567,8 @@ function EntriesTab({ h }) {
 }
 
 // ═══════════════════════════ PAYMENTS TAB ═══════════════════════════════════
-function PaymentForm({ h, edit, onClose }) {
-  const { fmt, today, uid } = ui();
+function PaymentForm({ h, edit, prefill, onClose }) {
+  const { fmt, today, uid, Scan } = ui();
   const { data: D, user } = h;
   const act = list => list.filter(x => x.active !== false);
   const kindOf = e => !e ? "customer_paid" : e.src === "loan" ? "loan_given" : e.rec.kind;
@@ -539,7 +576,8 @@ function PaymentForm({ h, edit, onClose }) {
     kind: kindOf(edit), date: edit.rec.date, customerId: edit.rec.customerId || "", companyId: edit.rec.companyId || "", materialId: edit.rec.materialId || "",
     amount: String(edit.rec.amount || ""), deduction: edit.rec.deduction ? String(edit.rec.deduction) : "", deductionReason: edit.rec.deductionReason || "",
     mode: edit.rec.mode || "Cash", note: edit.rec.note || "",
-  } : { kind: "customer_paid", date: today(), customerId: "", companyId: "", materialId: "", amount: "", deduction: "", deductionReason: "", mode: "Cash", note: "" };
+  } : { kind: "customer_paid", date: today(), customerId: "", companyId: "", materialId: "", amount: "", deduction: "", deductionReason: "", mode: "Cash", note: "",
+    ...(prefill ? { ...prefill, amount: prefill.amount ? String(Math.round(prefill.amount * 100) / 100) : "" } : {}) };
   const kinds = [{ v: "customer_paid", l: "Paid to customer" }, { v: "company_received", l: "Received from company" }, { v: "loan_given", l: "Husk loan given" }];
 
   const fields = v => {
@@ -584,15 +622,44 @@ function PaymentForm({ h, edit, onClose }) {
     h.log && h.log("HUSK_PAYMENT", `${v.kind} ${v.amount}`);
     await h.load();
   };
-  return <FormSheet title={edit ? "Edit payment" : "Record payment"} init={init} fields={fields} validate={validate} onSave={onSave} onClose={onClose} />;
+  // Scan a bank / UPI payment screenshot to fill the amount, date and reference; the owner checks it before saving.
+  const applyScan = (r, v, setV) => {
+    const patch = { mode: "Bank transfer" };
+    if (r.amount) patch.amount = String(r.amount);
+    if (r.paymentDate) patch.date = r.paymentDate;
+    const ref = r.referenceNo || r.transactionId;
+    const bits = [ref ? "Ref: " + ref : "", r.paidTo ? "To: " + r.paidTo : ""].filter(Boolean);
+    if (bits.length) patch.note = [v.note, ...bits].filter(Boolean).join(" · ");
+    if (r.paidTo && !v.customerId && v.kind !== "company_received") {
+      const hay = String(r.paidTo).toLowerCase();
+      const c = act(D.customers).find(c => c.name.toLowerCase().split(/\s+/).some(p => p.length >= 3 && hay.includes(p)));
+      if (c) patch.customerId = c.id;
+    }
+    setV(p => ({ ...p, ...patch }));
+  };
+  const header = !edit && Scan ? (v, setV) => (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+      <Scan onResult={r => applyScan(r, v, setV)} />
+      <span style={{ fontSize: 11, color: ui().C.muted }}>Scan a payment screenshot, or fill the form by hand. Check what was read before saving.</span>
+    </div>
+  ) : null;
+  return <FormSheet title={edit ? "Edit payment" : "Record payment"} init={init} fields={fields} validate={validate} onSave={onSave} onClose={onClose} header={header} />;
 }
 
 function PaymentsTab({ h }) {
-  const { C, Btn, Field, fmt } = ui();
+  const { C, Btn, Field, KPI, PillBar, fmt } = ui();
   const { data: D, P } = h;
-  const [form, setForm] = useState(null);
+  const [form, setForm] = useState(null);   // null | "new" | {prefill} | payment item to edit
+  const [view, setView] = useState("pay");
   const [kind, setKind] = useState("");
   const [shown, setShown] = useState(40);
+
+  const toPay = useMemo(() => L.customersDue(D), [D]);
+  const toReceive = useMemo(() => L.companiesDue(D), [D]);
+  const owed = toPay.filter(d => d.total > 0), advances = toPay.filter(d => d.total < 0);
+  const payTotal = owed.reduce((x, d) => x + d.total, 0);
+  const recvTotal = toReceive.reduce((x, d) => x + d.total, 0);
+  const dedOpen = useMemo(() => L.deductionLedger(D).unrecovered, [D]);
 
   const items = useMemo(() => {
     const a = D.payments.map(p => ({ src: "payment", rec: p, date: p.date, ts: p.ts, kind: p.kind }));
@@ -611,87 +678,231 @@ function PaymentsTab({ h }) {
   };
 
   const label = { customer_paid: ["Paid to customer", C.red], company_received: ["Received from company", C.green], loan_given: ["Husk loan given", C.orange] };
+  const line = (key, text, amount, color, action) => (
+    <div key={key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, padding: "6px 0", borderTop: `1px solid ${C.border}` }}>
+      <div style={{ fontSize: 12, color: C.text, minWidth: 0 }}>{text}</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+        <b style={{ color }}>{fmt(amount)}</b>
+        {action}
+      </div>
+    </div>
+  );
+  const isEdit = form && form !== "new" && !form.prefill;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <KPI label="To pay customers" value={fmt(payTotal)} sub={`${owed.length} customer${owed.length === 1 ? "" : "s"}`} color={C.red} icon="💸" />
+        <KPI label="To receive from companies" value={fmt(recvTotal)} sub={`${toReceive.filter(c => c.total > 0).length} compan${toReceive.filter(c => c.total > 0).length === 1 ? "y" : "ies"}`} color={C.green} icon="🏭" />
+      </div>
       {P.manage && <Btn full onClick={() => setForm("new")}>＋ Record payment</Btn>}
-      <Field label="Show" value={kind} onChange={setKind} opts={[{ v: "", l: "All payments" }, { v: "customer_paid", l: "Paid to customers" }, { v: "company_received", l: "Received from companies" }, { v: "loan_given", l: "Husk loans given" }]} />
-      {items.length === 0 && <Empty>No payments yet.</Empty>}
-      {items.slice(0, shown).map(it => {
-        const r = it.rec; const [lab, col] = label[it.kind];
-        return (
-          <Card key={it.src + r.id}>
-            <div style={{ display: "flex", justifyContent: "space-between" }}>
-              <div style={{ fontWeight: 800, color: col }}>{lab}</div>
-              <div style={{ fontWeight: 800 }}>{fmt(r.amount)}</div>
+      <PillBar items={[{ id: "pay", label: "To pay customers", color: C.red }, { id: "recv", label: "To receive from companies", color: C.green }, { id: "hist", label: "Payment history", color: C.accent }]} active={view} onSelect={setView} />
+
+      {view === "pay" && (<>
+        <Muted>What M Yantra still has to pay each customer: net payable of all their trucks, less what has been paid. It goes down by itself when a payment is recorded. All dates, not just the selected year.</Muted>
+        {owed.length === 0 && <Empty>Nothing to pay right now.</Empty>}
+        {owed.map(d => (
+          <Card key={d.customerId}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+              <div style={{ fontWeight: 800, color: C.text }}>{nm(D.customers, d.customerId)}</div>
+              <div style={{ fontWeight: 900, color: C.red }}>{fmt(d.total)}</div>
             </div>
-            <Muted>{fmtDay(r.date)}{r.customerId ? " · " + nm(D.customers, r.customerId) : ""}{r.companyId ? " · " + nm(D.companies, r.companyId) : ""}{r.materialId ? " · " + nm(D.materials, r.materialId) : ""}</Muted>
-            {it.kind === "company_received" && r.deduction > 0 && <Muted>Deduction {fmt(r.deduction)} · {r.deductionReason}</Muted>}
-            {(r.mode || r.note) && <Muted>{[r.mode, r.note].filter(Boolean).join(" · ")}</Muted>}
-            <Muted>By {r.createdBy}</Muted>
-            {P.admin && (
-              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-                <Btn sm outline onClick={() => setForm(it)}>Edit</Btn>
-                <Btn sm outline color={C.red} onClick={() => del(it)}>Delete</Btn>
-              </div>
-            )}
+            <Muted>{d.trips} trip{d.trips === 1 ? "" : "s"} · net payable {fmt(d.earned)} · paid {fmt(d.paid)}</Muted>
+            <div style={{ marginTop: 6 }}>
+              {d.lines.map(l => line(l.companyId + l.materialId, `${nm(D.companies, l.companyId)} · ${nm(D.materials, l.materialId)}`, l.balance, l.balance >= 0 ? C.text : C.green,
+                P.manage && l.balance > 0 ? <Btn sm onClick={() => setForm({ prefill: { kind: "customer_paid", customerId: d.customerId, companyId: l.companyId, materialId: l.materialId, amount: l.balance } })}>Pay</Btn> : null))}
+              {Math.abs(d.other) > 0.005 && line("other", "Opening balance (no company / material)", d.other, C.text,
+                P.manage && d.other > 0 ? <Btn sm onClick={() => setForm({ prefill: { kind: "customer_paid", customerId: d.customerId, amount: d.other } })}>Pay</Btn> : null)}
+            </div>
           </Card>
-        );
-      })}
-      {items.length > shown && <Btn outline onClick={() => setShown(s => s + 40)}>Show more</Btn>}
-      {form && <PaymentForm h={h} edit={form === "new" ? null : form} onClose={() => setForm(null)} />}
+        ))}
+        {advances.length > 0 && (
+          <Card>
+            <div style={{ fontWeight: 800, color: C.text, marginBottom: 4 }}>Advances (customer owes M Yantra)</div>
+            {advances.map(d => line(d.customerId, nm(D.customers, d.customerId), -d.total, C.orange, null))}
+          </Card>
+        )}
+      </>)}
+
+      {view === "recv" && (<>
+        <Muted>What each company still has to pay M Yantra: billed amount of all trips, less receipts and the deductions they made. All dates.</Muted>
+        {toReceive.length === 0 && <Empty>Nothing to receive right now.</Empty>}
+        {toReceive.map(c => (
+          <Card key={c.companyId}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+              <div style={{ fontWeight: 800, color: C.text }}>{nm(D.companies, c.companyId)}</div>
+              <div style={{ fontWeight: 900, color: c.total >= 0 ? C.green : C.orange }}>{fmt(c.total)}</div>
+            </div>
+            <Muted>Billed {fmt(c.billed)} · received {fmt(c.received)} · deducted by company {fmt(c.deducted)}</Muted>
+            <div style={{ marginTop: 6 }}>
+              {c.lines.map(l => line(l.materialId, nm(D.materials, l.materialId), l.balance, l.balance >= 0 ? C.text : C.orange,
+                P.manage && l.balance > 0 ? <Btn sm onClick={() => setForm({ prefill: { kind: "company_received", companyId: c.companyId, materialId: l.materialId, amount: l.balance } })}>Record receipt</Btn> : null))}
+              {Math.abs(c.other) > 0.005 && line("other", "Opening balance (no material)", c.other, C.text, null)}
+            </div>
+          </Card>
+        ))}
+        <Card><Muted>Company deductions not yet recovered from customers</Muted><div style={{ fontWeight: 900, color: C.orange }}>{fmt(dedOpen)}</div></Card>
+      </>)}
+
+      {view === "hist" && (<>
+        <Field label="Show" value={kind} onChange={setKind} opts={[{ v: "", l: "All payments" }, { v: "customer_paid", l: "Paid to customers" }, { v: "company_received", l: "Received from companies" }, { v: "loan_given", l: "Husk loans given" }]} />
+        {items.length === 0 && <Empty>No payments in this period.</Empty>}
+        {items.slice(0, shown).map(it => {
+          const r = it.rec; const [lab, col] = label[it.kind];
+          return (
+            <Card key={it.src + r.id}>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <div style={{ fontWeight: 800, color: col }}>{lab}</div>
+                <div style={{ fontWeight: 800 }}>{fmt(r.amount)}</div>
+              </div>
+              <Muted>{fmtDay(r.date)}{r.customerId ? " · " + nm(D.customers, r.customerId) : ""}{r.companyId ? " · " + nm(D.companies, r.companyId) : ""}{r.materialId ? " · " + nm(D.materials, r.materialId) : ""}</Muted>
+              {it.kind === "company_received" && r.deduction > 0 && <Muted>Deduction {fmt(r.deduction)} · {r.deductionReason}</Muted>}
+              {(r.mode || r.note) && <Muted>{[r.mode, r.note].filter(Boolean).join(" · ")}</Muted>}
+              <Muted>By {r.createdBy}</Muted>
+              {P.admin && (
+                <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                  <Btn sm outline onClick={() => setForm(it)}>Edit</Btn>
+                  <Btn sm outline color={C.red} onClick={() => del(it)}>Delete</Btn>
+                </div>
+              )}
+            </Card>
+          );
+        })}
+        {items.length > shown && <Btn outline onClick={() => setShown(s => s + 40)}>Show more</Btn>}
+      </>)}
+      {form && <PaymentForm h={h} edit={isEdit ? form : null} prefill={form && form.prefill ? form.prefill : null} onClose={() => setForm(null)} />}
     </div>
   );
 }
 
 // ═══════════════════════════ LEDGERS TAB ════════════════════════════════════
+// Each ledger is shown as separate bordered tables (trips / payments / loan …),
+// each with its own summary on top, so nothing is mixed into one long list.
+const sn = rows => rows.map((r, i) => ({ sn: String(i + 1), ...r }));
+const COL = {
+  sn: { key: "sn", label: "#", w: 28 }, date: { key: "date", label: "Date", nowrap: true },
+  co: { key: "co", label: "Company" }, mat: { key: "mat", label: "Material" }, veh: { key: "veh", label: "Vehicle", nowrap: true },
+  cust: { key: "cust", label: "Customer" }, tons: { key: "tons", label: "Tons", right: true },
+};
+const sum = (rows, k) => rows.reduce((s, r) => s + (r[k] || 0), 0);
+
 function buildLedger(D, mode, f) {
+  const { fmt } = ui();
+  const m = n => fmt(n);
+  const dash = n => (n ? fmt(n) : "—");
+  const cn = id => (id ? nm(D.companies, id) : "—");
+  const mn = id => (id ? nm(D.materials, id) : "—");
+  const un = id => (id ? nm(D.customers, id) : "—");
   const filt = { from: f.from || undefined, to: f.to || undefined, companyId: f.companyId || undefined, materialId: f.materialId || undefined };
-  let res, title, who = "", pos = "", neg = "";
-  if (mode === "customer") { res = L.customerLedger(D, f.partyId, filt); title = "Customer ledger"; who = nm(D.customers, f.partyId); pos = "M Yantra owes the customer"; neg = "Advance (customer owes M Yantra)"; }
-  else if (mode === "company") { res = L.companyLedger(D, f.partyId, filt); title = "Company ledger"; who = nm(D.companies, f.partyId); pos = "Company owes M Yantra"; neg = "Company has paid in excess"; }
-  else if (mode === "material") { res = L.materialLedger(D, f.partyId, filt); title = "Material ledger"; who = nm(D.materials, f.partyId); pos = "Companies owe M Yantra"; neg = "Companies have paid in excess"; }
-  else if (mode === "vehicle") { res = L.vehicleLedger(D, f.partyId, filt); title = "Vehicle ledger"; who = nm(D.vehicles.map(v => ({ id: v.id, name: v.truckNo })), f.partyId); pos = "Net payable to owners"; neg = ""; }
-  else if (mode === "loan") { res = L.loanLedger(D, f.partyId, filt); title = "Husk loan ledger"; who = nm(D.customers, f.partyId); pos = "Customer still owes on the loan"; neg = "Loan over-recovered"; }
-  else { res = L.deductionLedger(D, filt); title = "Deduction recovery ledger"; who = "All companies"; pos = "Deducted by companies, not yet recovered"; neg = "Recovered more than deducted"; }
-  const rows = res.rows.map(r => {
-    let detail = r.detail || "";
-    if (r.kind === "Trip") {
-      const cust = mode === "customer" ? "" : (r.customerId ? nm(D.customers, r.customerId) + " · " : "");
-      const rate = r.rate != null ? ` × ₹${r.rate}` : (r.companyRate != null ? ` · co ₹${r.companyRate} / cust ₹${r.customerRate}` : "");
-      detail = `${r.truckNo || ""} · ${cust}${fmtTons(r.tons)}${rate}`;
-      if (mode === "customer" && (r.loan > 0 || r.deduction > 0)) detail += ` (gross ${Math.round(r.gross)}${r.loan > 0 ? " − loan " + Math.round(r.loan) : ""}${r.deduction > 0 ? " − deduction " + Math.round(r.deduction) : ""})`;
-    }
-    if (r.kind === "Recovered" && r.customerId) detail = `${nm(D.customers, r.customerId)} · ${detail}`;
-    const cm = [r.companyId ? nm(D.companies, r.companyId) : "", r.materialId ? nm(D.materials, r.materialId) : ""].filter(Boolean).join(" · ");
-    return { date: fmtDay(r.date), kind: r.kind, cm, detail, amount: money(r.amount), balance: money(r.balance), _bold: r.kind === "Opening", _neg: r.amount < 0 };
-  });
-  return { res, rows, title, who, pos, neg };
+  const out = { title: "", who: "", pos: "", neg: "", balance: 0, topSummary: [], sections: [] };
+  const bal = (label, v) => ({ label, value: money(v), color: v >= 0 ? "green" : "red", sub: v >= 0 ? out.pos : out.neg });
+
+  if (mode === "customer") {
+    const res = L.customerLedger(D, f.partyId, filt);
+    Object.assign(out, { title: "Customer ledger", who: un(f.partyId), pos: "M Yantra owes the customer", neg: "Advance (customer owes M Yantra)", balance: res.balance });
+    const open = sum(res.rows.filter(r => r.kind === "Opening"), "amount");
+    const trips = res.rows.filter(r => r.kind === "Trip"), paid = res.rows.filter(r => r.kind === "Paid");
+    const tripRows = sn(trips.map(r => ({ date: fmtDay(r.date), co: cn(r.companyId), mat: mn(r.materialId), veh: r.truckNo, tons: String(r.tons), rate: m(r.rate), gross: m(r.gross), loan: dash(r.loan), ded: dash(r.deduction), net: m(r.amount) })));
+    const tonsT = sum(trips, "tons"), netT = sum(trips, "amount"), paidT = -sum(paid, "amount");
+    out.topSummary = [
+      { label: "Opening / brought forward", value: money(open) }, { label: "Net payable (trips)", value: m(netT) },
+      { label: "Paid to customer", value: m(paidT) }, { label: "Balance", value: money(res.balance), color: res.balance >= 0 ? "green" : "red", sub: res.balance >= 0 ? out.pos : out.neg },
+    ];
+    out.sections.push({
+      title: "Trips",
+      summary: [{ label: "Trips", value: String(trips.length) }, { label: "Tons", value: fmtTons(tonsT) }, { label: "Gross", value: m(sum(trips, "gross")) }, { label: "Loan deducted", value: m(sum(trips, "loan")) }, { label: "Deductions recovered", value: m(sum(trips, "deduction")) }, { label: "Net payable", value: m(netT) }],
+      columns: [COL.sn, COL.date, COL.co, COL.mat, COL.veh, COL.tons, { key: "rate", label: "Rate", right: true }, { key: "gross", label: "Gross", right: true }, { key: "loan", label: "Loan ded.", right: true }, { key: "ded", label: "Deduction", right: true }, { key: "net", label: "Net payable", right: true }],
+      rows: tripRows, totals: { sn: "", date: "Total", tons: String(Math.round(tonsT * 1000) / 1000), gross: m(sum(trips, "gross")), loan: m(sum(trips, "loan")), ded: m(sum(trips, "deduction")), net: m(netT) },
+    });
+    out.sections.push({
+      title: "Payments to the customer",
+      summary: [{ label: "Payments", value: String(paid.length) }, { label: "Total paid", value: m(paidT) }],
+      columns: [COL.sn, COL.date, COL.co, COL.mat, { key: "detail", label: "Mode · note" }, { key: "amt", label: "Amount paid", right: true }],
+      rows: sn(paid.map(r => ({ date: fmtDay(r.date), co: cn(r.companyId), mat: mn(r.materialId), detail: r.detail || "", amt: m(-r.amount) }))), totals: { sn: "", date: "Total", amt: m(paidT) },
+    });
+    if (D.loans.some(l => l.customerId === f.partyId)) out.sections.push(loanSection(D, f.partyId, filt, m));
+  } else if (mode === "company" || mode === "material") {
+    const isCo = mode === "company";
+    const res = isCo ? L.companyLedger(D, f.partyId, filt) : L.materialLedger(D, f.partyId, filt);
+    Object.assign(out, { title: isCo ? "Company ledger" : "Material ledger", who: isCo ? cn(f.partyId) : mn(f.partyId), pos: isCo ? "Company owes M Yantra" : "Companies owe M Yantra", neg: isCo ? "Company has paid in excess" : "Companies have paid in excess", balance: res.balance });
+    const open = sum(res.rows.filter(r => r.kind === "Opening"), "amount");
+    const trips = res.rows.filter(r => r.kind === "Trip"), recv = res.rows.filter(r => r.kind === "Received"), dedRows = res.rows.filter(r => r.kind === "Deduction");
+    const tonsT = sum(trips, "tons"), billed = sum(trips, "amount"), recvT = -sum(recv, "amount"), dedT = -sum(dedRows, "amount");
+    out.topSummary = [
+      { label: "Opening / brought forward", value: money(open) }, { label: "Billed (trips)", value: m(billed) },
+      { label: "Received", value: m(recvT) }, { label: "Deductions by company", value: m(dedT) },
+      { label: "Balance", value: money(res.balance), color: res.balance >= 0 ? "green" : "red", sub: res.balance >= 0 ? out.pos : out.neg },
+    ];
+    const coCol = isCo ? [] : [COL.co];
+    out.sections.push({
+      title: "Trips",
+      summary: [{ label: "Trips", value: String(trips.length) }, { label: "Tons", value: fmtTons(tonsT) }, { label: "Billed", value: m(billed) }],
+      columns: [COL.sn, COL.date, ...coCol, COL.mat, COL.veh, COL.cust, COL.tons, { key: "rate", label: "Rate", right: true }, { key: "amt", label: "Amount", right: true }],
+      rows: sn(trips.map(r => ({ date: fmtDay(r.date), co: cn(r.companyId), mat: mn(r.materialId), veh: r.truckNo, cust: un(r.customerId), tons: String(r.tons), rate: m(r.rate), amt: m(r.amount) }))),
+      totals: { sn: "", date: "Total", tons: String(Math.round(tonsT * 1000) / 1000), amt: m(billed) },
+    });
+    const dedBy = new Map(dedRows.map(d => [d.payId, d]));
+    out.sections.push({
+      title: "Payments received from the company",
+      summary: [{ label: "Receipts", value: String(recv.length) }, { label: "Received", value: m(recvT) }, { label: "Deductions", value: m(dedT) }],
+      columns: [COL.sn, COL.date, ...coCol, COL.mat, { key: "detail", label: "Mode · note" }, { key: "amt", label: "Received", right: true }, { key: "ded", label: "Deduction", right: true }, { key: "why", label: "Reason" }],
+      rows: sn(recv.map(r => { const d = dedBy.get(r.payId); return { date: fmtDay(r.date), co: cn(r.companyId), mat: mn(r.materialId), detail: r.detail || "", amt: m(-r.amount), ded: d ? m(-d.amount) : "—", why: d ? d.detail : "" }; })),
+      totals: { sn: "", date: "Total", amt: m(recvT), ded: m(dedT) },
+    });
+    if (!isCo && res.perCompany && Object.keys(res.perCompany).length) out.sections.push({
+      title: "Balance by company (all dates)",
+      columns: [{ key: "co", label: "Company" }, { key: "b", label: "Balance", right: true }],
+      rows: Object.entries(res.perCompany).map(([id, b]) => ({ co: cn(id), b: money(b) })),
+    });
+  } else if (mode === "vehicle") {
+    const res = L.vehicleLedger(D, f.partyId, filt);
+    const veh = D.vehicles.find(v => v.id === f.partyId);
+    Object.assign(out, { title: "Vehicle ledger", who: veh ? veh.truckNo : "—", balance: res.balance });
+    const trips = res.rows.filter(r => r.kind === "Trip");
+    out.topSummary = [{ label: "Trips", value: String(trips.length) }, { label: "Tons", value: fmtTons(res.tons) }, { label: "Net payable to owners", value: m(sum(trips, "amount")) }];
+    out.sections.push({
+      title: "Trips",
+      columns: [COL.sn, COL.date, COL.co, COL.mat, COL.cust, COL.tons, { key: "cr", label: "Co. rate", right: true }, { key: "ur", label: "Cust. rate", right: true }, { key: "net", label: "Net payable", right: true }],
+      rows: sn(trips.map(r => ({ date: fmtDay(r.date), co: cn(r.companyId), mat: mn(r.materialId), cust: un(r.customerId), tons: String(r.tons), cr: m(r.companyRate), ur: m(r.customerRate), net: m(r.amount) }))),
+      totals: { sn: "", date: "Total", tons: String(Math.round(res.tons * 1000) / 1000), net: m(sum(trips, "amount")) },
+    });
+  } else if (mode === "loan") {
+    Object.assign(out, { title: "Husk loan ledger", who: un(f.partyId), pos: "Customer still owes on the loan", neg: "Loan over-recovered", balance: L.loanBalance(D.loans, f.partyId) });
+    const sec = loanSection(D, f.partyId, filt, m);
+    out.topSummary = sec.summary;
+    out.sections.push({ ...sec, title: "Loan entries", summary: undefined });
+  } else {
+    const res = L.deductionLedger(D, filt);
+    Object.assign(out, { title: "Deduction recovery ledger", who: "All companies", pos: "Deducted by companies, not yet recovered", neg: "Recovered more than deducted", balance: res.unrecovered });
+    const ded = res.rows.filter(r => r.kind === "Deducted"), rec = res.rows.filter(r => r.kind === "Recovered");
+    out.topSummary = [{ label: "Deducted by companies", value: m(res.deducted) }, { label: "Recovered from customers", value: m(res.recovered) }, { label: "Not yet recovered", value: m(res.unrecovered), color: "orange" }];
+    out.sections.push({
+      title: "Deducted by companies",
+      columns: [COL.sn, COL.date, COL.co, COL.mat, { key: "why", label: "Reason" }, { key: "amt", label: "Amount", right: true }],
+      rows: sn(ded.map(r => ({ date: fmtDay(r.date), co: cn(r.companyId), mat: mn(r.materialId), why: r.detail || "", amt: m(r.amount) }))), totals: { sn: "", date: "Total", amt: m(res.deducted) },
+    }, {
+      title: "Recovered through trips",
+      columns: [COL.sn, COL.date, COL.co, COL.mat, COL.cust, { key: "amt", label: "Recovered", right: true }],
+      rows: sn(rec.map(r => ({ date: fmtDay(r.date), co: cn(r.companyId), mat: mn(r.materialId), cust: un(r.customerId), amt: m(-r.amount) }))), totals: { sn: "", date: "Total", amt: m(res.recovered) },
+    });
+  }
+  return out;
 }
 
-const LEDGER_COLS = [
-  { key: "date", label: "Date" }, { key: "kind", label: "Entry" }, { key: "cm", label: "Company · Material" },
-  { key: "detail", label: "Details" }, { key: "amount", label: "Amount", right: true }, { key: "balance", label: "Balance", right: true },
-];
-
-function LedgerTable({ rows }) {
-  const { C } = ui();
-  if (!rows.length) return <Empty>No entries for these filters.</Empty>;
-  return (
-    <div style={{ overflowX: "auto", border: `1px solid ${C.border}`, borderRadius: 12, background: C.card }}>
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, minWidth: 560 }}>
-        <thead><tr>{LEDGER_COLS.map(c => <th key={c.key} style={{ textAlign: c.right ? "right" : "left", padding: "8px 8px", background: C.card2, color: C.muted, fontSize: 10, textTransform: "uppercase", letterSpacing: 0.6, whiteSpace: "nowrap" }}>{c.label}</th>)}</tr></thead>
-        <tbody>{rows.map((r, i) => (
-          <tr key={i} style={{ borderTop: `1px solid ${C.border}`, fontWeight: r._bold ? 700 : 400 }}>
-            {LEDGER_COLS.map(c => <td key={c.key} style={{ padding: "7px 8px", textAlign: c.right ? "right" : "left", color: c.key === "amount" && r._neg ? C.red : C.text, whiteSpace: c.key === "detail" ? "normal" : "nowrap" }}>{r[c.key]}</td>)}
-          </tr>
-        ))}</tbody>
-      </table>
-    </div>
-  );
+function loanSection(D, customerId, filt, m) {
+  const res = L.loanLedger(D, customerId, { from: filt.from, to: filt.to });
+  const given = res.rows.filter(r => r.kind === "Loan given"), back = res.rows.filter(r => r.kind === "Recovered");
+  const bf = res.rows.find(r => r.kind === "Opening");
+  return {
+    title: "Husk loan",
+    summary: [{ label: "Loan given", value: m(sum(given, "amount")) }, { label: "Recovered on trips", value: m(-sum(back, "amount")) }, { label: "Outstanding", value: m(L.loanBalance(D.loans, customerId)) }],
+    columns: [COL.sn, COL.date, { key: "kind", label: "Entry" }, { key: "detail", label: "Details" }, { key: "given", label: "Given", right: true }, { key: "rec", label: "Recovered", right: true }, { key: "bal", label: "Balance", right: true }],
+    rows: [...(bf ? [{ sn: "", date: fmtDay(bf.date), kind: "Brought forward", detail: "", given: "", rec: "", bal: m(bf.balance), _bold: true }] : []),
+      ...sn(res.rows.filter(r => r.kind !== "Opening").map(r => ({ date: fmtDay(r.date), kind: r.kind, detail: r.detail || "", given: r.kind === "Loan given" ? m(r.amount) : "—", rec: r.kind === "Recovered" ? m(-r.amount) : "—", bal: m(r.balance) })))],
+  };
 }
 
 function LedgersTab({ h }) {
-  const { C, Btn, Field, PillBar, KPI } = ui();
+  const { C, Btn, Field, PillBar } = ui();
   const { data: D } = h;
   const [mode, setMode] = useState("customer");
   const [f, setF] = useState({ partyId: "", companyId: "", materialId: "", from: "", to: "" });
@@ -708,17 +919,15 @@ function LedgersTab({ h }) {
   const ready = !needsParty || f.partyId;
   const e = effRange(h.range, f.from, f.to);
   const fe = { ...f, from: e.from, to: e.to };
-  const L2 = ready ? buildLedger(D, mode, fe) : null;
+  const R = ready ? buildLedger(D, mode, fe) : null;
+  const col = c => ({ green: C.green, red: C.red, orange: C.orange }[c]);
 
-  const subtitle = L2 ? [L2.who, periodText(fe.from, fe.to), mode !== "company" && mode !== "material" && f.companyId && nm(D.companies, f.companyId), f.materialId && mode !== "material" && nm(D.materials, f.materialId)].filter(Boolean).join(" · ") : "";
-  const pdf = () => {
-    if (!L2) return;
-    const bal = L2.res.balance;
-    const summary = [{ label: "Balance", value: money(bal) }, { label: bal >= 0 ? "Meaning" : "Meaning", value: bal >= 0 ? L2.pos : (L2.neg || "—") }];
-    if (mode === "deduction") summary.unshift({ label: "Deducted", value: money(L2.res.deducted) }, { label: "Recovered", value: money(L2.res.recovered) });
-    if (mode === "vehicle") summary.push({ label: "Tons", value: fmtTons(L2.res.tons) });
-    printHuskReport({ title: L2.title, subtitle, summary, columns: LEDGER_COLS, rows: L2.rows });
-  };
+  const subtitle = R ? [R.who, periodText(fe.from, fe.to), mode !== "company" && mode !== "material" && f.companyId && nm(D.companies, f.companyId), f.materialId && mode !== "material" && nm(D.materials, f.materialId)].filter(Boolean).join(" · ") : "";
+  const pdf = () => R && printHuskReport({
+    title: R.title, subtitle,
+    summary: R.topSummary.map(s => ({ label: s.label, value: s.value })),
+    sections: R.sections.map(s => ({ ...s, summary: s.summary && s.summary.map(x => ({ label: x.label, value: x.value })) })),
+  });
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -726,28 +935,24 @@ function LedgersTab({ h }) {
       <Card>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
           {needsParty && <Field label={modes.find(m => m.id === mode).label} value={f.partyId} onChange={set("partyId")} opts={partyOpts} />}
-          {(mode === "customer" || mode === "deduction") && <Field label="Company" value={f.companyId} onChange={set("companyId")} opts={opt(D.companies)} half />}
-          {mode === "material" && <Field label="Company" value={f.companyId} onChange={set("companyId")} opts={opt(D.companies)} half />}
+          {(mode === "customer" || mode === "deduction" || mode === "material") && <Field label="Company" value={f.companyId} onChange={set("companyId")} opts={opt(D.companies)} half />}
           {(mode === "customer" || mode === "company" || mode === "deduction") && <Field label="Material" value={f.materialId} onChange={set("materialId")} opts={opt(D.materials)} half />}
           <DateInput label="From" value={f.from} onChange={set("from")} half />
           <DateInput label="To" value={f.to} onChange={set("to")} half />
         </div>
       </Card>
       {!ready && <Empty>Choose a {modes.find(m => m.id === mode).label.toLowerCase()} to see the ledger.</Empty>}
-      {L2 && (<>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-          <KPI label="Balance" value={money(L2.res.balance)} color={L2.res.balance >= 0 ? C.green : C.red} sub={L2.res.balance >= 0 ? L2.pos : (L2.neg || "")} />
-          {mode === "deduction" && <KPI label="Unrecovered" value={money(L2.res.unrecovered)} sub={`Deducted ${money(L2.res.deducted)}`} color={C.orange} />}
-          {mode === "vehicle" && <KPI label="Tons" value={fmtTons(L2.res.tons)} />}
-          {mode === "material" && Object.keys(L2.res.perCompany).length > 0 && (
-            <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: "12px" }}>
-              <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>By company</div>
-              {Object.entries(L2.res.perCompany).map(([id, b]) => <div key={id} style={{ fontSize: 12 }}>{nm(D.companies, id)}: <b>{money(b)}</b></div>)}
-            </div>
-          )}
-        </div>
+      {R && (<>
+        <div style={{ fontWeight: 800, color: C.text }}>{R.title} · {R.who}</div>
+        <SummaryBoxes items={R.topSummary.map(s => ({ ...s, color: col(s.color) }))} />
         <Btn sm outline onClick={pdf}>⬇ Download PDF</Btn>
-        <LedgerTable rows={L2.rows} />
+        {R.sections.map((s, i) => (
+          <div key={i} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ fontWeight: 800, color: C.accent, marginTop: 6 }}>{s.title}</div>
+            {s.summary && <SummaryBoxes items={s.summary} />}
+            <BTable columns={s.columns} rows={s.rows} totals={s.totals} empty="Nothing in this period." />
+          </div>
+        ))}
       </>)}
     </div>
   );
@@ -825,7 +1030,7 @@ function LoansTab({ h }) {
       <Card><Muted>Total outstanding Husk loans</Muted><div style={{ fontSize: 22, fontWeight: 900, color: C.orange }}>{fmt(total)}</div></Card>
       {list.length === 0 && <Empty>No Husk loans yet.</Empty>}
       {list.map(({ c, bal }) => {
-        const led = open === c.id ? L.loanLedger(D, c.id) : null;
+        const sec = open === c.id ? loanSection(D, c.id, {}, n => fmt(n)) : null;
         return (
           <Card key={c.id}>
             <div onClick={() => setOpen(open === c.id ? "" : c.id)} style={{ cursor: "pointer" }}>
@@ -835,11 +1040,11 @@ function LoansTab({ h }) {
               </div>
               <Muted>Deducted per trip: {c.loanPerTrip > 0 ? fmt(c.loanPerTrip) : "not set"} · tap for the loan ledger</Muted>
             </div>
-            {led && <div style={{ marginTop: 10 }}><LedgerTable rows={led.rows.map(r => ({ date: fmtDay(r.date), kind: r.kind, cm: "", detail: r.detail || "", amount: money(r.amount), balance: money(r.balance), _neg: r.amount < 0, _bold: r.kind === "Opening" }))} /></div>}
+            {sec && <div style={{ marginTop: 10 }}><BTable columns={sec.columns} rows={sec.rows} empty="No loan entries." /></div>}
           </Card>
         );
       })}
-      {form && <PaymentForm h={h} edit={null} onClose={() => setForm(false)} />}
+      {form && <PaymentForm h={h} edit={null} prefill={{ kind: "loan_given" }} onClose={() => setForm(false)} />}
     </div>
   );
 }
@@ -1001,7 +1206,7 @@ function SetupTab({ h }) {
       {sec === "openings" && (<><Btn full onClick={() => open("opening")}>＋ Add opening balance</Btn>{list([...D.openings].sort((a, b) => b.asOf.localeCompare(a.asOf)), o => row(o.id,
         `${o.partyType === "customer" ? nm(D.customers, o.partyId) : nm(D.companies, o.partyId)} · ${money(o.amount)}`,
         `${o.partyType === "customer" ? "Customer" : "Company"} · as of ${fmtDay(o.asOf)}${o.companyId ? " · " + nm(D.companies, o.companyId) : ""}${o.materialId ? " · " + nm(D.materials, o.materialId) : ""}${o.note ? " · " + o.note : ""}`,
-        () => open("opening", o),
+        h.P.admin ? () => open("opening", o) : null,
         h.P.admin ? <Btn sm outline color={C.red} onClick={async () => { if (!window.confirm("Delete this opening balance?")) return; await HuskDB.save("changelog", h.change("mye_husk_openings", o.id, "delete", o, null)); await HuskDB.remove("openings", o.id); await h.load(); }}>Delete</Btn> : null))}</>)}
       {renderForm()}
     </div>
