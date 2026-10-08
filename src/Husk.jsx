@@ -141,11 +141,14 @@ function EntryForm({ h, edit, onClose }) {
   const { data: D, user, P } = h;
   const NEW = "__new";
   const [date, setDate] = useState(edit ? edit.entryDate : today());
-  const [companyId, setCompanyId] = useState(edit ? edit.companyId : "");
-  const [materialId, setMaterialId] = useState(edit ? edit.materialId : "");
+  const [companySel, setCompanySel] = useState(edit ? edit.companyId : "");     // company id, or NEW
+  const [materialSel, setMaterialSel] = useState(edit ? edit.materialId : "");  // material id, or NEW
+  const [coName, setCoName] = useState("");
+  const [coContact, setCoContact] = useState("");
+  const [matName, setMatName] = useState("");
   const [vehicleId, setVehicleId] = useState(edit ? edit.vehicleId : "");
   const [q, setQ] = useState("");
-  const [newVeh, setNewVeh] = useState(false);
+  const [newVeh, setNewVeh] = useState(!edit && D.vehicles.length === 0);
   const [newTruck, setNewTruck] = useState("");
   const [ownerSel, setOwnerSel] = useState("");      // owner of a NEW vehicle: customer id, or NEW
   const [relink, setRelink] = useState(false);       // change owner of the chosen vehicle
@@ -160,10 +163,18 @@ function EntryForm({ h, edit, onClose }) {
   const [note, setNote] = useState(edit ? edit.note : "");
   const [busy, setBusy] = useState(false);
   const newCustId = useRef(uid()).current;
+  const newCoId = useRef(uid()).current;
+  const newMatId = useRef(uid()).current;
   const coRateId = useRef(uid()).current;
   const cuRateId = useRef(uid()).current;
 
   const act = list => list.filter(x => x.active !== false);
+  const creatingCo = companySel === NEW;
+  const creatingMat = materialSel === NEW;
+  const companyId = creatingCo ? newCoId : companySel;
+  const materialId = creatingMat ? newMatId : materialSel;
+  const coLabel = creatingCo ? (coName.trim() || "the new company") : nm(D.companies, companyId);
+  const matLabel = creatingMat ? (matName.trim() || "the new material") : nm(D.materials, materialId);
   const vehicle = D.vehicles.find(v => v.id === vehicleId);
   const ownerPick = newVeh ? ownerSel : relink ? relSel : "";
   const creatingCust = ownerPick === NEW;
@@ -220,7 +231,11 @@ function EntryForm({ h, edit, onClose }) {
   const nameTaken = n => D.customers.some(c => c.name.trim().toLowerCase() === n.trim().toLowerCase());
   const errors = [];
   if (!edit) {
-    if (!companyId || !materialId) errors.push("Choose a company and a material.");
+    if (!companySel || !materialSel) errors.push("Choose a company and a material.");
+    if (creatingCo && !coName.trim()) errors.push("Enter the new company's name.");
+    if (creatingCo && coName.trim() && D.companies.some(c => c.name.trim().toLowerCase() === coName.trim().toLowerCase())) errors.push("A company with this name already exists. Choose it from the list.");
+    if (creatingMat && !matName.trim()) errors.push("Enter the new material's name.");
+    if (creatingMat && matName.trim() && D.materials.some(m => m.name.trim().toLowerCase() === matName.trim().toLowerCase())) errors.push("A material with this name already exists. Choose it from the list.");
     if (!newVeh && !vehicle) errors.push("Choose a vehicle.");
     if (newVeh && !newTruck.trim()) errors.push("Enter the truck number.");
     if (newVeh && D.vehicles.some(v => normTruck(v.truckNo) === normTruck(newTruck))) errors.push("This truck number already exists. Search for it instead.");
@@ -230,8 +245,8 @@ function EntryForm({ h, edit, onClose }) {
     if (coNew && !(L.num(coNew.rate) > 0)) errors.push("Enter the company rate.");
     if (cuNew && !(L.num(cuNew.rate) > 0)) errors.push("Enter the customer rate.");
     if ((coNew && coNew.from > date) || (cuNew && cuNew.from > date)) errors.push("A rate cannot start after the entry date.");
-    if (companyId && materialId && !cr && !coNew) errors.push(P.manage ? `Set the company rate for ${nm(D.companies, companyId)} / ${nm(D.materials, materialId)}.` : `No company rate for ${nm(D.companies, companyId)} / ${nm(D.materials, materialId)} on ${fmtDay(date)}. Ask the Husk manager to set it.`);
-    if (ready && !pr && !cuNew) errors.push(P.manage ? `Set the customer rate for ${customer ? customer.name || "the new owner" : "the customer"} on ${nm(D.companies, companyId)} / ${nm(D.materials, materialId)}.` : `No customer rate for ${customer ? customer.name : "this owner"} on ${nm(D.companies, companyId)} / ${nm(D.materials, materialId)}. Ask the Husk manager to set it.`);
+    if (companyId && materialId && !cr && !coNew) errors.push(P.manage ? `Set the company rate for ${coLabel} / ${matLabel}.` : `No company rate for ${coLabel} / ${matLabel} on ${fmtDay(date)}. Ask the Husk manager to set it.`);
+    if (ready && !pr && !cuNew) errors.push(P.manage ? `Set the customer rate for ${customer ? customer.name || "the new owner" : "the customer"} on ${coLabel} / ${matLabel}.` : `No customer rate for ${customer ? customer.name : "this owner"} on ${coLabel} / ${matLabel}. Ask the Husk manager to set it.`);
   }
   if (!(tonsN > 0)) errors.push("Enter the unloaded tons.");
   if (selOpen && !(dedN > 0 && dedN <= dedMax + 0.001)) errors.push(`Deduction must be between ₹1 and ${fmt(dedMax)}.`);
@@ -251,6 +266,17 @@ function EntryForm({ h, edit, onClose }) {
         await HuskDB.save("changelog", h.change("mye_husk_trips", edit.id, "edit", edit, next));
         h.log && h.log("HUSK_EDIT", `${edit.truckNo} ${fmtDay(edit.entryDate)} edited`);
       } else {
+        // 0. new company / material → masters
+        if (creatingCo) {
+          const rec = { id: newCoId, name: coName.trim(), contact: coContact, active: true, ...h.meta() };
+          await HuskDB.save("companies", rec);
+          await HuskDB.save("changelog", h.change("mye_husk_companies", rec.id, "create", null, rec));
+        }
+        if (creatingMat) {
+          const rec = { id: newMatId, name: matName.trim(), active: true, ...h.meta() };
+          await HuskDB.save("materials", rec);
+          await HuskDB.save("changelog", h.change("mye_husk_materials", rec.id, "create", null, rec));
+        }
         // 1. new owner → customers
         if (creatingCust) {
           const rec = { id: newCustId, name: custName.trim(), phone: custPhone, loanPerTrip: 0, active: true, ...h.meta() };
@@ -291,7 +317,7 @@ function EntryForm({ h, edit, onClose }) {
         };
         await HuskDB.save("trips", trip);
         if (loanDed > 0) await HuskDB.save("loans", { id: uid(), customerId, kind: "recovered", amount: loanDed, date, tripId: trip.id, note: "Deducted on trip " + truckNo, createdBy: user.name, ts: ts + 1 });
-        h.log && h.log("HUSK_ENTRY", `${truckNo} ${tonsN}t ${nm(D.companies, companyId)}`);
+        h.log && h.log("HUSK_ENTRY", `${truckNo} ${tonsN}t ${coLabel}`);
       }
       await h.load();
       onClose();
@@ -338,8 +364,10 @@ function EntryForm({ h, edit, onClose }) {
         ) : (<>
           <DateInput label="Date" value={date} onChange={setDate} />
           <div style={{ flex: "1 1 100%", fontSize: 12, color: C.muted }}>Financial year: <b style={{ color: C.text }}>{entryFy ? fyLabel(entryFy) : "—"}</b> (from the date){h.fy && entryFy && String(entryFy) !== h.fy ? <span style={{ color: C.orange }}> · not the year selected at the top, so it will not show in the list until you switch</span> : null}</div>
-          <Field label="Company" value={companyId} onChange={setCompanyId} opts={opt(act(D.companies), "Select company")} half />
-          <Field label="Material" value={materialId} onChange={setMaterialId} opts={opt(act(D.materials), "Select material")} half />
+          <Field label="Company" value={companySel} onChange={setCompanySel} opts={[...opt(act(D.companies), "Select company"), ...(P.manage ? [{ v: NEW, l: "＋ New company…" }] : [])]} half />
+          <Field label="Material" value={materialSel} onChange={setMaterialSel} opts={[...opt(act(D.materials), "Select material"), ...(P.manage ? [{ v: NEW, l: "＋ New material…" }] : [])]} half />
+          {creatingCo && <><Field label="New company name" value={coName} onChange={setCoName} half /><Field label="Contact (optional)" value={coContact} onChange={setCoContact} half /></>}
+          {creatingMat && <Field label="New material name (e.g. Rice husk)" value={matName} onChange={setMatName} />}
           <div style={{ flex: "1 1 100%" }}>
             <div style={{ color: C.muted, fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, marginBottom: 5 }}>Vehicle</div>
             {newVeh ? (
