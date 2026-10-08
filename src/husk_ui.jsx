@@ -77,7 +77,9 @@ export function BTable({ columns, rows, totals, empty = "Nothing to show." }) {
           <th key={c.key} style={{ ...cell, background: C.card2, color: C.muted, fontSize: 10, textTransform: "uppercase", letterSpacing: 0.5, textAlign: c.right ? "right" : "left", whiteSpace: "nowrap" }}>{c.label}</th>
         ))}</tr></thead>
         <tbody>
-          {rows.map((r, i) => (
+          {rows.map((r, i) => r._group ? (
+            <tr key={i}><td colSpan={columns.length} style={{ ...cell, background: r._note ? "#fff7e0" : C.card2, color: r._note ? "#8a5a00" : C.text, fontWeight: 800 }}>{r._group}</td></tr>
+          ) : (
             <tr key={i}>{columns.map(c => (
               <td key={c.key} style={{ ...cell, textAlign: c.right ? "right" : "left", whiteSpace: c.right || c.nowrap ? "nowrap" : "normal", color: r._neg && c.right ? C.red : C.text, fontWeight: r._bold ? 700 : 400, minWidth: c.w }}>{r[c.key]}</td>
             ))}</tr>
@@ -119,7 +121,7 @@ export function printHuskReport({ title, subtitle, summary = [], sections, colum
   const table = sec => {
     const th = sec.columns.map(c => `<th style="text-align:${c.right ? "right" : "left"}">${esc(c.label)}</th>`).join("");
     const body = (sec.rows || []).map(r => r._group
-      ? `<tr class="group"><td colspan="${sec.columns.length}">${esc(r._group)}</td></tr>`
+      ? `<tr class="group${r._note ? " note" : ""}"><td colspan="${sec.columns.length}">${esc(r._group)}</td></tr>`
       : `<tr>${sec.columns.map(c => `<td class="${c.right ? "num" : ""}" style="${r._bold ? "font-weight:700;" : ""}">${esc(r[c.key])}</td>`).join("")}</tr>`).join("");
     const tot = sec.totals ? `<tr class="total">${sec.columns.map(c => `<td class="${c.right ? "num" : ""}">${esc(sec.totals[c.key] ?? "")}</td>`).join("")}</tr>` : "";
     const empty = !(sec.rows || []).length ? `<tr><td colspan="${sec.columns.length}" style="text-align:center;color:#4a7090">Nothing to show</td></tr>` : "";
@@ -145,6 +147,7 @@ export function printHuskReport({ title, subtitle, summary = [], sections, colum
       tr{page-break-inside:avoid}
       tr:nth-child(even) td{background:#f6faff}
       tr.group td{background:#dce8f4;font-weight:700;color:#0a1f3a}
+      tr.group.note td{background:#fff3cd;font-weight:800;color:#7a4a00}
       tr.total td{background:#e8f0fa;font-weight:800}
       .note{font-size:11px;color:#4a7090;margin-top:10px}
       .foot{margin-top:18px;font-size:10px;color:#4a7090;border-top:1px solid #ccddf0;padding-top:6px}

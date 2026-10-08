@@ -363,3 +363,28 @@ export function companiesDue(data) {
   });
   return out.sort((a, b) => b.total - a.total);
 }
+
+// ── Rate-change events (shown as bold rows inside ledgers / PDFs) ────────────
+// Returns [{date, side:"company"|"customer", companyId, materialId, customerId, from, to, ts}]
+// for every rate whose start date lies in the window. `from` is the rate it replaced (null = first rate).
+// pick: {company: row=>bool, customer: row=>bool} - which rate rows are relevant to the ledger.
+export function rateChanges(data, win = {}, pick = {}) {
+  const out = [];
+  const inWin = d => (!win.from || d >= win.from) && (!win.to || d <= win.to);
+  const walk = (rates, keyOf, side, ok) => {
+    const groups = new Map();
+    (rates || []).forEach(r => { const k = keyOf(r); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r); });
+    groups.forEach(rows => {
+      rows.sort((a, b) => (a.effectiveFrom || "").localeCompare(b.effectiveFrom || "") || (a.ts || 0) - (b.ts || 0));
+      rows.forEach((r, i) => {
+        if (!ok || !ok(r) || !inWin(r.effectiveFrom)) return;
+        const prev = i > 0 ? num(rows[i - 1].rate) : null;
+        if (prev !== null && prev === num(r.rate)) return;
+        out.push({ date: r.effectiveFrom, side, companyId: r.companyId, materialId: r.materialId, customerId: r.customerId || "", from: prev, to: num(r.rate), ts: r.ts || 0 });
+      });
+    });
+  };
+  if (pick.company) walk(data.companyRates, r => r.companyId + "|" + r.materialId, "company", pick.company);
+  if (pick.customer) walk(data.customerRates, r => r.customerId + "|" + r.companyId + "|" + r.materialId, "customer", pick.customer);
+  return out.sort((a, b) => a.date.localeCompare(b.date) || a.ts - b.ts);
+}

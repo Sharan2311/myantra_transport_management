@@ -51,6 +51,21 @@ function FYBar({ data, fy, setFy }) {
   );
 }
 
+
+// Which earlier entries change price when rates change. scopes: [{kind,...,from}] (company first, then customer).
+function planRepriceTrips(trips, coRates, cuRates, scopes) {
+  let working = trips;
+  const before = new Map(trips.map(t => [t.id, t]));
+  const touched = new Set();
+  scopes.forEach(scope => {
+    const ch = L.repriceTrips(working, coRates, cuRates, scope);
+    const by = new Map(ch.map(c => [c.trip.id, c.patch]));
+    ch.forEach(c => touched.add(c.trip.id));
+    working = working.map(t => by.has(t.id) ? { ...t, ...by.get(t.id) } : t);
+  });
+  return working.filter(t => touched.has(t.id)).map(t => ({ before: before.get(t.id), after: t }));
+}
+
 // ── Generic form sheet ───────────────────────────────────────────────────────
 function FormSheet({ title, fields, init, onSave, onClose, validate, hint, header, saveLabel = "Save" }) {
   const { Btn, Sheet, Field } = ui();
@@ -196,20 +211,10 @@ function EntryForm({ h, edit, onClose }) {
   const pr = edit ? { rate: edit.customerRate } : (customerId && companyId && materialId ? L.customerRateFor(cuRates, customerId, materialId, companyId, date) : null);
 
   // Earlier entries that a new / changed rate re-prices (company first, then customer, on the updated entries)
-  const planReprice = () => {
-    let working = D.trips;
-    const before = new Map(D.trips.map(t => [t.id, t]));
-    const touched = new Set();
-    const run = scope => {
-      const ch = L.repriceTrips(working, coRates, cuRates, scope);
-      const by = new Map(ch.map(c => [c.trip.id, c.patch]));
-      ch.forEach(c => touched.add(c.trip.id));
-      working = working.map(t => by.has(t.id) ? { ...t, ...by.get(t.id) } : t);
-    };
-    if (coRec) run({ kind: "company", companyId, materialId, from: coRec.effectiveFrom });
-    if (cuRec) run({ kind: "customer", customerId, materialId, companyId, from: cuRec.effectiveFrom });
-    return working.filter(t => touched.has(t.id)).map(t => ({ before: before.get(t.id), after: t }));
-  };
+  const planReprice = () => planRepriceTrips(D.trips, coRates, cuRates, [
+    ...(coRec ? [{ kind: "company", companyId, materialId, from: coRec.effectiveFrom }] : []),
+    ...(cuRec ? [{ kind: "customer", customerId, materialId, companyId, from: cuRec.effectiveFrom }] : []),
+  ]);
   const repriced = coRec || cuRec ? planReprice() : [];
 
   const loanDed = edit ? edit.loanDeduction : (customer && !creatingCust ? L.loanDeductionFor(customer, D.loans) : 0);
@@ -777,7 +782,19 @@ function PaymentsTab({ h }) {
 // ═══════════════════════════ LEDGERS TAB ════════════════════════════════════
 // Each ledger is shown as separate bordered tables (trips / payments / loan …),
 // each with its own summary on top, so nothing is mixed into one long list.
-const sn = rows => rows.map((r, i) => ({ sn: String(i + 1), ...r }));
+const sn = rows => { let n = 0; return rows.map(r => r._group ? r : ({ sn: String(++n), ...r })); };
+
+// Bold "rate changed" rows placed by date between trips. items: [{date(ISO), row}]
+const withRateNotes = (items, events, text) => {
+  const notes = events.filter(e => e.from !== null).map(e => ({ date: e.date, row: { _group: text(e), _note: true } }));
+  const out = []; let ni = 0;
+  items.forEach(it => {
+    while (ni < notes.length && notes[ni].date <= it.date) out.push(notes[ni++].row);
+    out.push(it.row);
+  });
+  while (ni < notes.length) out.push(notes[ni++].row);
+  return out;
+};
 const COL = {
   sn: { key: "sn", label: "#", w: 28 }, date: { key: "date", label: "Date", nowrap: true },
   co: { key: "co", label: "Company" }, mat: { key: "mat", label: "Material" }, veh: { key: "veh", label: "Vehicle", nowrap: true },
@@ -794,6 +811,9 @@ function buildLedger(D, mode, f) {
   const un = id => (id ? nm(D.customers, id) : "—");
   const filt = { from: f.from || undefined, to: f.to || undefined, companyId: f.companyId || undefined, materialId: f.materialId || undefined };
   const out = { title: "", who: "", pos: "", neg: "", balance: 0, topSummary: [], sections: [] };
+  const rateText = e => `RATE CHANGE · ${fmtDay(e.date)} · ${e.side === "company" ? "Company rate" : "Customer rate"} (${e.side === "customer" ? un(e.customerId) + " · " : ""}${cn(e.companyId)} · ${mn(e.materialId)}): ${e.from === null ? "set at " + m(e.to) : m(e.from) + " → " + m(e.to)} per ton`;
+  const win = { from: filt.from, to: filt.to };
+  const okCo = r => (!filt.companyId || r.companyId === filt.companyId) && (!filt.materialId || r.materialId === filt.materialId);
   const bal = (label, v) => ({ label, value: money(v), color: v >= 0 ? "green" : "red", sub: v >= 0 ? out.pos : out.neg });
 
   if (mode === "customer") {
@@ -801,7 +821,8 @@ function buildLedger(D, mode, f) {
     Object.assign(out, { title: "Customer ledger", who: un(f.partyId), pos: "M Yantra owes the customer", neg: "Advance (customer owes M Yantra)", balance: res.balance });
     const open = sum(res.rows.filter(r => r.kind === "Opening"), "amount");
     const trips = res.rows.filter(r => r.kind === "Trip"), paid = res.rows.filter(r => r.kind === "Paid");
-    const tripRows = sn(trips.map(r => ({ date: fmtDay(r.date), co: cn(r.companyId), mat: mn(r.materialId), veh: r.truckNo, tons: String(r.tons), rate: m(r.rate), gross: m(r.gross), loan: dash(r.loan), ded: dash(r.deduction), net: m(r.amount) })));
+    const evs = L.rateChanges(D, win, { customer: r => r.customerId === f.partyId && okCo(r) });
+    const tripRows = sn(withRateNotes(trips.map(r => ({ date: r.date, row: { date: fmtDay(r.date), co: cn(r.companyId), mat: mn(r.materialId), veh: r.truckNo, tons: String(r.tons), rate: m(r.rate), gross: m(r.gross), loan: dash(r.loan), ded: dash(r.deduction), net: m(r.amount) } })), evs, rateText));
     const tonsT = sum(trips, "tons"), netT = sum(trips, "amount"), paidT = -sum(paid, "amount");
     out.topSummary = [
       { label: "Opening / brought forward", value: money(open) }, { label: "Net payable (trips)", value: m(netT) },
@@ -837,7 +858,8 @@ function buildLedger(D, mode, f) {
       title: "Trips",
       summary: [{ label: "Trips", value: String(trips.length) }, { label: "Tons", value: fmtTons(tonsT) }, { label: "Billed", value: m(billed) }],
       columns: [COL.sn, COL.date, ...coCol, COL.mat, COL.veh, COL.cust, COL.tons, { key: "rate", label: "Rate", right: true }, { key: "amt", label: "Amount", right: true }],
-      rows: sn(trips.map(r => ({ date: fmtDay(r.date), co: cn(r.companyId), mat: mn(r.materialId), veh: r.truckNo, cust: un(r.customerId), tons: String(r.tons), rate: m(r.rate), amt: m(r.amount) }))),
+      rows: sn(withRateNotes(trips.map(r => ({ date: r.date, row: { date: fmtDay(r.date), co: cn(r.companyId), mat: mn(r.materialId), veh: r.truckNo, cust: un(r.customerId), tons: String(r.tons), rate: m(r.rate), amt: m(r.amount) } })),
+        L.rateChanges(D, win, { company: r => okCo(r) && (isCo ? r.companyId === f.partyId : r.materialId === f.partyId) }), rateText)),
       totals: { sn: "", date: "Total", tons: String(Math.round(tonsT * 1000) / 1000), amt: m(billed) },
     });
     const dedBy = new Map(dedRows.map(d => [d.payId, d]));
@@ -858,11 +880,13 @@ function buildLedger(D, mode, f) {
     const veh = D.vehicles.find(v => v.id === f.partyId);
     Object.assign(out, { title: "Vehicle ledger", who: veh ? veh.truckNo : "—", balance: res.balance });
     const trips = res.rows.filter(r => r.kind === "Trip");
+    const combos = new Set(); trips.forEach(t => { combos.add(t.companyId + "|" + t.materialId); combos.add(t.companyId + "|" + t.materialId + "|" + t.customerId); });
     out.topSummary = [{ label: "Trips", value: String(trips.length) }, { label: "Tons", value: fmtTons(res.tons) }, { label: "Net payable to owners", value: m(sum(trips, "amount")) }];
     out.sections.push({
       title: "Trips",
       columns: [COL.sn, COL.date, COL.co, COL.mat, COL.cust, COL.tons, { key: "cr", label: "Co. rate", right: true }, { key: "ur", label: "Cust. rate", right: true }, { key: "net", label: "Net payable", right: true }],
-      rows: sn(trips.map(r => ({ date: fmtDay(r.date), co: cn(r.companyId), mat: mn(r.materialId), cust: un(r.customerId), tons: String(r.tons), cr: m(r.companyRate), ur: m(r.customerRate), net: m(r.amount) }))),
+      rows: sn(withRateNotes(trips.map(r => ({ date: r.date, row: { date: fmtDay(r.date), co: cn(r.companyId), mat: mn(r.materialId), cust: un(r.customerId), tons: String(r.tons), cr: m(r.companyRate), ur: m(r.customerRate), net: m(r.amount) } })),
+        L.rateChanges(D, win, { company: r => combos.has(r.companyId + "|" + r.materialId), customer: r => combos.has(r.companyId + "|" + r.materialId + "|" + r.customerId) }), rateText)),
       totals: { sn: "", date: "Total", tons: String(Math.round(res.tons * 1000) / 1000), net: m(sum(trips, "amount")) },
     });
   } else if (mode === "loan") {
@@ -960,10 +984,38 @@ function LedgersTab({ h }) {
 
 // ═══════════════════════════ RATES TAB ══════════════════════════════════════
 function RatesTab({ h }) {
-  const { C, fmt, today } = ui();
+  const { C, fmt, today, Btn } = ui();
   const { data: D } = h;
   const [open, setOpen] = useState("");
+  const [edit, setEdit] = useState(null);
   const t = today();
+  const tbl = side => (side === "company" ? "companyRates" : "customerRates");
+
+  // Rates after an edit (next = changed row) or delete (next = null); returns the entries that would be repriced
+  const plan = (side, row, next) => {
+    const co = D.companyRates.filter(r => side !== "company" || r.id !== row.id).concat(side === "company" && next ? [next] : []);
+    const cu = D.customerRates.filter(r => side !== "customer" || r.id !== row.id).concat(side === "customer" && next ? [next] : []);
+    const from = next && next.effectiveFrom < row.effectiveFrom ? next.effectiveFrom : row.effectiveFrom;
+    const scope = side === "company" ? { kind: "company", companyId: row.companyId, materialId: row.materialId, from } : { kind: "customer", customerId: row.customerId, companyId: row.companyId, materialId: row.materialId, from };
+    return { co, cu, changed: planRepriceTrips(D.trips, co, cu, [scope]) };
+  };
+  const apply = async (side, row, next, action) => {
+    const { changed } = plan(side, row, next);
+    const tn = side === "company" ? "mye_husk_company_rates" : "mye_husk_customer_rates";
+    if (next) await HuskDB.save(tbl(side), next); else await HuskDB.remove(tbl(side), row.id);
+    await HuskDB.save("changelog", h.change(tn, row.id, action, row, next));
+    if (changed.length) {
+      const edited = changed.map(c => ({ ...c.after, editedBy: h.user.name, editedAt: ui().nowTs() }));
+      await HuskDB.saveMany("trips", edited);
+      await HuskDB.saveMany("changelog", changed.map((c, i) => h.change("mye_husk_trips", c.before.id, "reprice", c.before, edited[i])));
+    }
+    await h.load();
+  };
+  const removeRate = async (side, row) => {
+    const n = plan(side, row, null).changed.length;
+    if (!window.confirm(`Delete the ${fmt(row.rate)}/t rate from ${fmtDay(row.effectiveFrom)}?\n\n` + (n ? `${n} entr${n === 1 ? "y" : "ies"} will fall back to the earlier rate and be repriced.` : "No existing entry changes price.") + "\nThe change log keeps a copy.")) return;
+    try { await apply(side, row, null, "delete"); } catch (e) { alert("Could not delete: " + (e.message || e)); }
+  };
 
   const companyGroups = useMemo(() => {
     const m = new Map();
@@ -976,7 +1028,7 @@ function RatesTab({ h }) {
     return [...m.entries()].map(([k, rows]) => ({ k, rows: rows.sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom) || b.ts - a.ts), title: `${nm(D.customers, rows[0].customerId)} · ${nm(D.companies, rows[0].companyId)} · ${nm(D.materials, rows[0].materialId)}` }));
   }, [D]);
 
-  const block = (title, groups) => (
+  const block = (title, groups, side) => (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={{ fontWeight: 800, color: C.text }}>{title}</div>
       {groups.length === 0 && <Empty>No rates yet.</Empty>}
@@ -995,9 +1047,15 @@ function RatesTab({ h }) {
             {isOpen && (
               <div style={{ marginTop: 8, borderTop: `1px solid ${C.border}`, paddingTop: 8 }}>
                 {g.rows.map(r => (
-                  <div key={r.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, padding: "3px 0" }}>
+                  <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6, fontSize: 12, padding: "4px 0" }}>
                     <span>from {fmtDay(r.effectiveFrom)}{r.effectiveFrom > t ? " (upcoming)" : ""}</span>
-                    <span><b>{fmt(r.rate)}</b> <span style={{ color: C.muted }}>· {r.createdBy}</span></span>
+                    <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <span><b>{fmt(r.rate)}</b> <span style={{ color: C.muted }}>· {r.createdBy}</span></span>
+                      {h.P.admin && <>
+                        <Btn sm outline onClick={() => setEdit({ side, row: r })}>Edit</Btn>
+                        <Btn sm outline color={C.red} onClick={() => removeRate(side, r)}>Delete</Btn>
+                      </>}
+                    </span>
                   </div>
                 ))}
               </div>
@@ -1009,9 +1067,14 @@ function RatesTab({ h }) {
   );
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      <Muted>Rates are added or changed in the New vehicle entry form (Husk manager or owner). Every change is kept here and in the change log.</Muted>
-      {block("Company rates (company pays M Yantra)", companyGroups)}
-      {block("Customer rates (M Yantra pays customer)", customerGroups)}
+      <Muted>Rates are added or changed in the New vehicle entry form (Husk manager or owner). The owner can also edit or delete a wrong rate here. Every change is kept in the change log.</Muted>
+      {block("Company rates (company pays M Yantra)", companyGroups, "company")}
+      {block("Customer rates (M Yantra pays customer)", customerGroups, "customer")}
+      {edit && <FormSheet title="Edit rate" onClose={() => setEdit(null)} init={{ rate: String(edit.row.rate), effectiveFrom: edit.row.effectiveFrom }}
+        fields={[{ k: "rate", label: "Rate per ton (₹)", type: "number", half: true }, { k: "effectiveFrom", label: "Effective from", type: "date", half: true }]}
+        validate={v => !(L.num(v.rate) > 0) ? "Enter a rate above 0." : !v.effectiveFrom ? "Pick the effective date." : ""}
+        hint={v => { const n = plan(edit.side, edit.row, { ...edit.row, rate: L.num(v.rate), effectiveFrom: v.effectiveFrom }).changed.length; return n ? <Warn>{n} entr{n === 1 ? "y" : "ies"} will be repriced. The change log keeps the old and new amounts.</Warn> : null; }}
+        onSave={v => apply(edit.side, edit.row, { ...edit.row, rate: L.num(v.rate), effectiveFrom: v.effectiveFrom }, "edit")} />}
     </div>
   );
 }

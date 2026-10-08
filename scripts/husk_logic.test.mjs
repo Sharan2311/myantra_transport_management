@@ -187,4 +187,14 @@ t("what is still to be paid: A has 2 trucks, B has 1; a payment reduces it on it
   assert.deepEqual(co.map(c => [c.companyId, c.total]), [["A", 23 * 3000], ["B", 12000]]);
 });
 
+t("rate changes inside a window are listed with the rate they replaced", () => {
+  const data = { companyRates: [
+    { id: "r1", companyId: "A", materialId: "soya", rate: 3000, effectiveFrom: "2026-09-01", ts: 1 },
+    { id: "r2", companyId: "A", materialId: "soya", rate: 3100, effectiveFrom: "2026-10-05", ts: 2 }],
+    customerRates: [{ id: "c1", customerId: "CA", companyId: "A", materialId: "soya", rate: 2700, effectiveFrom: "2026-09-01", ts: 1 }] };
+  const ev = H.rateChanges(data, { from: "2026-10-01", to: "2026-10-10" }, { company: () => true, customer: () => true });
+  assert.deepEqual(ev.map(e => [e.date, e.side, e.from, e.to]), [["2026-10-05", "company", 3000, 3100]]);
+  assert.equal(H.rateChanges(data, { from: "2026-09-01", to: "2026-09-30" }, { customer: () => true })[0].from, null);
+});
+
 console.log(`\n${n} tests passed`);
