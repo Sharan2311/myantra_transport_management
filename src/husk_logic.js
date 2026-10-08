@@ -314,3 +314,52 @@ export function payableToCustomers(data) {
   ids.forEach(id => { sum += customerLedger(data, id).total; });
   return r2(sum);
 }
+
+// ── What is still to be settled (all dates) ──────────────────────────────────
+// Customers M Yantra still has to pay (positive) or has advanced to (negative),
+// with the split by company + material so a payment can be recorded against it.
+// Everything is derived from trips and payments, so a recorded payment reduces
+// the amount on its own.
+export function customersDue(data) {
+  const ids = new Set();
+  (data.trips || []).forEach(t => t.customerId && ids.add(t.customerId));
+  (data.payments || []).forEach(p => p.kind === "customer_paid" && p.customerId && ids.add(p.customerId));
+  (data.openings || []).forEach(o => o.partyType === "customer" && o.partyId && ids.add(o.partyId));
+  const out = [];
+  ids.forEach(id => {
+    const total = customerLedger(data, id).total;
+    const combos = new Map();
+    const note = (c, m) => { const k = c + "|" + m; if (!combos.has(k)) combos.set(k, { companyId: c, materialId: m }); };
+    let earned = 0, paid = 0, trips = 0;
+    (data.trips || []).forEach(t => { if (t.customerId === id) { note(t.companyId, t.materialId); earned += num(t.netPayable); trips++; } });
+    (data.payments || []).forEach(p => { if (p.kind === "customer_paid" && p.customerId === id) { if (p.companyId && p.materialId) note(p.companyId, p.materialId); paid += num(p.amount); } });
+    const lines = [...combos.values()]
+      .map(c => ({ ...c, balance: customerLedger(data, id, { companyId: c.companyId, materialId: c.materialId }).total }))
+      .filter(l => Math.abs(l.balance) > 0.005);
+    const other = r2(total - lines.reduce((s, l) => s + l.balance, 0));
+    if (Math.abs(total) > 0.005) out.push({ customerId: id, total, earned: r2(earned), paid: r2(paid), trips, lines, other });
+  });
+  return out.sort((a, b) => b.total - a.total);
+}
+
+// Companies that still owe M Yantra, split by material.
+export function companiesDue(data) {
+  const ids = new Set();
+  (data.trips || []).forEach(t => t.companyId && ids.add(t.companyId));
+  (data.payments || []).forEach(p => p.kind === "company_received" && p.companyId && ids.add(p.companyId));
+  (data.openings || []).forEach(o => o.partyType === "company" && o.partyId && ids.add(o.partyId));
+  const out = [];
+  ids.forEach(id => {
+    const total = companyLedger(data, id).total;
+    const mats = new Set();
+    let billed = 0, received = 0, deducted = 0;
+    (data.trips || []).forEach(t => { if (t.companyId === id) { mats.add(t.materialId); billed += num(t.companyAmount); } });
+    (data.payments || []).forEach(p => { if (p.kind === "company_received" && p.companyId === id) { if (p.materialId) mats.add(p.materialId); received += num(p.amount); deducted += num(p.deduction); } });
+    const lines = [...mats]
+      .map(m => ({ materialId: m, balance: companyLedger(data, id, { materialId: m }).total }))
+      .filter(l => Math.abs(l.balance) > 0.005);
+    const other = r2(total - lines.reduce((s, l) => s + l.balance, 0));
+    if (Math.abs(total) > 0.005) out.push({ companyId: id, total, billed: r2(billed), received: r2(received), deducted: r2(deducted), lines, other });
+  });
+  return out.sort((a, b) => b.total - a.total);
+}

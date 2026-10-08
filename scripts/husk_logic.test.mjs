@@ -168,4 +168,23 @@ t("receivable and payable totals", () => {
   assert.equal(H.payableToCustomers(data), 20000);
 });
 
+t("what is still to be paid: A has 2 trucks, B has 1; a payment reduces it on its own", () => {
+  const trip = (id, cust, tons, net, co = "A", m = "soya") => ({ id, entryDate: "2026-09-03", companyId: co, materialId: m, customerId: cust, tons, companyAmount: tons * 3000, customerAmount: net, netPayable: net });
+  const data = {
+    trips: [trip("T1", "CA", 10, 27000), trip("T2", "CA", 5, 13500), trip("T3", "CB", 8, 21600), trip("T4", "CA", 4, 10800, "B", "rice")],
+    payments: [], openings: [],
+  };
+  let due = H.customersDue(data);
+  assert.deepEqual(due.map(d => [d.customerId, d.total, d.trips]), [["CA", 51300, 3], ["CB", 21600, 1]]);
+  assert.equal(due[0].lines.length, 2); // A: soya at company A + rice at company B
+  data.payments.push({ id: "P1", kind: "customer_paid", customerId: "CA", companyId: "A", materialId: "soya", amount: 40500, date: "2026-09-10" });
+  due = H.customersDue(data);
+  assert.equal(due.find(d => d.customerId === "CA").total, 10800);
+  assert.equal(due.find(d => d.customerId === "CA").lines.length, 1);
+  data.payments.push({ id: "P2", kind: "customer_paid", customerId: "CB", companyId: "A", materialId: "soya", amount: 25000, date: "2026-09-11" });
+  assert.equal(H.customersDue(data).find(d => d.customerId === "CB").total, -3400); // advance
+  const co = H.companiesDue(data);
+  assert.deepEqual(co.map(c => [c.companyId, c.total]), [["A", 23 * 3000], ["B", 12000]]);
+});
+
 console.log(`\n${n} tests passed`);

@@ -2631,7 +2631,7 @@ function AppMain() {
       <div style={{padding:"14px 16px 8px"}}>
         <ErrorBoundary>
         {tab==="dashboard"  && user?.role!=="pump_operator" && user?.role!=="pump_uploader" && !isPureSelfWalletRole(user?.role) && !isParty && !isHuskOnly && <Dashboard {...sp} setTab={setTab} />}
-        {tab==="husk"       && can(user,"husk_view")  && <HuskMod user={user} log={log} ui={{C,Btn,Field,Sheet,KPI,PillBar,fmt,today,uid,nowTs,can:p=>can(user,p)}} />}
+        {tab==="husk"       && can(user,"husk_view")  && <HuskMod user={user} log={log} ui={{C,Btn,Field,Sheet,KPI,PillBar,fmt,today,uid,nowTs,can:p=>can(user,p),Scan:canFeature("payment_scan")?ScanPaymentBtn:null}} />}
         {tab==="trips"      && can(user,"trips")      && <Trips      {...sp} tripType="outbound" />}
         {tab==="inbound"    && can(user,"inbound")    && <Trips      {...sp} tripType="inbound" />}
         {tab==="billing"    && can(user,"billing")    && <Billing    {...sp} />}
