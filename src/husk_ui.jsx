@@ -42,7 +42,7 @@ export const DateInput = ({ label, value, onChange, half }) => {
     <div style={{ display: "flex", flexDirection: "column", gap: 5, flex: half ? "1 1 45%" : "1 1 100%", minWidth: 0 }}>
       {label && <label style={{ color: C.muted, fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1 }}>{label}</label>}
       <input type="date" value={value || ""} onChange={e => onChange(e.target.value)}
-        style={{ background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 10, color: C.text, padding: "12px 12px", fontSize: 15, outline: "none", width: "100%", boxSizing: "border-box", colorScheme: "light" }} />
+        style={{ background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 10, color: C.text, padding: "12px 12px", fontSize: 15, outline: "none", width: "100%", maxWidth: "100%", minWidth: 0, display: "block", boxSizing: "border-box", colorScheme: "light", WebkitAppearance: "none", appearance: "none", textAlign: "left", minHeight: 48 }} />
     </div>
   );
 };
