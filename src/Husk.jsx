@@ -5,12 +5,17 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { HuskDB } from "./db.js";
 import * as L from "./husk_logic.js";
-import { setHuskUI, ui, Card, Muted, Empty, Warn, DateInput, fmtDay, fmtTons, money, printHuskReport, FYPick, periodText } from "./husk_ui.jsx";
+import { setHuskUI, ui, Card, Muted, Empty, Warn, DateInput, fmtDay, fmtTons, money, printHuskReport, periodText, fyRange, fyLabel, fyStartYear } from "./husk_ui.jsx";
 
 const nm = (list, id) => (list.find(x => x.id === id) || {}).name || "—";
 const normTruck = s => String(s || "").toUpperCase().replace(/\s+/g, "");
 const opt = (list, all) => [{ v: "", l: all || "All" }, ...list.map(x => ({ v: x.id, l: x.name }))];
 const dayBefore = iso => { const d = new Date(iso + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() - 1); return d.toISOString().slice(0, 10); };
+// The top Financial-year filter is a range; each screen's own From/To can only narrow it.
+const effRange = (range, from, to) => ({
+  from: [range.from, from].filter(Boolean).sort().pop() || "",
+  to: [range.to, to].filter(Boolean).sort()[0] || "",
+});
 const MODES = ["Cash", "UPI", "Bank transfer", "Cheque"].map(m => ({ v: m, l: m }));
 
 // Who owned the vehicle on a given date (history), falling back to the current owner.
@@ -28,6 +33,22 @@ function useHuskData() {
   }, []);
   useEffect(() => { load(); const t = setInterval(load, 45000); return () => clearInterval(t); }, [load]);
   return [data, load, err];
+}
+
+// Top-of-screen financial year filter (Indian FY, 1 Apr – 31 Mar). Applies to
+// every Husk screen; each entry's own FY is worked out from its date.
+function FYBar({ data, fy, setFy }) {
+  const { C, PillBar, today } = ui();
+  const years = new Set([fyStartYear(today())]);
+  [...data.trips.map(t => t.entryDate), ...data.payments.map(p => p.date), ...data.openings.map(o => o.asOf), ...data.loans.map(l => l.date)]
+    .forEach(d => { const y = fyStartYear(d); if (y) years.add(y); });
+  const items = [...[...years].sort((a, b) => b - a).map(y => ({ id: String(y), label: fyLabel(y), color: C.accent })), { id: "all", label: "All years", color: C.muted }];
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <span style={{ color: C.muted, fontSize: 10, fontWeight: 700, flexShrink: 0 }}>📅 FY</span>
+      <div style={{ minWidth: 0, flex: 1 }}><PillBar items={items} active={fy || "all"} onSelect={id => setFy(id === "all" ? "" : id)} /></div>
+    </div>
+  );
 }
 
 // ── Generic form sheet ───────────────────────────────────────────────────────
@@ -63,15 +84,16 @@ export default function HuskMod({ user, log, ui: uiBag }) {
   const { C, PillBar, nowTs, uid } = uiBag;
   const [data, load, err] = useHuskData();
   const [tab, setTab] = useState("entries");
+  const [fy, setFy] = useState(() => String(fyStartYear(uiBag.today())));
 
   const roles = (user.role || "").split(",").map(s => s.trim());
   const P = { entry: uiBag.can("husk_entry"), manage: uiBag.can("husk_manage"), profit: uiBag.can("husk_profit"), admin: roles.includes("owner") };
   const h = useMemo(() => ({
-    data, load, user, P, log,
+    data, load, user, P, log, fy, range: fy ? fyRange(+fy) : { from: "", to: "" },
     meta: () => ({ createdBy: user.name, createdAt: nowTs(), ts: Date.now() }),
     change: (tableName, recordId, action, before, after) => ({ id: uid(), ts: Date.now(), at: nowTs(), by: user.name, tableName, recordId, action, before, after }),
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [data, user, P.entry, P.manage, P.profit, P.admin]);
+  }), [data, user, fy, P.entry, P.manage, P.profit, P.admin]);
 
   if (!data) return (
     <div style={{ padding: 30, textAlign: "center", color: C.muted }}>
@@ -99,6 +121,7 @@ export default function HuskMod({ user, log, ui: uiBag }) {
       {data.missing.length > 0 && (
         <Warn color={C.red}>Husk tables are not created in this database yet ({data.missing.length} missing). Run the Husk SQL in Supabase first. Nothing can be saved until then.</Warn>
       )}
+      <FYBar data={data} fy={fy} setFy={setFy} />
       <PillBar items={tabs} active={tab} onSelect={setTab} />
       {tab === "entries" && <EntriesTab h={h} />}
       {tab === "payments" && <PaymentsTab h={h} />}
@@ -137,6 +160,7 @@ function EntryForm({ h, edit, onClose }) {
   const pr = edit ? { rate: edit.customerRate } : (customerId && companyId && materialId ? L.customerRateFor(D.customerRates, customerId, materialId, companyId, date) : null);
   const loanDed = edit ? edit.loanDeduction : (customer ? L.loanDeductionFor(customer, D.loans) : 0);
   const tonsN = L.num(tons);
+  const entryFy = fyStartYear(date);
   const tripsOther = edit ? D.trips.filter(t => t.id !== edit.id) : D.trips;
   const opens = companyId ? L.openDeductions(D.payments, tripsOther, companyId) : [];
   const selOpen = opens.find(o => o.payment.id === dedId);
@@ -211,6 +235,7 @@ function EntryForm({ h, edit, onClose }) {
           </div>
         ) : (<>
           <DateInput label="Date" value={date} onChange={setDate} />
+          <div style={{ flex: "1 1 100%", fontSize: 12, color: C.muted }}>Financial year: <b style={{ color: C.text }}>{entryFy ? fyLabel(entryFy) : "—"}</b> (from the date){h.fy && entryFy && String(entryFy) !== h.fy ? <span style={{ color: C.orange }}> · not the year selected at the top, so it will not show in the list until you switch</span> : null}</div>
           <Field label="Company" value={companyId} onChange={setCompanyId} opts={opt(act(D.companies), "Select company")} half />
           <Field label="Material" value={materialId} onChange={setMaterialId} opts={opt(act(D.materials), "Select material")} half />
           <div style={{ flex: "1 1 100%" }}>
@@ -283,14 +308,15 @@ function EntriesTab({ h }) {
   const [search, setSearch] = useState("");
   const [shown, setShown] = useState(40);
 
+  const e = effRange(h.range, from, to);
   const rows = useMemo(() => {
     const k = search.trim().toLowerCase();
     return D.trips.filter(t =>
-      (!from || t.entryDate >= from) && (!to || t.entryDate <= to) &&
+      (!e.from || t.entryDate >= e.from) && (!e.to || t.entryDate <= e.to) &&
       (!cFilter || t.companyId === cFilter) && (!mFilter || t.materialId === mFilter) &&
       (!k || t.truckNo.toLowerCase().includes(k) || nm(D.customers, t.customerId).toLowerCase().includes(k))
     ).sort((a, b) => b.entryDate.localeCompare(a.entryDate) || b.ts - a.ts);
-  }, [D, from, to, cFilter, mFilter, search]);
+  }, [D, e.from, e.to, cFilter, mFilter, search]);
 
   const totalTons = rows.reduce((s, t) => s + t.tons, 0);
   const thisMonth = D.trips.filter(t => t.entryDate.slice(0, 7) === today().slice(0, 7));
@@ -308,7 +334,7 @@ function EntriesTab({ h }) {
 
   const pdf = () => printHuskReport({
     title: "Husk vehicle entries",
-    subtitle: [periodText(from, to), cFilter && nm(D.companies, cFilter), mFilter && nm(D.materials, mFilter)].filter(Boolean).join(" · ") || "All entries",
+    subtitle: [periodText(e.from, e.to), cFilter && nm(D.companies, cFilter), mFilter && nm(D.materials, mFilter)].filter(Boolean).join(" · ") || "All entries",
     summary: [{ label: "Entries", value: String(rows.length) }, { label: "Tons", value: fmtTons(totalTons) }],
     columns: [{ key: "d", label: "Date" }, { key: "v", label: "Vehicle" }, { key: "c", label: "Customer" }, { key: "co", label: "Company · Material" }, { key: "t", label: "Tons", right: true }, { key: "cr", label: "Co. rate", right: true }, { key: "pr", label: "Cust. rate", right: true }, { key: "n", label: "Net payable", right: true }],
     rows: rows.map(t => ({ d: fmtDay(t.entryDate), v: t.truckNo, c: nm(D.customers, t.customerId), co: nm(D.companies, t.companyId) + " · " + nm(D.materials, t.materialId), t: String(t.tons), cr: String(t.companyRate), pr: String(t.customerRate), n: fmt(t.netPayable) })),
@@ -323,7 +349,6 @@ function EntriesTab({ h }) {
       {P.entry && <Btn full onClick={() => setForm("new")}>＋ New vehicle entry</Btn>}
       <Card>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
-          <FYPick from={from} to={to} data={D} onPick={(a, b) => { setFrom(a); setTo(b); }} />
           <DateInput label="From" value={from} onChange={setFrom} half />
           <DateInput label="To" value={to} onChange={setTo} half />
           <Field label="Company" value={cFilter} onChange={setCFilter} opts={opt(D.companies)} half />
@@ -339,7 +364,7 @@ function EntriesTab({ h }) {
             <div style={{ fontWeight: 800, color: C.text }}>{t.truckNo}</div>
             <div style={{ fontWeight: 800, color: C.accent }}>{fmtTons(t.tons)}</div>
           </div>
-          <Muted>{fmtDay(t.entryDate)} · {nm(D.customers, t.customerId)}</Muted>
+          <Muted>{fmtDay(t.entryDate)} · {fyLabel(fyStartYear(t.entryDate))} · {nm(D.customers, t.customerId)}</Muted>
           <Muted>{nm(D.companies, t.companyId)} · {nm(D.materials, t.materialId)}</Muted>
           <Muted>Company {fmt(t.companyRate)}/t = {fmt(t.companyAmount)} · Customer {fmt(t.customerRate)}/t = {fmt(t.customerAmount)}</Muted>
           {t.loanDeduction > 0 && <Muted>Loan deducted −{fmt(t.loanDeduction)}</Muted>}
@@ -429,8 +454,8 @@ function PaymentsTab({ h }) {
   const items = useMemo(() => {
     const a = D.payments.map(p => ({ src: "payment", rec: p, date: p.date, ts: p.ts, kind: p.kind }));
     const b = D.loans.filter(l => l.kind === "given").map(l => ({ src: "loan", rec: l, date: l.date, ts: l.ts, kind: "loan_given" }));
-    return [...a, ...b].filter(x => !kind || x.kind === kind).sort((x, y) => y.date.localeCompare(x.date) || y.ts - x.ts);
-  }, [D, kind]);
+    return [...a, ...b].filter(x => (!kind || x.kind === kind) && (!h.range.from || x.date >= h.range.from) && (!h.range.to || x.date <= h.range.to)).sort((x, y) => y.date.localeCompare(x.date) || y.ts - x.ts);
+  }, [D, kind, h.range.from, h.range.to]);
 
   const del = async it => {
     if (it.src === "payment" && D.trips.some(t => t.dedPaymentId === it.rec.id)) { alert("Part of this payment's deduction has been recovered through trips. Remove it from those trips first."); return; }
@@ -538,9 +563,11 @@ function LedgersTab({ h }) {
     : mode === "company" ? opt(D.companies, "Select company") : mode === "material" ? opt(D.materials, "Select material")
     : opt(D.vehicles.map(v => ({ id: v.id, name: v.truckNo })), "Select vehicle");
   const ready = !needsParty || f.partyId;
-  const L2 = ready ? buildLedger(D, mode, f) : null;
+  const e = effRange(h.range, f.from, f.to);
+  const fe = { ...f, from: e.from, to: e.to };
+  const L2 = ready ? buildLedger(D, mode, fe) : null;
 
-  const subtitle = L2 ? [L2.who, periodText(f.from, f.to), mode !== "company" && mode !== "material" && f.companyId && nm(D.companies, f.companyId), f.materialId && mode !== "material" && nm(D.materials, f.materialId)].filter(Boolean).join(" · ") : "";
+  const subtitle = L2 ? [L2.who, periodText(fe.from, fe.to), mode !== "company" && mode !== "material" && f.companyId && nm(D.companies, f.companyId), f.materialId && mode !== "material" && nm(D.materials, f.materialId)].filter(Boolean).join(" · ") : "";
   const pdf = () => {
     if (!L2) return;
     const bal = L2.res.balance;
@@ -559,7 +586,6 @@ function LedgersTab({ h }) {
           {(mode === "customer" || mode === "deduction") && <Field label="Company" value={f.companyId} onChange={set("companyId")} opts={opt(D.companies)} half />}
           {mode === "material" && <Field label="Company" value={f.companyId} onChange={set("companyId")} opts={opt(D.companies)} half />}
           {(mode === "customer" || mode === "company" || mode === "deduction") && <Field label="Material" value={f.materialId} onChange={set("materialId")} opts={opt(D.materials)} half />}
-          <FYPick from={f.from} to={f.to} data={D} onPick={(a, b) => setF(p => ({ ...p, from: a, to: b }))} />
           <DateInput label="From" value={f.from} onChange={set("from")} half />
           <DateInput label="To" value={f.to} onChange={set("to")} half />
         </div>
@@ -739,13 +765,14 @@ function ProfitTab({ h }) {
   const [f, setF] = useState({ from: "", to: "", companyId: "", materialId: "", customerId: "", vehicleId: "" });
   const [dim, setDim] = useState("company");
   const set = k => v => setF(p => ({ ...p, [k]: v }));
-  const filt = Object.fromEntries(Object.entries(f).map(([k, v]) => [k, v || undefined]));
+  const pe = effRange(h.range, f.from, f.to);
+  const filt = Object.fromEntries(Object.entries({ ...f, from: pe.from, to: pe.to }).map(([k, v]) => [k, v || undefined]));
   const s = L.profitSummary(D, filt);
   const rows = L.profitBy(D, dim, filt);
   const label = id => dim === "company" ? nm(D.companies, id) : dim === "customer" ? nm(D.customers, id) : dim === "material" ? nm(D.materials, id) : (D.vehicles.find(v => v.id === id) || {}).truckNo || "—";
   const pdf = () => printHuskReport({
     title: "Husk profit report",
-    subtitle: [periodText(f.from, f.to) || "All time", f.companyId && nm(D.companies, f.companyId), f.materialId && nm(D.materials, f.materialId), f.customerId && nm(D.customers, f.customerId), f.vehicleId && (D.vehicles.find(v => v.id === f.vehicleId) || {}).truckNo].filter(Boolean).join(" · "),
+    subtitle: [periodText(pe.from, pe.to) || "All time", f.companyId && nm(D.companies, f.companyId), f.materialId && nm(D.materials, f.materialId), f.customerId && nm(D.customers, f.customerId), f.vehicleId && (D.vehicles.find(v => v.id === f.vehicleId) || {}).truckNo].filter(Boolean).join(" · "),
     summary: [{ label: "Profit", value: fmt(s.profit) }, { label: "Tons", value: fmtTons(s.tons) }, { label: "Per ton", value: fmt(s.perTon) }, { label: "Billed to companies", value: fmt(s.billed) }, { label: "Payable to customers", value: fmt(s.payable) }, { label: "Rate margin", value: fmt(s.margin) }, ...(s.deductionsAttributed ? [{ label: "Deductions", value: fmt(s.deductions) }, { label: "Recovered", value: fmt(s.recovered) }] : [])],
     columns: [{ key: "n", label: { company: "Company", customer: "Customer", material: "Material", vehicle: "Vehicle" }[dim] }, { key: "t", label: "Tons", right: true }, { key: "m", label: "Rate margin", right: true }, { key: "d", label: "Deductions", right: true }, { key: "r", label: "Recovered", right: true }, { key: "p", label: "Profit", right: true }],
     rows: rows.map(r => ({ n: label(r.id), t: String(r.tons), m: fmt(r.margin), d: r.deductionsAttributed && (dim === "company" || dim === "material") ? fmt(r.deductions) : "—", r: r.deductionsAttributed && (dim === "company" || dim === "material") ? fmt(r.recovered) : "—", p: fmt(r.profit) })),
@@ -755,7 +782,6 @@ function ProfitTab({ h }) {
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <Card>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
-          <FYPick from={f.from} to={f.to} data={D} onPick={(a, b) => setF(p => ({ ...p, from: a, to: b }))} />
           <DateInput label="From" value={f.from} onChange={set("from")} half />
           <DateInput label="To" value={f.to} onChange={set("to")} half />
           <Field label="Company" value={f.companyId} onChange={set("companyId")} opts={opt(D.companies)} half />
