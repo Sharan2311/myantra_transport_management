@@ -2,7 +2,7 @@
 // Rules live in husk_logic.js (tested), storage in db.js (HuskDB), small shared
 // widgets and PDF in husk_ui.jsx. App.jsx passes its own theme + components in
 // through the `ui` prop so this file looks and behaves like the rest of the app.
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { HuskDB } from "./db.js";
 import * as L from "./husk_logic.js";
 import { setHuskUI, ui, Card, Muted, Empty, Warn, DateInput, fmtDay, fmtTons, money, printHuskReport, periodText, fyRange, fyLabel, fyStartYear } from "./husk_ui.jsx";
@@ -138,7 +138,8 @@ export default function HuskMod({ user, log, ui: uiBag }) {
 // ═══════════════════════════ ENTRY FORM ═════════════════════════════════════
 function EntryForm({ h, edit, onClose }) {
   const { C, Btn, Sheet, Field, fmt, today, uid, nowTs } = ui();
-  const { data: D, user } = h;
+  const { data: D, user, P } = h;
+  const NEW = "__new";
   const [date, setDate] = useState(edit ? edit.entryDate : today());
   const [companyId, setCompanyId] = useState(edit ? edit.companyId : "");
   const [materialId, setMaterialId] = useState(edit ? edit.materialId : "");
@@ -146,21 +147,61 @@ function EntryForm({ h, edit, onClose }) {
   const [q, setQ] = useState("");
   const [newVeh, setNewVeh] = useState(false);
   const [newTruck, setNewTruck] = useState("");
-  const [newCust, setNewCust] = useState("");
+  const [ownerSel, setOwnerSel] = useState("");      // owner of a NEW vehicle: customer id, or NEW
+  const [relink, setRelink] = useState(false);       // change owner of the chosen vehicle
+  const [relSel, setRelSel] = useState("");
+  const [custName, setCustName] = useState("");
+  const [custPhone, setCustPhone] = useState("");
+  const [coNew, setCoNew] = useState(null);          // new / changed company rate {rate, from}
+  const [cuNew, setCuNew] = useState(null);          // new / changed customer rate {rate, from}
   const [tons, setTons] = useState(edit ? String(edit.tons) : "");
   const [dedId, setDedId] = useState(edit ? edit.dedPaymentId : "");
   const [dedAmt, setDedAmt] = useState(edit && edit.customerDeduction ? String(edit.customerDeduction) : "");
   const [note, setNote] = useState(edit ? edit.note : "");
   const [busy, setBusy] = useState(false);
+  const newCustId = useRef(uid()).current;
+  const coRateId = useRef(uid()).current;
+  const cuRateId = useRef(uid()).current;
 
+  const act = list => list.filter(x => x.active !== false);
   const vehicle = D.vehicles.find(v => v.id === vehicleId);
-  const customerId = edit ? edit.customerId : newVeh ? newCust : vehicle ? ownerAt(vehicle, D.vehicleOwners, date) : "";
-  const customer = D.customers.find(c => c.id === customerId);
-  const cr = edit ? { rate: edit.companyRate } : (companyId && materialId ? L.companyRateFor(D.companyRates, companyId, materialId, date) : null);
-  const pr = edit ? { rate: edit.customerRate } : (customerId && companyId && materialId ? L.customerRateFor(D.customerRates, customerId, materialId, companyId, date) : null);
-  const loanDed = edit ? edit.loanDeduction : (customer ? L.loanDeductionFor(customer, D.loans) : 0);
+  const ownerPick = newVeh ? ownerSel : relink ? relSel : "";
+  const creatingCust = ownerPick === NEW;
+  const customerId = edit ? edit.customerId : creatingCust ? newCustId : ownerPick ? ownerPick : vehicle ? ownerAt(vehicle, D.vehicleOwners, date) : "";
+  const customer = creatingCust ? { id: newCustId, name: custName.trim(), phone: custPhone, loanPerTrip: 0, active: true } : D.customers.find(c => c.id === customerId);
+  const ready = !edit && companyId && materialId && customerId;
+
+  // Rates typed into this form (saved with the entry)
+  const coRec = !edit && coNew && L.num(coNew.rate) > 0 && coNew.from && companyId && materialId
+    ? { id: coRateId, companyId, materialId, rate: L.num(coNew.rate), effectiveFrom: coNew.from, ts: Date.now(), createdBy: user.name, createdAt: nowTs() } : null;
+  const cuRec = !edit && cuNew && L.num(cuNew.rate) > 0 && cuNew.from && customerId && companyId && materialId
+    ? { id: cuRateId, customerId, materialId, companyId, rate: L.num(cuNew.rate), effectiveFrom: cuNew.from, ts: Date.now(), createdBy: user.name, createdAt: nowTs() } : null;
+  const coRates = coRec ? [...D.companyRates, coRec] : D.companyRates;
+  const cuRates = cuRec ? [...D.customerRates, cuRec] : D.customerRates;
+  const coBase = ready ? L.companyRateFor(D.companyRates, companyId, materialId, date) : null;
+  const cuBase = ready ? L.customerRateFor(D.customerRates, customerId, materialId, companyId, date) : null;
+  const cr = edit ? { rate: edit.companyRate } : (companyId && materialId ? L.companyRateFor(coRates, companyId, materialId, date) : null);
+  const pr = edit ? { rate: edit.customerRate } : (customerId && companyId && materialId ? L.customerRateFor(cuRates, customerId, materialId, companyId, date) : null);
+
+  // Earlier entries that a new / changed rate re-prices (company first, then customer, on the updated entries)
+  const planReprice = () => {
+    let working = D.trips;
+    const before = new Map(D.trips.map(t => [t.id, t]));
+    const touched = new Set();
+    const run = scope => {
+      const ch = L.repriceTrips(working, coRates, cuRates, scope);
+      const by = new Map(ch.map(c => [c.trip.id, c.patch]));
+      ch.forEach(c => touched.add(c.trip.id));
+      working = working.map(t => by.has(t.id) ? { ...t, ...by.get(t.id) } : t);
+    };
+    if (coRec) run({ kind: "company", companyId, materialId, from: coRec.effectiveFrom });
+    if (cuRec) run({ kind: "customer", customerId, materialId, companyId, from: cuRec.effectiveFrom });
+    return working.filter(t => touched.has(t.id)).map(t => ({ before: before.get(t.id), after: t }));
+  };
+  const repriced = coRec || cuRec ? planReprice() : [];
+
+  const loanDed = edit ? edit.loanDeduction : (customer && !creatingCust ? L.loanDeductionFor(customer, D.loans) : 0);
   const tonsN = L.num(tons);
-  const entryFy = fyStartYear(date);
   const tripsOther = edit ? D.trips.filter(t => t.id !== edit.id) : D.trips;
   const opens = companyId ? L.openDeductions(D.payments, tripsOther, companyId) : [];
   const selOpen = opens.find(o => o.payment.id === dedId);
@@ -168,6 +209,7 @@ function EntryForm({ h, edit, onClose }) {
   const dedMax = selOpen ? Math.min(selOpen.open, Math.max(0, base.customerAmount - loanDed)) : 0;
   const dedN = selOpen ? L.num(dedAmt) : 0;
   const amt = L.computeAmounts({ tons: tonsN, companyRate: cr && cr.rate, customerRate: pr && pr.rate, loanDeduction: loanDed, customerDeduction: dedN });
+  const entryFy = fyStartYear(date);
 
   const matches = useMemo(() => {
     const k = normTruck(q);
@@ -175,15 +217,23 @@ function EntryForm({ h, edit, onClose }) {
     return D.vehicles.filter(v => normTruck(v.truckNo).includes(k)).slice(0, 6);
   }, [q, D.vehicles]);
 
+  const nameTaken = n => D.customers.some(c => c.name.trim().toLowerCase() === n.trim().toLowerCase());
   const errors = [];
   if (!edit) {
     if (!companyId || !materialId) errors.push("Choose a company and a material.");
     if (!newVeh && !vehicle) errors.push("Choose a vehicle.");
-    if (newVeh && (!newTruck.trim() || !newCust)) errors.push("Enter the truck number and its owner.");
+    if (newVeh && !newTruck.trim()) errors.push("Enter the truck number.");
+    if (newVeh && D.vehicles.some(v => normTruck(v.truckNo) === normTruck(newTruck))) errors.push("This truck number already exists. Search for it instead.");
+    if ((newVeh || relink) && !ownerPick) errors.push("Choose the owner.");
+    if (creatingCust && !custName.trim()) errors.push("Enter the new owner's name.");
+    if (creatingCust && custName.trim() && nameTaken(custName)) errors.push("An owner with this name already exists. Choose them from the list.");
+    if (coNew && !(L.num(coNew.rate) > 0)) errors.push("Enter the company rate.");
+    if (cuNew && !(L.num(cuNew.rate) > 0)) errors.push("Enter the customer rate.");
+    if ((coNew && coNew.from > date) || (cuNew && cuNew.from > date)) errors.push("A rate cannot start after the entry date.");
+    if (companyId && materialId && !cr && !coNew) errors.push(P.manage ? `Set the company rate for ${nm(D.companies, companyId)} / ${nm(D.materials, materialId)}.` : `No company rate for ${nm(D.companies, companyId)} / ${nm(D.materials, materialId)} on ${fmtDay(date)}. Ask the Husk manager to set it.`);
+    if (ready && !pr && !cuNew) errors.push(P.manage ? `Set the customer rate for ${customer ? customer.name || "the new owner" : "the customer"} on ${nm(D.companies, companyId)} / ${nm(D.materials, materialId)}.` : `No customer rate for ${customer ? customer.name : "this owner"} on ${nm(D.companies, companyId)} / ${nm(D.materials, materialId)}. Ask the Husk manager to set it.`);
   }
   if (!(tonsN > 0)) errors.push("Enter the unloaded tons.");
-  if (companyId && materialId && !edit && !cr) errors.push(`No company rate for ${nm(D.companies, companyId)} / ${nm(D.materials, materialId)} on ${fmtDay(date)}. Add it under Rates first.`);
-  if (customerId && companyId && materialId && !edit && !pr) errors.push(`No rate for ${nm(D.customers, customerId)} on ${nm(D.companies, companyId)} / ${nm(D.materials, materialId)} on ${fmtDay(date)}. Add it under Rates first.`);
   if (selOpen && !(dedN > 0 && dedN <= dedMax + 0.001)) errors.push(`Deduction must be between ₹1 and ${fmt(dedMax)}.`);
 
   const save = async () => {
@@ -201,22 +251,46 @@ function EntryForm({ h, edit, onClose }) {
         await HuskDB.save("changelog", h.change("mye_husk_trips", edit.id, "edit", edit, next));
         h.log && h.log("HUSK_EDIT", `${edit.truckNo} ${fmtDay(edit.entryDate)} edited`);
       } else {
+        // 1. new owner → customers
+        if (creatingCust) {
+          const rec = { id: newCustId, name: custName.trim(), phone: custPhone, loanPerTrip: 0, active: true, ...h.meta() };
+          await HuskDB.save("customers", rec);
+          await HuskDB.save("changelog", h.change("mye_husk_customers", rec.id, "create", null, rec));
+        }
+        // 2. new vehicle → vehicles (+ ownership history) | changed owner → ownership history
         let vId = vehicleId, truckNo = vehicle ? vehicle.truckNo : "";
         if (newVeh) {
-          if (D.vehicles.some(v => normTruck(v.truckNo) === normTruck(newTruck))) { alert("This truck number already exists. Search for it instead."); setBusy(false); return; }
           vId = uid(); truckNo = newTruck.trim().toUpperCase();
-          await HuskDB.save("vehicles", { id: vId, truckNo, customerId: newCust, ...h.meta() });
-          await HuskDB.save("vehicleOwners", { id: uid(), vehicleId: vId, customerId: newCust, fromDate: "", toDate: "", ts, createdBy: user.name });
+          const vrec = { id: vId, truckNo, customerId, ...h.meta() };
+          await HuskDB.save("vehicles", vrec);
+          await HuskDB.save("vehicleOwners", { id: uid(), vehicleId: vId, customerId, fromDate: "", toDate: "", ts, createdBy: user.name });
+          await HuskDB.save("changelog", h.change("mye_husk_vehicles", vId, "create", null, vrec));
+        } else if (relink && customerId !== vehicle.customerId) {
+          const cur = D.vehicleOwners.filter(o => o.vehicleId === vehicle.id && !o.toDate).sort((a, b) => (b.fromDate || "").localeCompare(a.fromDate || ""))[0];
+          if (cur) await HuskDB.save("vehicleOwners", { ...cur, toDate: dayBefore(date) });
+          await HuskDB.save("vehicleOwners", { id: uid(), vehicleId: vehicle.id, customerId, fromDate: date, toDate: "", ts, createdBy: user.name });
+          const nextV = { ...vehicle, customerId };
+          await HuskDB.save("vehicles", nextV);
+          await HuskDB.save("changelog", h.change("mye_husk_vehicles", vehicle.id, "relink", vehicle, nextV));
         }
+        // 3. new / changed rates → rates, re-priced earlier entries → trips, everything → change log
+        if (coRec) { await HuskDB.save("companyRates", coRec); await HuskDB.save("changelog", h.change("mye_husk_company_rates", coRec.id, "rate", null, coRec)); }
+        if (cuRec) { await HuskDB.save("customerRates", cuRec); await HuskDB.save("changelog", h.change("mye_husk_customer_rates", cuRec.id, "rate", null, cuRec)); }
+        if (repriced.length) {
+          const edited = repriced.map(r => ({ ...r.after, editedBy: user.name, editedAt: nowTs() }));
+          await HuskDB.saveMany("trips", edited);
+          await HuskDB.saveMany("changelog", repriced.map((r, i) => h.change("mye_husk_trips", r.before.id, "reprice", r.before, edited[i])));
+        }
+        // 4. the entry itself (+ loan recovery)
         const trip = {
           id: uid(), entryDate: date, companyId, materialId, vehicleId: vId, truckNo, customerId, tons: tonsN,
           companyRate: L.num(cr.rate), customerRate: L.num(pr.rate),
           companyAmount: amt.companyAmount, customerAmount: amt.customerAmount, loanDeduction: loanDed,
           customerDeduction: dedN > 0 ? dedN : 0, dedPaymentId: dedN > 0 ? dedId : "", netPayable: amt.netPayable,
-          note, enteredBy: user.name, enteredAt: nowTs(), editedBy: "", editedAt: "", ts,
+          note, enteredBy: user.name, enteredAt: nowTs(), editedBy: "", editedAt: "", ts: ts + 1,
         };
         await HuskDB.save("trips", trip);
-        if (loanDed > 0) await HuskDB.save("loans", { id: uid(), customerId, kind: "recovered", amount: loanDed, date, tripId: trip.id, note: "Deducted on trip " + truckNo, createdBy: user.name, ts });
+        if (loanDed > 0) await HuskDB.save("loans", { id: uid(), customerId, kind: "recovered", amount: loanDed, date, tripId: trip.id, note: "Deducted on trip " + truckNo, createdBy: user.name, ts: ts + 1 });
         h.log && h.log("HUSK_ENTRY", `${truckNo} ${tonsN}t ${nm(D.companies, companyId)}`);
       }
       await h.load();
@@ -224,14 +298,42 @@ function EntryForm({ h, edit, onClose }) {
     } catch (e) { alert("Could not save: " + (e.message || e)); setBusy(false); }
   };
 
-  const act = list => list.filter(x => x.active !== false);
+  const ownerOpts = [{ v: "", l: "Select owner" }, ...act(D.customers).map(c => ({ v: c.id, l: c.name })), { v: NEW, l: "＋ New owner…" }];
+  const newOwnerFields = (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+      <Field label="New owner name" value={custName} onChange={setCustName} />
+      <Field label="Phone (optional)" value={custPhone} onChange={setCustPhone} />
+    </div>
+  );
+
+  // One rate: shows the current rate; managers/owner can set or change it right here.
+  const rateBlock = (label, baseRate, pending, setPending, currentReady) => {
+    if (!currentReady) return null;
+    const editing = pending || (!baseRate && P.manage);
+    const pv = pending || { rate: "", from: date };
+    return (
+      <div style={{ flex: "1 1 100%", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 12px" }}>
+        <div style={{ fontSize: 13 }}>{label}: {baseRate ? <><b>{fmt(baseRate.rate)}</b>/t <span style={{ color: C.muted, fontSize: 12 }}>since {fmtDay(baseRate.effectiveFrom)}</span></> : <span style={{ color: C.orange, fontWeight: 700 }}>no rate set</span>}</div>
+        {editing ? (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 8 }}>
+            <Field label={baseRate ? "New rate (₹ per ton)" : "Rate (₹ per ton)"} type="number" value={pv.rate} onChange={v => setPending({ ...pv, rate: v })} half />
+            <DateInput label="Effective from" value={pv.from} onChange={v => setPending({ ...pv, from: v })} half />
+            {baseRate && <div><Btn sm outline onClick={() => setPending(null)}>Keep current rate</Btn></div>}
+          </div>
+        ) : P.manage ? (
+          <div style={{ marginTop: 8 }}><Btn sm outline onClick={() => setPending({ rate: "", from: date })}>Change rate</Btn></div>
+        ) : !baseRate ? <Muted style={{ marginTop: 6 }}>Ask the Husk manager to set this rate.</Muted> : null}
+      </div>
+    );
+  };
+
   return (
     <Sheet title={edit ? `Edit entry · ${edit.truckNo}` : "New vehicle entry"} onClose={onClose} noBackdropClose>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
         {edit ? (
           <div style={{ flex: "1 1 100%" }}>
             <Muted>{fmtDay(edit.entryDate)} · {edit.truckNo} · {nm(D.customers, edit.customerId)}</Muted>
-            <Muted>{nm(D.companies, edit.companyId)} · {nm(D.materials, edit.materialId)} · rates stay as saved (change them under Rates)</Muted>
+            <Muted>{nm(D.companies, edit.companyId)} · {nm(D.materials, edit.materialId)} · rates stay as saved</Muted>
           </div>
         ) : (<>
           <DateInput label="Date" value={date} onChange={setDate} />
@@ -240,16 +342,26 @@ function EntryForm({ h, edit, onClose }) {
           <Field label="Material" value={materialId} onChange={setMaterialId} opts={opt(act(D.materials), "Select material")} half />
           <div style={{ flex: "1 1 100%" }}>
             <div style={{ color: C.muted, fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, marginBottom: 5 }}>Vehicle</div>
-            {vehicle && !newVeh ? (
-              <div style={{ background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 10, padding: "10px 12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <div><b>{vehicle.truckNo}</b><Muted>Owner: {nm(D.customers, customerId)}</Muted></div>
-                <Btn sm outline onClick={() => { setVehicleId(""); setQ(""); }}>Change</Btn>
-              </div>
-            ) : newVeh ? (
+            {newVeh ? (
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 <Field label="New truck number" value={newTruck} onChange={setNewTruck} placeholder="e.g. KA01AB1234" />
-                <Field label="Owner (customer)" value={newCust} onChange={setNewCust} opts={opt(act(D.customers), "Select owner")} />
-                <div><Btn sm outline onClick={() => setNewVeh(false)}>Back to search</Btn></div>
+                <Field label="Owner" value={ownerSel} onChange={setOwnerSel} opts={ownerOpts} />
+                {creatingCust && newOwnerFields}
+                <div><Btn sm outline onClick={() => { setNewVeh(false); setOwnerSel(""); }}>Back to search</Btn></div>
+              </div>
+            ) : vehicle ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <div style={{ background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 10, padding: "10px 12px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                  <div><b>{vehicle.truckNo}</b><Muted>Owner: {customer ? customer.name || "(new owner)" : "—"}</Muted></div>
+                  <Btn sm outline onClick={() => { setVehicleId(""); setQ(""); setRelink(false); setRelSel(""); }}>Change</Btn>
+                </div>
+                {P.entry && !relink && <div><Btn sm outline onClick={() => setRelink(true)}>Vehicle sold? Change owner</Btn></div>}
+                {relink && (<>
+                  <Field label="New owner (from the entry date)" value={relSel} onChange={setRelSel} opts={ownerOpts.filter(o => o.v !== vehicle.customerId)} />
+                  {creatingCust && newOwnerFields}
+                  <Muted>Earlier entries keep the old owner. This entry and later ones use the new owner.</Muted>
+                  <div><Btn sm outline onClick={() => { setRelink(false); setRelSel(""); }}>Keep current owner</Btn></div>
+                </>)}
               </div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -262,10 +374,13 @@ function EntryForm({ h, edit, onClose }) {
                   </button>
                 ))}
                 {q && !matches.length && <Muted>No vehicle matches “{q}”.</Muted>}
-                <div><Btn sm outline onClick={() => { setNewVeh(true); setNewTruck(q.trim().toUpperCase()); }}>＋ New vehicle</Btn></div>
+                {P.entry && <div><Btn sm outline onClick={() => { setNewVeh(true); setNewTruck(q.trim().toUpperCase()); }}>＋ New vehicle</Btn></div>}
               </div>
             )}
           </div>
+          {rateBlock("Company rate", coBase, coNew, setCoNew, !!(companyId && materialId))}
+          {rateBlock("Customer rate", cuBase, cuNew, setCuNew, !!ready)}
+          {repriced.length > 0 && <div style={{ flex: "1 1 100%" }}><Warn>{repriced.length} earlier entr{repriced.length === 1 ? "y" : "ies"} made on or after the new rate's start date will be repriced. The change log keeps the old and new amounts.</Warn></div>}
         </>)}
 
         <Field label="Unloaded tons" type="number" value={tons} onChange={setTons} placeholder="e.g. 10.5" />
@@ -276,7 +391,7 @@ function EntryForm({ h, edit, onClose }) {
             <div>Customer rate <b>{pr ? fmt(pr.rate) : "—"}</b>/t → <b>{fmt(amt.customerAmount)}</b></div>
             {loanDed > 0 && <div style={{ color: C.orange }}>Husk loan deducted: −{fmt(loanDed)}</div>}
             {dedN > 0 && <div style={{ color: C.orange }}>Company deduction recovered: −{fmt(dedN)}</div>}
-            <div style={{ marginTop: 4, fontWeight: 800 }}>Net payable to {customer ? customer.name : "customer"}: {fmt(amt.netPayable)}</div>
+            <div style={{ marginTop: 4, fontWeight: 800 }}>Net payable to {customer && customer.name ? customer.name : "customer"}: {fmt(amt.netPayable)}</div>
           </div>
         )}
 
@@ -611,65 +726,9 @@ function LedgersTab({ h }) {
 }
 
 // ═══════════════════════════ RATES TAB ══════════════════════════════════════
-function RateForm({ h, onClose }) {
-  const { fmt, today, uid, nowTs } = ui();
-  const { data: D, user } = h;
-  const act = list => list.filter(x => x.active !== false);
-  const init = { kind: "company", companyId: "", materialId: "", customerId: "", rate: "", effectiveFrom: today() };
-  const fields = v => [
-    { k: "kind", label: "Rate for", opts: [{ v: "company", l: "Company rate (what the company pays M Yantra)" }, { v: "customer", l: "Customer rate (what M Yantra pays the customer)" }] },
-    ...(v.kind === "customer" ? [{ k: "customerId", label: "Customer", opts: opt(act(D.customers), "Select customer") }] : []),
-    { k: "companyId", label: "Company", opts: opt(act(D.companies), "Select company"), half: true },
-    { k: "materialId", label: "Material", opts: opt(act(D.materials), "Select material"), half: true },
-    { k: "rate", label: "Rate per ton (₹)", type: "number", half: true },
-    { k: "effectiveFrom", label: "Effective from", type: "date", half: true },
-  ];
-  const validate = v => {
-    if (!v.companyId || !v.materialId) return "Choose the company and material.";
-    if (v.kind === "customer" && !v.customerId) return "Choose the customer.";
-    if (!(L.num(v.rate) > 0)) return "Enter the rate per ton.";
-    if (!v.effectiveFrom) return "Choose the date the rate starts.";
-    return "";
-  };
-  const plan = v => {
-    if (validate(v)) return null;
-    const ts = Date.now();
-    if (v.kind === "company") {
-      const rec = { id: uid(), companyId: v.companyId, materialId: v.materialId, rate: L.num(v.rate), effectiveFrom: v.effectiveFrom, ts, createdBy: user.name, createdAt: nowTs() };
-      const next = [...D.companyRates, rec];
-      return { rec, key: "companyRates", table: "mye_husk_company_rates", changes: L.repriceTrips(D.trips, next, D.customerRates, { kind: "company", companyId: v.companyId, materialId: v.materialId, from: v.effectiveFrom }) };
-    }
-    const rec = { id: uid(), customerId: v.customerId, materialId: v.materialId, companyId: v.companyId, rate: L.num(v.rate), effectiveFrom: v.effectiveFrom, ts, createdBy: user.name, createdAt: nowTs() };
-    const next = [...D.customerRates, rec];
-    return { rec, key: "customerRates", table: "mye_husk_customer_rates", changes: L.repriceTrips(D.trips, D.companyRates, next, { kind: "customer", customerId: v.customerId, materialId: v.materialId, companyId: v.companyId, from: v.effectiveFrom }) };
-  };
-  const hint = v => {
-    const p = plan(v);
-    if (!p) return null;
-    const delta = p.changes.reduce((s, c) => s + (c.patch.customerAmount !== undefined && v.kind === "customer" ? c.patch.customerAmount - c.trip.customerAmount : c.patch.companyAmount - c.trip.companyAmount), 0);
-    return p.changes.length
-      ? <Warn>{p.changes.length} existing entr{p.changes.length === 1 ? "y" : "ies"} made on or after {fmtDay(v.effectiveFrom)} will be repriced ({v.kind === "company" ? "company" : "customer"} amount changes by {money(delta)}). The change log keeps the old and new amounts.</Warn>
-      : <Muted>No existing entries are affected.</Muted>;
-  };
-  const onSave = async v => {
-    const p = plan(v);
-    await HuskDB.save(p.key, p.rec);
-    if (p.changes.length) {
-      const edited = p.changes.map(c => ({ ...c.trip, ...c.patch, editedBy: user.name, editedAt: nowTs() }));
-      await HuskDB.saveMany("trips", edited);
-      await HuskDB.saveMany("changelog", p.changes.map((c, i) => h.change("mye_husk_trips", c.trip.id, "reprice", c.trip, edited[i])));
-    }
-    await HuskDB.save("changelog", h.change(p.table, p.rec.id, "rate", null, p.rec));
-    h.log && h.log("HUSK_RATE", `${v.kind} rate ${v.rate} from ${v.effectiveFrom}, ${p.changes.length} repriced`);
-    await h.load();
-  };
-  return <FormSheet title="Add a rate" init={init} fields={fields} validate={validate} hint={hint} onSave={onSave} onClose={onClose} saveLabel="Save rate" />;
-}
-
 function RatesTab({ h }) {
-  const { C, Btn, fmt, today } = ui();
-  const { data: D, P } = h;
-  const [form, setForm] = useState(false);
+  const { C, fmt, today } = ui();
+  const { data: D } = h;
   const [open, setOpen] = useState("");
   const t = today();
 
@@ -717,10 +776,9 @@ function RatesTab({ h }) {
   );
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      {P.manage ? <Btn full onClick={() => setForm(true)}>＋ Add a rate</Btn> : <Muted>View only. Rates are added by the Husk manager or the owner.</Muted>}
+      <Muted>Rates are added or changed in the New vehicle entry form (Husk manager or owner). Every change is kept here and in the change log.</Muted>
       {block("Company rates (company pays M Yantra)", companyGroups)}
       {block("Customer rates (M Yantra pays customer)", customerGroups)}
-      {form && <RateForm h={h} onClose={() => setForm(false)} />}
     </div>
   );
 }
@@ -860,35 +918,6 @@ function SetupTab({ h }) {
         validate={v => !v.name.trim() ? "Enter a name." : nameDup(D.customers, v.name, e && e.id) ? "That name already exists." : ""}
         onSave={v => saveMaster("customers", "mye_husk_customers", e, { ...(e || { id: uid(), ...h.meta() }), name: v.name.trim(), phone: v.phone, loanPerTrip: L.num(v.loanPerTrip), active: v.active === "yes" })} />;
     }
-    if (kind === "vehicle") {
-      return <FormSheet key="veh-new" title="Add vehicle" onClose={close}
-        init={{ truckNo: "", customerId: "" }}
-        fields={[{ k: "truckNo", label: "Truck number" }, { k: "customerId", label: "Owner (customer)", opts: opt(D.customers.filter(c => c.active !== false), "Select owner") }]}
-        validate={v => !v.truckNo.trim() ? "Enter the truck number." : !v.customerId ? "Choose the owner." : D.vehicles.some(x => normTruck(x.truckNo) === normTruck(v.truckNo)) ? "This truck number already exists." : ""}
-        onSave={async v => {
-          const id = uid(); const m = h.meta();
-          await HuskDB.save("vehicles", { id, truckNo: v.truckNo.trim().toUpperCase(), customerId: v.customerId, ...m });
-          await HuskDB.save("vehicleOwners", { id: uid(), vehicleId: id, customerId: v.customerId, fromDate: "", toDate: "", ts: m.ts, createdBy: user.name });
-          await h.load();
-        }} />;
-    }
-    if (kind === "relink") {
-      return <FormSheet key={"rl" + e.id} title={`Change owner · ${e.truckNo}`} onClose={close}
-        init={{ customerId: "", from: today() }}
-        fields={[{ k: "customerId", label: "New owner (customer)", opts: opt(D.customers.filter(c => c.active !== false && c.id !== e.customerId), "Select new owner") }, { k: "from", label: "Effective from", type: "date" }]}
-        hint={() => <Muted>Old entries keep the old owner. New entries from this date use the new owner. Currently: {nm(D.customers, e.customerId)}.</Muted>}
-        validate={v => !v.customerId ? "Choose the new owner." : !v.from ? "Choose the date." : ""}
-        onSave={async v => {
-          const ts = Date.now();
-          const cur = D.vehicleOwners.filter(o => o.vehicleId === e.id && !o.toDate).sort((a, b) => (b.fromDate || "").localeCompare(a.fromDate || ""))[0];
-          if (cur) await HuskDB.save("vehicleOwners", { ...cur, toDate: dayBefore(v.from) });
-          await HuskDB.save("vehicleOwners", { id: uid(), vehicleId: e.id, customerId: v.customerId, fromDate: v.from, toDate: "", ts, createdBy: user.name });
-          const next = { ...e, customerId: v.customerId };
-          await HuskDB.save("vehicles", next);
-          await HuskDB.save("changelog", h.change("mye_husk_vehicles", e.id, "relink", e, next));
-          await h.load();
-        }} />;
-    }
     if (kind === "opening") {
       return <FormSheet key={"op" + (e ? e.id : "new")} title={e ? "Edit opening balance" : "Add opening balance"} onClose={close}
         init={e ? { partyType: e.partyType, partyId: e.partyId, companyId: e.companyId, materialId: e.materialId, dir: e.amount < 0 ? "neg" : "pos", amount: String(Math.abs(e.amount)), asOf: e.asOf, note: e.note }
@@ -929,14 +958,13 @@ function SetupTab({ h }) {
       <PillBar items={[{ id: "companies", label: "Companies", color: C.accent }, { id: "materials", label: "Materials", color: C.teal }, { id: "customers", label: "Customers", color: C.purple }, { id: "vehicles", label: "Vehicles", color: C.blue }, { id: "openings", label: "Opening balances", color: C.orange }]} active={sec} onSelect={setSec} />
       {sec === "companies" && (<><Btn full onClick={() => open("company")}>＋ Add company</Btn>{list(D.companies, c => row(c.id, c.name + (c.active ? "" : " (inactive)"), c.contact, () => open("company", c)))}</>)}
       {sec === "materials" && (<><Btn full onClick={() => open("material")}>＋ Add material</Btn>{list(D.materials, m => row(m.id, m.name + (m.active ? "" : " (inactive)"), "", () => open("material", m)))}</>)}
-      {sec === "customers" && (<><Btn full onClick={() => open("customer")}>＋ Add customer</Btn>{list(D.customers, c => row(c.id, c.name + (c.active ? "" : " (inactive)"), [c.phone, c.loanPerTrip > 0 ? `loan ${fmt(c.loanPerTrip)}/trip` : ""].filter(Boolean).join(" · "), () => open("customer", c)))}</>)}
-      {sec === "vehicles" && (<><Btn full onClick={() => open("vehicle")}>＋ Add vehicle</Btn>{list(D.vehicles, v => {
+      {sec === "customers" && (<><Muted>New owners are added in the New vehicle entry form. Here you can edit a customer (phone, loan per trip, active).</Muted>{list(D.customers, c => row(c.id, c.name + (c.active ? "" : " (inactive)"), [c.phone, c.loanPerTrip > 0 ? `loan ${fmt(c.loanPerTrip)}/trip` : ""].filter(Boolean).join(" · "), () => open("customer", c)))}</>)}
+      {sec === "vehicles" && (<><Muted>New vehicles and owner changes are made in the New vehicle entry form. Ownership history is shown here.</Muted>{list(D.vehicles, v => {
         const hist = D.vehicleOwners.filter(o => o.vehicleId === v.id).sort((a, b) => (b.fromDate || "").localeCompare(a.fromDate || ""));
         return (
           <Card key={v.id}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div><div style={{ fontWeight: 800, color: C.text }}>{v.truckNo}</div><Muted>Owner: {nm(D.customers, v.customerId)}</Muted></div>
-              <Btn sm outline onClick={() => open("relink", v)}>Change owner</Btn>
             </div>
             {hist.length > 1 && <div style={{ marginTop: 6 }}>{hist.map(o => <Muted key={o.id}>{nm(D.customers, o.customerId)}: {o.fromDate ? fmtDay(o.fromDate) : "start"} → {o.toDate ? fmtDay(o.toDate) : "now"}</Muted>)}</div>}
           </Card>
