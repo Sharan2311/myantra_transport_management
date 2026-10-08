@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { DB } from "./db.js";
+import HuskMod from "./Husk.jsx";
 import { loadRuntimeConfig, RC, canFeature as canFeatureRC, logScan, isPaymentDue, submitPaymentProof, getPendingPayment, fetchMyInvoices } from "./runtime_config.js";
 import { initSupabase } from "./supabase.js";
 import { supabase } from "./supabase.js";
@@ -603,7 +604,7 @@ function computeEffectiveFeatures(plan, overrides={}, rcFeatures={}) {
 
 // ─── ROLES ────────────────────────────────────────────────────────────────────
 const ROLES = {
-  owner:         {label:"Owner",               color:C.accent,  perms:["trips","inbound","gypsum","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","admin","driverPay","party_portal","unbilled_oversight","tasks"]},
+  owner:         {label:"Owner",               color:C.accent,  perms:["trips","inbound","gypsum","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","admin","driverPay","party_portal","unbilled_oversight","tasks","husk_entry","husk_view","husk_manage","husk_profit"]},
   manager:       {label:"Manager",             color:C.blue,    perms:["trips","inbound","gypsum","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","driverPay","party_portal","unbilled_oversight","tasks"]},
   fleet_manager: {label:"Cement Fleet Manager",color:C.teal,    perms:["cement_trips","billing","diesel","driverPay_view"]},
   fleet_mgr_nd:  {label:"Fleet Mgr (No Diesel Req)",color:"#0891b2", perms:["cement_trips","billing","diesel_view","driverPay_view"]},
@@ -620,6 +621,9 @@ const ROLES = {
   pump_uploader: {label:"Pump Receipt Uploader",color:"#c2410c", perms:["pump_portal"]},
   party_manager: {label:"Party Bill Manager",  color:"#7c3aed", perms:["party_portal"]},
   email_followup:{label:"Email Followup",      color:"#0369a1", perms:["party_portal"]},
+  // Husk module: role only, no feature switch. Neither role sees anything else.
+  husk_employee: {label:"Husk Employee",       color:"#a16207", perms:["husk_entry","husk_view"]},
+  husk_manager:  {label:"Husk Manager",        color:"#92400e", perms:["husk_entry","husk_view","husk_manage","husk_profit"]},
   viewer:        {label:"Viewer",              color:C.muted,   perms:["reports"]},
   employee_self: {label:"Employee (Self Wallet)",color:"#0d9488", perms:["employees_view"], selfWalletOnly:true},
 };
@@ -1179,11 +1183,14 @@ function BottomNav({tab, setTab, user, trips, driverPays, vehicles, dieselReques
   const isPump  = roles.includes("pump_operator") || roles.includes("pump_uploader");
   const isEmployeeSelf = roles.includes("employee_self");
   const isPartyOnly = roles.every(r=>["party_manager","email_followup"].includes(r));
+  const isHuskOnly = roles.every(r=>["husk_employee","husk_manager"].includes(r));
   const hasPartyRole = roles.some(r=>["party_manager","email_followup"].includes(r));
   const items = isPump ? [
     {id:"pump_portal", icon:"⛽", label:"Indents", perm:"pump_portal"},
   ] : isPartyOnly ? [
     {id:"party_portal", icon:"📋", label:"Party", perm:"party_portal"},
+  ] : isHuskOnly ? [
+    {id:"husk", icon:"🌾", label:"Husk", perm:"husk_view"},
   ] : hasPartyRole ? [
     {id:"dashboard",icon:"⊞",label:"Home",    perm:null},
     {id:"trips",    icon:"🚚",label:"Trips",   perm:"trips"},
@@ -1277,6 +1284,7 @@ const MORE_TABS = [
   {id:"gypsum",       icon:"⛰️",label:"Gypsum",         perm:"gypsum",       group:"ops",     feat:"gypsum_trips"},
   {id:"tasks",        icon:"✅",label:"Tasks",          perm:"tasks",        group:"ops",     feat:"task_management"},
   {id:"party_portal", icon:"📋",label:"Party Portal",   perm:"party_portal", group:"ops",     feat:"party_billing"},
+  {id:"husk",        icon:"🌾",label:"Husk",           perm:"husk_view",    group:"ops"},
   {id:"driverPay", icon:"🏧",label:"Driver Pay",     perm:"driverPay",    group:"money",   feat:"driver_pay"},
   {id:"settlement",icon:"💵",label:"Settlement",     perm:"settlement",   group:"money",   feat:"driver_pay"},
   {id:"tafal",     icon:"🤝",label:"TAFAL",          perm:"tafal",        group:"money",   feat:"tafal"},
@@ -1877,6 +1885,7 @@ function AppMain() {
       if(isPureSelfWalletRole(u?.role)) return "employees";
       const roles = (u?.role||"").split(",").map(r=>r.trim());
       if(roles.length && roles.every(r=>["party_manager","email_followup"].includes(r))) return "party_portal";
+      if(roles.length && roles.every(r=>["husk_employee","husk_manager"].includes(r))) return "husk";
     } catch {}
     return "dashboard";
   });
@@ -1914,6 +1923,9 @@ function AppMain() {
     // even though the shared component references them for the fuller
     // owner/manager view.
     employee_self: new Set(["users","settings","trips","cashTransfers"]),
+    // Husk screens read only their own mye_husk_* tables (HuskDB), nothing from the transport tables.
+    husk_employee: new Set(["users","settings"]),
+    husk_manager: new Set(["users","settings"]),
   };
   const userRoles = (user?.role||"").split(",").map(r=>r.trim()).filter(Boolean);
   const hasFullMapping = userRoles.length>0 && userRoles.every(r => ROLE_TABLE_NEEDS[r]);
@@ -1978,6 +1990,7 @@ function AppMain() {
   // Party role checks (supports multi-role like "party_manager,cement_fleet_mgr")
   const isParty = (user?.role||"").split(",").map(r=>r.trim()).every(r=>["party_manager","email_followup"].includes(r));
   const hasPartyRole = (user?.role||"").split(",").some(r=>["party_manager","email_followup"].includes(r.trim()));
+  const isHuskOnly = (user?.role||"").split(",").map(r=>r.trim()).filter(Boolean).every(r=>["husk_employee","husk_manager"].includes(r));
 
   // ── Wrapped setters that also persist to DB ──────────────────────────────
   const save = async (fn, reload, label="") => {
@@ -2521,6 +2534,7 @@ function AppMain() {
       if(u.role==="pump_operator" || u.role==="pump_uploader") setTab("pump_portal");
       if(isPureSelfWalletRole(u.role)) setTab("employees");
       if((u.role||"").split(",").every(r=>["party_manager","email_followup"].includes(r.trim()))) setTab("party_portal");
+      if((u.role||"").split(",").every(r=>["husk_employee","husk_manager"].includes(r.trim()))) setTab("husk");
       log("LOGIN",`${u.name} signed in`);
     }} />;
   }
@@ -2572,7 +2586,7 @@ function AppMain() {
           userCanSeeClient(user,c) && (trips||[]).some(t=>(t.client||getDEFAULT_CLIENT())===c)
         );
         const showBar = fyList.length > 1 || clientsInData.length >= 1;
-        if(!showBar) return null;
+        if(!showBar || isHuskOnly) return null;
         return (
           <div style={{background:C.card,borderBottom:`1px solid ${C.border}`,padding:"8px 16px",display:"flex",flexDirection:"column",gap:6}}>
             {/* FY row */}
@@ -2616,7 +2630,8 @@ function AppMain() {
 
       <div style={{padding:"14px 16px 8px"}}>
         <ErrorBoundary>
-        {tab==="dashboard"  && user?.role!=="pump_operator" && user?.role!=="pump_uploader" && !isPureSelfWalletRole(user?.role) && !isParty && <Dashboard {...sp} setTab={setTab} />}
+        {tab==="dashboard"  && user?.role!=="pump_operator" && user?.role!=="pump_uploader" && !isPureSelfWalletRole(user?.role) && !isParty && !isHuskOnly && <Dashboard {...sp} setTab={setTab} />}
+        {tab==="husk"       && can(user,"husk_view")  && <HuskMod user={user} log={log} ui={{C,Btn,Field,Sheet,KPI,PillBar,fmt,today,uid,nowTs,can:p=>can(user,p)}} />}
         {tab==="trips"      && can(user,"trips")      && <Trips      {...sp} tripType="outbound" />}
         {tab==="inbound"    && can(user,"inbound")    && <Trips      {...sp} tripType="inbound" />}
         {tab==="billing"    && can(user,"billing")    && <Billing    {...sp} />}
