@@ -29271,9 +29271,14 @@ This will auto-recover in the next trip.`);
             {t.driverSettled && t.orderType==="party" && (t.pouchBalance||0)>0 && tripPouchPayable(t) && (
               <Btn onClick={()=>requestPaymentGuarded(t, t)} sm outline color={C.purple}>📋 Request Payment</Btn>
             )}
+            {/* Settled trip with an unpaid balance: only the owner can pay it off
+                manually. Requests stay blocked for everyone (requestPaymentGuarded). */}
+            {t.balance>0&&t.driverSettled&&user.role==="owner"&&!viewOnly&&(
+              <Btn onClick={()=>{setPaySheet(t);setPf({amount:String(t.balance),utr:"",date:today(),paidTo:"",notes:""});}} full sm color={C.green}>+ Record Payment (Owner)</Btn>
+            )}
             {t.balance>0&&t.driverSettled&&(
               <div style={{flex:1,background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:8,padding:"8px 10px",fontSize:11,color:C.orange,fontWeight:600}}>
-                ⚠ Marked settled with {fmt(t.balance)} unaccounted for — no further requests allowed on this trip.
+                ⚠ Marked settled with {fmt(t.balance)} unaccounted for — no further requests allowed on this trip.{user.role==="owner"?" Only the owner can record a payment.":""}
               </div>
             )}
           </div>
