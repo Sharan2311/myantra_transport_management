@@ -2018,7 +2018,14 @@ function AppMain() {
       // Save new/changed trips
       next.forEach(t => {
         if (!prevIds.has(t.id) || JSON.stringify(t) !== JSON.stringify((prev||[]).find(x=>x.id===t.id))) {
-          DB.saveTrip(t).catch(e => setSaveErr(e.message));
+          const wasNew = !prevIds.has(t.id);
+          DB.saveTrip(t).catch(e => {
+            setSaveErr(e.message);
+            if (e.duplicateDI) {
+              alert("🚫 Duplicate DI\n\n" + e.message);
+              if (wasNew) setTrips(p => (p||[]).filter(x => x.id !== t.id));
+            }
+          });
         }
       });
       return next;
