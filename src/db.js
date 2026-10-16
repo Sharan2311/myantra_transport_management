@@ -873,6 +873,20 @@ export const DB = {
   }), pr),
   deletePaymentRequest: id => deleteOne('mye_payment_requests', id),
 
+  // Payment advices — frozen copy of each payment batch (one per UTR), for re-sending
+  getPaymentAdvices: async () => {
+    try { return await fetchAll('mye_payment_advices', r => ({
+      id: r.id, utr: r.utr||'', payDate: r.pay_date||'', paidTo: r.paid_to||'', notes: r.notes||'',
+      total: +(r.total||0), rows: r.rows||[], empIds: r.emp_ids||[],
+      createdBy: r.created_by||'', createdAt: r.created_at||'', ts: +(r.ts||0),
+    })); } catch(e) { console.warn('mye_payment_advices not ready:', e.message); return []; }
+  },
+  savePaymentAdvice: async (a) => upsertOne('mye_payment_advices', a => ({
+    id: a.id, utr: a.utr||'', pay_date: a.payDate||'', paid_to: a.paidTo||'', notes: a.notes||'',
+    total: a.total||0, rows: a.rows||[], emp_ids: a.empIds||[],
+    created_by: a.createdBy||'', created_at: a.createdAt||'', ts: a.ts||Date.now(),
+  }), a),
+
   // Action Items — created when invoice scan can't cleanly bill a DI:
   //  type "missing_di"     → DI on the invoice has no matching trip in the app
   //  type "amount_mismatch"→ DI matched, but invoice amount != app's expected amount

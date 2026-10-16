@@ -12943,16 +12943,19 @@ function ScanPaymentBtn({ onResult }) {
 // vehicle, LR, date and amount. Used BEFORE saving (scan split sheet / pay
 // selected) so the owner can share it with the employee straight away.
 const _escHtml = v => String(v==null?"":v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
-const openPaymentAdvicePDF = ({ rows, utr, date, paidTo, notes }) => {
+const openPaymentAdvicePDF = ({ rows, utr, date, paidTo, notes, empName }) => {
   const list = (rows||[]).filter(r => +r.amount > 0);
   if (!list.length) { alert("Nothing allocated yet — add at least one trip with an amount."); return; }
   const total = list.reduce((a,r)=>a+(+r.amount||0),0);
   const inr = n => "&#8377;" + (Math.round((+n||0)*100)/100).toLocaleString("en-IN");
   const dmy = d => { const m=/^(\d{4})-(\d{2})-(\d{2})/.exec(d||""); return m?`${m[3]}/${m[2]}/${m[1]}`:_escHtml(d||""); };
+  // Combined (whole-day) advices carry a UTR per row — show it as a column.
+  const multiUtr = new Set(list.map(r=>r.utr||utr||"")).size > 1;
   const body = list.map((r,i)=>`<tr>
       <td>${i+1}</td>
       <td><b>${_escHtml(r.truckNo||"—")}</b></td>
       <td style="color:#1d4ed8">${_escHtml(r.lrNo||"—")}</td>
+      ${multiUtr?`<td style="font-family:monospace;font-size:11px">${_escHtml(r.utr||utr||"—")}</td>`:""}
       <td>${dmy(date)}</td>
       <td style="text-align:right;font-weight:bold">${inr(r.amount)}</td>
     </tr>`).join("");
@@ -12984,11 +12987,12 @@ const openPaymentAdvicePDF = ({ rows, utr, date, paidTo, notes }) => {
   </div>
 </div>
 <div class="ref">
-  <div class="meta">Payment done · Reference / UTR: <b>${_escHtml(utr||"—")}</b></div>
-  <div class="meta">Date: <b>${dmy(date)}</b>${paidTo?` · Paid to: <b>${_escHtml(paidTo)}</b>`:""}</div>
+  ${empName?`<div class="meta">Employee: <b>${_escHtml(empName)}</b></div>`:""}
+  <div class="meta">Payment done · ${multiUtr?"Multiple transfers (reference shown against each trip)":`Reference / UTR: <b>${_escHtml(utr||"—")}</b>`}</div>
+  <div class="meta">Date: <b>${dmy(date)}</b>${paidTo&&!multiUtr?` · Paid to: <b>${_escHtml(paidTo)}</b>`:""}</div>
   ${notes?`<div class="meta">${_escHtml(notes)}</div>`:""}
 </div>
-<table><thead><tr><th>#</th><th>Vehicle</th><th>LR No</th><th>Date</th><th style="text-align:right">Amount</th></tr></thead>
+<table><thead><tr><th>#</th><th>Vehicle</th><th>LR No</th>${multiUtr?"<th>Reference / UTR</th>":""}<th>Date</th><th style="text-align:right">Amount</th></tr></thead>
 <tbody>${body}</tbody></table>
 <div class="total">${list.length} trip${list.length!==1?"s":""} &nbsp;·&nbsp; Total paid: ${inr(total)}</div>
 </body></html>`;
@@ -28409,6 +28413,31 @@ function BulkSettleSheet({ unpaidTrips=[], employees=[], vehicles=[], user, onSa
   );
 }
 
+// Space-separated LR numbers of the ticked trips — selectable text + one-tap copy (for WhatsApp)
+function LrCopyLine({ lrs }) {
+  const [copied, setCopied] = useState(false);
+  const text = (lrs||[]).filter(Boolean).join(" ");
+  if (!text) return null;
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(text); }
+    catch (e) {
+      const ta = document.createElement("textarea"); ta.value = text; document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); } catch (_) {}
+      document.body.removeChild(ta);
+    }
+    setCopied(true); setTimeout(()=>setCopied(false), 1500);
+  };
+  return (
+    <div style={{display:"flex",alignItems:"flex-start",gap:8,marginTop:6,width:"100%"}}>
+      <div style={{flex:1,minWidth:0,fontSize:12,color:C.text,wordBreak:"break-word",userSelect:"text",WebkitUserSelect:"text"}}>{text}</div>
+      <button onClick={copy} style={{flexShrink:0,padding:"4px 10px",borderRadius:8,fontSize:11,fontWeight:700,cursor:"pointer",
+        background:copied?C.green+"22":"transparent",border:`1.5px solid ${copied?C.green:C.purple}`,color:copied?C.green:C.purple}}>
+        {copied?"✓ Copied":"Copy"}
+      </button>
+    </div>
+  );
+}
+
 // ─── PAY SELECTED / PAY BY EMPLOYEE (owner) ─────────────────────────────────
 // One payment (one UTR) split across several trips, oldest first. Per trip the
 // owner can also drop the loan / shortage / diesel deduction before paying —
@@ -28585,6 +28614,34 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
   const [empFilter, setEmpFilter] = useState("");     // "" = everyone | employee id | "__none" = unassigned
   const [paySelSheet, setPaySelSheet] = useState(null); // PaySelectedSheet init data
   const [selectedReqIds, setSelectedReqIds] = useState(new Set()); // Requests tab (owner): ticked pending requests
+  // ── Payment advices (frozen copy of every payment batch, one per UTR) ──
+  const [advices, setAdvices] = useState([]);
+  const [advEmp,  setAdvEmp]  = useState("");          // "" = all | emp id | "__none"
+  const [advDate, setAdvDate] = useState(today());
+  const [advAllDates, setAdvAllDates] = useState(false);
+  const loadAdvices = () => DB.getPaymentAdvices().then(a=>setAdvices(a||[])).catch(()=>{});
+  React.useEffect(()=>{ loadAdvices(); }, []); // eslint-disable-line
+  React.useEffect(()=>{ if(filter==="advices") loadAdvices(); }, [filter]); // eslint-disable-line
+  // Save the advice for a batch of just-saved payments (all share one UTR/date).
+  // Never blocks or fails the payment itself.
+  const recordAdvice = (payments) => {
+    try {
+      if(!payments?.length) return;
+      const rows = payments.map(p => {
+        const t = (trips||[]).find(x=>x.id===p.tripId);
+        return {tripId:p.tripId, truckNo:p.truckNo||t?.truckNo||"", lrNo:p.lrNo||t?.lrNo||"", amount:+p.amount||0, empId:t?.assignedEmpId||""};
+      });
+      const a = {
+        id: uid(), utr: (payments[0].utr||"").trim(), payDate: payments[0].date||today(),
+        paidTo: payments[0].paidTo||"", notes: payments[0].notes||"",
+        total: rows.reduce((s,r)=>s+r.amount,0), rows,
+        empIds: [...new Set(rows.map(r=>r.empId||""))],
+        createdBy: user.username, createdAt: nowTs(), ts: Date.now(),
+      };
+      setAdvices(prev=>[a,...(prev||[])]);
+      DB.savePaymentAdvice(a).catch(e=>console.warn("savePaymentAdvice:",e));
+    } catch(e) { console.warn("recordAdvice:", e); }
+  };
   const [paySheet,  setPaySheet]  = useState(null);
   const [payReqSheet,   setPayReqSheet]   = useState(null); // trip for request payment
   // ── Return Pouch / Confirmation deadline gate ──────────────────────────────
@@ -28950,6 +29007,7 @@ This will auto-recover in the next trip.`);
     log("DRIVER PAYMENT",`LR:${t.lrNo} ${t.truckNo} — ${fmt(+pf.amount)} UTR:${pf.utr}`);
     autoSettle(t.id, +pf.amount);
     markRequestsDoneForLR(t.lrNo);
+    recordAdvice([p]);
     setPaySheet(null); setPf({amount:"",utr:"",date:today(),paidTo:"",notes:""});
   };
 
@@ -28983,6 +29041,7 @@ This will auto-recover in the next trip.`);
       autoSettle(p.tripId, p.amount);
       markRequestsDoneForLR(p.lrNo);
     }
+    recordAdvice(withMeta);
     setSplitSheet(null);
   };
 
@@ -29047,6 +29106,7 @@ This will auto-recover in the next trip.`);
         throw e;
       }
     }
+    recordAdvice(withMeta);
     // Settle trips whose balance reached zero (against the EDITED trip)
     const paidNow = {};
     withMeta.forEach(p=>{ paidNow[p.tripId]=(paidNow[p.tripId]||0)+p.amount; });
@@ -29305,10 +29365,11 @@ This will auto-recover in the next trip.`);
         {id:"all",     label:"All",                            color:C.blue},
         {id:"history", label:`History (${allPays.length})`,    color:C.muted},
         {id:"requests",label:`Requests (${scopedReqs.length})`, color:C.purple},
+        ...((user.role==="owner"||user.role==="manager") ? [{id:"advices", label:"📄 Advices", color:C.blue}] : []),
       ]} active={filter} onSelect={setFilter} />
 
       {/* Search bar for trip tabs */}
-      {filter!=="history" && filter!=="requests" && (
+      {filter!=="history" && filter!=="requests" && filter!=="advices" && (
         <input value={histLR} onChange={e=>setHistLR(e.target.value)}
           placeholder="🔍 Search LR or truck number…"
           style={{background:C.card,border:`1.5px solid ${histLR?C.accent:C.border}`,borderRadius:10,
@@ -29392,9 +29453,10 @@ This will auto-recover in the next trip.`);
             return (
               <div style={{position:"sticky",top:0,zIndex:5,background:C.card,border:`1.5px solid ${C.purple}`,borderRadius:12,
                 padding:"10px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-                <div>
+                <div style={{flex:1,minWidth:140}}>
                   <div style={{color:C.muted,fontSize:11,fontWeight:700}}>{sel.length} TRIP{sel.length!==1?"S":""} SELECTED</div>
                   <div style={{color:C.text,fontWeight:900,fontSize:18}}>{fmt(tot)}</div>
+                  <LrCopyLine lrs={[...sel].sort((a,b)=>(a.date||"").localeCompare(b.date||"")).map(t=>t.lrNo)} />
                 </div>
                 <Btn onClick={()=>setPaySelSheet({
                   trips:[...sel].sort((a,b)=>(a.date||"").localeCompare(b.date||"")||(a.createdAt||"").localeCompare(b.createdAt||"")),
@@ -29567,7 +29629,7 @@ This will auto-recover in the next trip.`);
       })()}
 
       {/* ── TRIP LIST (unpaid / paid / all / myreqs) ── */}
-      {filter!=="history" && filter!=="requests" && filter!=="byemp" && (()=>{
+      {filter!=="history" && filter!=="requests" && filter!=="byemp" && filter!=="advices" && (()=>{
         const base = filter==="myreqs"?myReqTrips:filter==="unpaid"?scopedUnpaid:filter==="paid"?scopedPaid:tripWithBalance.filter(inEmpScope);
         const orderFiltered = (filter==="unpaid"||filter==="paid") && orderTypeFilter!=="all"
           ? base.filter(t=>orderTypeFilter==="party" ? t.orderType==="party" : (!t.orderType||t.orderType==="godown"))
@@ -29736,6 +29798,91 @@ This will auto-recover in the next trip.`);
         </>);
       })()}
 
+      {/* ── PAYMENT ADVICES TAB (owner / manager) ── */}
+      {filter==="advices" && (()=>{
+        const empName = id => id==="__none"||!id ? "Unassigned" : ((employees||[]).find(e=>e.id===id)?.name || "Unknown employee");
+        const empOptions = [...(employees||[])].sort((a,b)=>(a.name||"").localeCompare(b.name||""));
+        const inDay = a => advAllDates || a.payDate===advDate;
+        // Rows of an advice that belong to the chosen employee ("" = everyone)
+        const rowsFor = a => (a.rows||[]).filter(r => !advEmp || (advEmp==="__none" ? !r.empId : r.empId===advEmp));
+        const list = (advices||[]).filter(inDay)
+          .map(a=>({a, rows:rowsFor(a)})).filter(x=>x.rows.length>0)
+          .sort((x,y)=>(y.a.ts||0)-(x.a.ts||0));
+        const dayTotal = list.reduce((t,x)=>t+x.rows.reduce((z,r)=>z+(+r.amount||0),0),0);
+        const label = advEmp ? empName(advEmp) : "";
+        return (
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+            <div style={{background:C.card,borderRadius:12,padding:"12px 14px",display:"flex",flexDirection:"column",gap:10}}>
+              <div>
+                <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:4}}>EMPLOYEE</div>
+                <select value={advEmp} onChange={e=>setAdvEmp(e.target.value)}
+                  style={{width:"100%",background:C.bg,border:`1.5px solid ${advEmp?C.teal:C.border}`,borderRadius:8,color:C.text,padding:"9px 12px",fontSize:13,outline:"none"}}>
+                  <option value="">All employees</option>
+                  {empOptions.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
+                  <option value="__none">Unassigned</option>
+                </select>
+              </div>
+              <div style={{display:"flex",gap:10,alignItems:"flex-end"}}>
+                <div style={{flex:1}}>
+                  <div style={{color:C.muted,fontSize:11,fontWeight:700,marginBottom:4}}>DATE</div>
+                  <input type="date" value={advDate} disabled={advAllDates} onChange={e=>setAdvDate(e.target.value)}
+                    style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,color:C.text,padding:"8px 10px",fontSize:13,boxSizing:"border-box",colorScheme:"light",opacity:advAllDates?0.4:1}} />
+                </div>
+                <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:C.muted,paddingBottom:10}}>
+                  <input type="checkbox" checked={advAllDates} onChange={e=>setAdvAllDates(e.target.checked)} /> All dates
+                </label>
+              </div>
+            </div>
+
+            {list.length===0 && (
+              <div style={{textAlign:"center",color:C.muted,padding:"28px 12px",fontSize:13}}>
+                No payment advices {advAllDates?"":`on ${advDate} `}{label?`for ${label}`:""}.
+                <div style={{fontSize:11,marginTop:6}}>Advices are saved automatically from the day this feature went live; earlier payments don't have one.</div>
+              </div>
+            )}
+
+            {list.length>0 && (
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                <div style={{color:C.muted,fontSize:12}}>{list.length} advice{list.length!==1?"s":""} · <b style={{color:C.text}}>{fmt(dayTotal)}</b></div>
+                {!advAllDates && list.length>1 && (
+                  <Btn sm outline color={C.green} onClick={()=>openPaymentAdvicePDF({
+                    rows: list.flatMap(x=>x.rows.map(r=>({...r, utr:x.a.utr}))),
+                    utr:"", date:advDate, paidTo:"", notes:"", empName:label })}>
+                    📄 Whole day — {list.length} transfers (PDF)
+                  </Btn>
+                )}
+              </div>
+            )}
+
+            {list.map(({a, rows})=>{
+              const amt = rows.reduce((z,r)=>z+(+r.amount||0),0);
+              return (
+                <div key={a.id} style={{background:C.card,borderRadius:12,padding:"12px 14px",borderLeft:`4px solid ${C.green}`}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+                    <div style={{minWidth:0}}>
+                      <div style={{fontFamily:"monospace",fontWeight:800,fontSize:13,wordBreak:"break-all"}}>{a.utr||"No UTR"}</div>
+                      <div style={{color:C.muted,fontSize:11}}>{a.payDate}{a.paidTo?` · Paid to ${a.paidTo}`:""}</div>
+                      <div style={{color:C.muted,fontSize:11}}>{rows.length} trip{rows.length!==1?"s":""} · saved by {a.createdBy||"—"} · {a.createdAt||""}</div>
+                    </div>
+                    <div style={{textAlign:"right",flexShrink:0}}>
+                      <div style={{color:C.green,fontWeight:900,fontSize:16}}>{fmt(amt)}</div>
+                      {advEmp && amt!==a.total && <div style={{color:C.muted,fontSize:10}}>of {fmt(a.total)} transfer</div>}
+                    </div>
+                  </div>
+                  <div style={{color:C.muted,fontSize:11,margin:"6px 0 8px"}}>
+                    {rows.map(r=>`${r.truckNo} ${r.lrNo}`).join(" · ")}
+                  </div>
+                  <Btn sm outline color={C.blue} onClick={()=>openPaymentAdvicePDF({
+                    rows, utr:a.utr, date:a.payDate, paidTo:a.paidTo, notes:a.notes, empName:label })}>
+                    📄 Download Advice (PDF)
+                  </Btn>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })()}
+
       {/* ── REQUESTS TAB ── */}
       {filter==="requests" && (
         <div style={{display:"flex",flexDirection:"column",gap:10}}>
@@ -29790,6 +29937,7 @@ This will auto-recover in the next trip.`);
                     <div style={{marginTop:6}}>
                       <div style={{color:C.muted,fontSize:11,fontWeight:700}}>{sel.length} REQUEST{sel.length!==1?"S":""} SELECTED</div>
                       <div style={{color:C.text,fontWeight:900,fontSize:18}}>{fmt(reqSum)}</div>
+                      <LrCopyLine lrs={sel.map(pr=>pr.lrNo)} />
                       {Math.abs(balSum-reqSum)>=1 && (
                         <div style={{color:C.orange,fontSize:11}}>⚠ current balances total {fmt(balSum)} — some requests are outdated</div>
                       )}
