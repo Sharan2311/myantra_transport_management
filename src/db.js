@@ -180,6 +180,7 @@ const employeeFromDB = r => ({
   accounts: r.accounts||[],
   loanTxns: r.loan_txns||[],
   tafalExempt: r.tafal_exempt||false,
+  pouchExempt: r.pouch_exempt||false,
   pouchDeadlineEnforced: r.pouch_deadline_enforced !== false, // default true
 })
 const employeeToDB = e => ({
@@ -189,6 +190,7 @@ const employeeToDB = e => ({
   accounts: e.accounts||[],
   loan_txns: e.loanTxns||[],
   tafal_exempt: e.tafalExempt||false,
+  pouch_exempt: e.pouchExempt||false,
   pouch_deadline_enforced: e.pouchDeadlineEnforced !== false,
 })
 
