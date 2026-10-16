@@ -12938,6 +12938,66 @@ function ScanPaymentBtn({ onResult }) {
 }
 
 // ─── SPLIT PAYMENT SHEET ──────────────────────────────────────────────────────
+// ─── PAYMENT ADVICE (shareable PDF) ──────────────────────────────────────────
+// Opens a print-ready page (Save as PDF) listing what was paid: reference/UTR,
+// vehicle, LR, date and amount. Used BEFORE saving (scan split sheet / pay
+// selected) so the owner can share it with the employee straight away.
+const _escHtml = v => String(v==null?"":v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+const openPaymentAdvicePDF = ({ rows, utr, date, paidTo, notes }) => {
+  const list = (rows||[]).filter(r => +r.amount > 0);
+  if (!list.length) { alert("Nothing allocated yet — add at least one trip with an amount."); return; }
+  const total = list.reduce((a,r)=>a+(+r.amount||0),0);
+  const inr = n => "&#8377;" + (Math.round((+n||0)*100)/100).toLocaleString("en-IN");
+  const dmy = d => { const m=/^(\d{4})-(\d{2})-(\d{2})/.exec(d||""); return m?`${m[3]}/${m[2]}/${m[1]}`:_escHtml(d||""); };
+  const body = list.map((r,i)=>`<tr>
+      <td>${i+1}</td>
+      <td><b>${_escHtml(r.truckNo||"—")}</b></td>
+      <td style="color:#1d4ed8">${_escHtml(r.lrNo||"—")}</td>
+      <td>${dmy(date)}</td>
+      <td style="text-align:right;font-weight:bold">${inr(r.amount)}</td>
+    </tr>`).join("");
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Payment Advice — ${_escHtml(utr||"")}</title>
+<style>
+  @media print { button { display:none !important; } body { margin:0; } }
+  * { box-sizing:border-box; }
+  body { font-family:Arial,sans-serif; font-size:12px; color:#111; padding:22px; max-width:760px; margin:0 auto; }
+  .print-btn { background:#16a34a; color:#fff; border:none; padding:9px 20px; font-size:14px; border-radius:6px; cursor:pointer; margin-bottom:14px; }
+  .header { border-bottom:2px solid #16a34a; padding-bottom:10px; margin-bottom:12px; }
+  .header h1 { font-size:18px; margin:0 0 3px; color:#16a34a; }
+  .meta { color:#444; margin:2px 0; }
+  .ref { background:#f0fdf4; border:1px solid #86efac; border-radius:8px; padding:10px 12px; margin:10px 0; }
+  .ref b { font-family:monospace; font-size:14px; }
+  table { width:100%; border-collapse:collapse; margin-top:8px; }
+  thead tr { background:#16a34a; color:#fff; }
+  th { padding:7px 8px; text-align:left; font-size:11px; text-transform:uppercase; }
+  td { padding:7px 8px; border-bottom:1px solid #eee; }
+  .total { text-align:right; font-size:15px; font-weight:bold; margin-top:12px; padding-top:10px; border-top:2px solid #16a34a; color:#16a34a; }
+</style></head><body>
+<button class="print-btn" onclick="window.print()">🖨 Print / Save as PDF</button>
+<div class="header">
+  <div style="display:flex;align-items:center;gap:12px">
+    ${RC.logoSrc?`<img src="${RC.logoSrc}" style="width:50px;height:50px;border-radius:50%;object-fit:cover;border:2px solid #16a34a"/>`:""}
+    <div><h1>Payment Advice</h1>
+    <div class="meta" style="font-weight:700;font-size:13px">${_escHtml((RC.companyName||"").toUpperCase())}</div></div>
+  </div>
+</div>
+<div class="ref">
+  <div class="meta">Payment done · Reference / UTR: <b>${_escHtml(utr||"—")}</b></div>
+  <div class="meta">Date: <b>${dmy(date)}</b>${paidTo?` · Paid to: <b>${_escHtml(paidTo)}</b>`:""}</div>
+  ${notes?`<div class="meta">${_escHtml(notes)}</div>`:""}
+</div>
+<table><thead><tr><th>#</th><th>Vehicle</th><th>LR No</th><th>Date</th><th style="text-align:right">Amount</th></tr></thead>
+<tbody>${body}</tbody></table>
+<div class="total">${list.length} trip${list.length!==1?"s":""} &nbsp;·&nbsp; Total paid: ${inr(total)}</div>
+</body></html>`;
+  const w = window.open("","_blank");
+  if (!w) { alert("Pop-up blocked — please allow pop-ups and try again."); return; }
+  w.document.write(html);
+  w.document.close();
+};
+
 // Shown when a scanned payment contains multiple LR numbers
 function SplitPaymentSheet({ scanData, trips, tripWithBalance: tripWithBalanceProp, driverPays=[], employees, setCashTransfers, user, log, onSave, onCancel, onEmployeeFlow=null }) {
   // Recompute live balance using current driverPays (tripWithBalance prop may be stale)
@@ -13301,6 +13361,12 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance: tripWithBalancePr
           </div>
         </div>
 
+        <Btn onClick={()=>openPaymentAdvicePDF({
+            rows: rows.map(r=>{ const t=tripWithBalance.find(x=>x.id===r.tripId); return {truckNo:t?.truckNo||"", lrNo:t?.lrNo||r.lr||"", amount:r.amount}; }),
+            utr: sharedUtr, date: sharedDate, paidTo: sharedPaidTo, notes: sharedNote })}
+          full outline color={C.blue} disabled={totalAllocated<=0}>
+          📄 Download Payment Advice (PDF)
+        </Btn>
         <Btn onClick={handleSave} full color={C.green} disabled={!canSave||saving}>
           {saving ? "⏳ Saving…" : `✓ Save ${rows.length} Payment${rows.length>1?"s":""} — ${fmt(totalAllocated)}`}
         </Btn>
@@ -28493,6 +28559,12 @@ function PaySelectedSheet({ init, onSave, onCancel }) {
         </div>
         <Field label="Paid To" value={paidTo} onChange={setPaidTo} placeholder="Recipient name…" />
         <Field label="Notes" value={notes} onChange={setNotes} placeholder="Optional" />
+        <Btn onClick={()=>openPaymentAdvicePDF({
+            rows: checkedTrips.filter(t=>alloc[t.id]>0).map(t=>({truckNo:t.truckNo, lrNo:t.lrNo, amount:alloc[t.id]})),
+            utr, date, paidTo, notes })}
+          full outline color={C.blue} disabled={!(amt>0)}>
+          📄 Download Payment Advice (PDF)
+        </Btn>
         <Btn onClick={handleSave} full color={C.green} disabled={!canSave}>
           {saving ? "Saving…" : `✓ Record ${fmt(amt)}${skipCount?` · ${skipCount} trip(s) edited`:""}`}
         </Btn>
