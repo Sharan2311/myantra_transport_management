@@ -12913,7 +12913,7 @@ function ScanPaymentBtn({ onResult }) {
 
 // ─── SPLIT PAYMENT SHEET ──────────────────────────────────────────────────────
 // Shown when a scanned payment contains multiple LR numbers
-function SplitPaymentSheet({ scanData, trips, tripWithBalance: tripWithBalanceProp, driverPays=[], employees, setCashTransfers, user, log, onSave, onCancel }) {
+function SplitPaymentSheet({ scanData, trips, tripWithBalance: tripWithBalanceProp, driverPays=[], employees, setCashTransfers, user, log, onSave, onCancel, onEmployeeFlow=null }) {
   // Recompute live balance using current driverPays (tripWithBalance prop may be stale)
   const tripWithBalance = React.useMemo(() => (tripWithBalanceProp||[]).map(t => {
     const paidSoFar = driverPays.filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
@@ -13092,6 +13092,17 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance: tripWithBalancePr
 
         {/* Trip payment mode */}
         {mode==="trips" && (<>
+
+        {onEmployeeFlow && (
+          <div style={{background:C.teal+"11",border:`1.5px solid ${C.teal}44`,borderRadius:10,padding:"10px 12px"}}>
+            <div style={{color:C.teal,fontSize:11,fontWeight:800,marginBottom:4}}>⚡ FASTER: PAY BY EMPLOYEE</div>
+            <select value="" onChange={e=>{ if(e.target.value) onEmployeeFlow(e.target.value, {amount:totalAmount, utr:sharedUtr, date:sharedDate, paidTo:sharedPaidTo, notes:sharedNote}); }}
+              style={{width:"100%",background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:8,color:C.text,padding:"9px 12px",fontSize:13,outline:"none"}}>
+              <option value="">— Pick employee: fills his unpaid trips, oldest first —</option>
+              {(employees||[]).map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
+            </select>
+          </div>
+        )}
 
         {/* Shared date + paid to + notes */}
         <div style={{display:"flex",gap:8}}>
@@ -28279,6 +28290,164 @@ function BulkSettleSheet({ unpaidTrips=[], employees=[], vehicles=[], user, onSa
   );
 }
 
+// ─── PAY SELECTED / PAY BY EMPLOYEE (owner) ─────────────────────────────────
+// One payment (one UTR) split across several trips, oldest first. Per trip the
+// owner can also drop the loan / shortage / diesel deduction before paying —
+// the handler (paySelectedTrips) rewrites the trip, re-syncs the vehicle's loan
+// & shortage ledger and detaches the diesel indent, THEN records the payment.
+// init: { trips (oldest first, with balance), amount?, utr?, date?, paidTo?, notes?, autoFill?, title? }
+function PaySelectedSheet({ init, onSave, onCancel }) {
+  const trips = init.trips || [];
+  const [skips, setSkips] = useState({}); // tripId -> {loan,shortage,diesel}
+  const skipOf = id => skips[id] || {};
+  const toggleSkip = (id, k) => setSkips(p => ({...p, [id]: {...(p[id]||{}), [k]: !(p[id]||{})[k]}}));
+
+  // Balance after dropping the chosen deductions — same maths as tripWithBalance.
+  const calc = (t) => {
+    const s = skipOf(t.id);
+    const deducts = (t.advance||0) + (t.tafal||0)
+      + (s.diesel ? 0 : (t.dieselEstimate||0))
+      + ((t.shortage||0)*(t.givenRate||0))
+      + (s.shortage ? 0 : (t.shortageRecovery||0))
+      + (s.loan ? 0 : (t.loanRecovery||0));
+    const netDue = Math.max(0, (t.gross||0) - deducts);
+    return {netDue, payable: Math.max(0, netDue - (t.paidSoFar||0))};
+  };
+
+  const [amount, setAmount] = useState(init.amount ? String(init.amount) : "");
+  const [amountTouched, setAmountTouched] = useState(!!init.amount);
+  const [utr, setUtr] = useState(init.utr || "");
+  const [date, setDate] = useState(init.date || today());
+  const [paidTo, setPaidTo] = useState(init.paidTo || "");
+  const [notes, setNotes] = useState(init.notes || "");
+  const [saving, setSaving] = useState(false);
+
+  // Initial ticks: all trips, or (scan flow) oldest-first until the amount is covered.
+  const [checked, setChecked] = useState(() => {
+    const amt = +init.amount || 0;
+    if (!(init.autoFill && amt > 0)) return new Set(trips.map(t => t.id));
+    let running = 0; const ids = new Set();
+    for (const t of trips) { if (running >= amt) break; ids.add(t.id); running += t.balance; }
+    return ids;
+  });
+  const checkedTrips = trips.filter(t => checked.has(t.id));
+  const totalPayable = checkedTrips.reduce((s,t) => s + calc(t).payable, 0);
+
+  // Keep the amount equal to the total until the owner types their own.
+  React.useEffect(() => {
+    if (!amountTouched) setAmount(totalPayable ? String(Math.round(totalPayable*100)/100) : "");
+    // eslint-disable-next-line
+  }, [totalPayable, amountTouched]);
+
+  const amt = +amount || 0;
+  const alloc = {}; let rem = amt;
+  for (const t of checkedTrips) {
+    const a = Math.round(Math.min(rem, calc(t).payable) * 100) / 100;
+    if (a > 0) { alloc[t.id] = a; rem = Math.round((rem - a) * 100) / 100; }
+  }
+  const unallocated = rem;
+  const skipCount = checkedTrips.filter(t => { const s = skipOf(t.id); return s.loan||s.shortage||s.diesel; }).length;
+  const canSave = amt > 0 && unallocated <= 0.5 && checkedTrips.length > 0 && !saving;
+
+  const toggle = id => setChecked(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+
+  const handleSave = async () => {
+    if (!canSave) return;
+    const skipList = checkedTrips.map(t => {
+      const s = skipOf(t.id);
+      return {
+        tripId: t.id,
+        loan: !!s.loan && (t.loanRecovery||0) > 0,
+        shortage: !!s.shortage && (t.shortageRecovery||0) > 0,
+        diesel: !!s.diesel && ((t.dieselEstimate||0) > 0 || !!t.dieselIndentNo || !!t.dieselIndentNo2),
+      };
+    }).filter(s => s.loan || s.shortage || s.diesel);
+    const lines = [`Record ${fmt(amt)} across ${Object.keys(alloc).length} trip(s)${utr.trim()?` — UTR ${utr.trim()}`:""}?`];
+    skipList.forEach(s => {
+      const t = trips.find(x => x.id === s.tripId);
+      const parts = [s.loan?`loan ₹${t.loanRecovery}`:"", s.shortage?`shortage ₹${t.shortageRecovery}`:"", s.diesel?`diesel ₹${t.dieselEstimate||0} (indent detached)`:""].filter(Boolean);
+      lines.push(`• ${t.truckNo} ${t.lrNo||""}: remove ${parts.join(", ")}`);
+    });
+    if (skipList.length) lines.push("", "Removed deductions are taken off the trip permanently. Loan/shortage stays owed on the vehicle and is recovered on a later trip.");
+    if (!window.confirm(lines.join("\n"))) return;
+    const payments = checkedTrips.filter(t => alloc[t.id] > 0).map(t => ({
+      id: uid(), tripId: t.id, truckNo: t.truckNo, lrNo: t.lrNo,
+      amount: alloc[t.id], utr: utr.trim(), date, paidTo: paidTo.trim(), notes: notes.trim(),
+    }));
+    setSaving(true);
+    try { await onSave({ payments, skips: skipList }); } finally { setSaving(false); }
+  };
+
+  const chip = (on, label, onClick) => (
+    <button onClick={onClick} style={{padding:"3px 8px",borderRadius:6,fontSize:10,fontWeight:700,cursor:"pointer",
+      background:on?C.orange+"22":"transparent",border:`1.5px solid ${on?C.orange:C.border}`,color:on?C.orange:C.muted}}>
+      {on?"✓ ":""}{label}
+    </button>
+  );
+
+  return (
+    <Sheet title={init.title || "💰 Pay Selected Trips"} onClose={onCancel}>
+      <div style={{display:"flex",flexDirection:"column",gap:12}}>
+        <div style={{background:C.bg,borderRadius:10,padding:"10px 12px",fontSize:12,color:C.muted,display:"flex",justifyContent:"space-between",flexWrap:"wrap",gap:4}}>
+          <span>{checkedTrips.length} of {trips.length} trips ticked</span>
+          <span>Total payable: <b style={{color:C.text}}>{fmt(totalPayable)}</b></span>
+        </div>
+
+        <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:340,overflowY:"auto"}}>
+          {trips.map(t => {
+            const on = checked.has(t.id), s = skipOf(t.id), c = calc(t);
+            const hasDiesel = (t.dieselEstimate||0) > 0 || t.dieselIndentNo || t.dieselIndentNo2;
+            return (
+              <div key={t.id} style={{background:on?C.purple+"11":C.card,border:`1px solid ${on?C.purple+"55":C.border}`,borderRadius:8,padding:"8px 10px"}}>
+                <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer"}}>
+                  <input type="checkbox" checked={on} onChange={()=>toggle(t.id)} />
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontWeight:700,fontSize:13}}>{t.truckNo} <span style={{color:C.muted,fontWeight:400}}>LR:{t.lrNo||"—"}</span></div>
+                    <div style={{color:C.muted,fontSize:11}}>{t.date} · {t.from}→{t.to}</div>
+                  </div>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{fontWeight:800,color:C.accent,whiteSpace:"nowrap"}}>{fmt(c.payable)}</div>
+                    {c.payable !== t.balance && <div style={{fontSize:10,color:C.muted,textDecoration:"line-through"}}>{fmt(t.balance)}</div>}
+                    {on && alloc[t.id] > 0 && alloc[t.id] < c.payable && <div style={{fontSize:10,color:C.blue}}>pay {fmt(alloc[t.id])}</div>}
+                  </div>
+                </label>
+                {on && ((t.loanRecovery||0)>0 || (t.shortageRecovery||0)>0 || hasDiesel) && (
+                  <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:6,paddingLeft:26}}>
+                    {(t.loanRecovery||0)>0 && chip(!!s.loan, `Skip loan ${fmt(t.loanRecovery)}`, ()=>toggleSkip(t.id,"loan"))}
+                    {(t.shortageRecovery||0)>0 && chip(!!s.shortage, `Skip shortage ${fmt(t.shortageRecovery)}`, ()=>toggleSkip(t.id,"shortage"))}
+                    {hasDiesel && chip(!!s.diesel, `Skip diesel ${fmt(t.dieselEstimate||0)}${t.dieselIndentNo?` (#${t.dieselIndentNo})`:""}`, ()=>toggleSkip(t.id,"diesel"))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        <Field label="Amount Paid ₹" value={amount} onChange={v=>{setAmount(v); setAmountTouched(true);}} type="number" />
+        {amt > 0 && unallocated > 0.5 && (
+          <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:8,padding:"8px 10px",fontSize:12,color:C.orange}}>
+            ⚠ {fmt(unallocated)} is more than the ticked trips need — tick more trips or lower the amount.
+          </div>
+        )}
+        {amt > 0 && unallocated <= 0.5 && amt < totalPayable - 0.5 && (
+          <div style={{background:C.blue+"11",borderRadius:8,padding:"8px 10px",fontSize:12,color:C.blue}}>
+            Amount is {fmt(totalPayable-amt)} less than the total — filled oldest first, the last trip gets a part payment.
+          </div>
+        )}
+        <div style={{display:"flex",gap:10}}>
+          <Field label="Transaction ID" value={utr} onChange={setUtr} placeholder="UTR / Ref no." half />
+          <Field label="Date" value={date} onChange={setDate} type="date" half />
+        </div>
+        <Field label="Paid To" value={paidTo} onChange={setPaidTo} placeholder="Recipient name…" />
+        <Field label="Notes" value={notes} onChange={setNotes} placeholder="Optional" />
+        <Btn onClick={handleSave} full color={C.green} disabled={!canSave}>
+          {saving ? "Saving…" : `✓ Record ${fmt(amt)}${skipCount?` · ${skipCount} trip(s) edited`:""}`}
+        </Btn>
+      </div>
+    </Sheet>
+  );
+}
+
 function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, vehicles, setVehicles, employees, setEmployees, cashTransfers, setCashTransfers, paymentRequests=[], setPaymentRequests, indents=[], dieselRequests=[], setDieselRequests, settings, user, log, viewOnly=false, setTab}) {
   const [filter,    setFilter]    = useState("unpaid");
   // Party-order sub-filter + bulk "mark settled" (owner only) — for party trips
@@ -28288,6 +28457,8 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
   const [selectMode,      setSelectMode]      = useState(false);
   const [selectedTripIds, setSelectedTripIds] = useState(new Set());
   const [bulkSettleSheet, setBulkSettleSheet]  = useState(false); // owner: settle-by-amount sheet open?
+  const [empFilter, setEmpFilter] = useState("");     // "" = everyone | employee id | "__none" = unassigned
+  const [paySelSheet, setPaySelSheet] = useState(null); // PaySelectedSheet init data
   const [paySheet,  setPaySheet]  = useState(null);
   const [payReqSheet,   setPayReqSheet]   = useState(null); // trip for request payment
   // ── Return Pouch / Confirmation deadline gate ──────────────────────────────
@@ -28438,7 +28609,15 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
     const hasPendingReq = (paymentRequests||[]).some(r=>r.tripId===t.id&&r.status==="pending");
     return !hasPendingReq;   // only block if a pending request exists — done requests allow new ones
   }) : [];
-  const totalBalance = unpaidTrips.reduce((s,t)=>s+t.balance,0);
+  // ── Employee filter (owner + manager) — display only. The auto-settle and
+  // stale-request effects above/below deliberately keep using the full lists.
+  const empScopeOn = !!empFilter && (user.role==="owner"||user.role==="manager");
+  const inEmpScope = t => !empScopeOn || (empFilter==="__none" ? !t?.assignedEmpId : t?.assignedEmpId===empFilter);
+  const tripOfPay = (id, lr) => (trips||[]).find(x=>x.id===id) || (lr ? (trips||[]).find(x=>x.lrNo===lr) : null);
+  const scopedUnpaid = unpaidTrips.filter(inEmpScope);
+  const scopedPaid   = paidTrips.filter(inEmpScope);
+  const scopedReqs   = (paymentRequests||[]).filter(r => !empScopeOn || inEmpScope(tripOfPay(r.tripId, r.lrNo)));
+  const totalBalance = scopedUnpaid.reduce((s,t)=>s+t.balance,0);
 
   // ── Startup: fix confirmed indents that are actually attached to trips ──────
   // Also self-heals dieselIndentLocked for any trip that has a dieselIndentNo
@@ -28681,6 +28860,91 @@ This will auto-recover in the next trip.`);
     setSplitSheet(null);
   };
 
+  // Owner "Pay Selected" / scan-by-employee: first take the chosen loan/shortage/
+  // diesel deductions off the trips (ledger + diesel indent kept consistent),
+  // then record ONE UTR split across the trips and settle any that hit zero.
+  // Deliberately does NOT go through autoSettle(): that works off the pre-edit
+  // balance and would mis-read the extra as an overpayment (and add a loan).
+  const paySelectedTrips = async ({payments, skips}) => {
+    const utrToCheck = (payments[0]?.utr||"").trim();
+    if(utrToCheck) {
+      const dupUtr = (driverPays||[]).find(p=>(p.utr||"").trim()===utrToCheck);
+      if(dupUtr) {
+        alert(`🚫 Duplicate UTR\n\nUTR ${utrToCheck} was already recorded on ${dupUtr.date||"—"} for LR ${dupUtr.lrNo||"—"}.\nNothing was saved.`);
+        return;
+      }
+    }
+    const edited = {}; // tripId -> trip after deductions removed
+    for(const sk of skips) {
+      const t = (trips||[]).find(x=>x.id===sk.tripId);
+      if(!t) continue;
+      let u = {...t}; const did = [];
+      if(sk.loan)     { did.push(`loan ₹${t.loanRecovery}`);         u.loanRecovery = 0; }
+      if(sk.shortage) { did.push(`shortage ₹${t.shortageRecovery}`); u.shortageRecovery = 0; }
+      if(sk.diesel) {
+        did.push(`diesel ₹${t.dieselEstimate||0}`);
+        u = {...u, dieselEstimate:0, dieselEstimate2:0, dieselIndentNo:"", dieselIndentNo2:"", dieselIndentLocked:false};
+        const nos = [t.dieselIndentNo, t.dieselIndentNo2].filter(Boolean).map(n=>String(n).trim());
+        const linked = (dieselRequests||[]).filter(r=>r.tripId===t.id || nos.includes(String(r.indentNo)));
+        for(const req of linked) {
+          const detached = {...req, status: req.confirmedAmount!=null ? "confirmed" : "open", tripId:"", lrNo:""};
+          setDieselRequests(prev=>(prev||[]).map(r=>r.id===req.id?detached:r));
+          DB.saveDieselRequest(detached).catch(e=>console.error("diesel detach (pay selected):",e));
+          log("DIESEL DETACH", `Indent #${req.indentNo} ← LR ${t.lrNo||"—"} (owner pay-selected)`);
+        }
+      }
+      try { await DB.saveTrip(u); }
+      catch(e) { alert(`Could not update LR ${t.lrNo||t.truckNo}: ${e.message}\n\nNothing further was saved.`); return; }
+      setTrips(prev=>prev.map(x=>x.id===u.id?u:x));
+      edited[u.id] = u;
+      if(sk.loan || sk.shortage) {
+        const veh = (vehicles||[]).find(v=>v.truckNo===t.truckNo);
+        if(veh) {
+          const nv = syncTripRecoveryToVehicle(veh, u);
+          setVehicles(prev=>prev.map(v=>v.id===nv.id?nv:v));
+          DB.saveVehicle(nv).catch(e=>console.warn("vehicle sync (pay selected):",e));
+        }
+      }
+      log("SKIP DEDUCTION", `LR:${t.lrNo||"—"} ${t.truckNo} — removed ${did.join(", ")} before payment`);
+    }
+    const withMeta = payments.map(p => ({...p, paidTo:p.paidTo||"", createdBy:user.username, createdAt:nowTs()}));
+    setDriverPays(prev=>[...(prev||[]),...withMeta]);
+    for(const p of withMeta) {
+      log("DRIVER PAYMENT", `LR:${p.lrNo} ${p.truckNo} — ${fmt(p.amount)} UTR:${p.utr}`);
+      try { await DB.saveDriverPay(p); }
+      catch(e) {
+        if(e.message?.includes("unique") || e.code==="23505") {
+          setDriverPays(prev=>prev.filter(x=>!withMeta.find(m=>m.id===x.id)));
+          alert(`🚫 DB rejected: UTR ${p.utr} already exists. Payments were not saved (any deduction edits already applied stay).`);
+          return;
+        }
+        throw e;
+      }
+    }
+    // Settle trips whose balance reached zero (against the EDITED trip)
+    const paidNow = {};
+    withMeta.forEach(p=>{ paidNow[p.tripId]=(paidNow[p.tripId]||0)+p.amount; });
+    for(const tripId of Object.keys(paidNow)) {
+      const t = edited[tripId] || (trips||[]).find(x=>x.id===tripId);
+      if(!t) continue;
+      const gross = (t.diLines&&t.diLines.length>1)
+        ? t.diLines.reduce((a,d)=>a+(d.qty||0)*(d.givenRate||0),0)
+        : (t.qty||0)*(t.givenRate||0);
+      const deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)+((t.shortage||0)*(t.givenRate||0))
+        +(t.shortageRecovery||0)+(t.loanRecovery||0);
+      const netDue = Math.max(0, gross - deducts);
+      const paidBefore = (driverPays||[]).filter(p=>p.tripId===tripId).reduce((a,p)=>a+(p.amount||0),0);
+      if(netDue - (paidBefore + paidNow[tripId]) <= 0.5 && !t.driverSettled) {
+        const done = {...t, driverSettled:true, settledBy:user.username, netPaid:netDue};
+        setTrips(prev=>prev.map(x=>x.id===done.id?done:x));
+        DB.saveTrip(done).catch(e=>console.warn("settle (pay selected):",e));
+        log("AUTO SETTLED", `LR:${t.lrNo} ${t.truckNo} — paid in full`);
+      }
+      if(t.lrNo) markRequestsDoneForLR(t.lrNo);
+    }
+    setPaySelSheet(null); setSelectedTripIds(new Set()); setSelectMode(false);
+  };
+
   const deleteDriverPay = async (id) => {
     // Find the payment being deleted so we can check its trip
     const pay = (driverPays||[]).find(p=>p.id===id);
@@ -28760,6 +29024,7 @@ This will auto-recover in the next trip.`);
   const allowedLRs     = new Set((trips||[]).map(t=>t.lrNo).filter(Boolean));
   const allPays = [...(driverPays||[])]
     .filter(p => allowedTripIds.has(p.tripId) || allowedLRs.has(p.lrNo))
+    .filter(p => !empScopeOn || inEmpScope(tripOfPay(p.tripId, p.lrNo)))
     .sort((a,b)=>b.date.localeCompare(a.date));
   // Unique "Paid To" accounts — case-insensitive dedup (shows canonical form)
   const paidToAccounts = (() => {
@@ -28882,18 +29147,38 @@ This will auto-recover in the next trip.`);
         }
       </div>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-        <KPI icon="⏳" label="Balance Due"  value={fmt(totalBalance)}    color={C.accent} sub={`${unpaidTrips.length} trips`} />
+        <KPI icon="⏳" label="Balance Due"  value={fmt(totalBalance)}    color={C.accent} sub={`${scopedUnpaid.length} trips`} />
         <KPI icon="✅" label="Total Paid"   value={fmt(allPays.reduce((s,p)=>s+(p.amount||0),0))} color={C.green} />
       </div>
 
+      {(user.role==="owner"||user.role==="manager") && (()=>{
+        const agg = {};
+        unpaidTrips.forEach(t=>{ const k=t.assignedEmpId||"__none"; (agg[k]=agg[k]||{n:0,b:0}); agg[k].n++; agg[k].b+=t.balance; });
+        const opts = (employees||[]).filter(e=>agg[e.id]||e.id===empFilter)
+          .sort((a,b)=>(a.name||"").localeCompare(b.name||""));
+        return (
+          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            <select value={empFilter} onChange={e=>{ setEmpFilter(e.target.value); setSelectedTripIds(new Set()); }}
+              style={{flex:1,background:C.card,border:`1.5px solid ${empFilter?C.teal:C.border}`,borderRadius:10,
+                color:C.text,padding:"10px 12px",fontSize:13,outline:"none"}}>
+              <option value="">👤 All employees</option>
+              {opts.map(e=><option key={e.id} value={e.id}>{e.name}{agg[e.id]?` — ${agg[e.id].n} unpaid · ${fmt(agg[e.id].b)}`:""}</option>)}
+              {agg["__none"] && <option value="__none">Unassigned — {agg["__none"].n} unpaid · {fmt(agg["__none"].b)}</option>}
+            </select>
+            {empFilter && <button onClick={()=>{setEmpFilter(""); setSelectedTripIds(new Set());}}
+              style={{padding:"9px 12px",borderRadius:10,border:`1.5px solid ${C.border}`,background:"transparent",color:C.muted,fontSize:12,fontWeight:700,cursor:"pointer"}}>✕</button>}
+          </div>
+        );
+      })()}
+
       <PillBar items={[
         ...(user.role!=="owner" && myReqTrips.length>0 ? [{id:"myreqs", label:`📋 Send Request (${myReqTrips.length})`, color:C.orange}] : []),
-        {id:"unpaid",  label:`Unpaid (${unpaidTrips.length})`, color:C.accent},
+        {id:"unpaid",  label:`Unpaid (${scopedUnpaid.length})`, color:C.accent},
         {id:"byemp",   label:"By Employee",                    color:C.teal},
-        {id:"paid",    label:`Paid (${paidTrips.length})`,     color:C.green},
+        {id:"paid",    label:`Paid (${scopedPaid.length})`,     color:C.green},
         {id:"all",     label:"All",                            color:C.blue},
         {id:"history", label:`History (${allPays.length})`,    color:C.muted},
-        {id:"requests",label:`Requests (${(paymentRequests||[]).length})`, color:C.purple},
+        {id:"requests",label:`Requests (${scopedReqs.length})`, color:C.purple},
       ]} active={filter} onSelect={setFilter} />
 
       {/* Search bar for trip tabs */}
@@ -28933,6 +29218,19 @@ This will auto-recover in the next trip.`);
                   background:"transparent",border:`1.5px solid ${C.green}`,color:C.green}}>
                 💰 Settle by Amount
               </button>
+              {(()=>{
+                const vis = scopedUnpaid
+                  .filter(t=>orderTypeFilter==="all" || (orderTypeFilter==="party" ? t.orderType==="party" : (!t.orderType||t.orderType==="godown")))
+                  .filter(t=>!histLR || (t.lrNo+t.truckNo).toLowerCase().includes(histLR.toLowerCase()));
+                const allOn = vis.length>0 && vis.every(t=>selectedTripIds.has(t.id));
+                return (
+                  <button onClick={()=>{ setSelectMode(true); setSelectedTripIds(allOn ? new Set() : new Set(vis.map(t=>t.id))); }}
+                    style={{padding:"6px 14px",borderRadius:8,fontSize:12,fontWeight:700,cursor:"pointer",
+                      background:"transparent",border:`1.5px solid ${C.purple}`,color:C.purple}}>
+                    {allOn ? "☐ Clear all" : `☑ Select all (${vis.length})`}
+                  </button>
+                );
+              })()}
               {selectMode && selectedTripIds.size>0 && (
                 <Btn onClick={()=>{
                   const count = selectedTripIds.size;
@@ -28962,6 +29260,24 @@ This will auto-recover in the next trip.`);
               )}
             </div>
           )}
+          {filter==="unpaid" && selectedTripIds.size>0 && (()=>{
+            const sel = scopedUnpaid.filter(t=>selectedTripIds.has(t.id));
+            const tot = sel.reduce((a,t)=>a+t.balance,0);
+            return (
+              <div style={{position:"sticky",top:0,zIndex:5,background:C.card,border:`1.5px solid ${C.purple}`,borderRadius:12,
+                padding:"10px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                <div>
+                  <div style={{color:C.muted,fontSize:11,fontWeight:700}}>{sel.length} TRIP{sel.length!==1?"S":""} SELECTED</div>
+                  <div style={{color:C.text,fontWeight:900,fontSize:18}}>{fmt(tot)}</div>
+                </div>
+                <Btn onClick={()=>setPaySelSheet({
+                  trips:[...sel].sort((a,b)=>(a.date||"").localeCompare(b.date||"")||(a.createdAt||"").localeCompare(b.createdAt||"")),
+                  paidTo:(employees||[]).find(e=>e.id===empFilter)?.name||"",
+                  title:"💰 Pay Selected Trips",
+                })} sm color={C.green}>💰 Pay Selected</Btn>
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -29094,7 +29410,7 @@ This will auto-recover in the next trip.`);
       {filter==="byemp" && (()=>{
         // Group unpaid trips by assigned employee
         const empGroups = {};
-        unpaidTrips.forEach(t => {
+        scopedUnpaid.forEach(t => {
           const empId = t.assignedEmpId||"unassigned";
           if(!empGroups[empId]) empGroups[empId] = [];
           empGroups[empId].push(t);
@@ -29126,7 +29442,7 @@ This will auto-recover in the next trip.`);
 
       {/* ── TRIP LIST (unpaid / paid / all / myreqs) ── */}
       {filter!=="history" && filter!=="requests" && filter!=="byemp" && (()=>{
-        const base = filter==="myreqs"?myReqTrips:filter==="unpaid"?unpaidTrips:filter==="paid"?paidTrips:tripWithBalance;
+        const base = filter==="myreqs"?myReqTrips:filter==="unpaid"?scopedUnpaid:filter==="paid"?scopedPaid:tripWithBalance.filter(inEmpScope);
         const orderFiltered = (filter==="unpaid"||filter==="paid") && orderTypeFilter!=="all"
           ? base.filter(t=>orderTypeFilter==="party" ? t.orderType==="party" : (!t.orderType||t.orderType==="godown"))
           : base;
@@ -29299,14 +29615,14 @@ This will auto-recover in the next trip.`);
         <div style={{display:"flex",flexDirection:"column",gap:10}}>
           {/* Sub-filter: Pending / History */}
           {(()=>{
-            const pendingCount = (paymentRequests||[]).filter(r=>r.status==="pending").length;
-            const doneCount    = (paymentRequests||[]).filter(r=>r.status==="done").length;
+            const pendingCount = scopedReqs.filter(r=>r.status==="pending").length;
+            const doneCount    = scopedReqs.filter(r=>r.status==="done").length;
             return (
               <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
                 {[
                   {id:"pending", label:`⏳ Pending (${pendingCount})`, color:C.purple},
                   {id:"done",    label:`✓ History (${doneCount})`,     color:C.green},
-                  {id:"all",     label:`All (${(paymentRequests||[]).length})`, color:C.muted},
+                  {id:"all",     label:`All (${scopedReqs.length})`, color:C.muted},
                 ].map(s=>(
                   <button key={s.id}
                     onClick={()=>setReqSubFilter(s.id)}
@@ -29324,10 +29640,10 @@ This will auto-recover in the next trip.`);
               </div>
             );
           })()}
-          {(paymentRequests||[]).length===0 && (
+          {scopedReqs.length===0 && (
             <div style={{textAlign:"center",color:C.muted,padding:"30px 0",fontSize:13}}>No payment requests yet</div>
           )}
-          {[...(paymentRequests||[])].filter(pr=>{
+          {[...scopedReqs].filter(pr=>{
             const eff = pr.status||"pending";
             if(reqSubFilter==="pending" && eff!=="pending") return false;
             if(reqSubFilter==="done"    && eff!=="done")    return false;
@@ -29654,7 +29970,22 @@ This will auto-recover in the next trip.`);
           log={log}
           onSave={saveMultiPayment}
           onCancel={()=>setSplitSheet(null)}
+          onEmployeeFlow={user.role==="owner" ? (empId, info) => {
+            const emp = (employees||[]).find(e=>e.id===empId);
+            const cands = unpaidTrips.filter(t=>t.assignedEmpId===empId)
+              .sort((a,b)=>(a.date||"").localeCompare(b.date||"")||(a.createdAt||"").localeCompare(b.createdAt||""));
+            if(!cands.length) { alert(`${emp?.name||"This employee"} has no unpaid trips.`); return; }
+            setSplitSheet(null);
+            setPaySelSheet({ trips:cands, amount:info.amount, utr:info.utr, date:info.date,
+              paidTo:info.paidTo||emp?.name||"", notes:info.notes||"", autoFill:true,
+              title:`📷 Scanned payment → ${emp?.name||"employee"}` });
+          } : null}
         />
+      )}
+
+      {/* ── PAY SELECTED / PAY BY EMPLOYEE (owner) ── */}
+      {paySelSheet && user.role==="owner" && (
+        <PaySelectedSheet init={paySelSheet} onSave={paySelectedTrips} onCancel={()=>setPaySelSheet(null)} />
       )}
 
       {/* ── BULK SETTLE BY AMOUNT (owner) ── */}
