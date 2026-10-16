@@ -82,6 +82,19 @@ const employeeTafalExemptFor = (truckNo, employees, assignedEmpId) => {
   const norm = String(truckNo).toUpperCase().trim();
   return (employees||[]).find(e => e.tafalExempt && (e.linkedTrucks||[]).some(t => String(t).toUpperCase().trim() === norm)) || null;
 };
+// Same idea for the party Return-Pouch deduction: an employee who is marked
+// pouch-exempt makes every NEW party trip on their linked trucks (or assigned to
+// them directly) carry ₹0 pouch. Existing trips keep whatever pouch they were
+// saved with — this only changes what new trips get.
+const employeePouchExemptFor = (truckNo, employees, assignedEmpId) => {
+  if (assignedEmpId) {
+    const assignedEmp = (employees||[]).find(e => e.id === assignedEmpId);
+    if (assignedEmp?.pouchExempt) return assignedEmp;
+  }
+  if (!truckNo) return null;
+  const norm = String(truckNo).toUpperCase().trim();
+  return (employees||[]).find(e => e.pouchExempt && (e.linkedTrucks||[]).some(t => String(t).toUpperCase().trim() === norm)) || null;
+};
 const tafalAmountFor = (veh, employees, settingsObj, assignedEmpId) => {
   if (employeeTafalExemptFor(veh?.truckNo, employees, assignedEmpId)) return 0;
   if (veh?.tafalExempt) return 0;
@@ -3672,7 +3685,8 @@ const lookupPincode = async (pincode) => {
 function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user, log, onClose, employees=[], cashTransfers=[], setCashTransfers, dieselRequests=[], setDieselRequests, manualDiesel=false, actionItems=[], setActionItems }) {
   // Party pouch deduction for a vehicle: exempt → 0, per-vehicle override → that,
   // else the owner's global rate (settings.pouchPerTrip), else ₹700 fallback.
-  const pouchAmt = (veh) => veh?.pouchExempt ? 0 : (veh?.pouchOverride!=null ? veh.pouchOverride : (settings?.pouchPerTrip ?? 700));
+  // An employee-level pouch exemption (linked truck or assigned employee) wins over everything.
+  const pouchAmt = (veh, assignedEmpId="") => (employeePouchExemptFor(veh?.truckNo, employees, assignedEmpId) || veh?.pouchExempt) ? 0 : (veh?.pouchOverride!=null ? veh.pouchOverride : (settings?.pouchPerTrip ?? 700));
 
   // ── Raw scanned items (one per uploaded file) ────────────────────────────────
   // item: { id, file, status, extracted, error }
@@ -4482,7 +4496,8 @@ Rules:
           pouchBalance: (() => {
             if(item.orderType!=="party") return 0;
             const _pVeh2 = (vehicles||[]).find(v=>v.truckNo===truckNo);
-            return _pVeh2?.pouchExempt ? 0 : (item.pouchBalance || pouchAmt(_pVeh2));
+            if(_pVeh2?.pouchExempt || employeePouchExemptFor(truckNo, employees, g.assignedEmpId||"")) return 0;
+            return item.pouchBalance || pouchAmt(_pVeh2, g.assignedEmpId||"");
           })(),
           grParticulars: item.extracted?._grParticulars || null,
           transporterName: ex.transporterName || "",
@@ -4767,8 +4782,8 @@ Rules:
           pouchBalance: (() => {
             if(!diLines.some(d=>d.orderType==="party")) return 0;
             const _pVeh3 = (vehicles||[]).find(v=>v.truckNo===truckNo);
-            if(_pVeh3?.pouchExempt) return 0;
-            return (groupItems.find(x=>x.orderType==="party")?.pouchBalance) ?? pouchAmt(_pVeh3);
+            if(_pVeh3?.pouchExempt || employeePouchExemptFor(truckNo, employees, g.assignedEmpId||"")) return 0;
+            return (groupItems.find(x=>x.orderType==="party")?.pouchBalance) ?? pouchAmt(_pVeh3, g.assignedEmpId||"");
           })(),
           grParticulars: primary.extracted?._grParticulars || null,
           transporterName: ex0.transporterName || "",
@@ -5257,7 +5272,7 @@ Rules:
                                 updateItem(item.id,"orderType",e.target.value);
                                 if(e.target.value==="party") {
                                   const _pv = (vehicles||[]).find(v=>v.truckNo===(g.truckNo||"").toUpperCase().trim());
-                                  updateItem(item.id,"pouchBalance",pouchAmt(_pv));
+                                  updateItem(item.id,"pouchBalance",pouchAmt(_pv, g.assignedEmpId||""));
                                 } else updateItem(item.id,"pouchBalance",0);
                               }}
                               style={{width:"100%",background:C.card,border:`1.5px solid ${C.border}`,
@@ -5882,6 +5897,17 @@ Rules:
                       const newTafal = stillDefault ? tafalAmountFor(veh, employees, settings, newEmpId) : gr.tafal;
                       return {...gr, assignedEmpId:newEmpId, tafal:String(newTafal)};
                     }));
+                    // Pouch: same rule — only re-default party items whose pouch still
+                    // equals the old default (a manually typed amount is left alone).
+                    {
+                      const _pvEmp = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
+                      const _oldPouch = pouchAmt(_pvEmp, g.assignedEmpId||"");
+                      const _newPouch = pouchAmt(_pvEmp, newEmpId);
+                      if(_oldPouch !== _newPouch) {
+                        setItems(prev => prev.map(x => ((g.diIds||[]).includes(x.id) && x.orderType==="party" && (x.pouchBalance==null || +x.pouchBalance===_oldPouch))
+                          ? {...x, pouchBalance:_newPouch} : x));
+                      }
+                    }
                   }}
                     style={{width:"100%",background:C.bg,border:`1.5px solid ${g.assignedEmpId?C.teal:C.border}`,
                       borderRadius:8,color:g.assignedEmpId?C.text:C.muted,padding:"7px 8px",fontSize:13,outline:"none"}}>
@@ -23188,6 +23214,14 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
             return upd;
           }));
         };
+        const togglePouchExempt = () => {
+          setEmployees(prev => prev.map(x => {
+            if(x.id!==trucksSheet) return x;
+            const upd = {...x, pouchExempt: !x.pouchExempt};
+            DB.saveEmployee(upd).catch(err=>console.error("saveEmployee pouchExempt:",err));
+            return upd;
+          }));
+        };
         // Defaults ON for every employee — owner opts specific people OUT.
         // undefined/null (not-yet-migrated employees) counts as enforced.
         const enforced = emp.pouchDeadlineEnforced !== false;
@@ -23217,6 +23251,24 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                       background:emp.tafalExempt?C.green+"22":"transparent",color:emp.tafalExempt?C.green:C.muted,
                       fontWeight:700,fontSize:12,cursor:"pointer",flexShrink:0}}>
                     {emp.tafalExempt?"✓ Exempt":"Exempt"}
+                  </button>
+                </div>
+              </div>
+              {/* Party Return-Pouch DEDUCTION (the ₹700-style hold on party trips) —
+                  separate from the 8-day deadline below. Affects NEW trips only. */}
+              <div style={{background:emp.pouchExempt?C.green+"11":C.bg,border:`1.5px solid ${emp.pouchExempt?C.green:C.border}`,borderRadius:10,padding:"12px 14px"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10}}>
+                  <div>
+                    <div style={{fontWeight:800,fontSize:13,color:emp.pouchExempt?C.green:C.text}}>Pouch Deduction Exempt — {emp.name}</div>
+                    <div style={{color:C.muted,fontSize:11,marginTop:2}}>
+                      {emp.pouchExempt ? "New party trips on the linked trucks below (or assigned to this employee) get ₹0 pouch deducted. Existing trips are not changed." : "Off — party trips on linked trucks deduct the normal pouch amount (vehicle override / global rate)"}
+                    </div>
+                  </div>
+                  <button onClick={togglePouchExempt}
+                    style={{padding:"7px 16px",borderRadius:8,border:`1.5px solid ${emp.pouchExempt?C.green:C.border}`,
+                      background:emp.pouchExempt?C.green+"22":"transparent",color:emp.pouchExempt?C.green:C.muted,
+                      fontWeight:700,fontSize:12,cursor:"pointer",flexShrink:0}}>
+                    {emp.pouchExempt?"✓ Exempt":"Exempt"}
                   </button>
                 </div>
               </div>
@@ -23250,6 +23302,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                   <input type="checkbox" checked={linked.includes(v.truckNo)} onChange={()=>toggle(v.truckNo)} style={{width:16,height:16,flexShrink:0}} />
                   <span style={{flex:1,fontSize:13,fontWeight:700}}>{v.truckNo}</span>
                   {linked.includes(v.truckNo) && emp.tafalExempt && <Badge label="TAFAL ₹0 (via employee)" color={C.green} />}
+                  {linked.includes(v.truckNo) && emp.pouchExempt && <Badge label="Pouch ₹0 (via employee)" color={C.green} />}
                 </label>
               ))}
             </div>
