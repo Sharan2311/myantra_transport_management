@@ -509,7 +509,15 @@ export const DB = {
     const data = await fetchPaginated(() => supabase.from('mye_trips').select('*').order('date', {ascending: false}).order('id'));
     return (data||[]).map(tripFromDB);
   },
-  saveTrip:       t  => upsertOne('mye_trips', tripToDB, t),
+  saveTrip:       async t => {
+    try { await upsertOne('mye_trips', tripToDB, t) }
+    catch (e) {
+      // DB trigger trg_trips_dup_di_guard raises 'duplicate_di: DI x already exists on LR y'
+      const m = /duplicate_di: DI (\S+) already exists on LR (\S+)/.exec(e?.message || '')
+      if (m) { const err = new Error(`DI ${m[1]} is already used on LR ${m[2]} — this trip was NOT saved.`); err.duplicateDI = true; throw err }
+      throw e
+    }
+  },
 
   // Atomic insert that checks for duplicate DI numbers before saving
   // Returns {success, error, duplicateDI} 
