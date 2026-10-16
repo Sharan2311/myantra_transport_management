@@ -14353,6 +14353,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
   const [pouchFilter,      setPouchFilter]      = useState("all"); // all | received | not_received — Return Pouch column
   const [confirmFilter,    setConfirmFilter]    = useState("all"); // all | received | not_received — Confirmation Email column
   const [readyFilter,      setReadyFilter]      = useState("all"); // all | ready | not_ready
+  const [epodFilter,       setEpodFilter]       = useState("all"); // all | marked | not_marked — Confirmation EPOD mark (per DI)
   const [employeeFilter,   setEmployeeFilter]    = useState(""); // "" = all employees, else empId
   const [clubFilter,       setClubFilter]        = useState("all"); // all | clubbed | party_only — mixed party+godown LRs vs pure-party
   const [lineFilter,       setLineFilter]         = useState("all"); // all | line1 | line2 — GR number prefix (1070 vs 1079)
@@ -14668,6 +14669,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
       // filters (it has nothing to confirm), only by billing status.
       if(confirmFilter!=="all") rows = rows.filter(d => d.orderType!=="party" || (confirmFilter==="received")===diConfirmReceived(t,d));
       if(readyFilter!=="all") rows = rows.filter(d => d.orderType!=="party" || (readyFilter==="ready")===d.readyForBilling);
+      if(epodFilter!=="all") rows = rows.filter(d => d.orderType!=="party" || (epodFilter==="marked")===!!d.epodDone);
       if(lineFilter!=="all") rows = rows.filter(d => grLine(d.grNo)===lineFilter);
       if(agingFilter!=="all") rows = rows.filter(d => { const a=billingAging(t,d); return agingFilter==="due_soon" ? a.dueSoon : a.overdue; });
       return {trip:t, rows, clubbed};
@@ -14696,6 +14698,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
     if(pouchFilter!=="all") filterParts.push(`Return Pouch: ${pouchFilter==="received"?"Received":"Not Received"}`);
     if(confirmFilter!=="all") filterParts.push(`Confirmation Email: ${confirmFilter==="received"?"Received":"Not Received"}`);
     if(readyFilter!=="all") filterParts.push(`Ready for Billing: ${readyFilter==="ready"?"Ready":"Not Ready"}`);
+    if(epodFilter!=="all") filterParts.push(`EPOD: ${epodFilter==="marked"?"Marked":"Not Marked"}`);
     if(dateFrom||dateTo) filterParts.push(`Date: ${dateFrom||"start"} to ${dateTo||"today"}`);
     if(searchQ.trim()) filterParts.push(`Search: "${searchQ.trim()}"`);
     const filterSummary = filterParts.length ? filterParts.join(" &nbsp;·&nbsp; ") : "No filters applied — showing all";
@@ -15116,6 +15119,17 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
             style={{padding:"5px 11px",borderRadius:16,cursor:"pointer",fontWeight:700,fontSize:11,
               background:readyFilter===k?C.green:"transparent",border:`1.5px solid ${C.green}`,
               color:readyFilter===k?"#fff":C.green}}>
+            {l}
+          </button>
+        ))}
+      </div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+        <span style={{fontSize:10,color:C.muted,fontWeight:700}}>EPOD:</span>
+        {[["all","All"],["marked","✓ EPOD Marked"],["not_marked","EPOD Not Marked"]].map(([k,l])=>(
+          <button key={k} onClick={()=>setEpodFilter(k)}
+            style={{padding:"5px 11px",borderRadius:16,cursor:"pointer",fontWeight:700,fontSize:11,
+              background:epodFilter===k?C.amber||"#d97706":"transparent",border:`1.5px solid ${C.amber||"#d97706"}`,
+              color:epodFilter===k?"#fff":(C.amber||"#d97706")}}>
             {l}
           </button>
         ))}
