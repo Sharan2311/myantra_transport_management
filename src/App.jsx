@@ -28413,6 +28413,31 @@ function BulkSettleSheet({ unpaidTrips=[], employees=[], vehicles=[], user, onSa
   );
 }
 
+// Space-separated LR numbers of the ticked trips — selectable text + one-tap copy (for WhatsApp)
+function LrCopyLine({ lrs }) {
+  const [copied, setCopied] = useState(false);
+  const text = (lrs||[]).filter(Boolean).join(" ");
+  if (!text) return null;
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(text); }
+    catch (e) {
+      const ta = document.createElement("textarea"); ta.value = text; document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); } catch (_) {}
+      document.body.removeChild(ta);
+    }
+    setCopied(true); setTimeout(()=>setCopied(false), 1500);
+  };
+  return (
+    <div style={{display:"flex",alignItems:"flex-start",gap:8,marginTop:6,width:"100%"}}>
+      <div style={{flex:1,minWidth:0,fontSize:12,color:C.text,wordBreak:"break-word",userSelect:"text",WebkitUserSelect:"text"}}>{text}</div>
+      <button onClick={copy} style={{flexShrink:0,padding:"4px 10px",borderRadius:8,fontSize:11,fontWeight:700,cursor:"pointer",
+        background:copied?C.green+"22":"transparent",border:`1.5px solid ${copied?C.green:C.purple}`,color:copied?C.green:C.purple}}>
+        {copied?"✓ Copied":"Copy"}
+      </button>
+    </div>
+  );
+}
+
 // ─── PAY SELECTED / PAY BY EMPLOYEE (owner) ─────────────────────────────────
 // One payment (one UTR) split across several trips, oldest first. Per trip the
 // owner can also drop the loan / shortage / diesel deduction before paying —
@@ -29428,9 +29453,10 @@ This will auto-recover in the next trip.`);
             return (
               <div style={{position:"sticky",top:0,zIndex:5,background:C.card,border:`1.5px solid ${C.purple}`,borderRadius:12,
                 padding:"10px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-                <div>
+                <div style={{flex:1,minWidth:140}}>
                   <div style={{color:C.muted,fontSize:11,fontWeight:700}}>{sel.length} TRIP{sel.length!==1?"S":""} SELECTED</div>
                   <div style={{color:C.text,fontWeight:900,fontSize:18}}>{fmt(tot)}</div>
+                  <LrCopyLine lrs={[...sel].sort((a,b)=>(a.date||"").localeCompare(b.date||"")).map(t=>t.lrNo)} />
                 </div>
                 <Btn onClick={()=>setPaySelSheet({
                   trips:[...sel].sort((a,b)=>(a.date||"").localeCompare(b.date||"")||(a.createdAt||"").localeCompare(b.createdAt||"")),
@@ -29911,6 +29937,7 @@ This will auto-recover in the next trip.`);
                     <div style={{marginTop:6}}>
                       <div style={{color:C.muted,fontSize:11,fontWeight:700}}>{sel.length} REQUEST{sel.length!==1?"S":""} SELECTED</div>
                       <div style={{color:C.text,fontWeight:900,fontSize:18}}>{fmt(reqSum)}</div>
+                      <LrCopyLine lrs={sel.map(pr=>pr.lrNo)} />
                       {Math.abs(balSum-reqSum)>=1 && (
                         <div style={{color:C.orange,fontSize:11}}>⚠ current balances total {fmt(balSum)} — some requests are outdated</div>
                       )}
