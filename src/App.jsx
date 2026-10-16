@@ -28512,6 +28512,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
   const [bulkSettleSheet, setBulkSettleSheet]  = useState(false); // owner: settle-by-amount sheet open?
   const [empFilter, setEmpFilter] = useState("");     // "" = everyone | employee id | "__none" = unassigned
   const [paySelSheet, setPaySelSheet] = useState(null); // PaySelectedSheet init data
+  const [selectedReqIds, setSelectedReqIds] = useState(new Set()); // Requests tab (owner): ticked pending requests
   const [paySheet,  setPaySheet]  = useState(null);
   const [payReqSheet,   setPayReqSheet]   = useState(null); // trip for request payment
   // ── Return Pouch / Confirmation deadline gate ──────────────────────────────
@@ -28995,7 +28996,7 @@ This will auto-recover in the next trip.`);
       }
       if(t.lrNo) markRequestsDoneForLR(t.lrNo);
     }
-    setPaySelSheet(null); setSelectedTripIds(new Set()); setSelectMode(false);
+    setPaySelSheet(null); setSelectedTripIds(new Set()); setSelectMode(false); setSelectedReqIds(new Set());
   };
 
   const deleteDriverPay = async (id) => {
@@ -29211,14 +29212,14 @@ This will auto-recover in the next trip.`);
           .sort((a,b)=>(a.name||"").localeCompare(b.name||""));
         return (
           <div style={{display:"flex",gap:8,alignItems:"center"}}>
-            <select value={empFilter} onChange={e=>{ setEmpFilter(e.target.value); setSelectedTripIds(new Set()); }}
+            <select value={empFilter} onChange={e=>{ setEmpFilter(e.target.value); setSelectedTripIds(new Set()); setSelectedReqIds(new Set()); }}
               style={{flex:1,background:C.card,border:`1.5px solid ${empFilter?C.teal:C.border}`,borderRadius:10,
                 color:C.text,padding:"10px 12px",fontSize:13,outline:"none"}}>
               <option value="">👤 All employees</option>
               {opts.map(e=><option key={e.id} value={e.id}>{e.name}{agg[e.id]?` — ${agg[e.id].n} unpaid · ${fmt(agg[e.id].b)}`:""}</option>)}
               {agg["__none"] && <option value="__none">Unassigned — {agg["__none"].n} unpaid · {fmt(agg["__none"].b)}</option>}
             </select>
-            {empFilter && <button onClick={()=>{setEmpFilter(""); setSelectedTripIds(new Set());}}
+            {empFilter && <button onClick={()=>{setEmpFilter(""); setSelectedTripIds(new Set()); setSelectedReqIds(new Set());}}
               style={{padding:"9px 12px",borderRadius:10,border:`1.5px solid ${C.border}`,background:"transparent",color:C.muted,fontSize:12,fontWeight:700,cursor:"pointer"}}>✕</button>}
           </div>
         );
@@ -29693,6 +29694,45 @@ This will auto-recover in the next trip.`);
               </div>
             );
           })()}
+          {user.role==="owner" && reqSubFilter!=="done" && (()=>{
+            const q = (reqSearch||"").toLowerCase();
+            const matches = pr => !q || [pr.lrNo,pr.truckNo,pr.createdBy,pr.recipientName,pr.accountNo].some(x=>(x||"").toLowerCase().includes(q));
+            // Only pending requests whose trip still has a balance can be paid from here
+            const selectable = scopedReqs.filter(pr => (pr.status||"pending")==="pending" && matches(pr) && unpaidTrips.some(t=>t.id===pr.tripId));
+            if(selectable.length===0) return null;
+            const allOn = selectable.every(pr=>selectedReqIds.has(pr.id));
+            const sel = selectable.filter(pr=>selectedReqIds.has(pr.id));
+            const reqSum = sel.reduce((a,pr)=>a+(+pr.amount||0),0);
+            const selTrips = sel.map(pr=>unpaidTrips.find(t=>t.id===pr.tripId)).filter(Boolean);
+            const balSum = selTrips.reduce((a,t)=>a+t.balance,0);
+            return (
+              <div style={{position:"sticky",top:0,zIndex:5,background:C.card,border:`1.5px solid ${sel.length?C.purple:C.border}`,borderRadius:12,
+                padding:"10px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                <div>
+                  <button onClick={()=>setSelectedReqIds(allOn?new Set():new Set(selectable.map(pr=>pr.id)))}
+                    style={{padding:"5px 12px",borderRadius:8,fontSize:12,fontWeight:700,cursor:"pointer",
+                      background:"transparent",border:`1.5px solid ${C.purple}`,color:C.purple}}>
+                    {allOn?"☐ Deselect all":`☑ Select all (${selectable.length})`}
+                  </button>
+                  {sel.length>0 && (
+                    <div style={{marginTop:6}}>
+                      <div style={{color:C.muted,fontSize:11,fontWeight:700}}>{sel.length} REQUEST{sel.length!==1?"S":""} SELECTED</div>
+                      <div style={{color:C.text,fontWeight:900,fontSize:18}}>{fmt(reqSum)}</div>
+                      {Math.abs(balSum-reqSum)>=1 && (
+                        <div style={{color:C.orange,fontSize:11}}>⚠ current balances total {fmt(balSum)} — some requests are outdated</div>
+                      )}
+                    </div>
+                  )}
+                </div>
+                {sel.length>0 && (
+                  <Btn onClick={()=>setPaySelSheet({
+                    trips:[...selTrips].sort((a,b)=>(a.date||"").localeCompare(b.date||"")||(a.createdAt||"").localeCompare(b.createdAt||"")),
+                    title:"💰 Pay Selected Requests",
+                  })} sm color={C.green}>💰 Pay Selected</Btn>
+                )}
+              </div>
+            );
+          })()}
           {scopedReqs.length===0 && (
             <div style={{textAlign:"center",color:C.muted,padding:"30px 0",fontSize:13}}>No payment requests yet</div>
           )}
@@ -29740,7 +29780,14 @@ This will auto-recover in the next trip.`);
                 borderLeft:`4px solid ${effectiveStatus==="done"?C.green:amountStale?C.orange:C.purple}`,marginBottom:4}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
                   <div>
-                    <div style={{fontWeight:800,fontSize:14}}>{pr.lrNo||"—"} · {pr.truckNo}</div>
+                    <div style={{fontWeight:800,fontSize:14,display:"flex",alignItems:"center",gap:8}}>
+                      {user.role==="owner" && effectiveStatus==="pending" && unpaidTrips.some(t=>t.id===pr.tripId) && (
+                        <input type="checkbox" checked={selectedReqIds.has(pr.id)}
+                          onChange={()=>setSelectedReqIds(prev=>{const n=new Set(prev); n.has(pr.id)?n.delete(pr.id):n.add(pr.id); return n;})}
+                          style={{width:18,height:18,flexShrink:0}} />
+                      )}
+                      <span>{pr.lrNo||"—"} · {pr.truckNo}</span>
+                    </div>
                     <div style={{color:C.muted,fontSize:11}}>{trip?`${trip.from}→${trip.to} · ${trip.qty}MT`:"—"}</div>
                     <div style={{color:C.muted,fontSize:11}}>Requested by: {pr.createdBy||"—"} · {pr.createdAt||""}</div>
                     {/* Diesel confirmation warning */}
