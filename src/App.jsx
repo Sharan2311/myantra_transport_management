@@ -27756,7 +27756,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
 // Record bank transfers against a trip. "Balance due" auto-updates.
 // ─── EMPLOYEE TRIP GROUP ─────────────────────────────────────────────────────
 // Groups all unpaid trips for one employee — can request payment for each or all together
-function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, paymentRequests, setPaymentRequests, setPayReqSheet, requestPaymentGuarded, vehicles, fmt,
+function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, heldOnly=[], paymentRequests, setPaymentRequests, setPayReqSheet, requestPaymentGuarded, vehicles, fmt,
   setDriverPays, setTrips, setEmployees, setCashTransfers, cashTransfers, user, log }) {
   const [open, setOpen] = useState(true);
   const [selected, setSelected] = useState(new Set(empTrips.map(t=>t.id)));
@@ -27869,8 +27869,8 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, paymentRequ
             {emp?.name||"Unassigned"} {empId==="unassigned"&&<span style={{fontSize:10,color:"#888"}}>(no employee linked)</span>}
           </div>
           <div style={{fontSize:11,color:"#666",marginTop:2}}>
-            {empTrips.length} trip{empTrips.length>1?"s":""} · Balance due: <b style={{color:"#dc2626"}}>₹{totalBal.toLocaleString("en-IN")}</b>
-             {pouchHeld>0 && <div style={{fontSize:11,color:"#0f766e",marginTop:2}}>incl. ₹{pouchHeld.toLocaleString("en-IN")} pouch held until confirmation · payable now <b>₹{(totalBal-pouchHeld).toLocaleString("en-IN")}</b></div>}
+            {empTrips.length+heldOnly.length} trip{empTrips.length+heldOnly.length>1?"s":""} · Balance due: <b style={{color:"#dc2626"}}>₹{totalBal.toLocaleString("en-IN")}</b>
+             {pouchHeld>0 && <div style={{fontSize:11,color:"#0f766e",marginTop:2}}>incl. ₹{pouchHeld.toLocaleString("en-IN")} pouch held until confirmation{heldOnly.length>0 && <span> (fully held: {heldOnly.map(h=>h.lrNo).join(", ")})</span>} · payable now <b>₹{(totalBal-pouchHeld).toLocaleString("en-IN")}</b></div>}
           </div>
         </div>
         <div style={{fontSize:18}}>{open?"▲":"▼"}</div>
@@ -29623,6 +29623,18 @@ This will auto-recover in the next trip.`);
           if(!empGroups[empId]) empGroups[empId] = [];
           empGroups[empId].push(t);
         });
+        // Trips whose whole remaining amount is the held pouch (balance 0 only
+        // because of the hold) drop out of the unpaid list, but the employee
+        // still sees that money as pending — count it in his headline total.
+        const heldOnlyByEmp = {};
+        tripWithBalance.forEach(t => {
+          if(t.driverSettled || t.balance>0 || !(t.pouchHold>0) || !inEmpScope(t)) return;
+          const amt = Math.max(0, (t.netDue||0)+(t.pouchHold||0)-(t.paidSoFar||0));
+          if(amt<=0) return;
+          const k = t.assignedEmpId||"unassigned";
+          (heldOnlyByEmp[k] = heldOnlyByEmp[k]||[]).push({lrNo:t.lrNo, amt});
+          if(!empGroups[k]) empGroups[k] = [];
+        });
         const empList = Object.entries(empGroups).sort(([a],[b])=>a==="unassigned"?1:b==="unassigned"?-1:0);
         return (
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
@@ -29631,12 +29643,14 @@ This will auto-recover in the next trip.`);
               const emp = (employees||[]).find(e=>e.id===empId);
               // Headline total stays the full amount (pouch hold included) so it
               // doesn't jump; the held pouch is shown separately in the group.
-              const pouchHeld = empTrips.reduce((s,t)=>s+Math.max(0, Math.max(0,(t.netDue||0)+(t.pouchHold||0)-(t.paidSoFar||0)) - t.balance),0);
+              const heldOnly = heldOnlyByEmp[empId]||[];
+              const pouchHeld = empTrips.reduce((s,t)=>s+Math.max(0, Math.max(0,(t.netDue||0)+(t.pouchHold||0)-(t.paidSoFar||0)) - t.balance),0)
+                              + heldOnly.reduce((s,h)=>s+h.amt,0);
               const totalBal = empTrips.reduce((s,t)=>s+t.balance,0) + pouchHeld;
               const [empGroupOpen, setEmpGroupOpen] = [null,null]; // handled per-instance below
               return (
                 <EmpTripGroup key={empId}
-                  empId={empId} emp={emp} empTrips={empTrips} totalBal={totalBal} pouchHeld={pouchHeld}
+                  empId={empId} emp={emp} empTrips={empTrips} totalBal={totalBal} pouchHeld={pouchHeld} heldOnly={heldOnly}
                   paymentRequests={paymentRequests||[]} setPaymentRequests={setPaymentRequests}
                   setPayReqSheet={setPayReqSheet}
                   requestPaymentGuarded={requestPaymentGuarded}
