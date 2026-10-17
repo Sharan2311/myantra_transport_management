@@ -28779,13 +28779,18 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
     const gross    = (t.diLines&&t.diLines.length>1)
       ? t.diLines.reduce((s,d)=>s+(d.qty||0)*(d.givenRate||0),0)
       : (t.qty||0)*(t.givenRate||0);
+    // Party pouch is held back until the sealed invoice / confirmation is in
+    // (or the trip is billed with an invoice no.) — same rule as
+    // RequestPaymentSheet and the auto-settle check, so every Driver Pay
+    // total agrees with what a payment request would show.
+    const pouchHold = (t.orderType==="party" && !tripPouchPayable(t)) ? (t.pouchBalance||0) : 0;
     const deducts  = (t.advance||0)+(t.tafal||0)
                    +(t.dieselEstimate||0)+((t.shortage||0)*(t.givenRate||0))
-                   +(t.shortageRecovery||0)+(t.loanRecovery||0);
+                   +(t.shortageRecovery||0)+(t.loanRecovery||0)+pouchHold;
     const netDue   = Math.max(0, gross - deducts);
     const paidSoFar= (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
     const balance  = Math.max(0, netDue - paidSoFar);
-    return {...t, gross, netDue, paidSoFar, balance, veh};
+    return {...t, gross, netDue, paidSoFar, balance, veh, pouchHold};
   });
 
   // driverSettled is authoritative — once set, a trip is Paid and cannot show as
@@ -29701,6 +29706,7 @@ This will auto-recover in the next trip.`);
               {l:"(−) TAFAL",          v:t.tafal||0,   c:C.purple},
               {l:"(−) Loan Recovery",  v:t.loanRecovery||0, c:C.red},
               {l:"(−) Diesel est.",    v:t.dieselEstimate||0, c:C.orange},
+              {l:"(−) Pouch hold",     v:t.pouchHold||0, c:C.teal},
               {l:"Net Due",            v:t.netDue,     c:C.blue},
               {l:"Paid so far",        v:t.paidSoFar,  c:C.green},
             ].map(r=>(
