@@ -27761,7 +27761,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
 // Record bank transfers against a trip. "Balance due" auto-updates.
 // ─── EMPLOYEE TRIP GROUP ─────────────────────────────────────────────────────
 // Groups all unpaid trips for one employee — can request payment for each or all together
-function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, heldOnly=[], paymentRequests, setPaymentRequests, setPayReqSheet, requestPaymentGuarded, vehicles, fmt,
+function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, heldOnly=[], prevSnap=null, paymentRequests, setPaymentRequests, setPayReqSheet, requestPaymentGuarded, vehicles, fmt,
   setDriverPays, setTrips, setEmployees, setCashTransfers, cashTransfers, user, log }) {
   const [open, setOpen] = useState(true);
   const [selected, setSelected] = useState(new Set(empTrips.map(t=>t.id)));
@@ -27876,6 +27876,7 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, heldOnly=[]
           <div style={{fontSize:11,color:"#666",marginTop:2}}>
             {empTrips.length+heldOnly.length} trip{empTrips.length+heldOnly.length>1?"s":""} · Balance due: <b style={{color:"#dc2626"}}>₹{totalBal.toLocaleString("en-IN")}</b>
              {pouchHeld>0 && <div style={{fontSize:11,color:"#0f766e",marginTop:2}}>incl. ₹{pouchHeld.toLocaleString("en-IN")} pouch held until confirmation{heldOnly.length>0 && <span> (fully held: {heldOnly.map(h=>h.lrNo).join(", ")})</span>} · payable now <b>₹{(totalBal-pouchHeld).toLocaleString("en-IN")}</b></div>}
+             {prevSnap && <div style={{fontSize:11,color:C.muted,marginTop:2}}>Last saved {prevSnap.date}: ₹{Math.round(prevSnap.total).toLocaleString("en-IN")} · now {totalBal-prevSnap.total>=0?"+":"−"}₹{Math.abs(Math.round(totalBal-prevSnap.total)).toLocaleString("en-IN")}</div>}
           </div>
         </div>
         <div style={{fontSize:18}}>{open?"▲":"▼"}</div>
@@ -28827,6 +28828,42 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
   const scopedReqs   = (paymentRequests||[]).filter(r => !empScopeOn || inEmpScope(tripOfPay(r.tripId, r.lrNo)));
   const totalBalance = scopedUnpaid.reduce((s,t)=>s+t.balance,0);
 
+  // ── Daily balance snapshot (owner/manager) ─────────────────────────────────
+  // Per employee: headline total (payable + pouch held), held, payable, trips —
+  // the same numbers By Employee shows. Last write of the day wins, so a later
+  // day can be compared with an earlier one. Never blocks the screen.
+  const [balSnaps, setBalSnaps] = useState(null);
+  React.useEffect(()=>{ DB.getBalanceSnapshots().then(x=>setBalSnaps(x||[])).catch(()=>setBalSnaps([])); }, []); // eslint-disable-line
+  React.useEffect(()=>{
+    if(!(user.role==="owner"||user.role==="manager") || balSnaps===null) return;
+    if(!(trips||[]).length || !(driverPays||[]).length) return;
+    const agg = {};
+    tripWithBalance.forEach(t=>{
+      if(t.driverSettled) return;
+      const full = Math.max(0, (t.netDue||0)+(t.pouchHold||0)-(t.paidSoFar||0));
+      const bal = t.balance||0;
+      if(bal<=0 && full<=0) return;
+      const k = t.assignedEmpId||"unassigned";
+      const a = agg[k] = agg[k] || {trips:0, payable:0, held:0};
+      a.trips++; a.payable += bal; a.held += Math.max(0, full-bal);
+    });
+    const day = today();
+    const tm = setTimeout(()=>{
+      Object.entries(agg).forEach(([k,a])=>{
+        const id = day+"|"+k;
+        const rec = {id, date:day, empId:k==="unassigned"?"":k,
+          empName: k==="unassigned" ? "Unassigned" : ((employees||[]).find(e=>e.id===k)?.name||k),
+          trips:a.trips, total:Math.round((a.payable+a.held)*100)/100, held:Math.round(a.held*100)/100,
+          payable:Math.round(a.payable*100)/100, ts:Date.now()};
+        const old = (balSnaps||[]).find(x=>x.id===id);
+        if(old && old.total===rec.total && old.held===rec.held && old.trips===rec.trips) return;
+        setBalSnaps(prev=>[...(prev||[]).filter(x=>x.id!==id), rec]);
+        DB.saveBalanceSnapshot(rec).catch(e=>console.warn("saveBalanceSnapshot:", e));
+      });
+    }, 6000);
+    return ()=>clearTimeout(tm);
+  }, [tripWithBalance, balSnaps===null]); // eslint-disable-line
+
   // ── Startup: fix confirmed indents that are actually attached to trips ──────
   // Also self-heals dieselIndentLocked for any trip that has a dieselIndentNo
   // but isn't marked locked yet (e.g. existed before the lock feature).
@@ -29655,7 +29692,7 @@ This will auto-recover in the next trip.`);
               const [empGroupOpen, setEmpGroupOpen] = [null,null]; // handled per-instance below
               return (
                 <EmpTripGroup key={empId}
-                  empId={empId} emp={emp} empTrips={empTrips} totalBal={totalBal} pouchHeld={pouchHeld} heldOnly={heldOnly}
+                  empId={empId} emp={emp} empTrips={empTrips} totalBal={totalBal} pouchHeld={pouchHeld} heldOnly={heldOnly} prevSnap={(()=>{ const k=empId==="unassigned"?"":empId; const d=today(); return (balSnaps||[]).filter(x=>x.empId===k && x.date<d).sort((a,b)=>b.date.localeCompare(a.date))[0]||null; })()}
                   paymentRequests={paymentRequests||[]} setPaymentRequests={setPaymentRequests}
                   setPayReqSheet={setPayReqSheet}
                   requestPaymentGuarded={requestPaymentGuarded}

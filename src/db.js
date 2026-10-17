@@ -887,6 +887,18 @@ export const DB = {
     created_by: a.createdBy||'', created_at: a.createdAt||'', ts: a.ts||Date.now(),
   }), a),
 
+  // Daily per-employee Driver Pay balance snapshot (id = "<date>|<empId>").
+  getBalanceSnapshots: async () => {
+    try { return await fetchAll('mye_balance_snapshots', r => ({
+      id: r.id, date: r.snap_date||'', empId: r.emp_id||'', empName: r.emp_name||'',
+      trips: +(r.trips||0), total: +(r.total||0), held: +(r.held||0), payable: +(r.payable||0), ts: +(r.ts||0),
+    })); } catch(e) { console.warn('mye_balance_snapshots not ready:', e.message); return []; }
+  },
+  saveBalanceSnapshot: async (x) => upsertOne('mye_balance_snapshots', x => ({
+    id: x.id, snap_date: x.date||'', emp_id: x.empId||'', emp_name: x.empName||'',
+    trips: x.trips||0, total: x.total||0, held: x.held||0, payable: x.payable||0, ts: x.ts||Date.now(),
+  }), x),
+
   // Action Items — created when invoice scan can't cleanly bill a DI:
   //  type "missing_di"     → DI on the invoice has no matching trip in the app
   //  type "amount_mismatch"→ DI matched, but invoice amount != app's expected amount
