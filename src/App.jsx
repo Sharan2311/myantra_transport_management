@@ -27756,7 +27756,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
 // Record bank transfers against a trip. "Balance due" auto-updates.
 // ─── EMPLOYEE TRIP GROUP ─────────────────────────────────────────────────────
 // Groups all unpaid trips for one employee — can request payment for each or all together
-function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPaymentRequests, setPayReqSheet, requestPaymentGuarded, vehicles, fmt,
+function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, paymentRequests, setPaymentRequests, setPayReqSheet, requestPaymentGuarded, vehicles, fmt,
   setDriverPays, setTrips, setEmployees, setCashTransfers, cashTransfers, user, log }) {
   const [open, setOpen] = useState(true);
   const [selected, setSelected] = useState(new Set(empTrips.map(t=>t.id)));
@@ -27870,6 +27870,7 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, paymentRequests, setPaym
           </div>
           <div style={{fontSize:11,color:"#666",marginTop:2}}>
             {empTrips.length} trip{empTrips.length>1?"s":""} · Balance due: <b style={{color:"#dc2626"}}>₹{totalBal.toLocaleString("en-IN")}</b>
+             {pouchHeld>0 && <div style={{fontSize:11,color:"#0f766e",marginTop:2}}>incl. ₹{pouchHeld.toLocaleString("en-IN")} pouch held until confirmation · payable now <b>₹{(totalBal-pouchHeld).toLocaleString("en-IN")}</b></div>}
           </div>
         </div>
         <div style={{fontSize:18}}>{open?"▲":"▼"}</div>
@@ -29628,11 +29629,14 @@ This will auto-recover in the next trip.`);
             {empList.length===0 && <div style={{textAlign:"center",color:C.muted,padding:30}}>No unpaid trips</div>}
             {empList.map(([empId, empTrips])=>{
               const emp = (employees||[]).find(e=>e.id===empId);
-              const totalBal = empTrips.reduce((s,t)=>s+t.balance,0);
+              // Headline total stays the full amount (pouch hold included) so it
+              // doesn't jump; the held pouch is shown separately in the group.
+              const pouchHeld = empTrips.reduce((s,t)=>s+Math.max(0, Math.max(0,(t.netDue||0)+(t.pouchHold||0)-(t.paidSoFar||0)) - t.balance),0);
+              const totalBal = empTrips.reduce((s,t)=>s+t.balance,0) + pouchHeld;
               const [empGroupOpen, setEmpGroupOpen] = [null,null]; // handled per-instance below
               return (
                 <EmpTripGroup key={empId}
-                  empId={empId} emp={emp} empTrips={empTrips} totalBal={totalBal}
+                  empId={empId} emp={emp} empTrips={empTrips} totalBal={totalBal} pouchHeld={pouchHeld}
                   paymentRequests={paymentRequests||[]} setPaymentRequests={setPaymentRequests}
                   setPayReqSheet={setPayReqSheet}
                   requestPaymentGuarded={requestPaymentGuarded}
