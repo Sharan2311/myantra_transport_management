@@ -65,6 +65,12 @@ const tripFromDB = r => ({
   readyForBilling: r.ready_for_billing || false,
   readyForBillingBy: r.ready_for_billing_by || '',
   readyForBillingAt: r.ready_for_billing_at || '',
+  sentForBilling: r.sent_for_billing || false,
+  sentForBillingBy: r.sent_for_billing_by || '',
+  sentForBillingAt: r.sent_for_billing_at || '',
+  billingRejectedBy: r.billing_rejected_by || '',
+  billingRejectedAt: r.billing_rejected_at || '',
+  billingRejectNote: r.billing_reject_note || '',
   // Set true the moment a diesel request attaches to this trip. Once
   // locked, only an owner-role edit may change or clear dieselIndentNo —
   // see saveEdit(). Closes a real bug: a non-owner's stale edit-sheet
@@ -142,6 +148,12 @@ const tripToDB = t => ({
   ready_for_billing: t.readyForBilling || false,
   ready_for_billing_by: t.readyForBillingBy || '',
   ready_for_billing_at: t.readyForBillingAt || '',
+  sent_for_billing: t.sentForBilling || false,
+  sent_for_billing_by: t.sentForBillingBy || '',
+  sent_for_billing_at: t.sentForBillingAt || '',
+  billing_rejected_by: t.billingRejectedBy || '',
+  billing_rejected_at: t.billingRejectedAt || '',
+  billing_reject_note: t.billingRejectNote || '',
   diesel_indent_locked: t.dieselIndentLocked || false,
   pending_approval: t.pendingApproval || false,
   pending_approval_by: t.pendingApprovalBy || '',
