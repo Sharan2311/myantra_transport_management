@@ -580,8 +580,8 @@ function PaymentForm({ h, edit, prefill, onClose }) {
   const init = edit ? {
     kind: kindOf(edit), date: edit.rec.date, customerId: edit.rec.customerId || "", companyId: edit.rec.companyId || "", materialId: edit.rec.materialId || "",
     amount: String(edit.rec.amount || ""), deduction: edit.rec.deduction ? String(edit.rec.deduction) : "", deductionReason: edit.rec.deductionReason || "",
-    mode: edit.rec.mode || "Cash", note: edit.rec.note || "",
-  } : { kind: "customer_paid", date: today(), customerId: "", companyId: "", materialId: "", amount: "", deduction: "", deductionReason: "", mode: "Cash", note: "",
+    mode: edit.rec.mode || "Cash", reference: edit.rec.reference || "", note: edit.rec.note || "",
+  } : { kind: "customer_paid", date: today(), customerId: "", companyId: "", materialId: "", amount: "", deduction: "", deductionReason: "", mode: "Cash", reference: "", note: "",
     ...(prefill ? { ...prefill, amount: prefill.amount ? String(Math.round(prefill.amount * 100) / 100) : "" } : {}) };
   const kinds = [{ v: "customer_paid", l: "Paid to customer" }, { v: "company_received", l: "Received from company" }, { v: "loan_given", l: "Husk loan given" }];
 
@@ -593,11 +593,24 @@ function PaymentForm({ h, edit, prefill, onClose }) {
     f.push({ k: "amount", label: v.kind === "company_received" ? "Amount received (₹)" : "Amount (₹)", type: "number" });
     if (v.kind === "company_received") f.push({ k: "deduction", label: "Company deduction (₹, if any)", type: "number", half: true, note: "Moisture, shortage, TDS…" }, { k: "deductionReason", label: "Deduction reason", half: true });
     if (v.kind !== "loan_given") f.push({ k: "mode", label: "Mode", opts: MODES });
+    f.push({ k: "reference", label: "Reference / UTR no.", placeholder: "Bank / UPI reference (blank for cash)", note: "Each reference can be recorded only once." });
     f.push({ k: "note", label: "Note (optional)" });
     return f;
   };
+  // A reference (UTR) is on one payment only. Older payments kept it inside the note as "Ref: …", so those count too.
+  const normRef = x => String(x || "").replace(/\s+/g, "").toUpperCase();
+  const refsOf = r => [r.reference, ...(String(r.note || "").match(/Ref:\s*([A-Za-z0-9]+)/gi) || []).map(m => m.replace(/^Ref:\s*/i, ""))].map(normRef).filter(Boolean);
+  const dupOf = v => {
+    const ref = normRef(v.reference);
+    if (!ref) return null;
+    const editId = edit ? edit.rec.id : "";
+    return [...D.payments.map(r => ({ r, what: "payment" })), ...D.loans.filter(l => l.kind === "given").map(r => ({ r, what: "loan" }))]
+      .find(x => x.r.id !== editId && refsOf(x.r).includes(ref)) || null;
+  };
   const validate = v => {
     if (!(L.num(v.amount) > 0)) return "Enter the amount.";
+    const dup = dupOf(v);
+    if (dup) return `Reference ${String(v.reference).trim()} is already recorded on a ${dup.what} of ${fmt(dup.r.amount)} dated ${dup.r.date}. Duplicate references are not allowed.`;
     if (v.kind === "customer_paid" && (!v.customerId || !v.companyId || !v.materialId)) return "Choose the customer, company and material.";
     if (v.kind === "company_received" && (!v.companyId || !v.materialId)) return "Choose the company and material.";
     if (v.kind === "loan_given" && !v.customerId) return "Choose the customer.";
@@ -612,14 +625,14 @@ function PaymentForm({ h, edit, prefill, onClose }) {
     const id = edit ? edit.rec.id : uid();
     const ts = edit ? edit.rec.ts : Date.now();
     if (v.kind === "loan_given") {
-      const rec = { id, customerId: v.customerId, kind: "given", amount: L.num(v.amount), date: v.date, tripId: "", note: v.note, createdBy: edit ? edit.rec.createdBy : user.name, ts };
+      const rec = { id, customerId: v.customerId, kind: "given", amount: L.num(v.amount), date: v.date, tripId: "", reference: String(v.reference || "").trim(), note: v.note, createdBy: edit ? edit.rec.createdBy : user.name, ts };
       await HuskDB.save("loans", rec);
       if (edit) await HuskDB.save("changelog", h.change("mye_husk_loans", id, "edit", edit.rec, rec));
     } else {
       const rec = {
         id, kind: v.kind, date: v.date, companyId: v.companyId, materialId: v.materialId, customerId: v.kind === "customer_paid" ? v.customerId : "",
         amount: L.num(v.amount), deduction: v.kind === "company_received" ? L.num(v.deduction) : 0, deductionReason: v.kind === "company_received" ? v.deductionReason : "",
-        mode: v.mode, note: v.note, createdBy: edit ? edit.rec.createdBy : user.name, createdAt: edit ? edit.rec.createdAt : ui().nowTs(), ts,
+        mode: v.mode, reference: String(v.reference || "").trim(), note: v.note, createdBy: edit ? edit.rec.createdBy : user.name, createdAt: edit ? edit.rec.createdAt : ui().nowTs(), ts,
       };
       await HuskDB.save("payments", rec);
       if (edit) await HuskDB.save("changelog", h.change("mye_husk_payments", id, "edit", edit.rec, rec));
@@ -633,7 +646,8 @@ function PaymentForm({ h, edit, prefill, onClose }) {
     if (r.amount) patch.amount = String(r.amount);
     if (r.paymentDate) patch.date = r.paymentDate;
     const ref = r.referenceNo || r.transactionId;
-    const bits = [ref ? "Ref: " + ref : "", r.paidTo ? "To: " + r.paidTo : ""].filter(Boolean);
+    if (ref) patch.reference = String(ref);
+    const bits = [r.paidTo ? "To: " + r.paidTo : ""].filter(Boolean);
     if (bits.length) patch.note = [v.note, ...bits].filter(Boolean).join(" · ");
     if (r.paidTo && !v.customerId && v.kind !== "company_received") {
       const hay = String(r.paidTo).toLowerCase();
