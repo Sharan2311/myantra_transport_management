@@ -4,9 +4,12 @@
 // through the `ui` prop so this file looks and behaves like the rest of the app.
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { HuskDB } from "./db.js";
+import { RC } from "./runtime_config.js";
 import * as L from "./husk_logic.js";
 import { setHuskUI, ui, Card, Muted, Empty, Warn, DateInput, BTable, SummaryBoxes, fmtDay, fmtTons, money, printHuskReport, periodText, fyRange, fyLabel, fyStartYear } from "./husk_ui.jsx";
 
+// The business's own name (M Yantra, Kori …) comes from the client config, never hard-coded.
+const OWN = () => RC.companyName || "We";
 const nm = (list, id) => (list.find(x => x.id === id) || {}).name || "—";
 const normTruck = s => String(s || "").toUpperCase().replace(/\s+/g, "");
 const opt = (list, all) => [{ v: "", l: all || "All" }, ...list.map(x => ({ v: x.id, l: x.name }))];
@@ -717,7 +720,7 @@ function PaymentsTab({ h }) {
       <PillBar items={[{ id: "pay", label: "To pay customers", color: C.red }, { id: "recv", label: "To receive from companies", color: C.green }, { id: "hist", label: "Payment history", color: C.accent }]} active={view} onSelect={setView} />
 
       {view === "pay" && (<>
-        <Muted>What M Yantra still has to pay each customer: net payable of all their trucks, less what has been paid. It goes down by itself when a payment is recorded. All dates, not just the selected year.</Muted>
+        <Muted>What {OWN()} still has to pay each customer: net payable of all their trucks, less what has been paid. It goes down by itself when a payment is recorded. All dates, not just the selected year.</Muted>
         {owed.length === 0 && <Empty>Nothing to pay right now.</Empty>}
         {owed.map(d => (
           <Card key={d.customerId}>
@@ -736,14 +739,14 @@ function PaymentsTab({ h }) {
         ))}
         {advances.length > 0 && (
           <Card>
-            <div style={{ fontWeight: 800, color: C.text, marginBottom: 4 }}>Advances (customer owes M Yantra)</div>
+            <div style={{ fontWeight: 800, color: C.text, marginBottom: 4 }}>Advances (customer owes {OWN()})</div>
             {advances.map(d => line(d.customerId, nm(D.customers, d.customerId), -d.total, C.orange, null))}
           </Card>
         )}
       </>)}
 
       {view === "recv" && (<>
-        <Muted>What each company still has to pay M Yantra: billed amount of all trips, less receipts and the deductions they made. All dates.</Muted>
+        <Muted>What each company still has to pay {OWN()}: billed amount of all trips, less receipts and the deductions they made. All dates.</Muted>
         {toReceive.length === 0 && <Empty>Nothing to receive right now.</Empty>}
         {toReceive.map(c => (
           <Card key={c.companyId}>
@@ -832,7 +835,7 @@ function buildLedger(D, mode, f) {
 
   if (mode === "customer") {
     const res = L.customerLedger(D, f.partyId, filt);
-    Object.assign(out, { title: "Customer ledger", who: un(f.partyId), pos: "M Yantra owes the customer", neg: "Advance (customer owes M Yantra)", balance: res.balance });
+    Object.assign(out, { title: "Customer ledger", who: un(f.partyId), pos: `${OWN()} owes the customer`, neg: `Advance (customer owes ${OWN()})`, balance: res.balance });
     const open = sum(res.rows.filter(r => r.kind === "Opening"), "amount");
     const trips = res.rows.filter(r => r.kind === "Trip"), paid = res.rows.filter(r => r.kind === "Paid");
     const evs = L.rateChanges(D, win, { customer: r => r.customerId === f.partyId && okCo(r) });
@@ -858,7 +861,7 @@ function buildLedger(D, mode, f) {
   } else if (mode === "company" || mode === "material") {
     const isCo = mode === "company";
     const res = isCo ? L.companyLedger(D, f.partyId, filt) : L.materialLedger(D, f.partyId, filt);
-    Object.assign(out, { title: isCo ? "Company ledger" : "Material ledger", who: isCo ? cn(f.partyId) : mn(f.partyId), pos: isCo ? "Company owes M Yantra" : "Companies owe M Yantra", neg: isCo ? "Company has paid in excess" : "Companies have paid in excess", balance: res.balance });
+    Object.assign(out, { title: isCo ? "Company ledger" : "Material ledger", who: isCo ? cn(f.partyId) : mn(f.partyId), pos: isCo ? `Company owes ${OWN()}` : `Companies owe ${OWN()}`, neg: isCo ? "Company has paid in excess" : "Companies have paid in excess", balance: res.balance });
     const open = sum(res.rows.filter(r => r.kind === "Opening"), "amount");
     const trips = res.rows.filter(r => r.kind === "Trip"), recv = res.rows.filter(r => r.kind === "Received"), dedRows = res.rows.filter(r => r.kind === "Deduction");
     const tonsT = sum(trips, "tons"), billed = sum(trips, "amount"), recvT = -sum(recv, "amount"), dedT = -sum(dedRows, "amount");
@@ -1082,8 +1085,8 @@ function RatesTab({ h }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <Muted>Rates are added or changed in the New vehicle entry form (Husk manager or owner). The owner can also edit or delete a wrong rate here. Every change is kept in the change log.</Muted>
-      {block("Company rates (company pays M Yantra)", companyGroups, "company")}
-      {block("Customer rates (M Yantra pays customer)", customerGroups, "customer")}
+      {block(`Company rates (company pays ${OWN()})`, companyGroups, "company")}
+      {block(`Customer rates (${OWN()} pays customer)`, customerGroups, "customer")}
       {edit && <FormSheet title="Edit rate" onClose={() => setEdit(null)} init={{ rate: String(edit.row.rate), effectiveFrom: edit.row.effectiveFrom }}
         fields={[{ k: "rate", label: "Rate per ton (₹)", type: "number", half: true }, { k: "effectiveFrom", label: "Effective from", type: "date", half: true }]}
         validate={v => !(L.num(v.rate) > 0) ? "Enter a rate above 0." : !v.effectiveFrom ? "Pick the effective date." : ""}
@@ -1170,8 +1173,8 @@ function ProfitTab({ h }) {
       {!s.deductionsAttributed && <Muted>Company deductions belong to company payments, not to a customer or vehicle, so this view shows the rate margin only.</Muted>}
       <Card>
         <div style={{ display: "flex", justifyContent: "space-between" }}>
-          <div><Muted>Companies still owe M Yantra</Muted><div style={{ fontWeight: 900, color: C.accent }}>{money(L.receivableFromCompanies(D))}</div></div>
-          <div style={{ textAlign: "right" }}><Muted>M Yantra owes customers</Muted><div style={{ fontWeight: 900, color: C.purple }}>{money(L.payableToCustomers(D))}</div></div>
+          <div><Muted>Companies still owe {OWN()}</Muted><div style={{ fontWeight: 900, color: C.accent }}>{money(L.receivableFromCompanies(D))}</div></div>
+          <div style={{ textAlign: "right" }}><Muted>{OWN()} owes customers</Muted><div style={{ fontWeight: 900, color: C.purple }}>{money(L.payableToCustomers(D))}</div></div>
         </div>
       </Card>
       <PillBar items={[{ id: "company", label: "By company", color: C.accent }, { id: "customer", label: "By customer", color: C.purple }, { id: "material", label: "By material", color: C.teal }, { id: "vehicle", label: "By vehicle", color: C.blue }]} active={dim} onSelect={setDim} />
@@ -1238,8 +1241,8 @@ function SetupTab({ h }) {
           ...(v.partyType === "customer" ? [{ k: "companyId", label: "Company (optional)", opts: opt(D.companies, "Not specific"), half: true }] : []),
           { k: "materialId", label: "Material (optional)", opts: opt(D.materials, "Not specific"), half: true },
           { k: "dir", label: "Direction", opts: v.partyType === "customer"
-            ? [{ v: "pos", l: "M Yantra owes the customer (+)" }, { v: "neg", l: "Advance: customer owes M Yantra (−)" }]
-            : [{ v: "pos", l: "Company owes M Yantra (+)" }, { v: "neg", l: "M Yantra owes the company (−)" }] },
+            ? [{ v: "pos", l: `${OWN()} owes the customer (+)` }, { v: "neg", l: `Advance: customer owes ${OWN()} (−)` }]
+            : [{ v: "pos", l: `Company owes ${OWN()} (+)` }, { v: "neg", l: `${OWN()} owes the company (−)` }] },
           { k: "amount", label: "Amount (₹)", type: "number", half: true },
           { k: "asOf", label: "As of", type: "date", half: true },
           { k: "note", label: "Note (optional)" },
