@@ -179,6 +179,9 @@ const diRowsFor = (trip) => {
     // Ready for Billing — per-DI, set automatically when Confirmation Email
     // is received, or manually by owner/party manager (see markReadyForBilling).
     readyForBilling: !!d.readyForBilling, readyForBillingBy: d.readyForBillingBy||"", readyForBillingAt: d.readyForBillingAt||"",
+    // Sent for billing — per-DI; billingRejected* is the note from the last time it was sent back.
+    sentForBilling: !!d.sentForBilling, sentForBillingBy: d.sentForBillingBy||"", sentForBillingAt: d.sentForBillingAt||"",
+    billingRejectedBy: d.billingRejectedBy||"", billingRejectedAt: d.billingRejectedAt||"", billingRejectNote: d.billingRejectNote||"",
     // Per-DI Return Pouch + its own GR/Invoice/Merged PDF — each DI already
     // had its own GR/Invoice since trip creation; sealedInvoicePath/
     // mergedPdfPath are new, uploaded per-DI going forward (see
@@ -196,6 +199,8 @@ const diRowsFor = (trip) => {
     epodDone: !!trip.epodDone, epodDoneBy: trip.epodDoneBy||"", epodDoneAt: trip.epodDoneAt||"",
     epodPouchDone: !!trip.epodPouchDone, epodPouchBy: trip.epodPouchBy||"", epodPouchAt: trip.epodPouchAt||"",
     readyForBilling: !!trip.readyForBilling, readyForBillingBy: trip.readyForBillingBy||"", readyForBillingAt: trip.readyForBillingAt||"",
+    sentForBilling: !!trip.sentForBilling, sentForBillingBy: trip.sentForBillingBy||"", sentForBillingAt: trip.sentForBillingAt||"",
+    billingRejectedBy: trip.billingRejectedBy||"", billingRejectedAt: trip.billingRejectedAt||"", billingRejectNote: trip.billingRejectNote||"",
     // Single-DI trip: the "per-DI" fields ARE the trip-level fields — no
     // separate storage needed since there's only ever one DI.
     grFilePath: trip.grFilePath||"", invoiceFilePath: trip.invoiceFilePath||"",
@@ -205,7 +210,7 @@ const diRowsFor = (trip) => {
 // Party Portal only ever wants PARTY DI lines — a trip classified "party"
 // overall can still carry godown-orderType DI lines mixed in (see above).
 const partyDiRowsFor = (trip) => diRowsFor(trip).filter(d => d.orderType==="party");
-const diRowStatus = d => d.paid ? "Paid" : d.billed ? "Billed" : "Not Billed";
+const diRowStatus = d => d.paid ? "Paid" : d.billed ? "Billed" : d.sentForBilling ? "Sent for Billing" : "Not Billed";
 // GR numbers are formatted <line-code>/MYE/<seq> (e.g. 1070/MYE/1908,
 // 1079/MYE/512) — the prefix identifies which physical loading line at the
 // plant the GR was issued from. Returns null for anything else, so an
@@ -270,7 +275,8 @@ const daysSinceDate = dateStr => {
 // dueSoon: 70-89 days old, still time to bill before the 90-day mark.
 // overdue: 90+ days old, past the deadline.
 const billingAging = (t, d) => {
-  if(diRowStatus(d)!=="Not Billed") return {daysOld:0, dueSoon:false, overdue:false};
+  const _st = diRowStatus(d);
+  if(_st!=="Not Billed" && _st!=="Sent for Billing") return {daysOld:0, dueSoon:false, overdue:false};
   const daysOld = daysSinceDate(t.date);
   return { daysOld, dueSoon: daysOld>=70 && daysOld<90, overdue: daysOld>=90 };
 };
@@ -14668,7 +14674,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
       // Clubbed trips show every DI on the LR (party + godown); everything
       // else keeps showing party DIs only, same as before.
       let rows = clubbed ? diRowsFor(t) : partyDiRowsFor(t);
-      if(billStatusFilter!=="all") rows = rows.filter(d => diRowStatus(d) === (billStatusFilter==="not_billed"?"Not Billed":billStatusFilter==="billed"?"Billed":"Paid"));
+      if(billStatusFilter!=="all") rows = rows.filter(d => diRowStatus(d) === (billStatusFilter==="not_billed"?"Not Billed":billStatusFilter==="sent"?"Sent for Billing":billStatusFilter==="billed"?"Billed":"Paid"));
       // Confirmation Email / Ready for Billing are party-specific concepts —
       // a godown DI row on a clubbed trip is never excluded by these two
       // filters (it has nothing to confirm), only by billing status.
@@ -14699,7 +14705,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
     const empName = employeeFilter ? (employees.find(e=>e.id===employeeFilter)?.name || employeeFilter) : "";
     const filterParts = [];
     if(employeeFilter) filterParts.push(`Employee: ${empName}`);
-    if(billStatusFilter!=="all") filterParts.push(`Status: ${billStatusFilter==="not_billed"?"Not Billed":billStatusFilter==="billed"?"Billed":"Paid"}`);
+    if(billStatusFilter!=="all") filterParts.push(`Status: ${billStatusFilter==="not_billed"?"Not Billed":billStatusFilter==="sent"?"Sent for Billing":billStatusFilter==="billed"?"Billed":"Paid"}`);
     if(pouchFilter!=="all") filterParts.push(`Return Pouch: ${pouchFilter==="received"?"Received":"Not Received"}`);
     if(confirmFilter!=="all") filterParts.push(`Confirmation Email: ${confirmFilter==="received"?"Received":"Not Received"}`);
     if(readyFilter!=="all") filterParts.push(`Ready for Billing: ${readyFilter==="ready"?"Ready":"Not Ready"}`);
@@ -14836,6 +14842,34 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
     setTrips(prev=>prev.map(t=>t.id===trip.id?updated:t));
     setTimeout(()=>DB.saveTrip(updated).catch(e=>console.error("saveTrip unmarkReady:",e)),0);
     log&&log("READY FOR BILLING REMOVED",`DI:${diNo||"—"} LR:${trip.lrNo} by ${user?.name||user?.username}`);
+  };
+
+  // ── Sent for Billing — per-DI, owner/party manager only ─────────────────
+  // Not Billed → Sent for Billing → (invoice scanned) Billed. If the party
+  // rejects the DI, "Back to Not Billed" returns it so the team can fix and
+  // resubmit; the rejection note stays visible until it is sent again.
+  const _saveBillingStage = (trip, diNo, patch, logAction, logExtra) => {
+    const hasLines = (trip.diLines||[]).length > 0;
+    const updated = hasLines
+      ? {...trip, diLines: trip.diLines.map(d => d.diNo===diNo ? {...d, ...patch} : d)}
+      : {...trip, ...patch};
+    setTrips(prev=>prev.map(t=>t.id===trip.id?updated:t));
+    setTimeout(()=>DB.saveTrip(updated).catch(e=>console.error("saveTrip billing stage:",e)),0);
+    log&&log(logAction,`DI:${diNo||"—"} LR:${trip.lrNo}${logExtra||""} by ${user?.name||user?.username}`);
+  };
+  const markSentForBilling = (trip, diNo) => {
+    if(!isPartyMgr) { alert("Only the owner or party manager can mark Sent for Billing."); return; }
+    if(!window.confirm(`Mark DI ${diNo||trip.lrNo} as Sent for Billing?`)) return;
+    _saveBillingStage(trip, diNo, {sentForBilling:true, sentForBillingBy:user?.name||user?.username||"", sentForBillingAt:new Date().toISOString(),
+      billingRejectedBy:"", billingRejectedAt:"", billingRejectNote:""}, "SENT FOR BILLING");
+  };
+  const rejectBackToNotBilled = (trip, diNo) => {
+    if(!isPartyMgr) { alert("Only the owner or party manager can move a DI back to Not Billed."); return; }
+    const note = window.prompt(`DI ${diNo||trip.lrNo} was rejected — move back to Not Billed.\n\nReason (optional, e.g. what needs fixing):`, "");
+    if(note===null) return; // cancelled
+    _saveBillingStage(trip, diNo, {sentForBilling:false, sentForBillingBy:"", sentForBillingAt:"",
+      billingRejectedBy:user?.name||user?.username||"", billingRejectedAt:new Date().toISOString(), billingRejectNote:(note||"").trim()},
+      "BILLING REJECTED", (note||"").trim()?` — ${(note||"").trim()}`:"");
   };
 
   // ── Confirmation Mail Builder ────────────────────────────────────────────
@@ -15086,7 +15120,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
 
       {/* Billing status (DI-line level) + Return Pouch + Confirmation Email + Ready for Billing filters */}
       <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-        {[["all","All"],["not_billed","Not Billed"],["billed","Billed"],["paid","Paid"]].map(([k,l])=>(
+        {[["all","All"],["not_billed","Not Billed"],["sent","📤 Sent for Billing"],["billed","Billed"],["paid","Paid"]].map(([k,l])=>(
           <button key={k} onClick={()=>setBillStatusFilter(k)}
             style={{padding:"5px 11px",borderRadius:16,cursor:"pointer",fontWeight:700,fontSize:11,
               background:billStatusFilter===k?C.teal:"transparent",border:`1.5px solid ${C.teal}`,
@@ -15353,9 +15387,31 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                         {clubbed && <div style={{marginTop:3}}>{d.orderType==="party"?<Badge label="🎪 Party" color="#7c3aed" />:<Badge label="🏭 Godown" color={C.muted} />}</div>}
                       </td>
                       <td style={{padding:"6px 8px",borderRight:bR,borderBottom:bB}}>
-                        {(()=>{ const st=diRowStatus(d); const c = st==="Paid"?C.green:st==="Billed"?C.teal:C.orange;
+                        {(()=>{ const st=diRowStatus(d); const c = st==="Paid"?C.green:st==="Billed"?C.teal:st==="Sent for Billing"?C.blue:C.orange;
                           return <Badge label={st} color={c} />; })()}
                         {d.invoiceNo && <div style={{color:C.muted,fontSize:10,marginTop:2,fontFamily:"monospace"}}>{d.invoiceNo}</div>}
+                        {d.orderType==="party" && diRowStatus(d)==="Sent for Billing" && (
+                          <div style={{marginTop:3}}>
+                            <div style={{color:C.muted,fontSize:9}}>sent by {d.sentForBillingBy||"—"}{d.sentForBillingAt?" · "+new Date(d.sentForBillingAt).toLocaleString("en-IN",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"}):""}</div>
+                            {isPartyMgr && (
+                              <button onClick={()=>rejectBackToNotBilled(t,d.diNo)}
+                                style={{background:"none",border:`1px solid ${C.red}`,borderRadius:6,color:C.red,fontSize:9,padding:"2px 6px",cursor:"pointer",fontWeight:700,marginTop:3}}>
+                                ↩ Rejected — back to Not Billed
+                              </button>
+                            )}
+                          </div>
+                        )}
+                        {d.orderType==="party" && diRowStatus(d)==="Not Billed" && (
+                          <div style={{marginTop:3}}>
+                            {d.billingRejectedAt && <div style={{color:C.red,fontSize:9,marginBottom:2}}>↩ Rejected{d.billingRejectedBy?` by ${d.billingRejectedBy}`:""}{d.billingRejectNote?`: ${d.billingRejectNote}`:""}</div>}
+                            {isPartyMgr && (
+                              <button onClick={()=>markSentForBilling(t,d.diNo)}
+                                style={{background:"none",border:`1px solid ${C.blue}`,borderRadius:6,color:C.blue,fontSize:9,padding:"2px 6px",cursor:"pointer",fontWeight:700}}>
+                                📤 Sent for billing
+                              </button>
+                            )}
+                          </div>
+                        )}
                         {aging.overdue && <div style={{marginTop:3}}><Badge label={`🚨 Overdue by ${aging.daysOld-90}d`} color={C.red} /></div>}
                         {aging.dueSoon && <div style={{marginTop:3}}><Badge label={`⏰ Bill within ${90-aging.daysOld}d`} color={C.orange} /></div>}
                       </td>

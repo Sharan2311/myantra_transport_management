@@ -4,9 +4,12 @@
 // through the `ui` prop so this file looks and behaves like the rest of the app.
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { HuskDB } from "./db.js";
+import { RC } from "./runtime_config.js";
 import * as L from "./husk_logic.js";
 import { setHuskUI, ui, Card, Muted, Empty, Warn, DateInput, BTable, SummaryBoxes, fmtDay, fmtTons, money, printHuskReport, periodText, fyRange, fyLabel, fyStartYear } from "./husk_ui.jsx";
 
+// The business's own name (M Yantra, Kori …) comes from the client config, never hard-coded.
+const OWN = () => RC.companyName || "We";
 const nm = (list, id) => (list.find(x => x.id === id) || {}).name || "—";
 const normTruck = s => String(s || "").toUpperCase().replace(/\s+/g, "");
 const opt = (list, all) => [{ v: "", l: all || "All" }, ...list.map(x => ({ v: x.id, l: x.name }))];
@@ -580,8 +583,8 @@ function PaymentForm({ h, edit, prefill, onClose }) {
   const init = edit ? {
     kind: kindOf(edit), date: edit.rec.date, customerId: edit.rec.customerId || "", companyId: edit.rec.companyId || "", materialId: edit.rec.materialId || "",
     amount: String(edit.rec.amount || ""), deduction: edit.rec.deduction ? String(edit.rec.deduction) : "", deductionReason: edit.rec.deductionReason || "",
-    mode: edit.rec.mode || "Cash", note: edit.rec.note || "",
-  } : { kind: "customer_paid", date: today(), customerId: "", companyId: "", materialId: "", amount: "", deduction: "", deductionReason: "", mode: "Cash", note: "",
+    mode: edit.rec.mode || "Cash", reference: edit.rec.reference || "", note: edit.rec.note || "",
+  } : { kind: "customer_paid", date: today(), customerId: "", companyId: "", materialId: "", amount: "", deduction: "", deductionReason: "", mode: "Cash", reference: "", note: "",
     ...(prefill ? { ...prefill, amount: prefill.amount ? String(Math.round(prefill.amount * 100) / 100) : "" } : {}) };
   const kinds = [{ v: "customer_paid", l: "Paid to customer" }, { v: "company_received", l: "Received from company" }, { v: "loan_given", l: "Husk loan given" }];
 
@@ -593,11 +596,24 @@ function PaymentForm({ h, edit, prefill, onClose }) {
     f.push({ k: "amount", label: v.kind === "company_received" ? "Amount received (₹)" : "Amount (₹)", type: "number" });
     if (v.kind === "company_received") f.push({ k: "deduction", label: "Company deduction (₹, if any)", type: "number", half: true, note: "Moisture, shortage, TDS…" }, { k: "deductionReason", label: "Deduction reason", half: true });
     if (v.kind !== "loan_given") f.push({ k: "mode", label: "Mode", opts: MODES });
+    f.push({ k: "reference", label: "Reference / UTR no.", placeholder: "Bank / UPI reference (blank for cash)", note: "Each reference can be recorded only once." });
     f.push({ k: "note", label: "Note (optional)" });
     return f;
   };
+  // A reference (UTR) is on one payment only. Older payments kept it inside the note as "Ref: …", so those count too.
+  const normRef = x => String(x || "").replace(/\s+/g, "").toUpperCase();
+  const refsOf = r => [r.reference, ...(String(r.note || "").match(/Ref:\s*([A-Za-z0-9]+)/gi) || []).map(m => m.replace(/^Ref:\s*/i, ""))].map(normRef).filter(Boolean);
+  const dupOf = v => {
+    const ref = normRef(v.reference);
+    if (!ref) return null;
+    const editId = edit ? edit.rec.id : "";
+    return [...D.payments.map(r => ({ r, what: "payment" })), ...D.loans.filter(l => l.kind === "given").map(r => ({ r, what: "loan" }))]
+      .find(x => x.r.id !== editId && refsOf(x.r).includes(ref)) || null;
+  };
   const validate = v => {
     if (!(L.num(v.amount) > 0)) return "Enter the amount.";
+    const dup = dupOf(v);
+    if (dup) return `Reference ${String(v.reference).trim()} is already recorded on a ${dup.what} of ${fmt(dup.r.amount)} dated ${dup.r.date}. Duplicate references are not allowed.`;
     if (v.kind === "customer_paid" && (!v.customerId || !v.companyId || !v.materialId)) return "Choose the customer, company and material.";
     if (v.kind === "company_received" && (!v.companyId || !v.materialId)) return "Choose the company and material.";
     if (v.kind === "loan_given" && !v.customerId) return "Choose the customer.";
@@ -612,14 +628,14 @@ function PaymentForm({ h, edit, prefill, onClose }) {
     const id = edit ? edit.rec.id : uid();
     const ts = edit ? edit.rec.ts : Date.now();
     if (v.kind === "loan_given") {
-      const rec = { id, customerId: v.customerId, kind: "given", amount: L.num(v.amount), date: v.date, tripId: "", note: v.note, createdBy: edit ? edit.rec.createdBy : user.name, ts };
+      const rec = { id, customerId: v.customerId, kind: "given", amount: L.num(v.amount), date: v.date, tripId: "", reference: String(v.reference || "").trim(), note: v.note, createdBy: edit ? edit.rec.createdBy : user.name, ts };
       await HuskDB.save("loans", rec);
       if (edit) await HuskDB.save("changelog", h.change("mye_husk_loans", id, "edit", edit.rec, rec));
     } else {
       const rec = {
         id, kind: v.kind, date: v.date, companyId: v.companyId, materialId: v.materialId, customerId: v.kind === "customer_paid" ? v.customerId : "",
         amount: L.num(v.amount), deduction: v.kind === "company_received" ? L.num(v.deduction) : 0, deductionReason: v.kind === "company_received" ? v.deductionReason : "",
-        mode: v.mode, note: v.note, createdBy: edit ? edit.rec.createdBy : user.name, createdAt: edit ? edit.rec.createdAt : ui().nowTs(), ts,
+        mode: v.mode, reference: String(v.reference || "").trim(), note: v.note, createdBy: edit ? edit.rec.createdBy : user.name, createdAt: edit ? edit.rec.createdAt : ui().nowTs(), ts,
       };
       await HuskDB.save("payments", rec);
       if (edit) await HuskDB.save("changelog", h.change("mye_husk_payments", id, "edit", edit.rec, rec));
@@ -633,7 +649,8 @@ function PaymentForm({ h, edit, prefill, onClose }) {
     if (r.amount) patch.amount = String(r.amount);
     if (r.paymentDate) patch.date = r.paymentDate;
     const ref = r.referenceNo || r.transactionId;
-    const bits = [ref ? "Ref: " + ref : "", r.paidTo ? "To: " + r.paidTo : ""].filter(Boolean);
+    if (ref) patch.reference = String(ref);
+    const bits = [r.paidTo ? "To: " + r.paidTo : ""].filter(Boolean);
     if (bits.length) patch.note = [v.note, ...bits].filter(Boolean).join(" · ");
     if (r.paidTo && !v.customerId && v.kind !== "company_received") {
       const hay = String(r.paidTo).toLowerCase();
@@ -703,7 +720,7 @@ function PaymentsTab({ h }) {
       <PillBar items={[{ id: "pay", label: "To pay customers", color: C.red }, { id: "recv", label: "To receive from companies", color: C.green }, { id: "hist", label: "Payment history", color: C.accent }]} active={view} onSelect={setView} />
 
       {view === "pay" && (<>
-        <Muted>What M Yantra still has to pay each customer: net payable of all their trucks, less what has been paid. It goes down by itself when a payment is recorded. All dates, not just the selected year.</Muted>
+        <Muted>What {OWN()} still has to pay each customer: net payable of all their trucks, less what has been paid. It goes down by itself when a payment is recorded. All dates, not just the selected year.</Muted>
         {owed.length === 0 && <Empty>Nothing to pay right now.</Empty>}
         {owed.map(d => (
           <Card key={d.customerId}>
@@ -722,14 +739,14 @@ function PaymentsTab({ h }) {
         ))}
         {advances.length > 0 && (
           <Card>
-            <div style={{ fontWeight: 800, color: C.text, marginBottom: 4 }}>Advances (customer owes M Yantra)</div>
+            <div style={{ fontWeight: 800, color: C.text, marginBottom: 4 }}>Advances (customer owes {OWN()})</div>
             {advances.map(d => line(d.customerId, nm(D.customers, d.customerId), -d.total, C.orange, null))}
           </Card>
         )}
       </>)}
 
       {view === "recv" && (<>
-        <Muted>What each company still has to pay M Yantra: billed amount of all trips, less receipts and the deductions they made. All dates.</Muted>
+        <Muted>What each company still has to pay {OWN()}: billed amount of all trips, less receipts and the deductions they made. All dates.</Muted>
         {toReceive.length === 0 && <Empty>Nothing to receive right now.</Empty>}
         {toReceive.map(c => (
           <Card key={c.companyId}>
@@ -818,7 +835,7 @@ function buildLedger(D, mode, f) {
 
   if (mode === "customer") {
     const res = L.customerLedger(D, f.partyId, filt);
-    Object.assign(out, { title: "Customer ledger", who: un(f.partyId), pos: "M Yantra owes the customer", neg: "Advance (customer owes M Yantra)", balance: res.balance });
+    Object.assign(out, { title: "Customer ledger", who: un(f.partyId), pos: `${OWN()} owes the customer`, neg: `Advance (customer owes ${OWN()})`, balance: res.balance });
     const open = sum(res.rows.filter(r => r.kind === "Opening"), "amount");
     const trips = res.rows.filter(r => r.kind === "Trip"), paid = res.rows.filter(r => r.kind === "Paid");
     const evs = L.rateChanges(D, win, { customer: r => r.customerId === f.partyId && okCo(r) });
@@ -844,7 +861,7 @@ function buildLedger(D, mode, f) {
   } else if (mode === "company" || mode === "material") {
     const isCo = mode === "company";
     const res = isCo ? L.companyLedger(D, f.partyId, filt) : L.materialLedger(D, f.partyId, filt);
-    Object.assign(out, { title: isCo ? "Company ledger" : "Material ledger", who: isCo ? cn(f.partyId) : mn(f.partyId), pos: isCo ? "Company owes M Yantra" : "Companies owe M Yantra", neg: isCo ? "Company has paid in excess" : "Companies have paid in excess", balance: res.balance });
+    Object.assign(out, { title: isCo ? "Company ledger" : "Material ledger", who: isCo ? cn(f.partyId) : mn(f.partyId), pos: isCo ? `Company owes ${OWN()}` : `Companies owe ${OWN()}`, neg: isCo ? "Company has paid in excess" : "Companies have paid in excess", balance: res.balance });
     const open = sum(res.rows.filter(r => r.kind === "Opening"), "amount");
     const trips = res.rows.filter(r => r.kind === "Trip"), recv = res.rows.filter(r => r.kind === "Received"), dedRows = res.rows.filter(r => r.kind === "Deduction");
     const tonsT = sum(trips, "tons"), billed = sum(trips, "amount"), recvT = -sum(recv, "amount"), dedT = -sum(dedRows, "amount");
@@ -1068,8 +1085,8 @@ function RatesTab({ h }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <Muted>Rates are added or changed in the New vehicle entry form (Husk manager or owner). The owner can also edit or delete a wrong rate here. Every change is kept in the change log.</Muted>
-      {block("Company rates (company pays M Yantra)", companyGroups, "company")}
-      {block("Customer rates (M Yantra pays customer)", customerGroups, "customer")}
+      {block(`Company rates (company pays ${OWN()})`, companyGroups, "company")}
+      {block(`Customer rates (${OWN()} pays customer)`, customerGroups, "customer")}
       {edit && <FormSheet title="Edit rate" onClose={() => setEdit(null)} init={{ rate: String(edit.row.rate), effectiveFrom: edit.row.effectiveFrom }}
         fields={[{ k: "rate", label: "Rate per ton (₹)", type: "number", half: true }, { k: "effectiveFrom", label: "Effective from", type: "date", half: true }]}
         validate={v => !(L.num(v.rate) > 0) ? "Enter a rate above 0." : !v.effectiveFrom ? "Pick the effective date." : ""}
@@ -1156,8 +1173,8 @@ function ProfitTab({ h }) {
       {!s.deductionsAttributed && <Muted>Company deductions belong to company payments, not to a customer or vehicle, so this view shows the rate margin only.</Muted>}
       <Card>
         <div style={{ display: "flex", justifyContent: "space-between" }}>
-          <div><Muted>Companies still owe M Yantra</Muted><div style={{ fontWeight: 900, color: C.accent }}>{money(L.receivableFromCompanies(D))}</div></div>
-          <div style={{ textAlign: "right" }}><Muted>M Yantra owes customers</Muted><div style={{ fontWeight: 900, color: C.purple }}>{money(L.payableToCustomers(D))}</div></div>
+          <div><Muted>Companies still owe {OWN()}</Muted><div style={{ fontWeight: 900, color: C.accent }}>{money(L.receivableFromCompanies(D))}</div></div>
+          <div style={{ textAlign: "right" }}><Muted>{OWN()} owes customers</Muted><div style={{ fontWeight: 900, color: C.purple }}>{money(L.payableToCustomers(D))}</div></div>
         </div>
       </Card>
       <PillBar items={[{ id: "company", label: "By company", color: C.accent }, { id: "customer", label: "By customer", color: C.purple }, { id: "material", label: "By material", color: C.teal }, { id: "vehicle", label: "By vehicle", color: C.blue }]} active={dim} onSelect={setDim} />
@@ -1224,8 +1241,8 @@ function SetupTab({ h }) {
           ...(v.partyType === "customer" ? [{ k: "companyId", label: "Company (optional)", opts: opt(D.companies, "Not specific"), half: true }] : []),
           { k: "materialId", label: "Material (optional)", opts: opt(D.materials, "Not specific"), half: true },
           { k: "dir", label: "Direction", opts: v.partyType === "customer"
-            ? [{ v: "pos", l: "M Yantra owes the customer (+)" }, { v: "neg", l: "Advance: customer owes M Yantra (−)" }]
-            : [{ v: "pos", l: "Company owes M Yantra (+)" }, { v: "neg", l: "M Yantra owes the company (−)" }] },
+            ? [{ v: "pos", l: `${OWN()} owes the customer (+)` }, { v: "neg", l: `Advance: customer owes ${OWN()} (−)` }]
+            : [{ v: "pos", l: `Company owes ${OWN()} (+)` }, { v: "neg", l: `${OWN()} owes the company (−)` }] },
           { k: "amount", label: "Amount (₹)", type: "number", half: true },
           { k: "asOf", label: "As of", type: "date", half: true },
           { k: "note", label: "Note (optional)" },
