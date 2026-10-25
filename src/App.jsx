@@ -27885,7 +27885,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
 // Record bank transfers against a trip. "Balance due" auto-updates.
 // ─── EMPLOYEE TRIP GROUP ─────────────────────────────────────────────────────
 // Groups all unpaid trips for one employee — can request payment for each or all together
-function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, heldOnly=[], prevSnap=null, paymentRequests, setPaymentRequests, setPayReqSheet, requestPaymentGuarded, vehicles, fmt,
+function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed=0, settledCount=0, heldOnly=[], prevSnap=null, paymentRequests, setPaymentRequests, setPayReqSheet, requestPaymentGuarded, vehicles, fmt,
   setDriverPays, setTrips, setEmployees, setCashTransfers, cashTransfers, user, log }) {
   const [open, setOpen] = useState(true);
   const [selected, setSelected] = useState(new Set(empTrips.map(t=>t.id)));
@@ -27999,7 +27999,10 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, heldOnly=[]
           </div>
           <div style={{fontSize:11,color:"#666",marginTop:2}}>
             {empTrips.length+heldOnly.length} trip{empTrips.length+heldOnly.length>1?"s":""} · Balance due: <b style={{color:"#dc2626"}}>₹{totalBal.toLocaleString("en-IN")}</b>
-             {pouchHeld>0 && <div style={{fontSize:11,color:"#0f766e",marginTop:2}}><b>Pouch held ₹{pouchHeld.toLocaleString("en-IN")}</b> (included in the total; can be requested after the first payment on each trip){heldOnly.length>0 && <span> (fully held: {heldOnly.map(h=>h.lrNo).join(", ")})</span>} · payable now <b>₹{(totalBal-pouchHeld).toLocaleString("en-IN")}</b></div>}
+             {(pouchHeld>0||settledOwed>0) && <div style={{fontSize:11,color:"#0f766e",marginTop:2}}>
+               {pouchHeld>0 && <span><b>Pouch held ₹{pouchHeld.toLocaleString("en-IN")}</b> · </span>}
+               {settledOwed>0 && <span><b>Marked settled but still owed ₹{Math.round(settledOwed).toLocaleString("en-IN")}</b> ({settledCount} trip{settledCount>1?"s":""}) · </span>}
+               payable now <b>₹{Math.round(totalBal-pouchHeld-settledOwed).toLocaleString("en-IN")}</b> — all included in the total above</div>}
              {prevSnap && <div style={{fontSize:11,color:C.muted,marginTop:2}}>Last saved {prevSnap.date}: ₹{Math.round(prevSnap.total).toLocaleString("en-IN")} · now {totalBal-prevSnap.total>=0?"+":"−"}₹{Math.abs(Math.round(totalBal-prevSnap.total)).toLocaleString("en-IN")}</div>}
           </div>
         </div>
@@ -28966,9 +28969,8 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
     if(!(trips||[]).length || !(driverPays||[]).length) return;
     const agg = {};
     tripWithBalance.forEach(t=>{
-      if(t.driverSettled) return;
       const full = t.balancePlain||0;
-      const bal = t.balance||0;
+      const bal = t.driverSettled ? 0 : (t.balance||0);
       if(bal<=0 && full<=0) return;
       const k = t.assignedEmpId||"unassigned";
       const a = agg[k] = agg[k] || {trips:0, payable:0, held:0};
@@ -29790,7 +29792,7 @@ This will auto-recover in the next trip.`);
         // pouch part are shown separately inside the group.
         const empGroups = {};
         tripWithBalance.forEach(t => {
-          if(t.driverSettled || !(t.balancePlain>0) || !inEmpScope(t)) return;
+          if(!(t.balancePlain>0) || !inEmpScope(t)) return;   // settled trips that still owe money are included too
           const empId = t.assignedEmpId||"unassigned";
           (empGroups[empId] = empGroups[empId] || []).push(t);
         });
@@ -29805,11 +29807,13 @@ This will auto-recover in the next trip.`);
               // doesn't jump; the held pouch is shown separately in the group.
               const heldOnly = heldOnlyByEmp[empId]||[];
               const totalBal = empTrips.reduce((s,t)=>s+t.balancePlain,0);
-              const pouchHeld = empTrips.reduce((s,t)=>s+Math.max(0, t.balancePlain - t.balance),0);
+              const pouchHeld = empTrips.filter(t=>!t.driverSettled).reduce((s,t)=>s+Math.max(0, t.balancePlain - t.balance),0);
+              const settledOwed = empTrips.filter(t=>t.driverSettled).reduce((s,t)=>s+t.balancePlain,0);
+              const settledCount = empTrips.filter(t=>t.driverSettled).length;
               const [empGroupOpen, setEmpGroupOpen] = [null,null]; // handled per-instance below
               return (
                 <EmpTripGroup key={empId}
-                  empId={empId} emp={emp} empTrips={empTrips} totalBal={totalBal} pouchHeld={pouchHeld} heldOnly={heldOnly} prevSnap={(()=>{ const k=empId==="unassigned"?"":empId; const d=today(); return (balSnaps||[]).filter(x=>x.empId===k && x.date<d).sort((a,b)=>b.date.localeCompare(a.date))[0]||null; })()}
+                  empId={empId} emp={emp} empTrips={empTrips} totalBal={totalBal} pouchHeld={pouchHeld} settledOwed={settledOwed} settledCount={settledCount} heldOnly={heldOnly} prevSnap={(()=>{ const k=empId==="unassigned"?"":empId; const d=today(); return (balSnaps||[]).filter(x=>x.empId===k && x.date<d).sort((a,b)=>b.date.localeCompare(a.date))[0]||null; })()}
                   paymentRequests={paymentRequests||[]} setPaymentRequests={setPaymentRequests}
                   setPayReqSheet={setPayReqSheet}
                   requestPaymentGuarded={requestPaymentGuarded}
