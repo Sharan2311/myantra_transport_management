@@ -1,14 +1,8 @@
 // Run: node scripts/pouch_logic.test.mjs
 import assert from "node:assert/strict";
-import { tripPouchReleased, pouchAmountFor } from "../src/pouch_logic.js";
+import { pouchAmountFor } from "../src/pouch_logic.js";
 let n = 0; const t = (name, fn) => { fn(); n++; console.log("ok -", name); };
 
-t("pouch is held until the first payment on that trip", () => {
-  assert.equal(tripPouchReleased({ id: "T1" }, []), false);
-  assert.equal(tripPouchReleased({ id: "T1" }, [{ tripId: "T2", amount: 500 }]), false);
-  assert.equal(tripPouchReleased({ id: "T1" }, [{ tripId: "T1", amount: 0 }]), false);
-  assert.equal(tripPouchReleased({ id: "T1" }, [{ tripId: "T1", amount: 12000 }]), true);
-});
 const veh = { truckNo: "KA28AA9261" };
 const emp = (o = {}) => ({ id: "E1", linkedTrucks: ["KA28AA9261"], ...o });
 t("default is global setting, else 700", () => {

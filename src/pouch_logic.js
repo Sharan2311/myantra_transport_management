@@ -1,10 +1,8 @@
 // ─── Party return-pouch rules (pure functions — no React, no database) ──────────
 // Tested in scripts/pouch_logic.test.mjs
 
-// The ₹ pouch is held back on every party trip until the FIRST payment on that trip
-// has been recorded; from then on the employee can request it. A payment of 0 does not count.
-export const tripPouchReleased = (trip, driverPays) =>
-  (driverPays || []).some(p => p.tripId === trip.id && (+p.amount || 0) > 0);
+// There is no release rule: the pouch stays held on every party trip (it used to be released
+// when the return pouch / confirmation was uploaded). Only the owner's "Mark settled" clears it.
 
 const norm = s => String(s || "").toUpperCase().trim();
 
