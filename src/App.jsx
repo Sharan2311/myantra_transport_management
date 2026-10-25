@@ -1,3 +1,4 @@
+import { pouchAmountFor } from "./pouch_logic.js";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { DB } from "./db.js";
 import HuskMod from "./Husk.jsx";
@@ -255,7 +256,11 @@ const tripBilledWithInvoice = t => {
   const partyLines = diRowsFor(t).filter(d=>d.orderType==="party");
   return partyLines.length>0 && partyLines.every(d=>d.billed && String(d.invoiceNo||"").trim()!=="");
 };
-const tripPouchPayable = t => tripConfirmReceived(t) || tripBilledWithInvoice(t);
+// Party pouch is held on every party trip (deducted from Driver Pay, shown as "pouch held"). It is
+// released only when someone ticks "Include pouch" on a payment request — which is possible only after
+// the first payment on that trip — and that sets trip.pouchReleased. Not tied to the return pouch,
+// confirmation or billing any more.
+const tripPouchPayable = t => !!t?.pouchReleased;
 
 // ─── CONFIRMATION EMAIL — drives the Ready for Billing auto-trigger. ─────────
 // Received if the document is uploaded, OR the DI's own epodDone (the
@@ -684,6 +689,16 @@ const canEdit = (user, p) => {
   return perms.has(p);
 };
 
+// While > 0, the 45 s background reload in useDB is skipped (batch saves hold it).
+let pollPauseCount = 0;
+const usePausePollingWhile = (active) => {
+  useEffect(() => {
+    if(!active) return;
+    pollPauseCount++;
+    return () => { pollPauseCount = Math.max(0, pollPauseCount - 1); };
+  }, [active]);
+};
+
 // ─── SUPABASE DATA HOOK ────────────────────────────────────────────────────────
 // Loads data once, then every 15 seconds. Writes go straight to DB + local state.
 function useDB(fetcher, initial = [], delay = 0, enabled = true) {
@@ -709,7 +724,7 @@ function useDB(fetcher, initial = [], delay = 0, enabled = true) {
         "orderType","grFilePath","invoiceFilePath","emailSentAt","partyEmail",
         "district","state","sealedInvoicePath","confirmFollowupUserId","confirmPdfPath",
         "dieselIndentNo","dieselIndentLocked","dieselEstimate",
-        "dieselIndentNo2","dieselEstimate2"];
+        "dieselIndentNo2","dieselEstimate2","pouchReleased"];
       setData(prev => {
         if(!Array.isArray(result)||!Array.isArray(prev)) return result;
         const prevMap = {};
@@ -746,7 +761,9 @@ function useDB(fetcher, initial = [], delay = 0, enabled = true) {
   useEffect(() => {
     if(!enabled) return;
     // Poll every 45s instead of 15s — reduces connection pool pressure by 3×
-    const t = setInterval(load, 45000);
+    // Skipped while a batch save is running: a full reload of every table in the middle
+    // of it competes with the save's own requests and can replace local state mid-save.
+    const t = setInterval(() => { if(pollPauseCount > 0) return; load(); }, 45000);
     return () => clearInterval(t);
   }, [load, enabled]);
 
@@ -3692,12 +3709,13 @@ function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user
   // Party pouch deduction for a vehicle: exempt → 0, per-vehicle override → that,
   // else the owner's global rate (settings.pouchPerTrip), else ₹700 fallback.
   // An employee-level pouch exemption (linked truck or assigned employee) wins over everything.
-  const pouchAmt = (veh, assignedEmpId="") => (employeePouchExemptFor(veh?.truckNo, employees, assignedEmpId) || veh?.pouchExempt) ? 0 : (veh?.pouchOverride!=null ? veh.pouchOverride : (settings?.pouchPerTrip ?? 700));
+  const pouchAmt = (veh, assignedEmpId="") => pouchAmountFor({ veh, employees, assignedEmpId, settings });
 
   // ── Raw scanned items (one per uploaded file) ────────────────────────────────
   // item: { id, file, status, extracted, error }
   const [items,      setItems]      = useState([]);
   const [saving,     setSaving]     = useState(false);
+  usePausePollingWhile(saving);
   const [savedCount, setSavedCount] = useState(0);
   const [savedLRs,   setSavedLRs]   = useState([]); // [{lrNo, truckNo, qty, diCount}]
   const [lrError,    setLrError]    = useState(""); // LR assignment error
@@ -4302,9 +4320,8 @@ Rules:
         const groupItems = doneItems.filter(x=>g.diIds.includes(x.id));
         const veh = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
         const missing = [];
-        // All trips: owner name + driver phone
-        if(!(g.ownerName||veh?.ownerName||"").trim()) missing.push("Owner Name (ಮಾಲೀಕರ ಹೆಸರು)");
-        if(!(g.driverPhone||veh?.driverPhone||"").trim()) missing.push("Driver Phone (ಚಾಲಕರ ಫೋನ್)");
+        // Owner name / driver phone are NOT required to save: a missing one used to abort the
+        // whole save, so the wallet, diesel and recovery ledgers were never written for that trip.
         // Party trips: party fields
         const hasParty = groupItems.some(it=>it.orderType==="party");
         if(hasParty) {
@@ -4396,9 +4413,8 @@ Rules:
         // times out at 25s, the cause is very likely network conditions or
         // row-lock contention (concurrent saves for the same client+material
         // queuing on the same sequence row), not the function itself.
-        const lrPromise = DB.getNextLR(client, material);
-        const timeout = new Promise((_,rej) => setTimeout(()=>rej(new Error("Timed out — check internet connection and try again")), 25000));
-        lrNo = await Promise.race([lrPromise, timeout]);
+        // getNextLR retries a stuck request itself (3 tries × 8 s), so no outer race here.
+        lrNo = await DB.getNextLR(client, material);
         console.log(`[BATCH TIMING] ${g.truckNo}: getNextLR resolved "${lrNo}" at +${(performance.now()-_t0).toFixed(0)}ms`);
       } catch(e) {
         console.log(`[BATCH TIMING] ${g.truckNo}: getNextLR FAILED at +${(performance.now()-_t0).toFixed(0)}ms — ${e.message}`);
@@ -4423,7 +4439,8 @@ Rules:
         || groupItems.map(x=>x.extracted?.driverPhone).find(p=>p&&p.trim())
         || "";
       if(!existingVeh || !existingVeh.driverPhone) {
-        if(!resolvedPhone || resolvedPhone.replace(/\D/g,"").length!==10) {
+        // Blank is allowed (saved without a phone); only a half-typed number is rejected.
+        if(resolvedPhone && resolvedPhone.replace(/\D/g,"").length!==10) {
           setLrError(`Truck ${truckNo}: Enter a valid 10-digit driver phone number.`);
           setSaving(false);
           return;
@@ -8642,8 +8659,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       const t = editSheet;
       const veh = (vehicles||[]).find(v=>v.truckNo===t.truckNo);
       const missing = [];
-      if(!(t.ownerName||veh?.ownerName||"").trim()) missing.push("Owner Name (ಮಾಲೀಕರ ಹೆಸರು)");
-      if(!(t.driverPhone||veh?.driverPhone||"").trim()) missing.push("Driver Phone (ಚಾಲಕರ ಫೋನ್)");
+      // Owner name / driver phone no longer block the save (see batch save) — ledgers must always be written.
       if(t.orderType==="party") {
         if(!(t.partyNumber||"").trim()) missing.push("Party Number (ಪಾರ್ಟಿ ನಂಬರ್)");
         if(!(t.salesOfficerPhone||"").trim()) missing.push("Sales Officer Phone (ಸೇಲ್ಸ್ ಅಧಿಕಾರಿ ಫೋನ್)");
@@ -20752,7 +20768,12 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
   const fmtD = s => { if(!s) return "—"; const d=new Date(s); return isNaN(d)?s:d.toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"}); };
   const today = () => new Date().toISOString().slice(0,10);
 
+  // Owner can restrict an employee's login to the trucks linked to him (Employees > Linked Trucks).
+  const _myEmp = (employees||[]).find(e=>e.id===user?.assignedEmployeeId);
+  const _ownOnly = !isOwner && !!_myEmp?.ownTrucksOnly;
+  const _myTrucks = new Set((_myEmp?.linkedTrucks||[]).map(x=>String(x).toUpperCase().trim()));
   const filtered = (vehicles||[]).filter(v => {
+    if(_ownOnly && !_myTrucks.has(String(v.truckNo||"").toUpperCase().trim())) return false;
     if(!search) return true;
     const q = search.toLowerCase();
     if((v.truckNo||"").toLowerCase().includes(q))    return true;
@@ -21230,7 +21251,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
           style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",
             background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:16}}>✕</button>}
       </div>
-      {search&&<div style={{fontSize:11,color:C.muted}}>{filtered.length} of {(vehicles||[]).length} vehicles</div>}
+      {search&&<div style={{fontSize:11,color:C.muted}}>{filtered.length} of {_ownOnly?filtered.length:(vehicles||[]).length} vehicles</div>}
 
 
       {/* Date filter for PDF export */}
@@ -23414,6 +23435,45 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                       background:emp.pouchExempt?C.green+"22":"transparent",color:emp.pouchExempt?C.green:C.muted,
                       fontWeight:700,fontSize:12,cursor:"pointer",flexShrink:0}}>
                     {emp.pouchExempt?"✓ Exempt":"Exempt"}
+                  </button>
+                </div>
+                {!emp.pouchExempt && <div style={{display:"flex",alignItems:"center",gap:8,marginTop:10,flexWrap:"wrap"}}>
+                  <span style={{fontSize:12,color:C.muted,fontWeight:700}}>Pouch amount ₹ per party trip</span>
+                  <input type="number" min="0" value={emp.pouchAmount ?? ""} disabled={!!emp.pouchExempt}
+                    onChange={e=>{
+                      const v = e.target.value;
+                      setEmployees(prev => prev.map(x => {
+                        if(x.id!==trucksSheet) return x;
+                        const upd = {...x, pouchAmount: v==="" ? null : Math.max(0, +v)};
+                        DB.saveEmployee(upd).catch(err=>console.error("saveEmployee pouchAmount:",err));
+                        return upd;
+                      }));
+                    }}
+                    placeholder="blank = default amount"
+                    style={{width:170,background:C.card,border:`1.5px solid ${emp.pouchAmount!=null&&!emp.pouchExempt?C.purple:C.border}`,borderRadius:8,padding:"6px 10px",fontSize:12,color:C.text,outline:"none",opacity:emp.pouchExempt?0.4:1}}/>
+                  <span style={{fontSize:11,color:C.muted}}>Held on every NEW party trip on this employee's linked trucks (blank = default amount). Existing trips are not changed.</span>
+                </div>}
+              </div>
+              {/* Truck visibility — owner decides per employee. ON: this employee's login sees only the
+                  trucks linked to him on the Vehicles screen. OFF (default): sees all trucks. */}
+              <div style={{background:emp.ownTrucksOnly?C.purple+"11":C.bg,border:`1.5px solid ${emp.ownTrucksOnly?C.purple:C.border}`,borderRadius:10,padding:"12px 14px"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10}}>
+                  <div>
+                    <div style={{fontWeight:800,fontSize:13,color:emp.ownTrucksOnly?C.purple:C.text}}>See only own trucks — {emp.name}</div>
+                    <div style={{color:C.muted,fontSize:11,marginTop:2}}>
+                      {emp.ownTrucksOnly ? "On — this employee's login sees only the trucks linked to him on the Vehicles screen." : "Off — this employee's login sees all trucks."}
+                    </div>
+                  </div>
+                  <button onClick={()=>setEmployees(prev=>prev.map(x=>{
+                      if(x.id!==trucksSheet) return x;
+                      const upd={...x, ownTrucksOnly:!x.ownTrucksOnly};
+                      DB.saveEmployee(upd).catch(err=>console.error("saveEmployee ownTrucksOnly:",err));
+                      return upd;
+                    }))}
+                    style={{padding:"7px 16px",borderRadius:8,border:`1.5px solid ${emp.ownTrucksOnly?C.purple:C.border}`,
+                      background:emp.ownTrucksOnly?C.purple+"22":"transparent",color:emp.ownTrucksOnly?C.purple:C.muted,
+                      fontWeight:700,fontSize:12,cursor:"pointer",flexShrink:0}}>
+                    {emp.ownTrucksOnly?"✓ On":"Off"}
                   </button>
                 </div>
               </div>
@@ -27332,7 +27392,7 @@ function ShortageRecoverBtn({v, setVehicles, log}) {
 }
 
 // ─── REQUEST PAYMENT SHEET ───────────────────────────────────────────────────
-function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentRequests, setPaymentRequests, driverPays=[], dieselRequests=[], user, log, onClose}) {
+function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentRequests, setPaymentRequests, driverPays=[], dieselRequests=[], user, log, onClose, onReleasePouch}) {
   const t = trip;
   const veh = (vehicles||[]).find(v=>v.truckNo===t.truckNo);
   // Compute actual balance (trip may not have .balance if coming from raw trips array)
@@ -27387,6 +27447,12 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
   const [accOpen,    setAccOpen]    = useState(false); // dropdown open
   const [showOther,  setShowOther]  = useState(!!editingReq?.accountId && editingReq.accountId!==primaryOwnerAcc); // show alternate accounts
   const [amount,     setAmount]     = useState(String(editingReq?.amount||_balance||0));
+  // Pouch is held; it can be added to a request only after the FIRST payment on this trip, and
+  // it is unticked by default. Once released (t.pouchReleased) it is already part of the balance.
+  const _pouchAmt = (t.pouchBalance||0);
+  const _canIncludePouch = t.orderType==="party" && _pouchAmt>0 && !t.pouchReleased && _paidSoFar>0 && !isEditing;
+  const [includePouch, setIncludePouch] = useState(false);
+  const togglePouch = on => { setIncludePouch(on); setAmount(a => String(Math.max(0, (+a||0) + (on ? _pouchAmt : -_pouchAmt)))); };
   const [notes,      setNotes]      = useState(editingReq?.notes||"");
   const [newAcc,     setNewAcc]     = useState({name:"",accountNo:"",ifsc:""});
   const [newAccEmpId,setNewAccEmpId]= useState(""); // which employee to save new account to
@@ -27459,14 +27525,6 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
       }
     }
 
-    // ── Pouch balance validation: block if only pouch remains and no confirmation ──
-    if(t.orderType==="party" && (t.pouchBalance||0)>0) {
-      if(!_hasMerged && _balance <= 0) {
-        alert("⚠ Cannot request payment.\n\nThe remaining balance (₹"+_balance.toLocaleString("en-IN")+") is only the pouch balance.\nPlease upload the sealed invoice or confirmation email, or bill the trip with an invoice number, first.");
-        return;
-      }
-    }
-
     const recipientId   = recipType==="vehicle_owner" ? (veh?.id||"") : (selAcc?._empId||"");
     const recipientName = recipType==="vehicle_owner"
       ? (veh?.ownerName||t.truckNo)
@@ -27501,6 +27559,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
       // these calls will be rejected even though the earlier client-side check
       // passed for both. Don't optimistically show success until this confirms.
       DB.savePaymentRequest(pr).then(() => {
+        if(includePouch && _canIncludePouch && typeof onReleasePouch==="function") onReleasePouch(t);
         setPaymentRequests(prev=>[pr,...(prev||[])]);
         log("PAY REQUEST",`LR:${t.lrNo} ${recipientName} ₹${Number(amount).toLocaleString("en-IN")}`);
         setSubmitted(true);
@@ -27604,6 +27663,15 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
 
         {/* Amount */}
         <Field label="Amount ₹ *" value={amount} onChange={setAmount} type="number" />
+        {t.orderType==="party" && _pouchAmt>0 && !t.pouchReleased && (
+          <label style={{display:"flex",alignItems:"center",gap:10,background:C.teal+"11",border:`1px solid ${C.teal}44`,borderRadius:10,padding:"10px 12px",opacity:_canIncludePouch?1:0.6}}>
+            <input type="checkbox" checked={includePouch} disabled={!_canIncludePouch} onChange={e=>togglePouch(e.target.checked)} style={{width:18,height:18}} />
+            <span style={{fontSize:13,color:C.text}}>
+              Include party pouch balance <b>₹{_pouchAmt.toLocaleString("en-IN")}</b>
+              <span style={{display:"block",fontSize:11,color:C.muted}}>{_paidSoFar>0 ? "Held so far — tick to request it with this payment." : "Available only after the first payment on this trip is done."}</span>
+            </span>
+          </label>
+        )}
 
         {/* Recipient type */}
         <div>
@@ -27931,7 +27999,7 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, heldOnly=[]
           </div>
           <div style={{fontSize:11,color:"#666",marginTop:2}}>
             {empTrips.length+heldOnly.length} trip{empTrips.length+heldOnly.length>1?"s":""} · Balance due: <b style={{color:"#dc2626"}}>₹{totalBal.toLocaleString("en-IN")}</b>
-             {pouchHeld>0 && <div style={{fontSize:11,color:"#0f766e",marginTop:2}}>incl. ₹{pouchHeld.toLocaleString("en-IN")} pouch held until confirmation{heldOnly.length>0 && <span> (fully held: {heldOnly.map(h=>h.lrNo).join(", ")})</span>} · payable now <b>₹{(totalBal-pouchHeld).toLocaleString("en-IN")}</b></div>}
+             {pouchHeld>0 && <div style={{fontSize:11,color:"#0f766e",marginTop:2}}><b>Pouch held ₹{pouchHeld.toLocaleString("en-IN")}</b> (included in the total; can be requested after the first payment on each trip){heldOnly.length>0 && <span> (fully held: {heldOnly.map(h=>h.lrNo).join(", ")})</span>} · payable now <b>₹{(totalBal-pouchHeld).toLocaleString("en-IN")}</b></div>}
              {prevSnap && <div style={{fontSize:11,color:C.muted,marginTop:2}}>Last saved {prevSnap.date}: ₹{Math.round(prevSnap.total).toLocaleString("en-IN")} · now {totalBal-prevSnap.total>=0?"+":"−"}₹{Math.abs(Math.round(totalBal-prevSnap.total)).toLocaleString("en-IN")}</div>}
           </div>
         </div>
@@ -29910,6 +29978,9 @@ This will auto-recover in the next trip.`);
             {t.balance>0&&!t.driverSettled&&(
               <Btn onClick={()=>requestPaymentGuarded(t, t)} sm outline color={C.purple}>📋 Request Payment</Btn>
             )}
+            {t.balance<=0 && !t.driverSettled && t.orderType==="party" && (t.pouchHold||0)>0 && (t.paidSoFar||0)>0 && (
+              <Btn onClick={()=>requestPaymentGuarded(t, t)} sm outline color={C.teal}>📋 Request pouch ₹{(t.pouchHold||0).toLocaleString("en-IN")}</Btn>
+            )}
             {/* A trip can settle on its main balance before the sealed invoice/
                 confirmation is ever uploaded — the pouch only unlocks on that
                 upload, so this is the one case a "settled" trip can still have a
@@ -30382,6 +30453,12 @@ This will auto-recover in the next trip.`);
           dieselRequests={dieselRequests||[]}
           user={user}
           log={log}
+          onReleasePouch={(tr)=>{
+            const upd = {...tr, pouchReleased:true};
+            setTrips(prev=>(prev||[]).map(x=>x.id===tr.id?{...x,pouchReleased:true}:x));
+            DB.saveTrip({...(trips||[]).find(x=>x.id===tr.id)||tr, pouchReleased:true}).catch(e=>console.error("saveTrip pouchReleased:",e));
+            log("POUCH RELEASED",`LR:${tr.lrNo} ₹${tr.pouchBalance||0} included in payment request`);
+          }}
           onClose={()=>setPayReqSheet(null)}
         />
       )}

@@ -49,6 +49,7 @@ const tripFromDB = r => ({
   partyNumber: r.party_number || '',
   partyName: r.party_name || '',
   pouchBalance: +(r.pouch_balance || 0),
+  pouchReleased: r.pouch_released || false,
   grParticulars: r.gr_particulars || null,
   transporterName: r.transporter_name || '',
   noDieselConfirmed: r.no_diesel_confirmed || false,
@@ -132,6 +133,7 @@ const tripToDB = t => ({
   party_number: t.partyNumber || '',
   party_name: t.partyName || '',
   pouch_balance: t.pouchBalance || 0,
+  pouch_released: t.pouchReleased || false,
   gr_particulars: t.grParticulars || null,
   transporter_name: t.transporterName || '',
   no_diesel_confirmed: t.noDieselConfirmed || false,
@@ -193,6 +195,8 @@ const employeeFromDB = r => ({
   loanTxns: r.loan_txns||[],
   tafalExempt: r.tafal_exempt||false,
   pouchExempt: r.pouch_exempt||false,
+  pouchAmount: r.pouch_amount!=null ? +r.pouch_amount : null,
+  ownTrucksOnly: r.own_trucks_only||false,
   pouchDeadlineEnforced: r.pouch_deadline_enforced !== false, // default true
 })
 const employeeToDB = e => ({
@@ -203,6 +207,8 @@ const employeeToDB = e => ({
   loan_txns: e.loanTxns||[],
   tafal_exempt: e.tafalExempt||false,
   pouch_exempt: e.pouchExempt||false,
+  pouch_amount: e.pouchAmount!=null && e.pouchAmount!=='' ? +e.pouchAmount : null,
+  own_trucks_only: e.ownTrucksOnly||false,
   pouch_deadline_enforced: e.pouchDeadlineEnforced !== false,
 })
 
@@ -851,13 +857,31 @@ export const DB = {
   logActivity: a => upsertOne('mye_activity', activityToDB, a),
 
   // Atomic LR number from Supabase sequence (no race conditions)
-  getNextLR: async (client, material) => {
-    const { data, error } = await supabase.rpc('get_next_lr', {
-      p_client: client,
-      p_material: material,
-    })
-    if (error) throw new Error(`LR sequence error: ${error.message}`)
-    return data // e.g. "SKLC020"
+  // Each attempt is cut off after perAttemptMs and retried: the database call itself
+  // takes ~10 ms (max 1 s ever), so a wait of many seconds means the request is stuck
+  // on the way — a fresh request normally goes straight through. A real database error
+  // (e.g. no sequence for this client/material) is NOT retried.
+  // Note: if an attempt reached the database but its reply was lost, that LR number is
+  // skipped (a gap in the series) — numbers are never duplicated.
+  getNextLR: async (client, material, { attempts = 3, perAttemptMs = 8000 } = {}) => {
+    let lastErr
+    for (let i = 0; i < attempts; i++) {
+      const ctl = new AbortController()
+      const timer = setTimeout(() => ctl.abort(), perAttemptMs)
+      try {
+        const { data, error } = await supabase.rpc('get_next_lr', { p_client: client, p_material: material }).abortSignal(ctl.signal)
+        if (error) {
+          const aborted = ctl.signal.aborted || /abort/i.test(error.message || '')
+          if (!aborted) throw new Error(`LR sequence error: ${error.message}`)
+          lastErr = new Error(`no reply within ${perAttemptMs / 1000}s`)
+        } else return data // e.g. "SKLC020"
+      } catch (e) {
+        if (/^LR sequence error/.test(e.message)) throw e
+        lastErr = e
+      } finally { clearTimeout(timer) }
+      console.warn(`[LR] attempt ${i + 1}/${attempts} failed — ${lastErr?.message}`)
+    }
+    throw new Error(`LR number could not be fetched after ${attempts} tries (${lastErr?.message || 'no reply'}) — check internet connection and try again`)
   },
 
   // Payment Requests
