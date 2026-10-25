@@ -1,3 +1,4 @@
+import { tripPouchReleased, pouchAmountFor } from "./pouch_logic.js";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { DB } from "./db.js";
 import HuskMod from "./Husk.jsx";
@@ -255,7 +256,9 @@ const tripBilledWithInvoice = t => {
   const partyLines = diRowsFor(t).filter(d=>d.orderType==="party");
   return partyLines.length>0 && partyLines.every(d=>d.billed && String(d.invoiceNo||"").trim()!=="");
 };
-const tripPouchPayable = t => tripConfirmReceived(t) || tripBilledWithInvoice(t);
+// The ₹ pouch is held on every party trip until the first payment on that trip is recorded
+// (no longer tied to the return pouch / confirmation upload). Pure rule: pouch_logic.js.
+const tripPouchPayable = (t, driverPays) => tripPouchReleased(t, driverPays);
 
 // ─── CONFIRMATION EMAIL — drives the Ready for Billing auto-trigger. ─────────
 // Received if the document is uploaded, OR the DI's own epodDone (the
@@ -3704,7 +3707,7 @@ function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user
   // Party pouch deduction for a vehicle: exempt → 0, per-vehicle override → that,
   // else the owner's global rate (settings.pouchPerTrip), else ₹700 fallback.
   // An employee-level pouch exemption (linked truck or assigned employee) wins over everything.
-  const pouchAmt = (veh, assignedEmpId="") => (employeePouchExemptFor(veh?.truckNo, employees, assignedEmpId) || veh?.pouchExempt) ? 0 : (veh?.pouchOverride!=null ? veh.pouchOverride : (settings?.pouchPerTrip ?? 700));
+  const pouchAmt = (veh, assignedEmpId="") => pouchAmountFor({ veh, employees, assignedEmpId, settings });
 
   // ── Raw scanned items (one per uploaded file) ────────────────────────────────
   // item: { id, file, status, extracted, error }
@@ -23428,6 +23431,22 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                     {emp.pouchExempt?"✓ Exempt":"Exempt"}
                   </button>
                 </div>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginTop:10,flexWrap:"wrap"}}>
+                  <span style={{fontSize:12,color:C.muted,fontWeight:700}}>Pouch amount ₹ per party trip</span>
+                  <input type="number" min="0" value={emp.pouchAmount ?? ""} disabled={!!emp.pouchExempt}
+                    onChange={e=>{
+                      const v = e.target.value;
+                      setEmployees(prev => prev.map(x => {
+                        if(x.id!==trucksSheet) return x;
+                        const upd = {...x, pouchAmount: v==="" ? null : Math.max(0, +v)};
+                        DB.saveEmployee(upd).catch(err=>console.error("saveEmployee pouchAmount:",err));
+                        return upd;
+                      }));
+                    }}
+                    placeholder="blank = default amount"
+                    style={{width:170,background:C.card,border:`1.5px solid ${emp.pouchAmount!=null&&!emp.pouchExempt?C.purple:C.border}`,borderRadius:8,padding:"6px 10px",fontSize:12,color:C.text,outline:"none",opacity:emp.pouchExempt?0.4:1}}/>
+                  <span style={{fontSize:11,color:C.muted}}>Held on every NEW party trip under this employee until the first payment on that trip. Existing trips are not changed.</span>
+                </div>
               </div>
               <div style={{background:C.teal+"11",border:`1px solid ${C.teal}33`,borderRadius:10,padding:"10px 14px",color:C.teal,fontSize:12}}>
                 Priority order: employee exempt (above) → vehicle's own Exempt toggle → vehicle's own override amount → global TAFAL rate.
@@ -27356,7 +27375,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
   // uploaded — no other condition unlocks it. A trip being marked settled by
   // the owner does not release the pouch; it closes the trip out entirely
   // (see the bulk "Mark Settled" action, which zeroes pouchBalance directly).
-  const _hasMerged = tripPouchPayable(t);
+  const _hasMerged = tripPouchPayable(t, driverPays);
   const _pouchHold = (t.orderType==="party"&&!_hasMerged) ? (t.pouchBalance||0) : 0;
   const _deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)+(t.shortageRecovery||0)+(t.loanRecovery||0)+_pouchHold;
   const _netDue  = Math.max(0, _diGross - _deducts);
@@ -28783,7 +28802,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
     // that upload, so this is the one legitimate case where a genuinely new,
     // unpaid amount can exist on an already-"settled" trip. Don't block that.
     const hasGenuinePouchClaim = (t) => {
-      return t.orderType==="party" && tripPouchPayable(t) && (t.pouchBalance||0)>0;
+      return t.orderType==="party" && tripPouchPayable(t, driverPays) && (t.pouchBalance||0)>0;
     };
     if (list.some(t => t.driverSettled && !hasGenuinePouchClaim(t))) {
       alert("This trip is already marked as settled — no further payment can be requested for it.");
@@ -28858,7 +28877,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
     // (or the trip is billed with an invoice no.) — same rule as
     // RequestPaymentSheet and the auto-settle check, so every Driver Pay
     // total agrees with what a payment request would show.
-    const pouchHold = (t.orderType==="party" && !tripPouchPayable(t)) ? (t.pouchBalance||0) : 0;
+    const pouchHold = (t.orderType==="party" && !tripPouchPayable(t, driverPays)) ? (t.pouchBalance||0) : 0;
     const deducts  = (t.advance||0)+(t.tafal||0)
                    +(t.dieselEstimate||0)+((t.shortage||0)*(t.givenRate||0))
                    +(t.shortageRecovery||0)+(t.loanRecovery||0)+pouchHold;
@@ -29031,7 +29050,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
   React.useEffect(() => {
     const tripForLR = (lrNo) => (trips||[]).find(x=>x.lrNo && x.lrNo===lrNo) || null;
     const hasGenuinePouchClaim = (t) => {
-      return t.orderType==="party" && tripPouchPayable(t) && (t.pouchBalance||0)>0;
+      return t.orderType==="party" && tripPouchPayable(t, driverPays) && (t.pouchBalance||0)>0;
     };
     const balanceForTrip = (t) => {
       const gross = (t.diLines&&t.diLines.length>1)
@@ -29039,7 +29058,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
         : (t.qty||0)*(t.givenRate||0);
       // Pouch counts toward netDue once merged — same rule as RequestPaymentSheet
       // — so a fully-paid main balance doesn't mask a genuinely outstanding pouch.
-      const pouchHold = (t.orderType==="party" && !tripPouchPayable(t)) ? (t.pouchBalance||0) : 0;
+      const pouchHold = (t.orderType==="party" && !tripPouchPayable(t, driverPays)) ? (t.pouchBalance||0) : 0;
       const deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)
         +((t.shortage||0)*(t.givenRate||0))+(t.shortageRecovery||0)+(t.loanRecovery||0)+pouchHold;
       const netDue = Math.max(0, gross - deducts);
@@ -29927,7 +29946,7 @@ This will auto-recover in the next trip.`);
                 upload, so this is the one case a "settled" trip can still have a
                 genuine, unpaid amount. t.balance itself won't reflect this (it's
                 never pouch-aware), so this checks pouchBalance directly instead. */}
-            {t.driverSettled && t.orderType==="party" && (t.pouchBalance||0)>0 && tripPouchPayable(t) && (
+            {t.driverSettled && t.orderType==="party" && (t.pouchBalance||0)>0 && tripPouchPayable(t, driverPays) && (
               <Btn onClick={()=>requestPaymentGuarded(t, t)} sm outline color={C.purple}>📋 Request Payment</Btn>
             )}
             {/* Settled trip with an unpaid balance: only the owner can pay it off
