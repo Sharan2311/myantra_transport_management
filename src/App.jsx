@@ -1,4 +1,5 @@
 import { pouchAmountFor } from "./pouch_logic.js";
+import { includeInByEmployee } from "./byemp_logic.js";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { DB } from "./db.js";
 import HuskMod from "./Husk.jsx";
@@ -28969,6 +28970,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
     if(!(trips||[]).length || !(driverPays||[]).length) return;
     const agg = {};
     tripWithBalance.forEach(t=>{
+      if(!includeInByEmployee(t)) return;   // same trips as the By Employee tab
       const full = t.balancePlain||0;
       const bal = t.driverSettled ? 0 : (t.balance||0);
       if(bal<=0 && full<=0) return;
@@ -29792,7 +29794,7 @@ This will auto-recover in the next trip.`);
         // pouch part are shown separately inside the group.
         const empGroups = {};
         tripWithBalance.forEach(t => {
-          if(!(t.balancePlain>0) || !inEmpScope(t)) return;   // settled trips that still owe money are included too
+          if(!includeInByEmployee(t) || !inEmpScope(t)) return;   // settled-but-owed trips + trips saved from the cutoff; older unsettled trips are left out for now
           const empId = t.assignedEmpId||"unassigned";
           (empGroups[empId] = empGroups[empId] || []).push(t);
         });
