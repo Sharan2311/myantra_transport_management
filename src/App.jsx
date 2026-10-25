@@ -28921,7 +28921,10 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
     const netDue   = Math.max(0, gross - deducts);
     const paidSoFar= (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
     const balance  = Math.max(0, netDue - paidSoFar);
-    return {...t, gross, netDue, paidSoFar, balance, veh, pouchHold};
+    // Plain balance: what remains on the trip ignoring the party pouch altogether (pouch is not
+    // held back, not counted separately). This is what By Employee adds up.
+    const balancePlain = Math.max(0, Math.max(0, gross - (deducts - pouchHold)) - paidSoFar);
+    return {...t, gross, netDue, paidSoFar, balance, veh, pouchHold, balancePlain};
   });
 
   // driverSettled is authoritative — once set, a trip is Paid and cannot show as
@@ -28964,7 +28967,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
     const agg = {};
     tripWithBalance.forEach(t=>{
       if(t.driverSettled) return;
-      const full = Math.max(0, (t.netDue||0)+(t.pouchHold||0)-(t.paidSoFar||0));
+      const full = t.balancePlain||0;
       const bal = t.balance||0;
       if(bal<=0 && full<=0) return;
       const k = t.assignedEmpId||"unassigned";
@@ -29782,25 +29785,16 @@ This will auto-recover in the next trip.`);
 
       {/* ── BY EMPLOYEE TAB ── */}
       {filter==="byemp" && (()=>{
-        // Group unpaid trips by assigned employee
+        // Every unsettled trip of the employee that still has money to receive — the total is the
+        // plain sum of those trips' balances (party pouch NOT held back). "Payable now" and the
+        // pouch part are shown separately inside the group.
         const empGroups = {};
-        scopedUnpaid.forEach(t => {
-          const empId = t.assignedEmpId||"unassigned";
-          if(!empGroups[empId]) empGroups[empId] = [];
-          empGroups[empId].push(t);
-        });
-        // Trips whose whole remaining amount is the held pouch (balance 0 only
-        // because of the hold) drop out of the unpaid list, but the employee
-        // still sees that money as pending — count it in his headline total.
-        const heldOnlyByEmp = {};
         tripWithBalance.forEach(t => {
-          if(t.driverSettled || t.balance>0 || !(t.pouchHold>0) || !inEmpScope(t)) return;
-          const amt = Math.max(0, (t.netDue||0)+(t.pouchHold||0)-(t.paidSoFar||0));
-          if(amt<=0) return;
-          const k = t.assignedEmpId||"unassigned";
-          (heldOnlyByEmp[k] = heldOnlyByEmp[k]||[]).push({lrNo:t.lrNo, amt});
-          if(!empGroups[k]) empGroups[k] = [];
+          if(t.driverSettled || !(t.balancePlain>0) || !inEmpScope(t)) return;
+          const empId = t.assignedEmpId||"unassigned";
+          (empGroups[empId] = empGroups[empId] || []).push(t);
         });
+        const heldOnlyByEmp = {};
         const empList = Object.entries(empGroups).sort(([a],[b])=>a==="unassigned"?1:b==="unassigned"?-1:0);
         return (
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
@@ -29810,9 +29804,8 @@ This will auto-recover in the next trip.`);
               // Headline total stays the full amount (pouch hold included) so it
               // doesn't jump; the held pouch is shown separately in the group.
               const heldOnly = heldOnlyByEmp[empId]||[];
-              const pouchHeld = empTrips.reduce((s,t)=>s+Math.max(0, Math.max(0,(t.netDue||0)+(t.pouchHold||0)-(t.paidSoFar||0)) - t.balance),0)
-                              + heldOnly.reduce((s,h)=>s+h.amt,0);
-              const totalBal = empTrips.reduce((s,t)=>s+t.balance,0) + pouchHeld;
+              const totalBal = empTrips.reduce((s,t)=>s+t.balancePlain,0);
+              const pouchHeld = empTrips.reduce((s,t)=>s+Math.max(0, t.balancePlain - t.balance),0);
               const [empGroupOpen, setEmpGroupOpen] = [null,null]; // handled per-instance below
               return (
                 <EmpTripGroup key={empId}
