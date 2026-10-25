@@ -28044,8 +28044,10 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed
                 <div style={{fontSize:11,color:"#888"}}>{t.from}→{t.to} · {t.qty}MT · {t.date}</div>
               </div>
               <div style={{textAlign:"right",flexShrink:0}}>
-                <div style={{fontWeight:800,fontSize:14,color:"#dc2626"}}>₹{t.balance.toLocaleString("en-IN")}</div>
-                {hasPendingReq(t.id) && <div style={{fontSize:9,color:"#7c3aed",fontWeight:700}}>REQ SENT</div>}
+                {/* Show the full amount still owed (same figure the group total adds up); payments/requests still use t.balance */}
+                <div style={{fontWeight:800,fontSize:14,color:"#dc2626"}}>₹{Math.round((t.balancePlain||0)*100)/100>0 ? (Math.round((t.balancePlain||0)*100)/100).toLocaleString("en-IN") : t.balance.toLocaleString("en-IN")}</div>
+                {(t.balancePlain||0)-t.balance>=1 && <div style={{fontSize:9,color:"#0f766e",fontWeight:700}}>{t.driverSettled ? "SETTLED · STILL OWED" : `₹${Math.round(t.balancePlain-t.balance).toLocaleString("en-IN")} POUCH HELD`}</div>}
+                {hasPendingReq(t.id) &&<div style={{fontSize:9,color:"#7c3aed",fontWeight:700}}>REQ SENT</div>}
               </div>
             </div>
           ))}
