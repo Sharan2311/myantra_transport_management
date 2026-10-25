@@ -1,0 +1,12 @@
+import assert from "node:assert/strict";
+import { includeInByEmployee as inc } from "../src/byemp_logic.js";
+const C = "2026-10-25";
+const T = (o) => ({ balancePlain: 700, driverSettled: false, createdAt: "2026-10-20T10:00:00Z", ...o });
+let n = 0; const t = (name, f) => { f(); n++; console.log("ok -", name); };
+t("old unsettled trip is left out", () => assert.equal(inc(T({}), C), false));
+t("old settled trip that still owes is included", () => assert.equal(inc(T({ driverSettled: true }), C), true));
+t("trip saved on cutoff day, unsettled, is included", () => assert.equal(inc(T({ createdAt: "2026-10-25T01:00:00Z" }), C), true));
+t("trip saved after cutoff is included", () => assert.equal(inc(T({ createdAt: "2026-11-02T09:00:00Z" }), C), true));
+t("no balance is never included", () => { assert.equal(inc(T({ balancePlain: 0, createdAt: "2026-11-02" }), C), false); assert.equal(inc(T({ balancePlain: 0, driverSettled: true }), C), false); });
+t("unsettled trip with no saved date is treated as old", () => assert.equal(inc(T({ createdAt: undefined }), C), false));
+console.log(n + " tests passed");
