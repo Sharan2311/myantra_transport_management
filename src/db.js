@@ -851,13 +851,31 @@ export const DB = {
   logActivity: a => upsertOne('mye_activity', activityToDB, a),
 
   // Atomic LR number from Supabase sequence (no race conditions)
-  getNextLR: async (client, material) => {
-    const { data, error } = await supabase.rpc('get_next_lr', {
-      p_client: client,
-      p_material: material,
-    })
-    if (error) throw new Error(`LR sequence error: ${error.message}`)
-    return data // e.g. "SKLC020"
+  // Each attempt is cut off after perAttemptMs and retried: the database call itself
+  // takes ~10 ms (max 1 s ever), so a wait of many seconds means the request is stuck
+  // on the way — a fresh request normally goes straight through. A real database error
+  // (e.g. no sequence for this client/material) is NOT retried.
+  // Note: if an attempt reached the database but its reply was lost, that LR number is
+  // skipped (a gap in the series) — numbers are never duplicated.
+  getNextLR: async (client, material, { attempts = 3, perAttemptMs = 8000 } = {}) => {
+    let lastErr
+    for (let i = 0; i < attempts; i++) {
+      const ctl = new AbortController()
+      const timer = setTimeout(() => ctl.abort(), perAttemptMs)
+      try {
+        const { data, error } = await supabase.rpc('get_next_lr', { p_client: client, p_material: material }).abortSignal(ctl.signal)
+        if (error) {
+          const aborted = ctl.signal.aborted || /abort/i.test(error.message || '')
+          if (!aborted) throw new Error(`LR sequence error: ${error.message}`)
+          lastErr = new Error(`no reply within ${perAttemptMs / 1000}s`)
+        } else return data // e.g. "SKLC020"
+      } catch (e) {
+        if (/^LR sequence error/.test(e.message)) throw e
+        lastErr = e
+      } finally { clearTimeout(timer) }
+      console.warn(`[LR] attempt ${i + 1}/${attempts} failed — ${lastErr?.message}`)
+    }
+    throw new Error(`LR number could not be fetched after ${attempts} tries (${lastErr?.message || 'no reply'}) — check internet connection and try again`)
   },
 
   // Payment Requests

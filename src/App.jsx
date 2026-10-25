@@ -684,6 +684,16 @@ const canEdit = (user, p) => {
   return perms.has(p);
 };
 
+// While > 0, the 45 s background reload in useDB is skipped (batch saves hold it).
+let pollPauseCount = 0;
+const usePausePollingWhile = (active) => {
+  useEffect(() => {
+    if(!active) return;
+    pollPauseCount++;
+    return () => { pollPauseCount = Math.max(0, pollPauseCount - 1); };
+  }, [active]);
+};
+
 // ─── SUPABASE DATA HOOK ────────────────────────────────────────────────────────
 // Loads data once, then every 15 seconds. Writes go straight to DB + local state.
 function useDB(fetcher, initial = [], delay = 0, enabled = true) {
@@ -746,7 +756,9 @@ function useDB(fetcher, initial = [], delay = 0, enabled = true) {
   useEffect(() => {
     if(!enabled) return;
     // Poll every 45s instead of 15s — reduces connection pool pressure by 3×
-    const t = setInterval(load, 45000);
+    // Skipped while a batch save is running: a full reload of every table in the middle
+    // of it competes with the save's own requests and can replace local state mid-save.
+    const t = setInterval(() => { if(pollPauseCount > 0) return; load(); }, 45000);
     return () => clearInterval(t);
   }, [load, enabled]);
 
@@ -3698,6 +3710,7 @@ function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user
   // item: { id, file, status, extracted, error }
   const [items,      setItems]      = useState([]);
   const [saving,     setSaving]     = useState(false);
+  usePausePollingWhile(saving);
   const [savedCount, setSavedCount] = useState(0);
   const [savedLRs,   setSavedLRs]   = useState([]); // [{lrNo, truckNo, qty, diCount}]
   const [lrError,    setLrError]    = useState(""); // LR assignment error
@@ -4396,9 +4409,8 @@ Rules:
         // times out at 25s, the cause is very likely network conditions or
         // row-lock contention (concurrent saves for the same client+material
         // queuing on the same sequence row), not the function itself.
-        const lrPromise = DB.getNextLR(client, material);
-        const timeout = new Promise((_,rej) => setTimeout(()=>rej(new Error("Timed out — check internet connection and try again")), 25000));
-        lrNo = await Promise.race([lrPromise, timeout]);
+        // getNextLR retries a stuck request itself (3 tries × 8 s), so no outer race here.
+        lrNo = await DB.getNextLR(client, material);
         console.log(`[BATCH TIMING] ${g.truckNo}: getNextLR resolved "${lrNo}" at +${(performance.now()-_t0).toFixed(0)}ms`);
       } catch(e) {
         console.log(`[BATCH TIMING] ${g.truckNo}: getNextLR FAILED at +${(performance.now()-_t0).toFixed(0)}ms — ${e.message}`);
