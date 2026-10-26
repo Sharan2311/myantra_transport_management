@@ -9,4 +9,9 @@ t("trip saved on cutoff day, unsettled, is included", () => assert.equal(inc(T({
 t("trip saved after cutoff is included", () => assert.equal(inc(T({ createdAt: "2026-11-02T09:00:00Z" }), C), true));
 t("no balance is never included", () => { assert.equal(inc(T({ balancePlain: 0, createdAt: "2026-11-02" }), C), false); assert.equal(inc(T({ balancePlain: 0, driverSettled: true }), C), false); });
 t("unsettled trip with no saved date is treated as old", () => assert.equal(inc(T({ createdAt: undefined }), C), false));
+t("app format dd/mm/yy: an old day-of-month >= 25 is NOT new", () => { assert.equal(inc(T({ createdAt: "31/08/26, 11:20 pm" }), C), false); assert.equal(inc(T({ createdAt: "25/09/26, 6:12 PM" }), C), false); assert.equal(inc(T({ createdAt: "24/10/26, 9:17 AM" }), C), false); });
+t("app format dd/mm/yy: cutoff day and later are new", () => { assert.equal(inc(T({ createdAt: "25/10/26, 9:17 AM" }), C), true); assert.equal(inc(T({ createdAt: "26/10/26, 5:54 PM" }), C), true); assert.equal(inc(T({ createdAt: "02/11/26, 1:00 PM" }), C), true); });
+t("unreadable saved date is treated as old", () => assert.equal(inc(T({ createdAt: "garbage" }), C), false));
+t("older unsettled trip the owner flagged to show is included", () => assert.equal(inc(T({ byEmpInclude: true }), C), true));
+t("flag does not bring in a trip with no balance", () => assert.equal(inc(T({ byEmpInclude: true, balancePlain: 0 }), C), false));
 console.log(n + " tests passed");
