@@ -1,5 +1,6 @@
 import { pouchAmountFor } from "./pouch_logic.js";
-import { includeInByEmployee } from "./byemp_logic.js";
+import { includeInByEmployee, employeeStatement, statementHtml } from "./byemp_logic.js";
+import { bookableLoanRecovery, PREV_YEAR_TYPE } from "./loan_ledger_logic.js";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { DB } from "./db.js";
 import HuskMod from "./Husk.jsx";
@@ -379,7 +380,8 @@ const syncTripRecoveryToVehicle = (veh, trip) => {
   const tripId = trip.id;
   const lrNo   = trip.lrNo||"";
   const date   = trip.date||today();
-  const newLR  = +trip.loanRecovery||0;
+  // "Previous year" memo entries are not part of the current ledger: take their share out of what is booked.
+  const newLR  = bookableLoanRecovery(veh, trip);
   const newSR  = +trip.shortageRecovery||0;
   // Returns ALL matching entries (not just the first) so a vehicle that somehow
   // ended up with more than one entry for the same trip gets collapsed back to
@@ -8959,7 +8961,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         if (v.truckNo !== t.truckNo) return v;
         const upd = {
           ...v,
-          loanRecovered: Math.max(0, (v.loanRecovered||0) - (+t.loanRecovery)),
+          loanRecovered: Math.max(0, (v.loanRecovered||0) - bookableLoanRecovery(v, t)),
           loanTxns: (v.loanTxns||[]).filter(tx => tx.lrNo !== t.lrNo),
         };
         DB.saveVehicle(upd).catch(e => console.warn("loan reversal save:", e));
@@ -20698,7 +20700,7 @@ function Vehicles({trips, setTrips, vehicles, setVehicles, driverPays, user, log
       const findMine = (txns) => (txns||[]).filter(tx=>tx.type==="recovery" &&
         (tx.tripId===t.id || (!tx.tripId && t.lrNo && tx.lrNo===t.lrNo)));
 
-      const newLR = +t.loanRecovery||0;
+      const newLR = bookableLoanRecovery(veh, t);
       const loanMatches = findMine(veh.loanTxns);
       const loanCurrent = loanMatches.reduce((s,x)=>s+(+x.amount||0),0);
       let loan = null;
@@ -21718,11 +21720,12 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                   {allOwnerTxns.map(tx=>(
                     <div key={tx.id} style={{background:C.bg,borderRadius:10,padding:"10px 12px",
                       display:"flex",justifyContent:"space-between",alignItems:"center",
-                      borderLeft:`3px solid ${tx.type==="given"?C.red:C.green}`}}>
+                      borderLeft:`3px solid ${tx.type==="given"?C.red:tx.type===PREV_YEAR_TYPE?C.muted:C.green}`}}>
                       <div>
-                        <div style={{fontSize:12,fontWeight:700,color:tx.type==="given"?C.red:C.green}}>
-                          {tx.type==="given"?"➕ Given":"💰 Recovery"} · ₹{fmt(tx.amount)}
+                        <div style={{fontSize:12,fontWeight:700,color:tx.type==="given"?C.red:tx.type===PREV_YEAR_TYPE?C.muted:C.green}}>
+                          {tx.type==="given"?"➕ Given":tx.type===PREV_YEAR_TYPE?"📁 Previous year loan recovered":"💰 Recovery"} · ₹{fmt(tx.amount)}
                         </div>
+                        {tx.type===PREV_YEAR_TYPE&&<div style={{fontSize:11,color:C.muted}}>Memo only — not counted in the loan balance</div>}
                         <div style={{fontSize:11,color:C.muted}}>{fmtD(tx.date)}{tx.ref?` · Ref: ${tx.ref}`:""}</div>
                         {tx.accountName&&<div style={{fontSize:11,color:C.muted}}>Acct: {tx.accountName}</div>}
                         {tx._truckNo&&ownerVehs.length>1&&<div style={{fontSize:11,color:C.blue}}>🚛 {tx._truckNo}</div>}
@@ -22338,12 +22341,13 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                   <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1,marginTop:4}}>LOAN TRANSACTIONS ({loanTxns.length})</div>
                   {[...loanTxns].reverse().map(tx=>(
                     <div key={tx.id} style={{background:C.bg,borderRadius:8,padding:"9px 12px",
-                      borderLeft:`3px solid ${tx.type==="given"?C.red:C.green}`}}>
+                      borderLeft:`3px solid ${tx.type==="given"?C.red:tx.type===PREV_YEAR_TYPE?C.muted:C.green}`}}>
                       <div style={{display:"flex",justifyContent:"space-between"}}>
                         <div>
-                          <div style={{fontSize:12,fontWeight:700,color:tx.type==="given"?C.red:C.green}}>
-                            {tx.type==="given"?"➕ Loan Given":"💰 Recovery"} · ₹{fmt(tx.amount)}
+                          <div style={{fontSize:12,fontWeight:700,color:tx.type==="given"?C.red:tx.type===PREV_YEAR_TYPE?C.muted:C.green}}>
+                            {tx.type==="given"?"➕ Loan Given":tx.type===PREV_YEAR_TYPE?"📁 Previous year loan recovered":"💰 Recovery"} · ₹{fmt(tx.amount)}
                           </div>
+                          {tx.type===PREV_YEAR_TYPE&&<div style={{fontSize:11,color:C.muted}}>Memo only — not counted in the loan balance</div>}
                           <div style={{fontSize:11,color:C.muted}}>{fmtD(tx.date)}{tx.ref?` · ${tx.ref}`:""}</div>
                           {tx.accountName&&<div style={{fontSize:11,color:C.muted}}>Acct: {tx.accountName}</div>}
                           {tx.lrNo&&<div style={{fontSize:11,color:C.blue}}>LR: {tx.lrNo}</div>}
@@ -27886,7 +27890,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
 // Record bank transfers against a trip. "Balance due" auto-updates.
 // ─── EMPLOYEE TRIP GROUP ─────────────────────────────────────────────────────
 // Groups all unpaid trips for one employee — can request payment for each or all together
-function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed=0, settledCount=0, heldOnly=[], prevSnap=null, paymentRequests, setPaymentRequests, setPayReqSheet, requestPaymentGuarded, vehicles, fmt,
+function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed=0, settledCount=0, heldOnly=[], prevSnap=null, balSnaps=[], paymentRequests, setPaymentRequests, setPayReqSheet, requestPaymentGuarded, vehicles, fmt,
   setDriverPays, setTrips, setEmployees, setCashTransfers, cashTransfers, user, log }) {
   const [open, setOpen] = useState(true);
   const [selected, setSelected] = useState(new Set(empTrips.map(t=>t.id)));
@@ -28007,7 +28011,18 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed
              {prevSnap && <div style={{fontSize:11,color:C.muted,marginTop:2}}>Last saved {prevSnap.date}: ₹{Math.round(prevSnap.total).toLocaleString("en-IN")} · now {totalBal-prevSnap.total>=0?"+":"−"}₹{Math.abs(Math.round(totalBal-prevSnap.total)).toLocaleString("en-IN")}</div>}
           </div>
         </div>
-        <div style={{fontSize:18}}>{open?"▲":"▼"}</div>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <button onClick={(e)=>{ e.stopPropagation();
+              const stmt = employeeStatement(empTrips, empId==="unassigned"?"":empId);
+              const hist = (balSnaps||[]).filter(x=>x.empId===(empId==="unassigned"?"":empId)).sort((a,b)=>b.date.localeCompare(a.date)).slice(0,31);
+              const w = window.open("","_blank");
+              if(!w){ alert("Allow pop-ups to download the statement."); return; }
+              w.document.write(statementHtml(stmt,{empName:emp?.name||"Unassigned", company:(RC.companyName||""), date:today(), history:hist}).replace("</body>","<script>window.onload=function(){window.print();}</script></body>"));
+              w.document.close();
+            }}
+            style={{background:"#0d9488",color:"#fff",border:"none",borderRadius:6,fontSize:11,fontWeight:700,padding:"5px 9px",cursor:"pointer"}}>⬇ Statement</button>
+          <div style={{fontSize:18}}>{open?"▲":"▼"}</div>
+        </div>
       </div>
 
       {open && (
@@ -29796,7 +29811,7 @@ This will auto-recover in the next trip.`);
         // pouch part are shown separately inside the group.
         const empGroups = {};
         tripWithBalance.forEach(t => {
-          if(!includeInByEmployee(t) || !inEmpScope(t)) return;   // settled-but-owed trips + trips saved from the cutoff; older unsettled trips are left out for now
+          if(!includeInByEmployee(t) || !inEmpScope(t)) return;   // every trip with a balance counts — no cutoff, no flags
           const empId = t.assignedEmpId||"unassigned";
           (empGroups[empId] = empGroups[empId] || []).push(t);
         });
@@ -29817,7 +29832,7 @@ This will auto-recover in the next trip.`);
               const [empGroupOpen, setEmpGroupOpen] = [null,null]; // handled per-instance below
               return (
                 <EmpTripGroup key={empId}
-                  empId={empId} emp={emp} empTrips={empTrips} totalBal={totalBal} pouchHeld={pouchHeld} settledOwed={settledOwed} settledCount={settledCount} heldOnly={heldOnly} prevSnap={(()=>{ const k=empId==="unassigned"?"":empId; const d=today(); return (balSnaps||[]).filter(x=>x.empId===k && x.date<d).sort((a,b)=>b.date.localeCompare(a.date))[0]||null; })()}
+                  empId={empId} emp={emp} empTrips={empTrips} totalBal={totalBal} pouchHeld={pouchHeld} settledOwed={settledOwed} settledCount={settledCount} heldOnly={heldOnly} balSnaps={balSnaps} prevSnap={(()=>{ const k=empId==="unassigned"?"":empId; const d=today(); return (balSnaps||[]).filter(x=>x.empId===k && x.date<d).sort((a,b)=>b.date.localeCompare(a.date))[0]||null; })()}
                   paymentRequests={paymentRequests||[]} setPaymentRequests={setPaymentRequests}
                   setPayReqSheet={setPayReqSheet}
                   requestPaymentGuarded={requestPaymentGuarded}
