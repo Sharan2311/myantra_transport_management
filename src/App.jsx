@@ -1,5 +1,5 @@
 import { pouchAmountFor } from "./pouch_logic.js";
-import { includeInByEmployee } from "./byemp_logic.js";
+import { includeInByEmployee, employeeStatement, statementHtml } from "./byemp_logic.js";
 import { bookableLoanRecovery, PREV_YEAR_TYPE } from "./loan_ledger_logic.js";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { DB } from "./db.js";
@@ -27890,7 +27890,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
 // Record bank transfers against a trip. "Balance due" auto-updates.
 // ─── EMPLOYEE TRIP GROUP ─────────────────────────────────────────────────────
 // Groups all unpaid trips for one employee — can request payment for each or all together
-function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed=0, settledCount=0, heldOnly=[], prevSnap=null, paymentRequests, setPaymentRequests, setPayReqSheet, requestPaymentGuarded, vehicles, fmt,
+function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed=0, settledCount=0, heldOnly=[], prevSnap=null, balSnaps=[], paymentRequests, setPaymentRequests, setPayReqSheet, requestPaymentGuarded, vehicles, fmt,
   setDriverPays, setTrips, setEmployees, setCashTransfers, cashTransfers, user, log }) {
   const [open, setOpen] = useState(true);
   const [selected, setSelected] = useState(new Set(empTrips.map(t=>t.id)));
@@ -28011,7 +28011,18 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed
              {prevSnap && <div style={{fontSize:11,color:C.muted,marginTop:2}}>Last saved {prevSnap.date}: ₹{Math.round(prevSnap.total).toLocaleString("en-IN")} · now {totalBal-prevSnap.total>=0?"+":"−"}₹{Math.abs(Math.round(totalBal-prevSnap.total)).toLocaleString("en-IN")}</div>}
           </div>
         </div>
-        <div style={{fontSize:18}}>{open?"▲":"▼"}</div>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <button onClick={(e)=>{ e.stopPropagation();
+              const stmt = employeeStatement(empTrips, empId==="unassigned"?"":empId);
+              const hist = (balSnaps||[]).filter(x=>x.empId===(empId==="unassigned"?"":empId)).sort((a,b)=>b.date.localeCompare(a.date)).slice(0,31);
+              const w = window.open("","_blank");
+              if(!w){ alert("Allow pop-ups to download the statement."); return; }
+              w.document.write(statementHtml(stmt,{empName:emp?.name||"Unassigned", company:(RC.companyName||""), date:today(), history:hist}).replace("</body>","<script>window.onload=function(){window.print();}</script></body>"));
+              w.document.close();
+            }}
+            style={{background:"#0d9488",color:"#fff",border:"none",borderRadius:6,fontSize:11,fontWeight:700,padding:"5px 9px",cursor:"pointer"}}>⬇ Statement</button>
+          <div style={{fontSize:18}}>{open?"▲":"▼"}</div>
+        </div>
       </div>
 
       {open && (
@@ -29800,7 +29811,7 @@ This will auto-recover in the next trip.`);
         // pouch part are shown separately inside the group.
         const empGroups = {};
         tripWithBalance.forEach(t => {
-          if(!includeInByEmployee(t) || !inEmpScope(t)) return;   // settled-but-owed trips + trips saved from the cutoff; older unsettled trips are left out for now
+          if(!includeInByEmployee(t) || !inEmpScope(t)) return;   // every trip with a balance counts — no cutoff, no flags
           const empId = t.assignedEmpId||"unassigned";
           (empGroups[empId] = empGroups[empId] || []).push(t);
         });
@@ -29821,7 +29832,7 @@ This will auto-recover in the next trip.`);
               const [empGroupOpen, setEmpGroupOpen] = [null,null]; // handled per-instance below
               return (
                 <EmpTripGroup key={empId}
-                  empId={empId} emp={emp} empTrips={empTrips} totalBal={totalBal} pouchHeld={pouchHeld} settledOwed={settledOwed} settledCount={settledCount} heldOnly={heldOnly} prevSnap={(()=>{ const k=empId==="unassigned"?"":empId; const d=today(); return (balSnaps||[]).filter(x=>x.empId===k && x.date<d).sort((a,b)=>b.date.localeCompare(a.date))[0]||null; })()}
+                  empId={empId} emp={emp} empTrips={empTrips} totalBal={totalBal} pouchHeld={pouchHeld} settledOwed={settledOwed} settledCount={settledCount} heldOnly={heldOnly} balSnaps={balSnaps} prevSnap={(()=>{ const k=empId==="unassigned"?"":empId; const d=today(); return (balSnaps||[]).filter(x=>x.empId===k && x.date<d).sort((a,b)=>b.date.localeCompare(a.date))[0]||null; })()}
                   paymentRequests={paymentRequests||[]} setPaymentRequests={setPaymentRequests}
                   setPayReqSheet={setPayReqSheet}
                   requestPaymentGuarded={requestPaymentGuarded}
