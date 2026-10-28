@@ -1,0 +1,14 @@
+import assert from "node:assert/strict";
+import { PREV_YEAR_TYPE, prevYearMemoFor, bookableLoanRecovery } from "../src/loan_ledger_logic.js";
+let n = 0; const t = (name, f) => { f(); n++; console.log("ok -", name); };
+const trip = { id: "T1", lrNo: "SKLC270", loanRecovery: 10000 };
+const memo = (o) => ({ id: "m1", type: PREV_YEAR_TYPE, tripId: "T1", lrNo: "SKLC270", amount: 10000, ...o });
+t("no memo: the whole trip loan recovery is bookable", () => assert.equal(bookableLoanRecovery({ loanTxns: [] }, trip), 10000));
+t("memo for this trip is taken out of what the ledger books", () => assert.equal(bookableLoanRecovery({ loanTxns: [memo()] }, trip), 0));
+t("memo covers only part: the rest is still booked", () => assert.equal(bookableLoanRecovery({ loanTxns: [memo({ amount: 700 })] }, { ...trip, loanRecovery: 5700 }), 5000));
+t("memo of another trip is ignored", () => assert.equal(bookableLoanRecovery({ loanTxns: [memo({ tripId: "T2", lrNo: "X" })] }, trip), 10000));
+t("old memo without tripId matches by LR", () => assert.equal(prevYearMemoFor([memo({ tripId: undefined })], trip), 10000));
+t("normal recovery entries are not memos", () => assert.equal(prevYearMemoFor([{ id: "r", type: "recovery", tripId: "T1", amount: 5000 }], trip), 0));
+t("never negative", () => assert.equal(bookableLoanRecovery({ loanTxns: [memo({ amount: 99999 })] }, trip), 0));
+t("missing vehicle is fine", () => assert.equal(bookableLoanRecovery(null, trip), 10000));
+console.log(n + " tests passed");
