@@ -14,6 +14,13 @@ export const diCategory = (goods, billed = false) => {
 // Goods for one DI: its own line first, else the trip's GR particulars (older trips store goods only there).
 export const goodsFor = (trip, line) => (line && line.goods) || trip?.grParticulars?.goods || "";
 
+// "Generate PDF" with a selection: ticked DI rows (tripId::diNo) win; else ticked trips; else everything in view.
+export const restrictToSelection = (groups, tripIds, diKeys) => {
+  if (diKeys && diKeys.size) return groups.map((g) => ({ ...g, rows: g.rows.filter((d) => diKeys.has(g.trip.id + "::" + (d.diNo || ""))) })).filter((g) => g.rows.length);
+  if (tripIds && tripIds.size) return groups.filter((g) => tripIds.has(g.trip.id));
+  return groups;
+};
+
 // Category of one DI (line = a DI line / diRowsFor row, or null for a single-DI trip)
 export const diCat = (trip, line) => {
   const billed = line ? !!(line.billed || line.paid) : !!(trip?.invoiceNo || trip?.status === "Paid");

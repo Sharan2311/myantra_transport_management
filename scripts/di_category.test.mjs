@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { diCategory, diCat, goodsFor, tripHasCategory, followupByVehicle, followupHtml } from "../src/di_category.js";
+import { restrictToSelection, diCategory, diCat, goodsFor, tripHasCategory, followupByVehicle, followupHtml } from "../src/di_category.js";
 let n = 0; const t = (name, f) => { f(); n++; console.log("ok -", name); };
 
 // RULE: if the Goods text has NT → NT (non trade), else T (trade)
@@ -88,4 +88,16 @@ t("html lists every DI, vehicle headings, T/NT tags, filters and escapes text", 
   const h2 = followupHtml(followupByVehicle([E({ cat: "NA" })]), { fmt: (x) => x });
   assert.ok(h2.includes(">NA<"));
 });
+const G = [{ trip: { id: "a" }, rows: [{ diNo: "1" }, { diNo: "2" }] }, { trip: { id: "b" }, rows: [{ diNo: "3" }] }, { trip: { id: "c" }, rows: [{ diNo: "4" }] }];
+t("nothing selected → everything shown is kept", () => assert.equal(restrictToSelection(G, new Set(), new Set()).length, 3));
+t("ticked trips → only those trips (all their shown DIs)", () => {
+  const r = restrictToSelection(G, new Set(["a", "c"]), new Set());
+  assert.deepEqual(r.map(g => g.trip.id), ["a", "c"]); assert.equal(r[0].rows.length, 2);
+});
+t("ticked DIs → only those DI rows", () => {
+  const r = restrictToSelection(G, new Set(), new Set(["a::2", "b::3"]));
+  assert.deepEqual(r.map(g => g.rows.map(d => d.diNo)), [["2"], ["3"]]);
+});
+t("DI ticks win over trip ticks when both are used", () => assert.deepEqual(restrictToSelection(G, new Set(["a"]), new Set(["c::4"])).map(g => g.trip.id), ["c"]));
+t("selection that is not in the current view → empty", () => assert.equal(restrictToSelection(G, new Set(["zz"]), new Set()).length, 0));
 console.log(n + " tests passed");
