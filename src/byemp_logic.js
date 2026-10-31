@@ -1,7 +1,7 @@
 // Driver Pay → By Employee.
 // RULE (owner, 28 Oct 2026): an employee's balance is the sum of the balance of every trip placed on
 // him. No cutoff date, no hand-picked trips — a trip with a balance is always counted.
-export const includeInByEmployee = (t) => (t?.balancePlain || 0) > 0;
+export const includeInByEmployee = (t) => Math.round((t?.balancePlain || 0) * 100) > 0;   // ignore floating-point dust below half a paisa
 
 // The app stores createdAt as "dd/mm/yy, h:mm am" (en-IN short); older/other rows may be ISO.
 // Returns "yyyy-mm-dd" or "" when it can't be read.
