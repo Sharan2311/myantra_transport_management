@@ -1,21 +1,30 @@
-// DI category: Trade (T) vs Non Trade (NT), read from the GR particulars "Goods" text.
-// RULE (owner, 31 Oct 2026): if the goods text has NT → NT, otherwise T (also when there is no goods text).
-// "NT" must stand alone as a word — CEMENT / PAYMENT / AGENT contain the letters but are trade.
+// DI category from the GR particulars "Goods" text:
+//   NT  = Non Trade  (goods text has NT)          T = Trade (any other goods text)
+//   NA  = Not available (no goods text AND not billed yet — goods still to be filled)
+// A billed DI with no goods text (old history) counts as T. "NT" must stand alone as a word —
+// CEMENT / PAYMENT / AGENT contain the letters but are trade.
 const NT_WORD = /(^|[^A-Za-z0-9])NT([^A-Za-z0-9]|$)/i;
 const NON_TRADE = /NON[\s-]*TRADE/i;
-export const diCategory = (goods) => {
-  const g = String(goods ?? "");
+export const diCategory = (goods, billed = false) => {
+  const g = String(goods ?? "").trim();
+  if (!g) return billed ? "T" : "NA";
   return NT_WORD.test(g) || NON_TRADE.test(g) ? "NT" : "T";
 };
 
 // Goods for one DI: its own line first, else the trip's GR particulars (older trips store goods only there).
 export const goodsFor = (trip, line) => (line && line.goods) || trip?.grParticulars?.goods || "";
 
+// Category of one DI (line = a DI line / diRowsFor row, or null for a single-DI trip)
+export const diCat = (trip, line) => {
+  const billed = line ? !!(line.billed || line.paid) : !!(trip?.invoiceNo || trip?.status === "Paid");
+  return diCategory(goodsFor(trip, line), billed);
+};
+
 // Trip-level filter: a trip is in a category if ANY of its DIs is. "all" (or empty) matches everything.
 export const tripHasCategory = (trip, cat) => {
   if (!cat || cat === "all") return true;
   const lines = trip?.diLines?.length ? trip.diLines : [null];
-  return lines.some((l) => diCategory(goodsFor(trip, l)) === cat);
+  return lines.some((l) => diCat(trip, l) === cat);
 };
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -44,7 +53,7 @@ export const followupHtml = (r, { company = "", filterSummary = "", generated = 
   const sum = r.vehicles.map((v, i) => `<tr><td>${i + 1}</td><td>${esc(v.truckNo)}</td><td>${v.dis}</td><td>${v.lrs}</td><td>${esc(v.oldest)}</td><td style="text-align:right">${fmt(v.amount)}</td></tr>`).join("");
   const blocks = r.vehicles.map((v) => `<div class="veh"><div class="vh"><span><b>${esc(v.truckNo)}</b> <span class="mut">· ${v.lrs} LR${v.lrs > 1 ? "s" : ""} · ${v.dis} DI${v.dis > 1 ? "s" : ""}</span></span><span class="amt">${fmt(v.amount)}</span></div>
 <table><tr><th>Date</th><th>LR</th><th>Party name</th><th>DI</th><th>Type</th><th>Pouch</th><th>Email</th><th>Ready</th><th style="text-align:right">Amount</th></tr>
-${v.entries.map((e) => `<tr><td>${esc(e.date)}</td><td>${esc(e.lrNo || "—")}</td><td>${esc(e.partyName || "—")}</td><td>${esc(e.diNo || "—")}</td><td style="text-align:center"><b style="color:${e.cat === "NT" ? "#b45309" : "#0f766e"}">${esc(e.cat)}</b></td>${tick(e.pouch)}${tick(e.email)}${tick(e.ready)}<td style="text-align:right">${fmt(e.amount)}</td></tr>`).join("")}</table></div>`).join("");
+${v.entries.map((e) => `<tr><td>${esc(e.date)}</td><td>${esc(e.lrNo || "—")}</td><td>${esc(e.partyName || "—")}</td><td>${esc(e.diNo || "—")}</td><td style="text-align:center"><b style="color:${e.cat === "NT" ? "#b45309" : e.cat === "NA" ? "#6b7280" : "#0f766e"}">${esc(e.cat)}</b></td>${tick(e.pouch)}${tick(e.email)}${tick(e.ready)}<td style="text-align:right">${fmt(e.amount)}</td></tr>`).join("")}</table></div>`).join("");
   return `<style>
   body{font-family:'Segoe UI',Arial,sans-serif;font-size:11px;color:#111;margin:20px}
   .kpis{display:flex;gap:12px;margin:12px 0;flex-wrap:wrap}.kpi{border:1px solid #ddd;border-radius:6px;padding:8px 14px;min-width:90px;text-align:center}

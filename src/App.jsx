@@ -1,6 +1,6 @@
 import { pouchAmountFor } from "./pouch_logic.js";
 import { includeInByEmployee, employeeStatement, statementHtml } from "./byemp_logic.js";
-import { diCategory, goodsFor, tripHasCategory, followupByVehicle, followupHtml } from "./di_category.js";
+import { diCat, tripHasCategory, followupByVehicle, followupHtml } from "./di_category.js";
 import { bookableLoanRecovery, PREV_YEAR_TYPE } from "./loan_ledger_logic.js";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { DB } from "./db.js";
@@ -9245,7 +9245,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       {!isIn && (
         <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
           <span style={{color:C.muted,fontSize:11,fontWeight:700,flexShrink:0}}>Category:</span>
-          {[["all","All"],["T","Trade (T)"],["NT","Non Trade (NT)"]].map(([k,l])=>(
+          {[["all","All"],["T","Trade (T)"],["NT","Non Trade (NT)"],["NA","Not available (NA)"]].map(([k,l])=>(
             <button key={k} onClick={()=>setCatFilterTrip(k)}
               style={{padding:"5px 10px",borderRadius:20,border:`1.5px solid ${catFilterTrip===k?"#0f766e":C.border}`,
                 background:catFilterTrip===k?"#0f766e22":"transparent",color:catFilterTrip===k?"#0f766e":C.muted,
@@ -14720,7 +14720,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
       if(readyFilter!=="all") rows = rows.filter(d => d.orderType!=="party" || (readyFilter==="ready")===d.readyForBilling);
       if(epodFilter!=="all") rows = rows.filter(d => d.orderType!=="party" || (epodFilter==="marked")===!!d.epodDone);
       if(lineFilter!=="all") rows = rows.filter(d => grLine(d.grNo)===lineFilter);
-      if(catFilter!=="all") rows = rows.filter(d => diCategory(goodsFor(t,d))===catFilter);
+      if(catFilter!=="all") rows = rows.filter(d => diCat(t,d)===catFilter);
       if(agingFilter!=="all") rows = rows.filter(d => { const a=billingAging(t,d); return agingFilter==="due_soon" ? a.dueSoon : a.overdue; });
       return {trip:t, rows, clubbed};
     })
@@ -14754,14 +14754,14 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
     if(confirmFilter!=="all") filterParts.push(`Confirmation Email: ${confirmFilter==="received"?"Received":"Not Received"}`);
     if(readyFilter!=="all") filterParts.push(`Ready for Billing: ${readyFilter==="ready"?"Ready":"Not Ready"}`);
     if(epodFilter!=="all") filterParts.push(`EPOD: ${epodFilter==="marked"?"Marked":"Not Marked"}`);
-    if(catFilter!=="all") filterParts.push(`Category: ${catFilter==="NT"?"Non Trade (NT)":"Trade (T)"}`);
+    if(catFilter!=="all") filterParts.push(`Category: ${catFilter==="NT"?"Non Trade (NT)":catFilter==="NA"?"Not available (NA)":"Trade (T)"}`);
     if(dateFrom||dateTo) filterParts.push(`Date: ${dateFrom||"start"} to ${dateTo||"today"}`);
     if(searchQ.trim()) filterParts.push(`Search: "${searchQ.trim()}"`);
     const filterSummary = (filterParts.length ? filterParts.join(" · ") : "No filters applied — showing all") + " · Grouped by vehicle";
 
     const entries = groupsForPdf.flatMap(({trip:t, rows}) => rows.map(d => ({
       truckNo:t.truckNo||"", date:t.date||"", lrNo:t.lrNo||"", partyName:t.partyName||"", diNo:d.diNo||"",
-      cat:diCategory(goodsFor(t,d)),
+      cat:diCat(t,d),
       pouch: d.orderType==="party" ? diPouchReceived(t,d) : false,
       email: diConfirmReceived(t,d), ready: !!d.readyForBilling,
       amount: rowAmt(t,d),
@@ -15194,7 +15194,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
       </div>
       <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
         <span style={{fontSize:10,color:C.muted,fontWeight:700}}>CATEGORY:</span>
-        {[["all","All"],["T","Trade (T)"],["NT","Non Trade (NT)"]].map(([k,l])=>(
+        {[["all","All"],["T","Trade (T)"],["NT","Non Trade (NT)"],["NA","Not available (NA)"]].map(([k,l])=>(
           <button key={k} onClick={()=>setCatFilter(k)}
             style={{padding:"5px 11px",borderRadius:16,cursor:"pointer",fontWeight:700,fontSize:11,
               background:catFilter===k?"#0f766e":"transparent",border:"1.5px solid #0f766e",
@@ -15407,7 +15407,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                       {i===0 && <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",borderRight:bR,borderBottom:bB}}>{t.to||"—"}</td>}
                       <td style={{padding:"6px 8px",fontFamily:"monospace",fontSize:11,borderRight:bR,borderBottom:bB}}>
                         <input type="checkbox" title="Tick to include this DI in 'PDF of selected DIs'" checked={pdfSel.has(t.id+"::"+(d.diNo||""))} onChange={()=>setPdfSel(p=>{const n=new Set(p);const k=t.id+"::"+(d.diNo||"");n.has(k)?n.delete(k):n.add(k);return n;})} style={{marginRight:5,verticalAlign:"middle"}}/>
-                        {d.diNo||"—"} <span style={{fontSize:9,fontWeight:800,color:diCategory(goodsFor(t,d))==="NT"?"#b45309":"#0f766e",border:"1px solid currentColor",borderRadius:4,padding:"0 3px"}}>{diCategory(goodsFor(t,d))}</span>{d.qty?<div style={{color:C.muted,fontFamily:"inherit"}}>{d.qty}MT{d.bags?` · ${d.bags} bags`:""}</div>:null}
+                        {d.diNo||"—"} <span style={{fontSize:9,fontWeight:800,color:diCat(t,d)==="NT"?"#b45309":diCat(t,d)==="NA"?"#6b7280":"#0f766e",border:"1px solid currentColor",borderRadius:4,padding:"0 3px"}}>{diCat(t,d)}</span>{d.qty?<div style={{color:C.muted,fontFamily:"inherit"}}>{d.qty}MT{d.bags?` · ${d.bags} bags`:""}</div>:null}
                         {clubbed && <div style={{marginTop:3}}>{d.orderType==="party"?<Badge label="🎪 Party" color="#7c3aed" />:<Badge label="🏭 Godown" color={C.muted} />}</div>}
                       </td>
                       <td style={{padding:"6px 8px",borderRight:bR,borderBottom:bB}}>

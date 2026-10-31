@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { diCategory, goodsFor, tripHasCategory, followupByVehicle, followupHtml } from "../src/di_category.js";
+import { diCategory, diCat, goodsFor, tripHasCategory, followupByVehicle, followupHtml } from "../src/di_category.js";
 let n = 0; const t = (name, f) => { f(); n++; console.log("ok -", name); };
 
 // RULE: if the Goods text has NT → NT (non trade), else T (trade)
@@ -24,7 +24,21 @@ t("case, punctuation and the written-out form", () => {
   assert.equal(diCategory("NON TRADE OPC"), "NT");
   assert.equal(diCategory("Non-Trade"), "NT");
 });
-t("no goods text at all is trade (the 'else T' rule)", () => { assert.equal(diCategory(""), "T"); assert.equal(diCategory(null), "T"); assert.equal(diCategory(undefined), "T"); });
+t("no goods text: NA while not billed, T once billed (history)", () => {
+  assert.equal(diCategory("", false), "NA"); assert.equal(diCategory(null, false), "NA"); assert.equal(diCategory(undefined), "NA");
+  assert.equal(diCategory("", true), "T"); assert.equal(diCategory(null, true), "T");
+  assert.equal(diCategory("SC NT OPC", false), "NT"); assert.equal(diCategory("Shree TR PPC", false), "T");
+});
+t("diCat reads goods and billing from the DI line, else the trip", () => {
+  const trip = { grParticulars: { goods: "" } };
+  assert.equal(diCat(trip, { billed: false }), "NA");
+  assert.equal(diCat(trip, { billed: true }), "T");
+  assert.equal(diCat(trip, { paid: true }), "T");
+  assert.equal(diCat({ invoiceNo: "INV1" }, null), "T");
+  assert.equal(diCat({ status: "Paid" }, null), "T");
+  assert.equal(diCat({}, null), "NA");
+  assert.equal(diCat({ grParticulars: { goods: "SC NT PPC" } }, { billed: true }), "NT");
+});
 
 t("goods come from the DI line first, else the trip's GR particulars", () => {
   const trip = { grParticulars: { goods: "SC NT OPC53 LOOSE" } };
@@ -38,7 +52,9 @@ t("trip filter: a trip matches a category if any of its DIs is in it", () => {
   assert.equal(tripHasCategory(mixed, "T"), true);
   assert.equal(tripHasCategory({ grParticulars: { goods: "SC NT PPC" } }, "T"), false);
   assert.equal(tripHasCategory({ grParticulars: { goods: "SC NT PPC" } }, "NT"), true);
-  assert.equal(tripHasCategory({}, "T"), true);          // single-DI trip, no goods → T
+  assert.equal(tripHasCategory({}, "T"), false);         // single-DI trip, no goods, not billed → NA
+  assert.equal(tripHasCategory({}, "NA"), true);
+  assert.equal(tripHasCategory({ invoiceNo: "I" }, "T"), true);   // billed, no goods → T
   assert.equal(tripHasCategory({}, "all"), true);
 });
 
@@ -69,5 +85,7 @@ t("html lists every DI, vehicle headings, T/NT tags, filters and escapes text", 
   assert.ok(h.includes("Category: NT") && h.includes("Vehicle Summary"));
   assert.ok(h.includes("A&lt;script&gt;") && !h.includes("A<script>"));
   assert.ok(h.includes(">NT<") && h.includes(">T<"));
+  const h2 = followupHtml(followupByVehicle([E({ cat: "NA" })]), { fmt: (x) => x });
+  assert.ok(h2.includes(">NA<"));
 });
 console.log(n + " tests passed");
