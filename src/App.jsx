@@ -1,5 +1,6 @@
 import { pouchAmountFor } from "./pouch_logic.js";
 import { includeInByEmployee, employeeStatement, statementHtml } from "./byemp_logic.js";
+import { diCat, tripHasCategory, followupByVehicle, followupHtml } from "./di_category.js";
 import { bookableLoanRecovery, PREV_YEAR_TYPE } from "./loan_ledger_logic.js";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { DB } from "./db.js";
@@ -164,7 +165,7 @@ const tripPaidAmount = (trip) => {
 const diRowsFor = (trip) => {
   const lines = trip.diLines||[];
   if(lines.length > 0) return lines.map(d => ({
-    diNo: d.diNo||"", grNo: d.grNo||"", qty: d.qty||0, bags: d.bags||0,
+    diNo: d.diNo||"", grNo: d.grNo||"", qty: d.qty||0, bags: d.bags||0, goods: d.goods||"",
     billed: !!d.billed, invoiceNo: d.invoiceNo||"", invoiceDate: d.invoiceDate||"",
     billedAmt: d.billedAmt||0,
     paid: !!d.paid, paidAmount: d.paidAmount||0, utr: d.utr||"", paymentDate: d.paymentDate||"",
@@ -194,7 +195,7 @@ const diRowsFor = (trip) => {
   }));
   // Single-DI trip using the flat fields directly
   return [{
-    diNo: trip.diNo||"", grNo: trip.grNo||"", qty: trip.qty||0, bags: trip.bags||0,
+    diNo: trip.diNo||"", grNo: trip.grNo||"", qty: trip.qty||0, bags: trip.bags||0, goods: "",
     billed: !!trip.invoiceNo, invoiceNo: trip.invoiceNo||"", invoiceDate: trip.invoiceDate||"",
     billedAmt: trip.billedToShree||((trip.qty||0)*(trip.givenRate||0)),
     paid: trip.status==="Paid", paidAmount: trip.paidAmount||0, utr: trip.utr||"", paymentDate: trip.paymentDate||"",
@@ -4759,6 +4760,7 @@ Rules:
             grNo:  ex.grNo||"",
             qty:   +ex.qty||0,
             bags:  +ex.bags||0,
+            goods: ex._grParticulars?.goods || ex.goods || "",   // per-DI goods → T / NT category
             givenRate: +item.givenRate||0,
             frRate:    +ex.frRate||0,
             orderType: item.orderType||"godown",
@@ -8086,6 +8088,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
   const [editSheet,   setEditSheet]   = useState(null);
   const [filter,      setFilter]      = useState("All");
   const [orderTypeFilter, setOrderTypeFilter] = useState("All"); // "All"|"godown"|"party"
+  const [catFilterTrip, setCatFilterTrip] = useState("all"); // all | T | NT — Trade / Non Trade (from GR particulars Goods)
   const [search,      setSearch]      = useState("");
   const [clientFilter, setClientFilter] = useState(""); // "" = All clients
   const [filterEmpTrip, setFilterEmpTrip] = useState(""); // "" = All employees
@@ -8198,10 +8201,11 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         (() => { const emp=(employees||[]).find(e=>e.id===filterEmpTrip); const tr=(emp?.linkedTrucks||[]).map(x=>x.toUpperCase()); return tr.length>0&&tr.includes((t.truckNo||"").toUpperCase()); })()
       )
     : slist;
-  const shown  = filter==="All" ? elist
+  const clist2 = catFilterTrip==="all" ? elist : elist.filter(t => tripHasCategory(t, catFilterTrip));
+  const shown  = filter==="All" ? clist2
     : filter==="Confirmation Email Received"
-      ? elist.filter(t=>t.status==="Confirmation Email Received"&&t.orderType==="party")
-      : elist.filter(t => t.status===filter);
+      ? clist2.filter(t=>t.status==="Confirmation Email Received"&&t.orderType==="party")
+      : clist2.filter(t => t.status===filter);
 
   // When truck number changes, check if tafalExempt
   const onTruckChange = v => {
@@ -9233,6 +9237,19 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                 fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
               {o.icon} {o.label}
             </button>
+          ))}
+        </div>
+      )}
+
+      {/* Category filter — Trade (T) / Non Trade (NT), from the GR particulars Goods text */}
+      {!isIn && (
+        <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+          <span style={{color:C.muted,fontSize:11,fontWeight:700,flexShrink:0}}>Category:</span>
+          {[["all","All"],["T","Trade (T)"],["NT","Non Trade (NT)"],["NA","Not available (NA)"]].map(([k,l])=>(
+            <button key={k} onClick={()=>setCatFilterTrip(k)}
+              style={{padding:"5px 10px",borderRadius:20,border:`1.5px solid ${catFilterTrip===k?"#0f766e":C.border}`,
+                background:catFilterTrip===k?"#0f766e22":"transparent",color:catFilterTrip===k?"#0f766e":C.muted,
+                fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>{l}</button>
           ))}
         </div>
       )}
@@ -14386,6 +14403,8 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
   const [epodFilter,       setEpodFilter]       = useState("all"); // all | marked | not_marked — Confirmation EPOD mark (per DI)
   const [employeeFilter,   setEmployeeFilter]    = useState(""); // "" = all employees, else empId
   const [clubFilter,       setClubFilter]        = useState("all"); // all | clubbed | party_only — mixed party+godown LRs vs pure-party
+  const [catFilter,        setCatFilter]          = useState("all"); // all | T | NT — Trade / Non Trade (from GR particulars Goods)
+  const [pdfSel,           setPdfSel]             = useState(new Set()); // DI rows ticked for "PDF of selected DIs": tripId::diNo
   const [lineFilter,       setLineFilter]         = useState("all"); // all | line1 | line2 — GR number prefix (1070 vs 1079)
   const [agingFilter,      setAgingFilter]         = useState("all"); // all | due_soon | overdue — unbilled 90-day deadline, alert from 70
   const [rowUploadingId,   setRowUploadingId]   = useState(""); // per-row inline upload spinner
@@ -14701,6 +14720,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
       if(readyFilter!=="all") rows = rows.filter(d => d.orderType!=="party" || (readyFilter==="ready")===d.readyForBilling);
       if(epodFilter!=="all") rows = rows.filter(d => d.orderType!=="party" || (epodFilter==="marked")===!!d.epodDone);
       if(lineFilter!=="all") rows = rows.filter(d => grLine(d.grNo)===lineFilter);
+      if(catFilter!=="all") rows = rows.filter(d => diCat(t,d)===catFilter);
       if(agingFilter!=="all") rows = rows.filter(d => { const a=billingAging(t,d); return agingFilter==="due_soon" ? a.dueSoon : a.overdue; });
       return {trip:t, rows, clubbed};
     })
@@ -14719,71 +14739,40 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
   // trip: reads tableGroups directly, so whatever the owner is looking at
   // (e.g. filtered to one employee + Pouch: Not Received) is exactly what
   // gets printed.
-  const exportPartyPortalPDF = () => {
-    if(tableGroups.length===0) { alert("No trips match the current filters."); return; }
+  const exportPartyPortalPDF = (onlyKeys) => {
+    const picked = onlyKeys && onlyKeys.size ? onlyKeys : null;   // "PDF of selected DIs": only the ticked DI rows
+    const groupsForPdf = picked
+      ? tableGroups.map(g => ({...g, rows:g.rows.filter(d => picked.has(g.trip.id+"::"+(d.diNo||"")))})).filter(g => g.rows.length>0)
+      : tableGroups;
+    if(groupsForPdf.length===0) { alert(picked ? "None of the selected DIs are in the current view — clear the selection or change the filters." : "No trips match the current filters."); return; }
     const empName = employeeFilter ? (employees.find(e=>e.id===employeeFilter)?.name || employeeFilter) : "";
     const filterParts = [];
+    if(picked) filterParts.push(`Selected DIs only (${groupsForPdf.reduce((s,g)=>s+g.rows.length,0)})`);
     if(employeeFilter) filterParts.push(`Employee: ${empName}`);
     if(billStatusFilter!=="all") filterParts.push(`Status: ${billStatusFilter==="not_billed"?"Not Billed":billStatusFilter==="sent"?"Sent for Billing":billStatusFilter==="billed"?"Billed":"Paid"}`);
     if(pouchFilter!=="all") filterParts.push(`Return Pouch: ${pouchFilter==="received"?"Received":"Not Received"}`);
     if(confirmFilter!=="all") filterParts.push(`Confirmation Email: ${confirmFilter==="received"?"Received":"Not Received"}`);
     if(readyFilter!=="all") filterParts.push(`Ready for Billing: ${readyFilter==="ready"?"Ready":"Not Ready"}`);
     if(epodFilter!=="all") filterParts.push(`EPOD: ${epodFilter==="marked"?"Marked":"Not Marked"}`);
+    if(catFilter!=="all") filterParts.push(`Category: ${catFilter==="NT"?"Non Trade (NT)":catFilter==="NA"?"Not available (NA)":"Trade (T)"}`);
     if(dateFrom||dateTo) filterParts.push(`Date: ${dateFrom||"start"} to ${dateTo||"today"}`);
     if(searchQ.trim()) filterParts.push(`Search: "${searchQ.trim()}"`);
-    const filterSummary = filterParts.length ? filterParts.join(" &nbsp;·&nbsp; ") : "No filters applied — showing all";
+    const filterSummary = (filterParts.length ? filterParts.join(" · ") : "No filters applied — showing all") + " · Grouped by vehicle";
 
-    const rows = tableGroups.flatMap(({trip:t, rows}) => rows.map(d => {
-      const empN = employees.find(e=>e.id===t.assignedEmpId)?.name || "—";
-      const pouchOk = d.orderType==="party" ? diPouchReceived(t,d) : false;
-      const confirmOk = diConfirmReceived(t,d);
-      return `<tr>
-        <td>${t.date||""}</td>
-        <td>${t.lrNo||"—"}<br/><span style="color:#888;font-size:9px">${t.truckNo||""}</span></td>
-        <td>${empN}</td>
-        <td>${t.partyName||"—"}</td>
-        <td>${d.diNo||"—"}</td>
-        <td>${diRowStatus(d)}</td>
-        <td style="color:${pouchOk?"#16a34a":"#dc2626"};font-weight:700">${pouchOk?"✓":"✗"}</td>
-        <td style="color:${confirmOk?"#16a34a":"#dc2626"};font-weight:700">${confirmOk?"✓":"✗"}</td>
-        <td style="color:${d.readyForBilling?"#16a34a":"#dc2626"};font-weight:700">${d.readyForBilling?"✓":"✗"}</td>
-        <td style="text-align:right">${fmt(rowAmt(t,d))}</td>
-      </tr>`;
-    })).join("");
-
-    const html = `<style>
-      body{font-family:'Segoe UI',Arial,sans-serif;font-size:11px;color:#111;margin:20px}
-      .kpis{display:flex;gap:12px;margin:12px 0;flex-wrap:wrap}
-      .kpi{border:1px solid #ddd;border-radius:6px;padding:8px 14px;min-width:100px;text-align:center}
-      .kpi .val{font-size:16px;font-weight:800} .kpi .lbl{font-size:9px;color:#888;margin-top:2px}
-      table{width:100%;border-collapse:collapse;margin-bottom:10px;font-size:10px}
-      th{background:#7c3aed;color:white;padding:5px 7px;text-align:left;border:1px solid #7c3aed;font-size:9px;text-transform:uppercase}
-      td{padding:4px 7px;border:1px solid #e0e0e0}
-      tr:nth-child(even){background:#f7f5fc}
-      .footer{margin-top:20px;font-size:9px;color:#aaa;border-top:1px solid #eee;padding-top:8px}
-      .logo-img{width:52px;height:52px;border-radius:8px;object-fit:cover}
-      @media print { * { -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; } }
-    </style>
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;padding-bottom:8px;border-bottom:2px solid #7c3aed">
-      <img src="${RC.logoSrc}" class="logo-img" alt="${RC.companyShort}" />
-      <div>
-        <div style="font-size:7px;text-transform:uppercase;letter-spacing:2px;color:#7c3aed;font-weight:700">${RC.companyName}</div>
-        <div style="font-size:20px;font-weight:800;line-height:1.2">Party Portal — Follow-up List</div>
-        <div style="font-size:10px;color:#888">Generated ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}</div>
-      </div>
-    </div>
-    <div style="background:#f7f5fc;border:1px solid #7c3aed44;border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:11px;color:#555">
-      <b>Filters applied:</b> ${filterSummary}
-    </div>
-    <div class="kpis">
-      <div class="kpi"><div class="val" style="color:#7c3aed">${tableGroups.length}</div><div class="lbl">TRIPS</div></div>
-      <div class="kpi"><div class="val" style="color:#16a34a">${fmt(filteredTotal)}</div><div class="lbl">TOTAL AMOUNT</div></div>
-    </div>
-    <table><tr><th>Date</th><th>LR/Truck</th><th>Employee</th><th>Party Name</th><th>DI</th><th>Status</th><th>Pouch</th><th>Email</th><th>Ready</th><th style="text-align:right">Amount</th></tr>${rows}</table>
-    <div class="footer">${RC.companyName} · Report generated ${new Date().toLocaleString("en-IN")}</div>`;
-
+    const entries = groupsForPdf.flatMap(({trip:t, rows}) => rows.map(d => ({
+      truckNo:t.truckNo||"", date:t.date||"", lrNo:t.lrNo||"", partyName:t.partyName||"", diNo:d.diNo||"",
+      cat:diCat(t,d),
+      pouch: d.orderType==="party" ? diPouchReceived(t,d) : false,
+      email: diConfirmReceived(t,d), ready: !!d.readyForBilling,
+      amount: rowAmt(t,d),
+    })));
+    const html = followupHtml(followupByVehicle(entries), {
+      company:RC.companyName, filterSummary, fmt,
+      generated:new Date().toLocaleString("en-IN"), logo:RC.logoSrc||"",
+    });
     const w = window.open("","_blank");
-    w.document.write(`<!DOCTYPE html><html><head><title>Party Portal Follow-up</title></head><body onload="window.print()">${html}</body></html>`);
+    if(!w){ alert("Allow pop-ups to generate the PDF."); return; }
+    w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Party Portal Follow-up</title></head><body onload="window.print()">${html}</body></html>`);
     w.document.close();
   };
 
@@ -15204,6 +15193,17 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
         ))}
       </div>
       <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+        <span style={{fontSize:10,color:C.muted,fontWeight:700}}>CATEGORY:</span>
+        {[["all","All"],["T","Trade (T)"],["NT","Non Trade (NT)"],["NA","Not available (NA)"]].map(([k,l])=>(
+          <button key={k} onClick={()=>setCatFilter(k)}
+            style={{padding:"5px 11px",borderRadius:16,cursor:"pointer",fontWeight:700,fontSize:11,
+              background:catFilter===k?"#0f766e":"transparent",border:"1.5px solid #0f766e",
+              color:catFilter===k?"#fff":"#0f766e"}}>
+            {l}
+          </button>
+        ))}
+      </div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
         <span style={{fontSize:10,color:C.muted,fontWeight:700}}>LINE:</span>
         {[["all","All"],["line1","Line 1 (1070)"],["line2","Line 2 (1079)"]].map(([k,l])=>(
           <button key={k} onClick={()=>setLineFilter(k)}
@@ -15313,9 +15313,13 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
           <span style={{fontSize:12,color:C.muted}}>{tableGroups.length} trips · <b>{fmt(filteredTotal)}</b></span>
           <div style={{display:"flex",gap:6}}>
-            <button onClick={exportPartyPortalPDF} style={{background:"none",border:`1px solid ${C.purple}`,borderRadius:6,color:C.purple,fontSize:11,padding:"3px 10px",cursor:"pointer",fontWeight:700}}>
+            <button onClick={()=>exportPartyPortalPDF()} style={{background:"none",border:`1px solid ${C.purple}`,borderRadius:6,color:C.purple,fontSize:11,padding:"3px 10px",cursor:"pointer",fontWeight:700}}>
               📄 Generate PDF
             </button>
+            {pdfSel.size>0 && <button onClick={()=>exportPartyPortalPDF(pdfSel)} style={{background:C.purple,border:`1px solid ${C.purple}`,borderRadius:6,color:"#fff",fontSize:11,padding:"3px 10px",cursor:"pointer",fontWeight:700}}>
+              📄 PDF of selected DIs ({pdfSel.size})
+            </button>}
+            {pdfSel.size>0 && <button onClick={()=>setPdfSel(new Set())} style={{background:"none",border:`1px solid ${C.muted}`,borderRadius:6,color:C.muted,fontSize:11,padding:"3px 8px",cursor:"pointer"}}>Clear</button>}
             <button onClick={toggleAll} style={{background:"none",border:`1px solid ${C.accent}`,borderRadius:6,color:C.accent,fontSize:11,padding:"3px 10px",cursor:"pointer",fontWeight:700}}>
               {filteredTripIds.length>0 && filteredTripIds.every(id=>selected.has(id)) && selected.size===filteredTripIds.length ?"Deselect All":"Select All"}
             </button>
@@ -15402,7 +15406,8 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                       )}
                       {i===0 && <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",borderRight:bR,borderBottom:bB}}>{t.to||"—"}</td>}
                       <td style={{padding:"6px 8px",fontFamily:"monospace",fontSize:11,borderRight:bR,borderBottom:bB}}>
-                        {d.diNo||"—"}{d.qty?<div style={{color:C.muted,fontFamily:"inherit"}}>{d.qty}MT{d.bags?` · ${d.bags} bags`:""}</div>:null}
+                        <input type="checkbox" title="Tick to include this DI in 'PDF of selected DIs'" checked={pdfSel.has(t.id+"::"+(d.diNo||""))} onChange={()=>setPdfSel(p=>{const n=new Set(p);const k=t.id+"::"+(d.diNo||"");n.has(k)?n.delete(k):n.add(k);return n;})} style={{marginRight:5,verticalAlign:"middle"}}/>
+                        {d.diNo||"—"} <span style={{fontSize:9,fontWeight:800,color:diCat(t,d)==="NT"?"#b45309":diCat(t,d)==="NA"?"#6b7280":"#0f766e",border:"1px solid currentColor",borderRadius:4,padding:"0 3px"}}>{diCat(t,d)}</span>{d.qty?<div style={{color:C.muted,fontFamily:"inherit"}}>{d.qty}MT{d.bags?` · ${d.bags} bags`:""}</div>:null}
                         {clubbed && <div style={{marginTop:3}}>{d.orderType==="party"?<Badge label="🎪 Party" color="#7c3aed" />:<Badge label="🏭 Godown" color={C.muted} />}</div>}
                       </td>
                       <td style={{padding:"6px 8px",borderRight:bR,borderBottom:bB}}>

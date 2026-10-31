@@ -7,6 +7,7 @@ t("any trip with a balance is included, however old", () => assert.equal(inc(T({
 t("settled trip that still owes is included", () => assert.equal(inc(T({ driverSettled: true })), true));
 t("unsettled trip with no saved date is included", () => assert.equal(inc(T({ createdAt: undefined })), true));
 t("trip with no balance is never included", () => { assert.equal(inc(T({ balancePlain: 0 })), false); assert.equal(inc(T({ balancePlain: 0, driverSettled: true })), false); });
+t("rounding dust (less than half a paisa) is not a balance", () => { assert.equal(inc(T({ balancePlain: 3e-12 })), false); assert.equal(inc(T({ balancePlain: 0.004 })), false); assert.equal(inc(T({ balancePlain: 0.01 })), true); });
 t("missing balance is not included", () => assert.equal(inc({}), false));
 
 const trips = [
