@@ -88,3 +88,22 @@ export const splitShortage = (item, amount) => {
   if (!Number.isFinite(a) || a <= 0 || a > total) return { ok: false };
   return { ok: true, assigned: a, remaining: r2(total - a) };
 };
+
+// An advice with nothing for the owner to look at: reconciles, only freight invoices that are all in the app and paid exactly
+// as expected (2% TDS, 18% GST held) — no GST release, debit/credit note, shortage, expense, penalty or extra deduction.
+export const isCleanAdvice = (advice, { have, appTotals, recordedUtrs, from } = {}) => {
+  if (!advice || !advice.reconciled || !(advice.invoices || []).length) return false;
+  if (recordedUtrs && recordedUtrs.has(advice.utr)) return false;
+  if (from && (advice.paymentDate || "") < from) return false;
+  if ((advice.shortages || []).length || (advice.expenses || []).length || (advice.penalties || []).length) return false;
+  return advice.invoices.every((i) => {
+    const no = String(i.invoiceNo || "").trim();
+    if (!/^invoice$/i.test(i.docType || "Invoice") || !(+i.paymentAmt > 0) || !have?.has(no)) return false;
+    return checkInvoiceLine(i, appTotals?.[no]).state === "ok";
+  });
+};
+
+// Drafts that can be saved without looking, oldest payment first.
+export const cleanAdvices = (drafts, ctx) =>
+  (drafts || []).filter((d) => d.status !== "saved" && d.status !== "discarded" && isCleanAdvice(d.advice, ctx))
+    .sort((a, b) => String(a.advice.paymentDate).localeCompare(String(b.advice.paymentDate)));
