@@ -1,0 +1,6 @@
+We have effected a fund transfer to your a/c no. 50200051622767 with HDFC BANK LIMITED for Rs. 346670.10 ( X ) dated 15.10.2026 vide UTR No. 2018318075 against the below mentioned payment details :-
+| Sr No. | Document Description | Inv/Ref Number | Inv/Doc Date | Payment Amount | TDS Deducted | Hold Amount | Total Bill Amount | Narration | SAP Doc No | Location |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | Invoice | SMYE107927100089 | 14.10.2026 | 186936.96 | 3815.04 | 34335.36 | 225087.36 | CEMENT FREIGHT BILL - KODLA | 5100280083 | SCL-KODLA II |
+| 2 | Invoice | SMYE107027100218 | 14.10.2026 | 159733.14 | 3259.86 | 29338.74 | 192331.74 | CEMENT FREIGHT BILL - KODLA | 5100280077 | SCL-KODLA |
+| | Total | | | 346670.10 | 7074.90 | 63674.10 | 417419.10 | | | |

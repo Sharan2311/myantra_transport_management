@@ -1,6 +1,7 @@
 import { pouchAmountFor } from "./pouch_logic.js";
 import { includeInByEmployee, employeeStatement, statementHtml } from "./byemp_logic.js";
-import { diCat, tripHasCategory, followupByVehicle, followupHtml } from "./di_category.js";
+import { draftStatus } from "./advice_mail.js";
+import { restrictToSelection, diCat, tripHasCategory, followupByVehicle, followupHtml } from "./di_category.js";
 import { bookableLoanRecovery, PREV_YEAR_TYPE } from "./loan_ledger_logic.js";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { DB } from "./db.js";
@@ -14739,15 +14740,14 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
   // trip: reads tableGroups directly, so whatever the owner is looking at
   // (e.g. filtered to one employee + Pouch: Not Received) is exactly what
   // gets printed.
-  const exportPartyPortalPDF = (onlyKeys) => {
-    const picked = onlyKeys && onlyKeys.size ? onlyKeys : null;   // "PDF of selected DIs": only the ticked DI rows
-    const groupsForPdf = picked
-      ? tableGroups.map(g => ({...g, rows:g.rows.filter(d => picked.has(g.trip.id+"::"+(d.diNo||"")))})).filter(g => g.rows.length>0)
-      : tableGroups;
-    if(groupsForPdf.length===0) { alert(picked ? "None of the selected DIs are in the current view — clear the selection or change the filters." : "No trips match the current filters."); return; }
+  const exportPartyPortalPDF = () => {
+    // Selection: ticked DI rows win, else ticked trips (left checkbox), else everything in view.
+    const groupsForPdf = restrictToSelection(tableGroups, selected, pdfSel);
+    const picked = (pdfSel.size>0 || selected.size>0) ? true : null;
+    if(groupsForPdf.length===0) { alert(picked ? "None of the selected trips/DIs are in the current view — clear the selection or change the filters." : "No trips match the current filters."); return; }
     const empName = employeeFilter ? (employees.find(e=>e.id===employeeFilter)?.name || employeeFilter) : "";
     const filterParts = [];
-    if(picked) filterParts.push(`Selected DIs only (${groupsForPdf.reduce((s,g)=>s+g.rows.length,0)})`);
+    if(picked) filterParts.push(`Selected only (${groupsForPdf.reduce((s,g)=>s+g.rows.length,0)} DI${groupsForPdf.reduce((s,g)=>s+g.rows.length,0)>1?"s":""})`);
     if(employeeFilter) filterParts.push(`Employee: ${empName}`);
     if(billStatusFilter!=="all") filterParts.push(`Status: ${billStatusFilter==="not_billed"?"Not Billed":billStatusFilter==="sent"?"Sent for Billing":billStatusFilter==="billed"?"Billed":"Paid"}`);
     if(pouchFilter!=="all") filterParts.push(`Return Pouch: ${pouchFilter==="received"?"Received":"Not Received"}`);
@@ -15313,12 +15313,9 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
           <span style={{fontSize:12,color:C.muted}}>{tableGroups.length} trips · <b>{fmt(filteredTotal)}</b></span>
           <div style={{display:"flex",gap:6}}>
-            <button onClick={()=>exportPartyPortalPDF()} style={{background:"none",border:`1px solid ${C.purple}`,borderRadius:6,color:C.purple,fontSize:11,padding:"3px 10px",cursor:"pointer",fontWeight:700}}>
-              📄 Generate PDF
+            <button onClick={exportPartyPortalPDF} style={{background:"none",border:`1px solid ${C.purple}`,borderRadius:6,color:C.purple,fontSize:11,padding:"3px 10px",cursor:"pointer",fontWeight:700}}>
+              📄 {(pdfSel.size>0||selected.size>0) ? `PDF of selected (${pdfSel.size>0?pdfSel.size+" DI"+(pdfSel.size>1?"s":""):selected.size+" trip"+(selected.size>1?"s":"")})` : "Generate PDF"}
             </button>
-            {pdfSel.size>0 && <button onClick={()=>exportPartyPortalPDF(pdfSel)} style={{background:C.purple,border:`1px solid ${C.purple}`,borderRadius:6,color:"#fff",fontSize:11,padding:"3px 10px",cursor:"pointer",fontWeight:700}}>
-              📄 PDF of selected DIs ({pdfSel.size})
-            </button>}
             {pdfSel.size>0 && <button onClick={()=>setPdfSel(new Set())} style={{background:"none",border:`1px solid ${C.muted}`,borderRadius:6,color:C.muted,fontSize:11,padding:"3px 8px",cursor:"pointer"}}>Clear</button>}
             <button onClick={toggleAll} style={{background:"none",border:`1px solid ${C.accent}`,borderRadius:6,color:C.accent,fontSize:11,padding:"3px 10px",cursor:"pointer",fontWeight:700}}>
               {filteredTripIds.length>0 && filteredTripIds.every(id=>selected.has(id)) && selected.size===filteredTripIds.length ?"Deselect All":"Select All"}
@@ -24091,6 +24088,11 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
 
   const [activeTab,   setActiveTab]   = useState("overview");
   const [scanResult,  setScanResult]  = useState(null);
+  // ── Payment advices read from e-mail → drafts for owner review ──────────────
+  const [advDrafts, setAdvDrafts] = useState([]);
+  const [advBusy, setAdvBusy] = useState(false);
+  const loadAdvDrafts = React.useCallback(()=>{ setAdvBusy(true); DB.getAdviceDrafts().then(x=>setAdvDrafts(x||[])).catch(()=>{}).finally(()=>setAdvBusy(false)); },[]);
+  React.useEffect(()=>{ loadAdvDrafts(); },[loadAdvDrafts]);
   const [scanning,    setScanning]    = useState(false);
   const [scanError,   setScanError]   = useState(null);
   const [applyingInvoice, setApplyingInvoice] = useState(false);
@@ -25052,6 +25054,10 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     }
 
     log && log("Payment advice UTR "+utr+" applied — "+shorts.length+" shortage(s), "+confirmedDebitEntries.length+" expense(s), hold ₹"+Number(scanResult.holdAmount||0).toLocaleString("en-IN"));
+    if(scanResult._draftId) {   // came from an e-mailed advice — close its draft
+      const dr = (advDrafts||[]).find(x=>x.id===scanResult._draftId);
+      if(dr) { const done={...dr, status:"saved", savedAt:new Date().toISOString(), ts:Date.now()}; setAdvDrafts(prev=>prev.map(x=>x.id===done.id?done:x)); DB.saveAdviceDraft(done).catch(e=>console.error("saveAdviceDraft:",e)); }
+    }
     setScanResult(null);
   };
 
@@ -25787,6 +25793,41 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                 </div>
               ))}
             </div>
+
+            {/* ── Payment advices from e-mail: pre-filled, owner reviews and saves ── */}
+            {(()=>{
+              const have = new Set((trips||[]).flatMap(t=>[t.invoiceNo, ...(t.diLines||[]).map(d=>d.invoiceNo)]).filter(Boolean).map(x=>x.trim()));
+              const recorded = new Set((payments||[]).map(p=>p.utr).filter(Boolean));
+              const rows = (advDrafts||[]).filter(d=>d.status!=="discarded").map(d=>{
+                const live = recorded.has(d.utr) || d.status==="saved" ? {status:"saved",missing:[]} : draftStatus(d.advice, have);
+                return {...d, live};
+              }).sort((a,b)=>String(b.payDate).localeCompare(String(a.payDate)));
+              const open = rows.filter(r=>r.live.status!=="saved");
+              if(rows.length===0) return null;
+              const chip = {ready:["✓ Ready to save",C.green], waiting:["⏳ Waiting for invoice",C.orange], check:["⚠ Totals don't match",C.red], saved:["✔ Saved",C.muted]};
+              return (
+                <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,padding:14,marginBottom:16}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                    <div style={{fontSize:13,fontWeight:700,color:C.text}}>📧 Advices from e-mail <span style={{color:C.muted,fontWeight:400}}>· {open.length} to review</span></div>
+                    <button onClick={loadAdvDrafts} disabled={advBusy} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:6,color:C.muted,fontSize:11,padding:"3px 10px",cursor:"pointer"}}>{advBusy?"…":"↻ Refresh"}</button>
+                  </div>
+                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                    {rows.map(r=>{ const [lab,col]=chip[r.live.status]||chip.check; return (
+                      <div key={r.id} style={{border:`1px solid ${col}55`,borderRadius:8,padding:"8px 10px",display:"flex",justifyContent:"space-between",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                        <div style={{fontSize:12}}>
+                          <div><b>UTR {r.utr}</b> · {r.payDate} · ₹{fmtINR(r.total)}</div>
+                          <div style={{color:C.muted,fontSize:11}}>{(r.advice?.invoices||[]).length} lines{r.live.missing.length>0 && <span style={{color:C.orange,fontWeight:600}}> · upload invoice: {r.live.missing.join(", ")}</span>}</div>
+                        </div>
+                        <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                          <span style={{fontSize:10,fontWeight:700,color:col,border:`1px solid ${col}`,borderRadius:10,padding:"2px 8px"}}>{lab}</span>
+                          {r.live.status!=="saved" && <button onClick={()=>{ setScanError(null); setScanResult({...r.advice, type:"payment", _draftId:r.id}); window.scrollTo({top:0,behavior:"smooth"}); }} style={{background:C.accent||"#1565c0",color:"#fff",border:"none",borderRadius:6,padding:"5px 12px",cursor:"pointer",fontWeight:700,fontSize:11}}>Review</button>}
+                        </div>
+                      </div>); })}
+                  </div>
+                  <div style={{fontSize:10,color:C.muted,marginTop:6}}>An advice stays here until you save it. If an invoice is missing, upload it, then come back and press ↻ Refresh — the draft picks it up.</div>
+                </div>
+              );
+            })()}
 
             {/* scan zone */}
             <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,padding:14,marginBottom:16}}>

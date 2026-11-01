@@ -925,6 +925,20 @@ export const DB = {
     created_by: a.createdBy||'', created_at: a.createdAt||'', ts: a.ts||Date.now(),
   }), a),
 
+  // Payment advices read from e-mail, waiting for owner review (one row per UTR)
+  getAdviceDrafts: async () => {
+    try { return await fetchAll('mye_advice_drafts', r => ({
+      id: r.id, utr: r.utr||'', payDate: r.pay_date||'', total: +(r.total||0), advice: r.advice||{},
+      status: r.status||'waiting', missing: r.missing||[], source: r.source||'email', msgId: r.msg_id||'',
+      mailDate: r.mail_date||'', savedAt: r.saved_at||'', createdAt: r.created_at||'', ts: +(r.ts||0),
+    })); } catch(e) { console.warn('mye_advice_drafts not ready:', e.message); return []; }
+  },
+  saveAdviceDraft: async (d) => upsertOne('mye_advice_drafts', d => ({
+    id: d.id, utr: d.utr||'', pay_date: d.payDate||'', total: d.total||0, advice: d.advice||{},
+    status: d.status||'waiting', missing: d.missing||[], source: d.source||'email', msg_id: d.msgId||'',
+    mail_date: d.mailDate||'', saved_at: d.savedAt||'', created_at: d.createdAt||'', ts: d.ts||Date.now(),
+  }), d),
+
   // Daily per-employee Driver Pay balance snapshot (id = "<date>|<empId>").
   getBalanceSnapshots: async () => {
     try { return await fetchAll('mye_balance_snapshots', r => ({
