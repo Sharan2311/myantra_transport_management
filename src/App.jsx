@@ -1,5 +1,8 @@
 import { pouchAmountFor } from "./pouch_logic.js";
-import { includeInByEmployee } from "./byemp_logic.js";
+import { includeInByEmployee, employeeStatement, statementHtml } from "./byemp_logic.js";
+import { draftStatus } from "./advice_mail.js";
+import { checkInvoiceLine, extraDeductionItems, splitShortage } from "./advice_check.js";
+import { restrictToSelection, diCat, tripHasCategory, followupByVehicle, followupHtml } from "./di_category.js";
 import { bookableLoanRecovery, PREV_YEAR_TYPE } from "./loan_ledger_logic.js";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { DB } from "./db.js";
@@ -164,7 +167,7 @@ const tripPaidAmount = (trip) => {
 const diRowsFor = (trip) => {
   const lines = trip.diLines||[];
   if(lines.length > 0) return lines.map(d => ({
-    diNo: d.diNo||"", grNo: d.grNo||"", qty: d.qty||0, bags: d.bags||0,
+    diNo: d.diNo||"", grNo: d.grNo||"", qty: d.qty||0, bags: d.bags||0, goods: d.goods||"",
     billed: !!d.billed, invoiceNo: d.invoiceNo||"", invoiceDate: d.invoiceDate||"",
     billedAmt: d.billedAmt||0,
     paid: !!d.paid, paidAmount: d.paidAmount||0, utr: d.utr||"", paymentDate: d.paymentDate||"",
@@ -194,7 +197,7 @@ const diRowsFor = (trip) => {
   }));
   // Single-DI trip using the flat fields directly
   return [{
-    diNo: trip.diNo||"", grNo: trip.grNo||"", qty: trip.qty||0, bags: trip.bags||0,
+    diNo: trip.diNo||"", grNo: trip.grNo||"", qty: trip.qty||0, bags: trip.bags||0, goods: "",
     billed: !!trip.invoiceNo, invoiceNo: trip.invoiceNo||"", invoiceDate: trip.invoiceDate||"",
     billedAmt: trip.billedToShree||((trip.qty||0)*(trip.givenRate||0)),
     paid: trip.status==="Paid", paidAmount: trip.paidAmount||0, utr: trip.utr||"", paymentDate: trip.paymentDate||"",
@@ -4759,6 +4762,7 @@ Rules:
             grNo:  ex.grNo||"",
             qty:   +ex.qty||0,
             bags:  +ex.bags||0,
+            goods: ex._grParticulars?.goods || ex.goods || "",   // per-DI goods → T / NT category
             givenRate: +item.givenRate||0,
             frRate:    +ex.frRate||0,
             orderType: item.orderType||"godown",
@@ -8086,6 +8090,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
   const [editSheet,   setEditSheet]   = useState(null);
   const [filter,      setFilter]      = useState("All");
   const [orderTypeFilter, setOrderTypeFilter] = useState("All"); // "All"|"godown"|"party"
+  const [catFilterTrip, setCatFilterTrip] = useState("all"); // all | T | NT — Trade / Non Trade (from GR particulars Goods)
   const [search,      setSearch]      = useState("");
   const [clientFilter, setClientFilter] = useState(""); // "" = All clients
   const [filterEmpTrip, setFilterEmpTrip] = useState(""); // "" = All employees
@@ -8198,10 +8203,11 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         (() => { const emp=(employees||[]).find(e=>e.id===filterEmpTrip); const tr=(emp?.linkedTrucks||[]).map(x=>x.toUpperCase()); return tr.length>0&&tr.includes((t.truckNo||"").toUpperCase()); })()
       )
     : slist;
-  const shown  = filter==="All" ? elist
+  const clist2 = catFilterTrip==="all" ? elist : elist.filter(t => tripHasCategory(t, catFilterTrip));
+  const shown  = filter==="All" ? clist2
     : filter==="Confirmation Email Received"
-      ? elist.filter(t=>t.status==="Confirmation Email Received"&&t.orderType==="party")
-      : elist.filter(t => t.status===filter);
+      ? clist2.filter(t=>t.status==="Confirmation Email Received"&&t.orderType==="party")
+      : clist2.filter(t => t.status===filter);
 
   // When truck number changes, check if tafalExempt
   const onTruckChange = v => {
@@ -9233,6 +9239,19 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                 fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
               {o.icon} {o.label}
             </button>
+          ))}
+        </div>
+      )}
+
+      {/* Category filter — Trade (T) / Non Trade (NT), from the GR particulars Goods text */}
+      {!isIn && (
+        <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+          <span style={{color:C.muted,fontSize:11,fontWeight:700,flexShrink:0}}>Category:</span>
+          {[["all","All"],["T","Trade (T)"],["NT","Non Trade (NT)"],["NA","Not available (NA)"]].map(([k,l])=>(
+            <button key={k} onClick={()=>setCatFilterTrip(k)}
+              style={{padding:"5px 10px",borderRadius:20,border:`1.5px solid ${catFilterTrip===k?"#0f766e":C.border}`,
+                background:catFilterTrip===k?"#0f766e22":"transparent",color:catFilterTrip===k?"#0f766e":C.muted,
+                fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>{l}</button>
           ))}
         </div>
       )}
@@ -14386,6 +14405,8 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
   const [epodFilter,       setEpodFilter]       = useState("all"); // all | marked | not_marked — Confirmation EPOD mark (per DI)
   const [employeeFilter,   setEmployeeFilter]    = useState(""); // "" = all employees, else empId
   const [clubFilter,       setClubFilter]        = useState("all"); // all | clubbed | party_only — mixed party+godown LRs vs pure-party
+  const [catFilter,        setCatFilter]          = useState("all"); // all | T | NT — Trade / Non Trade (from GR particulars Goods)
+  const [pdfSel,           setPdfSel]             = useState(new Set()); // DI rows ticked for "PDF of selected DIs": tripId::diNo
   const [lineFilter,       setLineFilter]         = useState("all"); // all | line1 | line2 — GR number prefix (1070 vs 1079)
   const [agingFilter,      setAgingFilter]         = useState("all"); // all | due_soon | overdue — unbilled 90-day deadline, alert from 70
   const [rowUploadingId,   setRowUploadingId]   = useState(""); // per-row inline upload spinner
@@ -14701,6 +14722,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
       if(readyFilter!=="all") rows = rows.filter(d => d.orderType!=="party" || (readyFilter==="ready")===d.readyForBilling);
       if(epodFilter!=="all") rows = rows.filter(d => d.orderType!=="party" || (epodFilter==="marked")===!!d.epodDone);
       if(lineFilter!=="all") rows = rows.filter(d => grLine(d.grNo)===lineFilter);
+      if(catFilter!=="all") rows = rows.filter(d => diCat(t,d)===catFilter);
       if(agingFilter!=="all") rows = rows.filter(d => { const a=billingAging(t,d); return agingFilter==="due_soon" ? a.dueSoon : a.overdue; });
       return {trip:t, rows, clubbed};
     })
@@ -14720,70 +14742,38 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
   // (e.g. filtered to one employee + Pouch: Not Received) is exactly what
   // gets printed.
   const exportPartyPortalPDF = () => {
-    if(tableGroups.length===0) { alert("No trips match the current filters."); return; }
+    // Selection: ticked DI rows win, else ticked trips (left checkbox), else everything in view.
+    const groupsForPdf = restrictToSelection(tableGroups, selected, pdfSel);
+    const picked = (pdfSel.size>0 || selected.size>0) ? true : null;
+    if(groupsForPdf.length===0) { alert(picked ? "None of the selected trips/DIs are in the current view — clear the selection or change the filters." : "No trips match the current filters."); return; }
     const empName = employeeFilter ? (employees.find(e=>e.id===employeeFilter)?.name || employeeFilter) : "";
     const filterParts = [];
+    if(picked) filterParts.push(`Selected only (${groupsForPdf.reduce((s,g)=>s+g.rows.length,0)} DI${groupsForPdf.reduce((s,g)=>s+g.rows.length,0)>1?"s":""})`);
     if(employeeFilter) filterParts.push(`Employee: ${empName}`);
     if(billStatusFilter!=="all") filterParts.push(`Status: ${billStatusFilter==="not_billed"?"Not Billed":billStatusFilter==="sent"?"Sent for Billing":billStatusFilter==="billed"?"Billed":"Paid"}`);
     if(pouchFilter!=="all") filterParts.push(`Return Pouch: ${pouchFilter==="received"?"Received":"Not Received"}`);
     if(confirmFilter!=="all") filterParts.push(`Confirmation Email: ${confirmFilter==="received"?"Received":"Not Received"}`);
     if(readyFilter!=="all") filterParts.push(`Ready for Billing: ${readyFilter==="ready"?"Ready":"Not Ready"}`);
     if(epodFilter!=="all") filterParts.push(`EPOD: ${epodFilter==="marked"?"Marked":"Not Marked"}`);
+    if(catFilter!=="all") filterParts.push(`Category: ${catFilter==="NT"?"Non Trade (NT)":catFilter==="NA"?"Not available (NA)":"Trade (T)"}`);
     if(dateFrom||dateTo) filterParts.push(`Date: ${dateFrom||"start"} to ${dateTo||"today"}`);
     if(searchQ.trim()) filterParts.push(`Search: "${searchQ.trim()}"`);
-    const filterSummary = filterParts.length ? filterParts.join(" &nbsp;·&nbsp; ") : "No filters applied — showing all";
+    const filterSummary = (filterParts.length ? filterParts.join(" · ") : "No filters applied — showing all") + " · Grouped by vehicle";
 
-    const rows = tableGroups.flatMap(({trip:t, rows}) => rows.map(d => {
-      const empN = employees.find(e=>e.id===t.assignedEmpId)?.name || "—";
-      const pouchOk = d.orderType==="party" ? diPouchReceived(t,d) : false;
-      const confirmOk = diConfirmReceived(t,d);
-      return `<tr>
-        <td>${t.date||""}</td>
-        <td>${t.lrNo||"—"}<br/><span style="color:#888;font-size:9px">${t.truckNo||""}</span></td>
-        <td>${empN}</td>
-        <td>${t.partyName||"—"}</td>
-        <td>${d.diNo||"—"}</td>
-        <td>${diRowStatus(d)}</td>
-        <td style="color:${pouchOk?"#16a34a":"#dc2626"};font-weight:700">${pouchOk?"✓":"✗"}</td>
-        <td style="color:${confirmOk?"#16a34a":"#dc2626"};font-weight:700">${confirmOk?"✓":"✗"}</td>
-        <td style="color:${d.readyForBilling?"#16a34a":"#dc2626"};font-weight:700">${d.readyForBilling?"✓":"✗"}</td>
-        <td style="text-align:right">${fmt(rowAmt(t,d))}</td>
-      </tr>`;
-    })).join("");
-
-    const html = `<style>
-      body{font-family:'Segoe UI',Arial,sans-serif;font-size:11px;color:#111;margin:20px}
-      .kpis{display:flex;gap:12px;margin:12px 0;flex-wrap:wrap}
-      .kpi{border:1px solid #ddd;border-radius:6px;padding:8px 14px;min-width:100px;text-align:center}
-      .kpi .val{font-size:16px;font-weight:800} .kpi .lbl{font-size:9px;color:#888;margin-top:2px}
-      table{width:100%;border-collapse:collapse;margin-bottom:10px;font-size:10px}
-      th{background:#7c3aed;color:white;padding:5px 7px;text-align:left;border:1px solid #7c3aed;font-size:9px;text-transform:uppercase}
-      td{padding:4px 7px;border:1px solid #e0e0e0}
-      tr:nth-child(even){background:#f7f5fc}
-      .footer{margin-top:20px;font-size:9px;color:#aaa;border-top:1px solid #eee;padding-top:8px}
-      .logo-img{width:52px;height:52px;border-radius:8px;object-fit:cover}
-      @media print { * { -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; } }
-    </style>
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;padding-bottom:8px;border-bottom:2px solid #7c3aed">
-      <img src="${RC.logoSrc}" class="logo-img" alt="${RC.companyShort}" />
-      <div>
-        <div style="font-size:7px;text-transform:uppercase;letter-spacing:2px;color:#7c3aed;font-weight:700">${RC.companyName}</div>
-        <div style="font-size:20px;font-weight:800;line-height:1.2">Party Portal — Follow-up List</div>
-        <div style="font-size:10px;color:#888">Generated ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}</div>
-      </div>
-    </div>
-    <div style="background:#f7f5fc;border:1px solid #7c3aed44;border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:11px;color:#555">
-      <b>Filters applied:</b> ${filterSummary}
-    </div>
-    <div class="kpis">
-      <div class="kpi"><div class="val" style="color:#7c3aed">${tableGroups.length}</div><div class="lbl">TRIPS</div></div>
-      <div class="kpi"><div class="val" style="color:#16a34a">${fmt(filteredTotal)}</div><div class="lbl">TOTAL AMOUNT</div></div>
-    </div>
-    <table><tr><th>Date</th><th>LR/Truck</th><th>Employee</th><th>Party Name</th><th>DI</th><th>Status</th><th>Pouch</th><th>Email</th><th>Ready</th><th style="text-align:right">Amount</th></tr>${rows}</table>
-    <div class="footer">${RC.companyName} · Report generated ${new Date().toLocaleString("en-IN")}</div>`;
-
+    const entries = groupsForPdf.flatMap(({trip:t, rows}) => rows.map(d => ({
+      truckNo:t.truckNo||"", date:t.date||"", lrNo:t.lrNo||"", partyName:t.partyName||"", diNo:d.diNo||"",
+      cat:diCat(t,d),
+      pouch: d.orderType==="party" ? diPouchReceived(t,d) : false,
+      email: diConfirmReceived(t,d), ready: !!d.readyForBilling,
+      amount: rowAmt(t,d),
+    })));
+    const html = followupHtml(followupByVehicle(entries), {
+      company:RC.companyName, filterSummary, fmt,
+      generated:new Date().toLocaleString("en-IN"), logo:RC.logoSrc||"",
+    });
     const w = window.open("","_blank");
-    w.document.write(`<!DOCTYPE html><html><head><title>Party Portal Follow-up</title></head><body onload="window.print()">${html}</body></html>`);
+    if(!w){ alert("Allow pop-ups to generate the PDF."); return; }
+    w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Party Portal Follow-up</title></head><body onload="window.print()">${html}</body></html>`);
     w.document.close();
   };
 
@@ -15204,6 +15194,17 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
         ))}
       </div>
       <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+        <span style={{fontSize:10,color:C.muted,fontWeight:700}}>CATEGORY:</span>
+        {[["all","All"],["T","Trade (T)"],["NT","Non Trade (NT)"],["NA","Not available (NA)"]].map(([k,l])=>(
+          <button key={k} onClick={()=>setCatFilter(k)}
+            style={{padding:"5px 11px",borderRadius:16,cursor:"pointer",fontWeight:700,fontSize:11,
+              background:catFilter===k?"#0f766e":"transparent",border:"1.5px solid #0f766e",
+              color:catFilter===k?"#fff":"#0f766e"}}>
+            {l}
+          </button>
+        ))}
+      </div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
         <span style={{fontSize:10,color:C.muted,fontWeight:700}}>LINE:</span>
         {[["all","All"],["line1","Line 1 (1070)"],["line2","Line 2 (1079)"]].map(([k,l])=>(
           <button key={k} onClick={()=>setLineFilter(k)}
@@ -15314,8 +15315,9 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
           <span style={{fontSize:12,color:C.muted}}>{tableGroups.length} trips · <b>{fmt(filteredTotal)}</b></span>
           <div style={{display:"flex",gap:6}}>
             <button onClick={exportPartyPortalPDF} style={{background:"none",border:`1px solid ${C.purple}`,borderRadius:6,color:C.purple,fontSize:11,padding:"3px 10px",cursor:"pointer",fontWeight:700}}>
-              📄 Generate PDF
+              📄 {(pdfSel.size>0||selected.size>0) ? `PDF of selected (${pdfSel.size>0?pdfSel.size+" DI"+(pdfSel.size>1?"s":""):selected.size+" trip"+(selected.size>1?"s":"")})` : "Generate PDF"}
             </button>
+            {pdfSel.size>0 && <button onClick={()=>setPdfSel(new Set())} style={{background:"none",border:`1px solid ${C.muted}`,borderRadius:6,color:C.muted,fontSize:11,padding:"3px 8px",cursor:"pointer"}}>Clear</button>}
             <button onClick={toggleAll} style={{background:"none",border:`1px solid ${C.accent}`,borderRadius:6,color:C.accent,fontSize:11,padding:"3px 10px",cursor:"pointer",fontWeight:700}}>
               {filteredTripIds.length>0 && filteredTripIds.every(id=>selected.has(id)) && selected.size===filteredTripIds.length ?"Deselect All":"Select All"}
             </button>
@@ -15402,7 +15404,8 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                       )}
                       {i===0 && <td rowSpan={rows.length} style={{padding:"6px 8px",verticalAlign:"top",borderRight:bR,borderBottom:bB}}>{t.to||"—"}</td>}
                       <td style={{padding:"6px 8px",fontFamily:"monospace",fontSize:11,borderRight:bR,borderBottom:bB}}>
-                        {d.diNo||"—"}{d.qty?<div style={{color:C.muted,fontFamily:"inherit"}}>{d.qty}MT{d.bags?` · ${d.bags} bags`:""}</div>:null}
+                        <input type="checkbox" title="Tick to include this DI in 'PDF of selected DIs'" checked={pdfSel.has(t.id+"::"+(d.diNo||""))} onChange={()=>setPdfSel(p=>{const n=new Set(p);const k=t.id+"::"+(d.diNo||"");n.has(k)?n.delete(k):n.add(k);return n;})} style={{marginRight:5,verticalAlign:"middle"}}/>
+                        {d.diNo||"—"} <span style={{fontSize:9,fontWeight:800,color:diCat(t,d)==="NT"?"#b45309":diCat(t,d)==="NA"?"#6b7280":"#0f766e",border:"1px solid currentColor",borderRadius:4,padding:"0 3px"}}>{diCat(t,d)}</span>{d.qty?<div style={{color:C.muted,fontFamily:"inherit"}}>{d.qty}MT{d.bags?` · ${d.bags} bags`:""}</div>:null}
                         {clubbed && <div style={{marginTop:3}}>{d.orderType==="party"?<Badge label="🎪 Party" color="#7c3aed" />:<Badge label="🏭 Godown" color={C.muted} />}</div>}
                       </td>
                       <td style={{padding:"6px 8px",borderRight:bR,borderBottom:bB}}>
@@ -24086,6 +24089,13 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
 
   const [activeTab,   setActiveTab]   = useState("overview");
   const [scanResult,  setScanResult]  = useState(null);
+  // ── Payment advices read from e-mail → drafts for owner review ──────────────
+  // invoice value already in the app, by invoice number (incl. GST) — the yardstick for checking an advice
+  const appInvTotals = useMemo(()=>{ const m={}; (invoiceRegistry||[]).forEach(r=>{ if(r.status!=="deleted" && r.invoiceNo) m[r.invoiceNo.trim()]=+r.totalAmt||0; }); return m; },[invoiceRegistry]);
+  const [advDrafts, setAdvDrafts] = useState([]);
+  const [advBusy, setAdvBusy] = useState(false);
+  const loadAdvDrafts = React.useCallback(()=>{ setAdvBusy(true); DB.getAdviceDrafts().then(x=>setAdvDrafts(x||[])).catch(()=>{}).finally(()=>setAdvBusy(false)); },[]);
+  React.useEffect(()=>{ loadAdvDrafts(); },[loadAdvDrafts]);
   const [scanning,    setScanning]    = useState(false);
   const [scanError,   setScanError]   = useState(null);
   const [applyingInvoice, setApplyingInvoice] = useState(false);
@@ -24879,7 +24889,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         lrNo: d._lrNo||"",
         invoiceNo: utr, // reference field — carries the UTR so it's traceable to the advice
         invoiceDate: pDate||"",
-        note: d._fromExpenseLine ? "From payment advice — no truck identified at review time" : `From unmatched invoice ${d.invoiceNo} — no truck identified at review time`,
+        note: d._fromExpenseLine ? "From payment advice — no truck identified at review time" : `Debit note ${d.invoiceNo} — ask Shree for the vehicle-wise detail, then assign each vehicle's share`,
         createdAt: new Date().toISOString(),
       }));
       setActionItems(prev=>[...openItems, ...(prev||[])]);
@@ -24952,6 +24962,17 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     // Delete party files from Supabase Storage for paid trips
     if(paidTrips.length>0){
       paidTrips.forEach(tid => deletePartyFiles(tid).catch(e=>console.warn("File delete error:",e)));
+    }
+
+    // Extra deductions: payment below (app invoice value − 2% TDS) with no reason → follow up with Shree
+    if(setActionItems) {
+      const xd = extraDeductionItems({...scanResult, paymentDate:pDate}, appInvTotals, new Date().toISOString())
+        .filter(it=>!(actionItems||[]).some(a=>a.id===it.id));
+      if(xd.length>0) {
+        setActionItems(prev=>[...xd, ...(prev||[])]);
+        xd.forEach(it=>DB.saveActionItem(it).catch(e=>console.error("saveActionItem extra_deduction:",e)));
+        log && log(`EXTRA DEDUCTION: ${xd.length} invoice(s), ₹${xd.reduce((s,x)=>s+x.amount,0).toFixed(2)} short-paid · UTR:${utr}`);
+      }
     }
 
     const pa={id:"PA"+Date.now(), utr, paymentDate:pDate,
@@ -25047,6 +25068,10 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     }
 
     log && log("Payment advice UTR "+utr+" applied — "+shorts.length+" shortage(s), "+confirmedDebitEntries.length+" expense(s), hold ₹"+Number(scanResult.holdAmount||0).toLocaleString("en-IN"));
+    if(scanResult._draftId) {   // came from an e-mailed advice — close its draft
+      const dr = (advDrafts||[]).find(x=>x.id===scanResult._draftId);
+      if(dr) { const done={...dr, status:"saved", savedAt:new Date().toISOString(), ts:Date.now()}; setAdvDrafts(prev=>prev.map(x=>x.id===done.id?done:x)); DB.saveAdviceDraft(done).catch(e=>console.error("saveAdviceDraft:",e)); }
+    }
     setScanResult(null);
   };
 
@@ -25550,6 +25575,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
           const conflict = open.filter(ai=>ai.type==="duplicate_di");
           const noDiesel = open.filter(ai=>ai.type==="no_diesel_confirmed");
           const unassignedShort = open.filter(ai=>ai.type==="unassigned_shortage");
+          const extraDed = open.filter(ai=>ai.type==="extra_deduction");
           const dieselNoLr = open.filter(ai=>ai.type==="diesel_no_lr");
 
           const dismiss = (ai) => {
@@ -25562,21 +25588,29 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
           // Assign a deferred shortage to a truck — writes the vehicle ledger
           // entry (same shape as the immediate-assign path in the scan review)
           // then closes the action item, same as any other resolution here.
-          const assignShortage = (ai, truckNo, lrNo) => {
+          const assignShortage = (ai, truckNo, lrNo, amt) => {
             if(!truckNo) { alert("Pick a truck first."); return; }
             const veh = (vehicles||[]).find(v=>v.truckNo===truckNo);
             if(!veh) return;
+            const part = splitShortage(ai, typeof amt==="number" ? amt : (+ai.amount||0));
+            if(!part.ok) { alert("Enter an amount between ₹0.01 and ₹"+fmt(ai.amount||0)+"."); return; }
             const txn = {id:uid(), type:"shortage", date:ai.invoiceDate||today(),
-              qty:0, lrNo:lrNo||ai.lrNo||"", amount:ai.amount||0,
+              qty:0, lrNo:lrNo||ai.lrNo||"", amount:part.assigned,
               note:`Payment advice UTR:${ai.invoiceNo} (assigned later via Action Items)`};
             const updated = {...veh,
-              shortageOwed:(veh.shortageOwed||0)+(ai.amount||0),
+              shortageOwed:(veh.shortageOwed||0)+part.assigned,
               shortageTxns:[...(veh.shortageTxns||[]),txn]};
             setVehicles(p=>p.map(x=>x.truckNo===truckNo?updated:x));
             DB.saveVehicle(updated).catch(e=>console.error("saveVehicle shortage assign:",e));
-            setActionItems(prev=>(prev||[]).filter(x=>x.id!==ai.id));
-            DB.deleteActionItem(ai.id).catch(e=>console.error("deleteActionItem assign:",e));
-            log && log(`SHORTAGE ASSIGNED: ${truckNo} ₹${fmt(ai.amount||0)} · UTR:${ai.invoiceNo}`);
+            if(part.remaining>0) {   // vehicle-wise split: the rest of the debit note stays open
+              const rest = {...ai, amount:part.remaining};
+              setActionItems(prev=>(prev||[]).map(x=>x.id===ai.id?rest:x));
+              DB.saveActionItem(rest).catch(e=>console.error("saveActionItem shortage remainder:",e));
+            } else {
+              setActionItems(prev=>(prev||[]).filter(x=>x.id!==ai.id));
+              DB.deleteActionItem(ai.id).catch(e=>console.error("deleteActionItem assign:",e));
+            }
+            log && log(`SHORTAGE ASSIGNED: ${truckNo} ₹${fmt(part.assigned)}${part.remaining>0?` (₹${fmt(part.remaining)} still open)`:""} · UTR:${ai.invoiceNo}`);
           };
 
           return (
@@ -25603,6 +25637,10 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   <div style={{fontSize:11,color:C.muted}}>Shortages awaiting a truck</div>
                 </div>
                 <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.border}`}}>
+                  <div style={{fontSize:20,fontWeight:800,color:C.red}}>{extraDed.length}</div>
+                  <div style={{fontSize:11,color:C.muted}}>Extra deductions to follow up</div>
+                </div>
+                <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.border}`}}>
                   <div style={{fontSize:20,fontWeight:800,color:C.orange}}>{dieselNoLr.length}</div>
                   <div style={{fontSize:11,color:C.muted}}>Diesel — no LR attached</div>
                 </div>
@@ -25625,7 +25663,12 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                         </div>
                         <button onClick={()=>dismiss(ai)} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,fontSize:11,padding:"4px 8px",cursor:"pointer"}}>Dismiss</button>
                       </div>
-                      <select onChange={e=>{ if(e.target.value) assignShortage(ai, e.target.value); }}
+                      <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:6}}>
+                        <span style={{fontSize:11,color:C.muted}}>Amount for this vehicle ₹</span>
+                        <input id={"sa-"+ai.id} type="number" step="0.01" defaultValue={ai.amount||0} key={ai.id+"-"+(ai.amount||0)}
+                          style={{width:110,background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 8px",fontSize:12,color:C.text}}/>
+                      </div>
+                      <select onChange={e=>{ if(e.target.value){ const a=parseFloat(document.getElementById("sa-"+ai.id)?.value); assignShortage(ai, e.target.value, undefined, a); e.target.value=""; } }}
                         defaultValue=""
                         style={{width:"100%",background:C.bg,border:`1.5px solid ${C.red}`,
                           borderRadius:6,padding:"7px 10px",fontSize:12,color:C.text,outline:"none"}}>
@@ -25635,6 +25678,29 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                     </div>
                   );
                 })}
+              </div>
+
+              <div style={{fontSize:12,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:8}}>
+                💸 Extra deductions — follow up with Shree ({extraDed.length})
+              </div>
+              {extraDed.length===0 && <div style={{color:C.muted,fontSize:13,marginBottom:16}}>None open.</div>}
+              <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:20}}>
+                {extraDed.map(ai=>(
+                  <div key={ai.id} style={{background:C.card,borderRadius:10,padding:"11px 14px",border:`1px solid ${C.red}44`}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+                      <div>
+                        <div style={{fontWeight:800,fontSize:14,color:C.red}}>₹{fmt(ai.amount||0)} extra deducted</div>
+                        <div style={{fontSize:12,color:C.text,marginTop:2}}>Invoice <b>{ai.invoiceNo}</b> · UTR {ai.utr||ai.grNo||"—"}</div>
+                        <div style={{fontSize:11,color:C.muted,marginTop:2}}>Invoice ₹{fmt(ai.appTotal||ai.invoiceAmt||0)} · expected payment ₹{fmt(ai.expectedPay||ai.expectedAmt||0)} · received ₹{fmt(Math.round(((ai.expectedPay||ai.expectedAmt||0)-(ai.amount||0))*100)/100)}</div>
+                      </div>
+                      <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                        <button onClick={()=>{ const done={...ai,status:"done",resolvedAt:today(),resolvedBy:user?.name||""}; setActionItems(prev=>(prev||[]).map(x=>x.id===ai.id?done:x)); DB.saveActionItem(done).catch(e=>console.error("saveActionItem xd resolve:",e)); log && log("Extra deduction resolved — "+ai.invoiceNo+" ₹"+fmt(ai.amount||0)); }}
+                          style={{background:C.green,border:"none",borderRadius:8,color:"#fff",fontSize:11,padding:"5px 9px",cursor:"pointer",fontWeight:700}}>✓ Resolved with Shree</button>
+                        <button onClick={()=>dismiss(ai)} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,fontSize:11,padding:"4px 8px",cursor:"pointer"}}>Dismiss</button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
 
               <div style={{fontSize:12,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:8}}>
@@ -25783,6 +25849,41 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
               ))}
             </div>
 
+            {/* ── Payment advices from e-mail: pre-filled, owner reviews and saves ── */}
+            {(()=>{
+              const have = new Set((trips||[]).flatMap(t=>[t.invoiceNo, ...(t.diLines||[]).map(d=>d.invoiceNo)]).filter(Boolean).map(x=>x.trim()));
+              const recorded = new Set((payments||[]).map(p=>p.utr).filter(Boolean));
+              const rows = (advDrafts||[]).filter(d=>d.status!=="discarded").map(d=>{
+                const live = recorded.has(d.utr) || d.status==="saved" ? {status:"saved",missing:[]} : draftStatus(d.advice, have);
+                return {...d, live};
+              }).sort((a,b)=>String(b.payDate).localeCompare(String(a.payDate)));
+              const open = rows.filter(r=>r.live.status!=="saved");
+              if(rows.length===0) return null;
+              const chip = {ready:["✓ Ready to save",C.green], waiting:["⏳ Waiting for invoice",C.orange], check:["⚠ Totals don't match",C.red], saved:["✔ Saved",C.muted]};
+              return (
+                <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,padding:14,marginBottom:16}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                    <div style={{fontSize:13,fontWeight:700,color:C.text}}>📧 Advices from e-mail <span style={{color:C.muted,fontWeight:400}}>· {open.length} to review</span></div>
+                    <button onClick={loadAdvDrafts} disabled={advBusy} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:6,color:C.muted,fontSize:11,padding:"3px 10px",cursor:"pointer"}}>{advBusy?"…":"↻ Refresh"}</button>
+                  </div>
+                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                    {rows.map(r=>{ const [lab,col]=chip[r.live.status]||chip.check; return (
+                      <div key={r.id} style={{border:`1px solid ${col}55`,borderRadius:8,padding:"8px 10px",display:"flex",justifyContent:"space-between",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                        <div style={{fontSize:12}}>
+                          <div><b>UTR {r.utr}</b> · {r.payDate} · ₹{fmtINR(r.total)}</div>
+                          <div style={{color:C.muted,fontSize:11}}>{(r.advice?.invoices||[]).length} lines{r.live.missing.length>0 && <span style={{color:C.orange,fontWeight:600}}> · upload invoice: {r.live.missing.join(", ")}</span>}</div>
+                        </div>
+                        <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                          <span style={{fontSize:10,fontWeight:700,color:col,border:`1px solid ${col}`,borderRadius:10,padding:"2px 8px"}}>{lab}</span>
+                          {r.live.status!=="saved" && <button onClick={()=>{ setScanError(null); setScanResult({...r.advice, type:"payment", _draftId:r.id}); setTimeout(()=>document.getElementById("advice-review-panel")?.scrollIntoView({behavior:"smooth",block:"start"}),200); }} style={{background:C.accent||"#1565c0",color:"#fff",border:"none",borderRadius:6,padding:"5px 12px",cursor:"pointer",fontWeight:700,fontSize:11}}>Review</button>}
+                        </div>
+                      </div>); })}
+                  </div>
+                  <div style={{fontSize:10,color:C.muted,marginTop:6}}>An advice stays here until you save it. If an invoice is missing, upload it, then come back and press ↻ Refresh — the draft picks it up.</div>
+                </div>
+              );
+            })()}
+
             {/* scan zone */}
             <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,padding:14,marginBottom:16}}>
               <div style={{fontSize:13,fontWeight:700,color:C.text,marginBottom:10}}>📤 Scan with AI</div>
@@ -25831,7 +25932,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
               )}
 
               {scanResult&&!scanError&&(
-                <div style={{marginTop:12,background:C.green+"11",border:`1px solid ${C.green}44`,borderRadius:8,padding:12}}>
+                <div id="advice-review-panel" style={{marginTop:12,background:C.green+"11",border:`1px solid ${C.green}44`,borderRadius:8,padding:12}}>
                   <div style={{fontWeight:700,color:C.green,marginBottom:10,fontSize:13}}>
                     ✅ {scanResult.type==="invoice"?"Invoice":"Payment Advice"} scanned
                   </div>
@@ -26084,6 +26185,36 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                           </div>
                         ))}
                       </div>
+                      {(scanResult.invoices||[]).filter(i=>!i._fromExpenseLine).length>0&&(()=>{
+                        const _have = new Set((trips||[]).flatMap(t=>[t.invoiceNo, ...(t.diLines||[]).map(d=>d.invoiceNo)]).filter(Boolean).map(x=>x.trim()));
+                        return (
+                          <div style={{background:C.card2,border:`1px solid ${C.border}`,borderRadius:6,padding:"8px 10px",marginBottom:10}}>
+                            <div style={{fontWeight:700,fontSize:11,color:C.text,marginBottom:4}}>🧾 Invoices in this advice ({(scanResult.invoices||[]).filter(i=>!i._fromExpenseLine).length})</div>
+                            {(scanResult.invoices||[]).filter(i=>!i._fromExpenseLine).map((i,k)=>{
+                              const inApp = _have.has((i.invoiceNo||"").trim());
+                              const isFreight = /^invoice$/i.test(i.docType||"Invoice") && Number(i.paymentAmt||0)>0;
+                              const chk = isFreight ? checkInvoiceLine(i, appInvTotals[(i.invoiceNo||"").trim()]) : null;
+                              return (
+                                <div key={k} style={{fontSize:11,padding:"3px 0",borderTop:k?`1px dashed ${C.border}`:"none"}}>
+                                  <div style={{display:"flex",justifyContent:"space-between",gap:8}}>
+                                    <span><b style={{fontFamily:"monospace"}}>{i.invoiceNo||"—"}</b> <span style={{color:inApp?C.green:C.orange,fontWeight:700}}>{inApp?"✓ in app":"not in app"}</span>{i.invDate?<span style={{color:C.muted}}> · {i.invDate}</span>:null}</span>
+                                    <span style={{fontFamily:"monospace",color:Number(i.paymentAmt||0)<0?C.red:C.text}}>₹{fmtINR(i.paymentAmt!=null?i.paymentAmt:i.totalAmt)}</span>
+                                  </div>
+                                  {chk && chk.state!=="no_app_value" && (
+                                    <div style={{color:C.muted,fontSize:10,marginTop:1}}>
+                                      App invoice ₹{fmtINR(chk.expected.total)} · base ₹{fmtINR(chk.expected.base)} · TDS 2% ₹{fmtINR(chk.expected.tds)} · expected payment ₹{fmtINR(chk.expected.pay)}
+                                      {chk.state==="ok" && <b style={{color:C.green}}> · ✓ as expected</b>}
+                                      {chk.state==="overpaid" && <b style={{color:C.orange}}> · paid ₹{fmtINR(chk.actualPay-chk.expected.pay)} more than expected</b>}
+                                      {chk.state==="extra_deduction" && <b style={{color:C.red}}> · ⚠ ₹{fmtINR(chk.shortfall)} extra deducted — will be added to follow-up with Shree</b>}
+                                    </div>
+                                  )}
+                                  {chk && chk.state==="no_app_value" && <div style={{color:C.orange,fontSize:10,marginTop:1}}>Invoice value not in the app yet — can't check the deduction</div>}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        );
+                      })()}
                       {(scanResult.shortages||[]).length>0&&(
                         <div style={{background:"#fef2f2",borderRadius:6,padding:"8px 10px",marginBottom:8,border:`1px solid ${C.red}30`}}>
                           <div style={{color:"#b91c1c",fontWeight:700,fontSize:11,marginBottom:4}}>⚠ Shortages</div>
@@ -27890,7 +28021,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
 // Record bank transfers against a trip. "Balance due" auto-updates.
 // ─── EMPLOYEE TRIP GROUP ─────────────────────────────────────────────────────
 // Groups all unpaid trips for one employee — can request payment for each or all together
-function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed=0, settledCount=0, heldOnly=[], prevSnap=null, paymentRequests, setPaymentRequests, setPayReqSheet, requestPaymentGuarded, vehicles, fmt,
+function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed=0, settledCount=0, heldOnly=[], prevSnap=null, balSnaps=[], paymentRequests, setPaymentRequests, setPayReqSheet, requestPaymentGuarded, vehicles, fmt,
   setDriverPays, setTrips, setEmployees, setCashTransfers, cashTransfers, user, log }) {
   const [open, setOpen] = useState(true);
   const [selected, setSelected] = useState(new Set(empTrips.map(t=>t.id)));
@@ -28011,7 +28142,18 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed
              {prevSnap && <div style={{fontSize:11,color:C.muted,marginTop:2}}>Last saved {prevSnap.date}: ₹{Math.round(prevSnap.total).toLocaleString("en-IN")} · now {totalBal-prevSnap.total>=0?"+":"−"}₹{Math.abs(Math.round(totalBal-prevSnap.total)).toLocaleString("en-IN")}</div>}
           </div>
         </div>
-        <div style={{fontSize:18}}>{open?"▲":"▼"}</div>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <button onClick={(e)=>{ e.stopPropagation();
+              const stmt = employeeStatement(empTrips, empId==="unassigned"?"":empId);
+              const hist = (balSnaps||[]).filter(x=>x.empId===(empId==="unassigned"?"":empId)).sort((a,b)=>b.date.localeCompare(a.date)).slice(0,31);
+              const w = window.open("","_blank");
+              if(!w){ alert("Allow pop-ups to download the statement."); return; }
+              w.document.write(statementHtml(stmt,{empName:emp?.name||"Unassigned", company:(RC.companyName||""), date:today(), history:hist}).replace("</body>","<script>window.onload=function(){window.print();}</script></body>"));
+              w.document.close();
+            }}
+            style={{background:"#0d9488",color:"#fff",border:"none",borderRadius:6,fontSize:11,fontWeight:700,padding:"5px 9px",cursor:"pointer"}}>⬇ Statement</button>
+          <div style={{fontSize:18}}>{open?"▲":"▼"}</div>
+        </div>
       </div>
 
       {open && (
@@ -29800,7 +29942,7 @@ This will auto-recover in the next trip.`);
         // pouch part are shown separately inside the group.
         const empGroups = {};
         tripWithBalance.forEach(t => {
-          if(!includeInByEmployee(t) || !inEmpScope(t)) return;   // settled-but-owed trips + trips saved from the cutoff; older unsettled trips are left out for now
+          if(!includeInByEmployee(t) || !inEmpScope(t)) return;   // every trip with a balance counts — no cutoff, no flags
           const empId = t.assignedEmpId||"unassigned";
           (empGroups[empId] = empGroups[empId] || []).push(t);
         });
@@ -29821,7 +29963,7 @@ This will auto-recover in the next trip.`);
               const [empGroupOpen, setEmpGroupOpen] = [null,null]; // handled per-instance below
               return (
                 <EmpTripGroup key={empId}
-                  empId={empId} emp={emp} empTrips={empTrips} totalBal={totalBal} pouchHeld={pouchHeld} settledOwed={settledOwed} settledCount={settledCount} heldOnly={heldOnly} prevSnap={(()=>{ const k=empId==="unassigned"?"":empId; const d=today(); return (balSnaps||[]).filter(x=>x.empId===k && x.date<d).sort((a,b)=>b.date.localeCompare(a.date))[0]||null; })()}
+                  empId={empId} emp={emp} empTrips={empTrips} totalBal={totalBal} pouchHeld={pouchHeld} settledOwed={settledOwed} settledCount={settledCount} heldOnly={heldOnly} balSnaps={balSnaps} prevSnap={(()=>{ const k=empId==="unassigned"?"":empId; const d=today(); return (balSnaps||[]).filter(x=>x.empId===k && x.date<d).sort((a,b)=>b.date.localeCompare(a.date))[0]||null; })()}
                   paymentRequests={paymentRequests||[]} setPaymentRequests={setPaymentRequests}
                   setPayReqSheet={setPayReqSheet}
                   requestPaymentGuarded={requestPaymentGuarded}

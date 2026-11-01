@@ -1,0 +1,8 @@
+We have effected a fund transfer to your a/c no. 50200051622767 with HDFC BANK LIMITED for Rs. 316862.44 ( THREE LAKH ) dated 30.10.2026 vide UTR No. 2059352600 against the below mentioned payment details :-
+| Sr No. | Document Description | Inv/Ref Number | Inv/Doc Date | Payment Amount | TDS Deducted | Hold Amount | Total Bill Amount | Narration | SAP Doc No | Location |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | Invoice | PMYE107027100046 | 28.10.2026 | 299309.64 | 6108.36 | 54975.24 | 360393.24 | CMT FRT BILL SCL KODLA SITE OCT'26 | 5100296625 | SCL-KODLA |
+| 2 | Invoice | SMYE107027100231 | 28.10.2026 | 66404.80 | 1355.20 | 12196.80 | 79956.80 | CMT FRT BILL SCL KODLA SITE OCT'26 | 5100296031 | SCL-KODLA |
+| 3 | Service Sales | KR2601071957 | 29.10.2026 | 28497.00 - | | | 28497.00- | | 1108717604 | |
+| 4 | Service Sales | KR2601072027 | 30.10.2026 | 20355.00 - | | | 20355.00- | | 1108718053 | |
+| | Total | | | 316862.44 | 7463.56 | 67172.04 | 391498.04 | | | |
