@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { parseAdviceMail, parseAdviceHtml, isAdviceMail, draftStatus } from "../src/advice_mail.js";
+import { parseAdviceMail, parseAdviceHtml, isAdviceMail, draftStatus, searchAdvices } from "../src/advice_mail.js";
 const fx = (n) => fs.readFileSync(new URL("./fixtures/" + n, import.meta.url), "utf8");
 let n = 0; const t = (name, f) => { f(); n++; console.log("ok -", name); };
 
@@ -56,4 +56,16 @@ t("html: credit-note cells like '28497.00 -' and entities still parse", () => {
   assert.ok(parseAdviceHtml(h));   // does not throw on odd rows
   assert.equal(parseAdviceHtml("<html>nothing</html>"), null); assert.equal(parseAdviceHtml(""), null); assert.equal(parseAdviceHtml(null), null);
 });
+
+// ── search the e-mailed advices by UTR or invoice number (saved ones included) ──
+const SR = [
+  { id: "EML-1940621387", utr: "1940621387", status: "saved", advice: { invoices: [{ invoiceNo: "SMYE107027100090" }, { invoiceNo: "PMYE107927100022" }] } },
+  { id: "EML-2020527920", utr: "2020527920", status: "waiting", advice: { invoices: [{ invoiceNo: "SMYE107927100090" }] } },
+  { id: "EML-1811498066", utr: "1811498066", status: "waiting", advice: { invoices: [] } },
+];
+t("search: empty query returns everything", () => { assert.equal(searchAdvices(SR, "").length, 3); assert.equal(searchAdvices(SR, "   ").length, 3); assert.equal(searchAdvices(SR, null).length, 3); });
+t("search: by full UTR finds the advice even when it is already saved", () => assert.deepEqual(searchAdvices(SR, "1940621387").map((x) => x.id), ["EML-1940621387"]));
+t("search: partial UTR, spaces and case do not matter", () => { assert.deepEqual(searchAdvices(SR, " 194062 ").map((x) => x.utr), ["1940621387"]); assert.deepEqual(searchAdvices(SR, "19406 21387").map((x) => x.utr), ["1940621387"]); });
+t("search: by invoice number (finds every advice that carries it)", () => assert.deepEqual(searchAdvices(SR, "smye107").map((x) => x.utr), ["1940621387", "2020527920"]));
+t("search: nothing matches → empty list", () => assert.deepEqual(searchAdvices(SR, "99999"), []));
 console.log(n + " tests passed");

@@ -1,5 +1,6 @@
 // ─── db.js — all Supabase read/write operations ────────────────────────────
 import { supabase } from './supabase.js'
+import { mergeVehicleForSave } from './vehicle_merge.js'
 
 const tripFromDB = r => ({
   id: r.id, type: r.type, lrNo: r.lr_no, diNo: r.di_no, truckNo: r.truck_no,
@@ -499,6 +500,10 @@ const districtOfficerFromDB = r => ({
   salesOfficerPhone: r.sales_officer_phone, salesOfficerEmail: r.sales_officer_email,
 });
 
+// What this phone knew of each vehicle's loan/shortage entries when it last loaded or saved it (see vehicle_merge.js)
+const vehicleBase = new Map()
+const noteVehicleBase = v => vehicleBase.set(v.id, { loan: new Set((v.loanTxns || []).map(x => x.id)), shortage: new Set((v.shortageTxns || []).map(x => x.id)) })
+
 export const DB = {
   getUsers:       () => fetchAll('mye_users', userFromDB),
   saveUser:       u  => upsertOne('mye_users', userToDB, u),
@@ -605,8 +610,25 @@ export const DB = {
     if (error) throw error
   },
 
-  getVehicles:    () => fetchAll('mye_vehicles', vehicleFromDB),
-  saveVehicle:    v  => upsertOne('mye_vehicles', vehicleToDB, v),
+  getVehicles:    async () => { const rows = await fetchAll('mye_vehicles', vehicleFromDB); (rows||[]).forEach(noteVehicleBase); return rows },
+  // Saving a vehicle (1) keeps loan/shortage entries another device added since this phone loaded it, and (2) reads the row back
+  // to make sure every entry really is in the database — a save that did not stick is an ERROR, never silent.
+  saveVehicle: async v => {
+    let toSave = v, kept = []
+    try {
+      const { data: cur, error: curErr } = await supabase.from('mye_vehicles').select('*').eq('id', v.id).maybeSingle()
+      if (!curErr && cur) { const r = mergeVehicleForSave(v, vehicleFromDB(cur), vehicleBase.get(v.id)); toSave = r.vehicle; kept = r.kept }
+    } catch (e) { /* could not read the current row: fall through to the plain save, the read-back below still checks it */ }
+    const { data: back, error } = await supabase.from('mye_vehicles').upsert(vehicleToDB(toSave), { onConflict: 'id' }).select().maybeSingle()
+    if (error) throw error
+    const ids = x => new Set((x || []).map(t => t.id))
+    const have = ids(back?.loan_txns), haveS = ids(back?.shortage_txns)
+    const missing = [...ids(toSave.loanTxns)].filter(i => !have.has(i)).length + [...ids(toSave.shortageTxns)].filter(i => !haveS.has(i)).length
+    if (!back || missing > 0) throw new Error(`Vehicle ${v.truckNo} was NOT saved correctly (${back ? missing + ' loan/shortage entr' + (missing === 1 ? 'y' : 'ies') + ' missing after saving' : 'no row came back'}). Reload and check before doing anything else.`)
+    noteVehicleBase(toSave)
+    if (kept.length && typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('mye-save-notice', { detail: { message: `Vehicle ${v.truckNo}: ${kept.length} loan/shortage entr${kept.length === 1 ? 'y' : 'ies'} added from another device ${kept.length === 1 ? 'was' : 'were'} kept (₹${kept.reduce((s, k) => s + (+k.txn.amount || 0), 0).toLocaleString('en-IN')}). Reload to see ${kept.length === 1 ? 'it' : 'them'}.` } }))
+    return toSave
+  },
   deleteVehicle:  id => deleteOne('mye_vehicles', id),
 
   getEmployees:   () => fetchAll('mye_employees', employeeFromDB),
@@ -1107,7 +1129,7 @@ export const DB = {
         const data = await fetchPaginated(() => supabase.from('mye_trips').select('*').order('date', {ascending:false}).order('id'));
         return (data||[]).map(tripFromDB);
       }),
-      safe(() => fetchAll('mye_vehicles', vehicleFromDB)),
+      safe(async () => { const r = await fetchAll('mye_vehicles', vehicleFromDB); (r||[]).forEach(noteVehicleBase); return r }),
     ]);
     onPhase?.({ users, settings, trips, vehicles });
 
