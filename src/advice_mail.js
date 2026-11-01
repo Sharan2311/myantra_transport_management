@@ -57,3 +57,11 @@ export const htmlToAdviceText = (html) => decode(String(html ?? "")
   .replace(/<\/t[dh]\s*>/gi, " | ").replace(/<tr\b[^>]*>/gi, "\n| ").replace(/<br\s*\/?>/gi, "\n").replace(/<\/table>/gi, "\n")
   .replace(/<[^>]+>/g, " ")).split("\n").map((l) => l.replace(/[ \t\r]+/g, " ").trim()).join("\n");
 export const parseAdviceHtml = (html) => parseAdviceMail(htmlToAdviceText(html));
+
+// Search drafts by UTR or invoice number (case, spaces ignored). Empty query = everything.
+export const searchAdvices = (rows, q) => {
+  const k = String(q ?? "").replace(/\s+/g, "").toLowerCase();
+  if (!k) return rows || [];
+  return (rows || []).filter((r) => String(r.utr || "").toLowerCase().includes(k)
+    || (r.advice?.invoices || []).some((i) => String(i.invoiceNo || "").replace(/\s+/g, "").toLowerCase().includes(k)));
+};
