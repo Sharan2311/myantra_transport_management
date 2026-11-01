@@ -26130,6 +26130,23 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                           </div>
                         ))}
                       </div>
+                      {(scanResult.invoices||[]).filter(i=>!i._fromExpenseLine).length>0&&(()=>{
+                        const _have = new Set((trips||[]).flatMap(t=>[t.invoiceNo, ...(t.diLines||[]).map(d=>d.invoiceNo)]).filter(Boolean).map(x=>x.trim()));
+                        return (
+                          <div style={{background:C.card2,border:`1px solid ${C.border}`,borderRadius:6,padding:"8px 10px",marginBottom:10}}>
+                            <div style={{fontWeight:700,fontSize:11,color:C.text,marginBottom:4}}>🧾 Invoices in this advice ({(scanResult.invoices||[]).filter(i=>!i._fromExpenseLine).length})</div>
+                            {(scanResult.invoices||[]).filter(i=>!i._fromExpenseLine).map((i,k)=>{
+                              const inApp = _have.has((i.invoiceNo||"").trim());
+                              return (
+                                <div key={k} style={{display:"flex",justifyContent:"space-between",gap:8,fontSize:11,padding:"3px 0",borderTop:k?`1px dashed ${C.border}`:"none"}}>
+                                  <span><b style={{fontFamily:"monospace"}}>{i.invoiceNo||"—"}</b> <span style={{color:inApp?C.green:C.orange,fontWeight:700}}>{inApp?"✓ in app":"not in app"}</span>{i.invDate?<span style={{color:C.muted}}> · {i.invDate}</span>:null}</span>
+                                  <span style={{fontFamily:"monospace",color:Number(i.paymentAmt||0)<0?C.red:C.text}}>₹{fmtINR(i.paymentAmt!=null?i.paymentAmt:i.totalAmt)}</span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        );
+                      })()}
                       {(scanResult.shortages||[]).length>0&&(
                         <div style={{background:"#fef2f2",borderRadius:6,padding:"8px 10px",marginBottom:8,border:`1px solid ${C.red}30`}}>
                           <div style={{color:"#b91c1c",fontWeight:700,fontSize:11,marginBottom:4}}>⚠ Shortages</div>
