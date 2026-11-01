@@ -13,6 +13,12 @@ import { supabase } from "./supabase.js";
 
 // Network retry wrapper for Safari iOS "Load failed" / transient network errors
 // Retries up to 3x with 1s, 2s backoff
+// A failed save must NEVER be silent (silent failures cost real money): every DB.save*/delete* failure is shown in the red banner at the top.
+const saveFail = (label) => (e) => {
+  console.error(label, e);
+  try { window.dispatchEvent(new CustomEvent("mye-save-failed", { detail: { label: String(label||"").replace(/:\s*$/,""), message: (e && e.message) || String(e) } })); } catch(_) {}
+};
+
 const _dbRetry = async (fn, maxAttempts = 3) => {
   for (let i = 1; i <= maxAttempts; i++) {
     try { return await fn(); }
@@ -1938,6 +1944,13 @@ function AppMain() {
   const [navTarget, setNavTarget] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saveErr, setSaveErr] = useState("");
+  // Any DB save that fails anywhere (saveFail) or a vehicle save that had to keep another device's entries (db.js) shows up in the banner.
+  useEffect(()=>{
+    const failed = (e) => setSaveErr(`NOT SAVED — ${e.detail?.label||"save"}: ${e.detail?.message||"unknown error"}. Do not rely on this entry: reload and check it.`);
+    const notice = (e) => setSaveErr(`ℹ ${e.detail?.message||""}`);
+    window.addEventListener("mye-save-failed", failed); window.addEventListener("mye-save-notice", notice);
+    return ()=>{ window.removeEventListener("mye-save-failed", failed); window.removeEventListener("mye-save-notice", notice); };
+  },[]);
   const [selectedFY, setSelectedFY] = useState(currentFY()); // Financial year filter
   const [selectedClient, setSelectedClient] = useState(""); // "" = All clients
 
@@ -2217,7 +2230,7 @@ function AppMain() {
           }
         });
       if(toDelete.length > 0) {
-        toDelete.forEach(id => DB.deleteExpense(id).catch(err => console.warn("dedup delete:", err)));
+        toDelete.forEach(id => DB.deleteExpense(id).catch(saveFail("dedup delete:")));
         console.log("[Expenses] Auto-removed", toDelete.length, "duplicate UTR expense(s) from DB");
         return next.filter(e => !toDelete.includes(e.id));
       }
@@ -2291,7 +2304,7 @@ function AppMain() {
       };
       if (loanMismatch)     console.warn(`[LoanHeal] ${v.truckNo}: loanRecovered ${v.loanRecovered} → ${loanTxnSum}`);
       if (shortageMismatch) console.warn(`[LoanHeal] ${v.truckNo}: shortageRecovered ${v.shortageRecovered} → ${shortageTxnSum}`);
-      DB.saveVehicle(fixed).catch(e => console.error("[LoanHeal] DB save failed for", v.truckNo, e.message));
+      DB.saveVehicle(fixed).catch(saveFail("[LoanHeal] DB save failed for"));
       return fixed;
     });
     setVehicles(healed);
@@ -2369,7 +2382,7 @@ function AppMain() {
       if(r.status!=="pending") return r;
       if(!toSettle.find(s=>s.lrNo && s.lrNo===r.lrNo)) return r;
       const done = {...r, status:"done", paidAt:today(), paidBy:"auto"};
-      DB.savePaymentRequest(done).catch(e=>console.error("savePaymentRequest auto-settle:",e));
+      DB.savePaymentRequest(done).catch(saveFail("savePaymentRequest auto-settle:"));
       return done;
     }));
   }, [trips, driverPays, vehicles, allTripsLoaded]);
@@ -2429,7 +2442,7 @@ function AppMain() {
 
     if(resolvedIds.length>0 && setActionItems) {
       setActionItems(prev => (prev||[]).filter(ai => !resolvedIds.includes(ai.id)));
-      resolvedIds.forEach(id => DB.deleteActionItem(id).catch(e=>console.error("deleteActionItem auto-resolve:",e)));
+      resolvedIds.forEach(id => DB.deleteActionItem(id).catch(saveFail("deleteActionItem auto-resolve:")));
       log && log("Auto-billed "+resolvedIds.length+" DI(s) on upload — action item(s) closed");
     }
   }, [trips, actionItems]);
@@ -2482,7 +2495,7 @@ function AppMain() {
         };
         const updatedEmp = {...emp, loan:(emp.loan||0)+amt, loanTxns:[...(emp.loanTxns||[]), loanTxn]};
         setEmployees(prev => (prev||[]).map(e=>e.id===emp.id?updatedEmp:e));
-        DB.saveEmployee(updatedEmp).catch(e=>console.error("saveEmployee diesel_no_lr loan:",e));
+        DB.saveEmployee(updatedEmp).catch(saveFail("saveEmployee diesel_no_lr loan:"));
         log && log("DIESEL NO-LR → EMPLOYEE LOAN", `Indent #${req.indentNo} · ${req.truckNo} · ₹${amt} added to ${emp.name}'s loan (no LR after 7 days)`);
         toClear.push(ai);
       });
@@ -2491,7 +2504,7 @@ function AppMain() {
     if(toClear.length>0 && setActionItems) {
       const clearIds = toClear.map(ai=>ai.id);
       setActionItems(prev => (prev||[]).filter(ai => !clearIds.includes(ai.id)));
-      clearIds.forEach(id => DB.deleteActionItem(id).catch(e=>console.error("deleteActionItem diesel_no_lr:",e)));
+      clearIds.forEach(id => DB.deleteActionItem(id).catch(saveFail("deleteActionItem diesel_no_lr:")));
     }
   }, [dieselRequests, actionItems, rDR]);
 
@@ -2884,7 +2897,7 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
               const v = e.target.value;
               setSettings(p=>{
                 const updated={...(p||{}),pouchDeadlineStartDate: v};
-                DB.saveSettings(updated).catch(err=>console.error("saveSettings pouchDeadlineStartDate:",err));
+                DB.saveSettings(updated).catch(saveFail("saveSettings pouchDeadlineStartDate:"));
                 return updated;
               });
             }} style={{background:C.card,border:`1.5px solid ${C.border}`,
@@ -4610,7 +4623,7 @@ Rules:
             createdAt: nowTs(),
           };
           setActionItems(prev=>[noDieselItem, ...(prev||[])]);
-          DB.saveActionItem(noDieselItem).catch(e=>console.error("saveActionItem no_diesel_confirmed:",e));
+          DB.saveActionItem(noDieselItem).catch(saveFail("saveActionItem no_diesel_confirmed:"));
         }
         // ── Mark pre-filled diesel indent as "attached" ───────────────────
         if (g.dieselIndentNo.trim() && typeof setDieselRequests === "function" && !noDieselGroupIds.has(g.id)) {
@@ -4702,7 +4715,7 @@ Rules:
             note:`Advance — LR ${lrNo} · ${truckNo}`,
             lrNo, tripId:trip.id, createdBy:user.username, createdAt:nowTs()};
           setCashTransfers(prev=>[wxn,...(Array.isArray(prev)?prev:[])]);
-          try { await DB.saveCashTransfer(wxn); } catch(e) { console.error("saveCashTransfer (batch wallet advance):",e); }
+          try { await DB.saveCashTransfer(wxn); } catch(e) { saveFail("saveCashTransfer (batch wallet advance):")(e); }
           log("WALLET ADVANCE",`${empName} −₹${trip.advance} LR:${lrNo}`);
         }
         // Loan/shortage ledger — strict sync to match this trip's recovery fields
@@ -4720,7 +4733,7 @@ Rules:
             // via [BATCH TIMING] logs + pg_stat_activity showing nothing
             // running server-side during the hang — the request was stuck
             // client-side, not in Postgres).
-            try { await DB.saveVehicle(upd); } catch(e) { console.error("saveVehicle batch DI recovery:",e); }
+            try { await DB.saveVehicle(upd); } catch(e) { saveFail("saveVehicle batch DI recovery:")(e); }
           }
         }
         log("BATCH TRIP",`LR:${lrNo} DI:${ex.diNo} ${truckNo} ${ex.qty}MT [${item.orderType}]`);
@@ -4737,7 +4750,7 @@ Rules:
               type:"excess_diesel", ref:lrNo,
               lrNo, tripId:trip.id, createdBy:user.username, createdAt:nowTs()};
             setCashTransfers(prev=>[wxnXD,...(Array.isArray(prev)?prev:[]).filter(x=>x.id!==wxnXD.id)]);
-            try { await DB.saveCashTransfer(wxnXD); } catch(e) { console.error("excess diesel save:",e); }
+            try { await DB.saveCashTransfer(wxnXD); } catch(e) { saveFail("excess diesel save:")(e); }
             log("EXCESS DIESEL",`${employees.find(e=>e.id===_empId)?.name||"—"} −₹${excess} LR:${lrNo} (diesel ₹${trip.dieselEstimate} caused negative net)`);
           }
         }}
@@ -4864,7 +4877,7 @@ Rules:
             createdAt: nowTs(),
           };
           setActionItems(prev=>[noDieselItem, ...(prev||[])]);
-          DB.saveActionItem(noDieselItem).catch(e=>console.error("saveActionItem no_diesel_confirmed:",e));
+          DB.saveActionItem(noDieselItem).catch(saveFail("saveActionItem no_diesel_confirmed:"));
         }
         // ── Auto-attach confirmed diesel request for this truck (any age) ──
         if (typeof setDieselRequests === "function" && !noDieselGroupIds.has(g.id)) {
@@ -4934,7 +4947,7 @@ Rules:
             note:`Advance — LR ${lrNo} · ${truckNo}`,
             lrNo, tripId:trip.id, createdBy:user.username, createdAt:nowTs()};
           setCashTransfers(prev=>[wxn,...(Array.isArray(prev)?prev:[])]);
-          try { await DB.saveCashTransfer(wxn); } catch(e) { console.error("saveCashTransfer (batch wallet advance):",e); }
+          try { await DB.saveCashTransfer(wxn); } catch(e) { saveFail("saveCashTransfer (batch wallet advance):")(e); }
           log("WALLET ADVANCE",`${empName} −₹${trip.advance} LR:${lrNo}`);
         }
         // Loan/shortage ledger — strict sync to match this trip's recovery fields
@@ -4945,7 +4958,7 @@ Rules:
             const upd = syncTripRecoveryToVehicle(_veh1, trip);
             _vehWork.set(truckNo, upd);
             setVehicles(prev=>prev.map(veh=>veh.truckNo===truckNo?upd:veh));
-            try { await DB.saveVehicle(upd); } catch(e) { console.error("saveVehicle batch multi-DI recovery:",e); }
+            try { await DB.saveVehicle(upd); } catch(e) { saveFail("saveVehicle batch multi-DI recovery:")(e); }
           }
         }
         log("BATCH MULTI-DI",`LR:${lrNo} ${allDiNos} ${truckNo} ${totalQty}MT`);
@@ -4962,7 +4975,7 @@ Rules:
               type:"excess_diesel", ref:lrNo,
               lrNo, tripId:trip.id, createdBy:user.username, createdAt:nowTs()};
             setCashTransfers(prev=>[wxnXD,...(Array.isArray(prev)?prev:[]).filter(x=>x.id!==wxnXD.id)]);
-            try { await DB.saveCashTransfer(wxnXD); } catch(e) { console.error("excess diesel save:",e); }
+            try { await DB.saveCashTransfer(wxnXD); } catch(e) { saveFail("excess diesel save:")(e); }
             log("EXCESS DIESEL",`${employees.find(e=>e.id===_empId)?.name||"—"} −₹${excess} LR:${lrNo} (multi-DI, diesel ₹${trip.dieselEstimate} caused negative net)`);
           }
         }}
@@ -7332,7 +7345,7 @@ function PartyBatchEmailSheet({ trips, setTrips, onClose, log }) {
     setTrips(p => p.map(t => {
       if(!selected.has(t.id)) return t;
       const updated = {...t, emailSentAt:ts, partyEmail:toEmail, batchId};
-      DB.saveTrip(updated).catch(e=>console.error("saveTrip batch:",e));
+      DB.saveTrip(updated).catch(saveFail("saveTrip batch:"));
       return updated;
     }));
     log("PARTY EMAIL SENT", selTrips.length+" trips · batch:"+batchId+" → "+toEmail);
@@ -7412,7 +7425,7 @@ function PartyBatchEmailSheet({ trips, setTrips, onClose, log }) {
                   if(!window.confirm(`Mark email sent for ${t.lrNo||t.truckNo}?`)) return;
                   const ts=new Date().toISOString();
                   setTrips(p=>p.map(x=>x.id===t.id?{...x,emailSentAt:ts,status:"Yet to Bill"}:x));
-                  setTimeout(()=>DB.saveTrip({...t,emailSentAt:ts,status:"Yet to Bill"}).catch(er=>console.error(er)),0);
+                  setTimeout(()=>DB.saveTrip({...t,emailSentAt:ts,status:"Yet to Bill"}).catch(saveFail("Save failed")),0);
                   log&&log("PARTY EMAIL SENT","Single: "+t.lrNo);
                 }} style={{fontSize:10,color:C.blue,background:C.blue+"11",border:`1px solid ${C.blue}33`,
                   borderRadius:4,padding:"3px 8px",cursor:"pointer",fontWeight:600}}>
@@ -7450,7 +7463,7 @@ function PartyBatchEmailSheet({ trips, setTrips, onClose, log }) {
                       const u={...t,emailSentAt:t.emailSentAt||ts,confirmPdfPath:data?.signedUrl||path,
                         ...(mergedPath?{status:"Confirmation Email Received",mergedPdfPath:mergedPath,receiptFilePath:path,receiptUploadedAt:ts}:{})};
                       setTrips(p=>p.map(x=>x.id===t.id?u:x));
-                      setTimeout(()=>DB.saveTrip(u).catch(er=>console.error(er)),0);
+                      setTimeout(()=>DB.saveTrip(u).catch(saveFail("Save failed")),0);
                       log&&log("CONFIRM PDF","Single: "+t.lrNo+(mergedPath?" + merged":" \u2014 merge failed"));
                     }catch(err){alert("Upload failed: "+err.message);}
                   }}/>
@@ -7698,7 +7711,7 @@ function BatchReceiptSheet({ batchId, trips, setTrips, onClose, log }) {
           receiptUploadedAt: ts,
           mergedPdfPath: mergedResult.path,
         };
-        DB.saveTrip(updated).catch(e=>console.error("saveTrip batch receipt:",e));
+        DB.saveTrip(updated).catch(saveFail("saveTrip batch receipt:"));
         return updated;
       }));
       log("BATCH RECEIPT UPLOADED","batch:"+batchId+" "+batchTrips.length+" trips merged");
@@ -8515,7 +8528,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         note:`Advance — LR ${t.lrNo||"—"} · ${t.truckNo}`, lrNo:t.lrNo||"", tripId:t.id,
         createdBy:user.username, createdAt:nowTs()};
       setCashTransfers(prev=>[wxn,...(Array.isArray(prev)?prev:[])]);
-      DB.saveCashTransfer(wxn).catch(e=>console.error("saveCashTransfer:",e));
+      DB.saveCashTransfer(wxn).catch(saveFail("saveCashTransfer:"));
       log("WALLET ADVANCE",`${empName} −₹${fmt(t.advance)} LR:${t.lrNo}`);
     }
     // ── Excess diesel tracking — single DI trip ──
@@ -8531,7 +8544,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
           type:"excess_diesel", ref:t.lrNo||"",
           lrNo:t.lrNo||"", tripId:t.id, createdBy:user.username, createdAt:nowTs()};
         setCashTransfers(prev=>[wxnXD,...(Array.isArray(prev)?prev:[]).filter(x=>x.id!==wxnXD.id)]);
-        DB.saveCashTransfer(wxnXD).catch(e=>console.error("excess diesel save:",e));
+        DB.saveCashTransfer(wxnXD).catch(saveFail("excess diesel save:"));
         log("EXCESS DIESEL",`${employees.find(e=>e.id===_empId)?.name||"—"} −₹${excess} LR:${t.lrNo||"—"} (single DI, diesel ₹${t.dieselEstimate} caused negative net)`);
       }
     }}
@@ -8547,7 +8560,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         tafalExempt:false, shortageOwed:0, shortageRecovered:0,
         shortageTxns:[], loanTxns:[], createdBy:user.username };
       setVehicles(p => [...(p||[]), nv]);
-      DB.saveVehicle(nv).catch(e=>console.error("saveVehicle auto-create:",e));
+      DB.saveVehicle(nv).catch(saveFail("saveVehicle auto-create:"));
       log("AUTO-CREATE VEHICLE", `${tn2} from trip save`);
     } else if(tn2 && f.ownerName?.trim()) {
       // If vehicle exists but ownerName was blank — persist it now
@@ -8555,7 +8568,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       if(existV && !(existV.ownerName||"").trim()) {
         const updated = {...existV, ownerName:f.ownerName.trim()};
         setVehicles(prev=>prev.map(v=>v.truckNo===tn2?updated:v));
-        DB.saveVehicle(updated).catch(e=>console.error("saveVehicle ownerName:",e));
+        DB.saveVehicle(updated).catch(saveFail("saveVehicle ownerName:"));
         log("VEHICLE OWNER SET", `${tn2} → ${f.ownerName.trim()}`);
       }
     }
@@ -8744,7 +8757,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         if (oldReq) {
           const detached = {...oldReq, status:"confirmed", tripId:"", lrNo:""};
           setDieselRequests(p => p.map(r => r.id===oldReq.id ? detached : r));
-          DB.saveDieselRequest(detached).catch(e=>console.error("saveDieselRequest detach (edit save):",e));
+          DB.saveDieselRequest(detached).catch(saveFail("saveDieselRequest detach (edit save):"));
           log&&log("DIESEL DETACH", `Indent #${oldReq.indentNo} ← LR ${editSheet.lrNo} (owner edit)`);
         }
       }
@@ -8770,7 +8783,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         if (oldReq2) {
           const detached2 = {...oldReq2, status:"confirmed", tripId:"", lrNo:""};
           setDieselRequests(p => p.map(r => r.id===oldReq2.id ? detached2 : r));
-          DB.saveDieselRequest(detached2).catch(e=>console.error("saveDieselRequest detach 2nd (edit save):",e));
+          DB.saveDieselRequest(detached2).catch(saveFail("saveDieselRequest detach 2nd (edit save):"));
           log&&log("DIESEL DETACH (2ND)", `Indent #${oldReq2.indentNo} ← LR ${editSheet.lrNo} (owner edit)`);
         }
       }
@@ -8820,7 +8833,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       if(existV3 && !(existV3.ownerName||"").trim()) {
         const updV3 = {...existV3, ownerName:editSheet.ownerName.trim()};
         setVehicles(prev=>prev.map(v=>v.truckNo===tn3?updV3:v));
-        DB.saveVehicle(updV3).catch(e=>console.error("saveVehicle ownerName edit:",e));
+        DB.saveVehicle(updV3).catch(saveFail("saveVehicle ownerName edit:"));
         log("VEHICLE OWNER SET", `${tn3} → ${editSheet.ownerName.trim()} (from edit trip)`);
       }
     }
@@ -8836,7 +8849,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
         note:`Advance — LR ${editSheet.lrNo||"—"} · ${editSheet.truckNo}`, lrNo:editSheet.lrNo||"", tripId:editSheet.id,
         createdBy:user.username, createdAt:nowTs()};
       setCashTransfers(prev=>[wxn,...(Array.isArray(prev)?prev:[]).filter(x=>x.id!==stableId)]);
-      DB.saveCashTransfer(wxn).catch(e=>console.error("saveCashTransfer:",e));
+      DB.saveCashTransfer(wxn).catch(saveFail("saveCashTransfer:"));
       log("WALLET ADVANCE",`${empName} −₹${fmt(newAdv)} LR:${editSheet.lrNo}`);
     } else if(!newEmpId || newAdv<=0) {
       // Employee unlinked or advance cleared — remove the wallet record
@@ -8858,7 +8871,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
           type:"excess_diesel", ref:editSheet.lrNo||"",
           lrNo:editSheet.lrNo||"", tripId:editSheet.id, createdBy:user.username, createdAt:nowTs()};
         setCashTransfers(prev=>[wxnXD,...(Array.isArray(prev)?prev:[]).filter(x=>x.id!==xdId)]);
-        DB.saveCashTransfer(wxnXD).catch(e=>console.error("excess diesel save:",e));
+        DB.saveCashTransfer(wxnXD).catch(saveFail("excess diesel save:"));
         log("EXCESS DIESEL",`${employees.find(e=>e.id===_empId)?.name||"—"} −₹${excess} LR:${editSheet.lrNo||"—"} (edit trip)`);
       } else {
         // Net is positive now — remove any previous excess diesel entry
@@ -8930,7 +8943,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     if (linkedIndents.length > 0) {
       setIndents(prev => prev.filter(i => i.tripId !== t.id));
       for (const ind of linkedIndents) {
-        try { await DB.deleteIndent(ind.id); } catch(e) { console.warn("indent cascade delete:", e); }
+        try { await DB.deleteIndent(ind.id); } catch(e) { saveFail("indent cascade delete:")(e); }
       }
     }
 
@@ -8938,7 +8951,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     const walletId = "WX-" + t.id;
     if ((cashTransfers||[]).some(x => x.id === walletId)) {
       setCashTransfers(prev => (prev||[]).filter(x => x.id !== walletId));
-      DB.deleteCashTransfer(walletId).catch(e => console.warn("wallet cascade delete:", e));
+      DB.deleteCashTransfer(walletId).catch(saveFail("wallet cascade delete:"));
       log("WALLET REVERSE", `Deleted advance entry for LR:${t.lrNo||"—"}`);
     }
 
@@ -8946,7 +8959,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     const xdId = "XD-" + t.id;
     if ((cashTransfers||[]).some(x => x.id === xdId)) {
       setCashTransfers(prev => (prev||[]).filter(x => x.id !== xdId));
-      DB.deleteCashTransfer(xdId).catch(e => console.warn("excess diesel cascade delete:", e));
+      DB.deleteCashTransfer(xdId).catch(saveFail("excess diesel cascade delete:"));
       log("EXCESS DIESEL REVERSE", `Deleted excess diesel entry for LR:${t.lrNo||"—"}`);
     }
 
@@ -8956,7 +8969,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       const linkedIds = new Set(otherLinked.map(x => x.id));
       setCashTransfers(prev => (prev||[]).filter(x => !linkedIds.has(x.id)));
       for (const wx of otherLinked) {
-        DB.deleteCashTransfer(wx.id).catch(e => console.warn("linked wallet delete:", e));
+        DB.deleteCashTransfer(wx.id).catch(saveFail("linked wallet delete:"));
       }
       log("WALLET CLEANUP", `Deleted ${otherLinked.length} wallet entries linked to LR:${t.lrNo||"—"}`);
     }
@@ -8970,7 +8983,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
           loanRecovered: Math.max(0, (v.loanRecovered||0) - bookableLoanRecovery(v, t)),
           loanTxns: (v.loanTxns||[]).filter(tx => tx.lrNo !== t.lrNo),
         };
-        DB.saveVehicle(upd).catch(e => console.warn("loan reversal save:", e));
+        DB.saveVehicle(upd).catch(saveFail("loan reversal save:"));
         return upd;
       }));
       log("LOAN REVERSE", `₹${t.loanRecovery} reversed for ${t.truckNo} LR:${t.lrNo||"—"}`);
@@ -8985,7 +8998,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
           shortageRecovered: Math.max(0, (v.shortageRecovered||0) - (+t.shortageRecovery)),
           shortageTxns: (v.shortageTxns||[]).filter(tx => tx.lrNo !== t.lrNo),
         };
-        DB.saveVehicle(upd).catch(e => console.warn("shortage reversal save:", e));
+        DB.saveVehicle(upd).catch(saveFail("shortage reversal save:"));
         return upd;
       }));
       log("SHORTAGE REVERSE", `₹${t.shortageRecovery} reversed for ${t.truckNo} LR:${t.lrNo||"—"}`);
@@ -8998,7 +9011,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     for (const req of linkedDiesel) {
       const detached = {...req, tripId:"", lrNo:"", status: req.confirmed ? "confirmed" : "open"};
       setDieselRequests(prev => (prev||[]).map(r => r.id === req.id ? detached : r));
-      DB.saveDieselRequest(detached).catch(e => console.warn("diesel detach:", e));
+      DB.saveDieselRequest(detached).catch(saveFail("diesel detach:"));
       log("DIESEL DETACH", `Indent #${req.indentNo} detached from LR:${t.lrNo||"—"} (trip deleted)`);
     }
 
@@ -9850,7 +9863,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                                 const u={...t,emailSentAt:t.emailSentAt||ts,confirmPdfPath:signedUrl||path,
                                   ...(mergedPath?{status:"Confirmation Email Received",mergedPdfPath:mergedPath,receiptFilePath:path,receiptUploadedAt:ts}:{})};
                                 setTrips(p=>p.map(x=>x.id===t.id?u:x));
-                                setTimeout(()=>DB.saveTrip(u).catch(er=>console.error("saveTrip confirm:",er)),0);
+                                setTimeout(()=>DB.saveTrip(u).catch(saveFail("saveTrip confirm:")),0);
                                 log("CONFIRM PDF","LR:"+t.lrNo+(mergedPath?" + auto-merged":""));
                                 // AUTO-PAY on confirmation removed — payments must be recorded manually with UTR
                               }catch(err){alert("Upload failed: "+err.message);}
@@ -11984,7 +11997,7 @@ function Settlement({trips, setTrips, vehicles, setVehicles, settlements, setSet
       setPaymentRequests(prev => (prev||[]).map(r => {
         if(r.lrNo!==t.lrNo || r.status!=="pending") return r;
         const done = {...r, status:"done", paidAt:today(), paidBy:user.username};
-        DB.savePaymentRequest(done).catch(e=>console.error("savePaymentRequest settle:",e));
+        DB.savePaymentRequest(done).catch(saveFail("savePaymentRequest settle:"));
         return done;
       }));
     }
@@ -12156,7 +12169,7 @@ function TafalMod({trips, vehicles, setVehicles, employees, settings, setSetting
         <div style={{display:"flex",gap:10,alignItems:"flex-end"}}>
           <Field label="₹ Per Trip (all vehicles)" value={String(tafalRate)} onChange={v=>setSettings(p=>{
             const updated={...(p||{}),tafalPerTrip:+v};
-            DB.saveSettings(updated).catch(e=>console.error("saveSettings:",e));
+            DB.saveSettings(updated).catch(saveFail("saveSettings:"));
             return updated;
           })} type="number" />
           <div style={{color:C.muted,fontSize:12,paddingBottom:14}}>applies to new trips</div>
@@ -13218,7 +13231,7 @@ function SplitPaymentSheet({ scanData, trips, tripWithBalance: tripWithBalancePr
                   note:(sharedNote||paidTo||"Cash Transfer").trim(),utr,
                   createdBy:user?.username||"",createdAt:nowTs()};
                 setCashTransfers(prev=>[tx,...(Array.isArray(prev)?prev:[])]);
-                DB.saveCashTransfer(tx).catch(e=>console.error("saveCashTransfer wallet scan:",e));
+                DB.saveCashTransfer(tx).catch(saveFail("saveCashTransfer wallet scan:"));
                 log&&log("CASH TRANSFER",`${selEmp?.name} ₹${fmt(totalAmount)} UTR:${utr}`);
                 alert(`✅ ₹${fmt(totalAmount)} added to ${selEmp?.name}'s wallet`);
                 onCancel();
@@ -13573,7 +13586,7 @@ function TasksMod({tasks=[], setTasks, employees=[], trips=[], settings, setSett
       completedBy: "", completedAt: "",
     };
     setTasks(p=>[t, ...(p||[])]);
-    DB.saveTask(t).catch(e=>console.error("saveTask:",e));
+    DB.saveTask(t).catch(saveFail("saveTask:"));
     log&&log("TASK CREATED", `"${t.title}" → ${employees.find(e=>e.id===t.assignedTo)?.name||"—"}`);
     setNf({title:"",description:"",assignedTo:"",dueDate:""});
     setNewSheet(false);
@@ -13584,14 +13597,14 @@ function TasksMod({tasks=[], setTasks, employees=[], trips=[], settings, setSett
     const upd = {...t, status: done?"done":"pending",
       completedBy: done?(user.name||user.username):"", completedAt: done?nowTs():""};
     setTasks(p=>p.map(x=>x.id===t.id?upd:x));
-    DB.saveTask(upd).catch(e=>console.error("saveTask toggle:",e));
+    DB.saveTask(upd).catch(saveFail("saveTask toggle:"));
     log&&log(done?"TASK COMPLETED":"TASK REOPENED", t.title);
   };
 
   const removeTask = (t) => {
     if(!window.confirm(`Delete task "${t.title}"? This can't be undone.`)) return;
     setTasks(p=>(p||[]).filter(x=>x.id!==t.id));
-    DB.deleteTask(t.id).catch(e=>console.error("deleteTask:",e));
+    DB.deleteTask(t.id).catch(saveFail("deleteTask:"));
     log&&log("TASK DELETED", t.title);
   };
 
@@ -13626,7 +13639,7 @@ function TasksMod({tasks=[], setTasks, employees=[], trips=[], settings, setSett
   const setPartyEpodStartDate = (dateStr) => {
     setSettings(p=>{
       const updated = {...(p||{}), partyEpodStartDate: dateStr};
-      DB.saveSettings(updated).catch(e=>console.error("saveSettings partyEpodStartDate:",e));
+      DB.saveSettings(updated).catch(saveFail("saveSettings partyEpodStartDate:"));
       return updated;
     });
   };
@@ -13655,7 +13668,7 @@ function TasksMod({tasks=[], setTasks, employees=[], trips=[], settings, setSett
   const setPartyEpodAssignee = (empId) => {
     setSettings(p=>{
       const updated = {...(p||{}), partyEpodAssigneeId: empId};
-      DB.saveSettings(updated).catch(e=>console.error("saveSettings partyEpodAssigneeId:",e));
+      DB.saveSettings(updated).catch(saveFail("saveSettings partyEpodAssigneeId:"));
       return updated;
     });
   };
@@ -14117,7 +14130,7 @@ function GypsumTrips({gypsumTrips=[], setGypsumTrips, gypsumShreeRates=[], setGy
         setGypsumTrips(updatedTrips);
         tripIds.forEach(id => {
           const t = updatedTrips.find(x=>x.id===id);
-          if(t) DB.saveGypsumTrip(t).catch(e=>console.error("saveGypsumTrip settled:",e));
+          if(t) DB.saveGypsumTrip(t).catch(saveFail("saveGypsumTrip settled:"));
         });
       }
       log && log("GYPSUM PAYMENT", `${emp?.name||payEmpId} · ₹${payAmount} · UTR ${payUtr} · ${tripIds.length} LR(s) tagged`);
@@ -14373,7 +14386,7 @@ function GypsumTrips({gypsumTrips=[], setGypsumTrips, gypsumShreeRates=[], setGy
             <div style={{color:C.muted,fontSize:11,marginBottom:8}}>Held back from every trip's driver pay, released via shortage settlement in a later stage.</div>
             <Field label="Amount (₹)" value={String(holdback)} onChange={v=>setSettings(p=>{
               const updated={...(p||{}), gypsumHoldbackAmount:+v||0};
-              DB.saveSettings(updated).catch(e=>console.error("saveSettings:",e));
+              DB.saveSettings(updated).catch(saveFail("saveSettings:"));
               return updated;
             })} type="number" />
           </div>
@@ -14524,7 +14537,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
     }));
     // Save to DB AFTER state update, outside the updater
     setTimeout(()=>{
-      updatedTrips.forEach(u=>DB.saveTrip(u).catch(e=>console.error("saveTrip party:",e)));
+      updatedTrips.forEach(u=>DB.saveTrip(u).catch(saveFail("saveTrip party:")));
     }, 0);
     log&&log("PARTY EMAIL SENT",`${selected.size} trips`);
     setSelected(new Set()); setAssignTo(""); setShowAssign(false);
@@ -14581,7 +14594,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
           u = {...t, sealedInvoicePath:path, status:"Sealed Invoice Received",
             ...(mergedPath ? {mergedPdfPath:mergedPath, receiptFilePath:path, receiptUploadedAt:new Date().toISOString()} : {})};
         }
-        setTimeout(()=>DB.saveTrip(u).catch(e=>console.error("saveTrip sealed:",e)),0);
+        setTimeout(()=>DB.saveTrip(u).catch(saveFail("saveTrip sealed:")),0);
         return u;
       }));
       setSelected(new Set());
@@ -14662,7 +14675,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
           ...(mergedPath?{mergedPdfPath:mergedPath,receiptFilePath:path,receiptUploadedAt:ts}:{})};
         pdfUpdated.push(u); return u;
       }));
-      setTimeout(()=>pdfUpdated.forEach(u=>DB.saveTrip(u).catch(e=>console.error("saveTrip confirm pdf:",e))),0);
+      setTimeout(()=>pdfUpdated.forEach(u=>DB.saveTrip(u).catch(saveFail("saveTrip confirm pdf:"))),0);
       log&&log("CONFIRM PDF",`${ids.size} trips`+(batchMergedPath?" + merged":"")+" — auto Ready for Billing");setSelected(new Set());
     }catch(e){alert("Upload failed: "+e.message);}
     finally{setPdfUploading(false);}
@@ -14672,13 +14685,13 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
     if(!window.confirm(`Undo email sent for ${t.lrNo}?`))return;
     const u={...t,emailSentAt:"",status:"Pending Bill",confirmFollowupUserId:"",confirmPdfPath:""};
     setTrips(prev=>prev.map(x=>x.id===t.id?u:x));
-    setTimeout(()=>DB.saveTrip(u).catch(e=>console.error("undo email:",e)),0);
+    setTimeout(()=>DB.saveTrip(u).catch(saveFail("undo email:")),0);
     log&&log("UNDO EMAIL SENT",t.lrNo);
   };
   const undoAssign=(t)=>{
     const u={...t,confirmFollowupUserId:""};
     setTrips(prev=>prev.map(x=>x.id===t.id?u:x));
-    setTimeout(()=>DB.saveTrip(u).catch(e=>console.error("undo assign:",e)),0);
+    setTimeout(()=>DB.saveTrip(u).catch(saveFail("undo assign:")),0);
   };
 
   const cardProps = {selected, toggle, isOwner, isPartyMgr, employees, openFile, undoEmailSent, undoAssign};
@@ -14821,7 +14834,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
       updated = flat;
     }
     setTrips(prev=>prev.map(t=>t.id===trip.id?updated:t));
-    setTimeout(()=>DB.saveTrip(updated).catch(e=>console.error("saveTrip epodDone:",e)),0);
+    setTimeout(()=>DB.saveTrip(updated).catch(saveFail("saveTrip epodDone:")),0);
     log&&log("EPOD MARKED",`${label} · DI:${diNo||"—"} LR:${trip.lrNo} by ${by}`);
   };
 
@@ -14836,7 +14849,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
       ? {...trip, diLines: trip.diLines.map(d => d.diNo===diNo ? {...d, readyForBilling:true, readyForBillingBy:by, readyForBillingAt:ts} : d)}
       : {...trip, readyForBilling:true, readyForBillingBy:by, readyForBillingAt:ts};
     setTrips(prev=>prev.map(t=>t.id===trip.id?updated:t));
-    setTimeout(()=>DB.saveTrip(updated).catch(e=>console.error("saveTrip readyForBilling:",e)),0);
+    setTimeout(()=>DB.saveTrip(updated).catch(saveFail("saveTrip readyForBilling:")),0);
     log&&log("READY FOR BILLING",`DI:${diNo||"—"} LR:${trip.lrNo} by ${by}`);
   };
   // Reversal is owner-only, per explicit instruction — a party manager can
@@ -14849,7 +14862,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
       ? {...trip, diLines: trip.diLines.map(d => d.diNo===diNo ? {...d, readyForBilling:false, readyForBillingBy:"", readyForBillingAt:""} : d)}
       : {...trip, readyForBilling:false, readyForBillingBy:"", readyForBillingAt:""};
     setTrips(prev=>prev.map(t=>t.id===trip.id?updated:t));
-    setTimeout(()=>DB.saveTrip(updated).catch(e=>console.error("saveTrip unmarkReady:",e)),0);
+    setTimeout(()=>DB.saveTrip(updated).catch(saveFail("saveTrip unmarkReady:")),0);
     log&&log("READY FOR BILLING REMOVED",`DI:${diNo||"—"} LR:${trip.lrNo} by ${user?.name||user?.username}`);
   };
 
@@ -14863,7 +14876,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
       ? {...trip, diLines: trip.diLines.map(d => d.diNo===diNo ? {...d, ...patch} : d)}
       : {...trip, ...patch};
     setTrips(prev=>prev.map(t=>t.id===trip.id?updated:t));
-    setTimeout(()=>DB.saveTrip(updated).catch(e=>console.error("saveTrip billing stage:",e)),0);
+    setTimeout(()=>DB.saveTrip(updated).catch(saveFail("saveTrip billing stage:")),0);
     log&&log(logAction,`DI:${diNo||"—"} LR:${trip.lrNo}${logExtra||""} by ${user?.name||user?.username}`);
   };
   const markSentForBilling = (trip, diNo) => {
@@ -15291,7 +15304,7 @@ function PartyPortal({trips, setTrips, employees, users, user, log, selectedFY, 
                   const u={...t,confirmFollowupUserId:assignTo};
                   assigned.push(u);return u;
                 }));
-                setTimeout(()=>assigned.forEach(u=>DB.saveTrip(u).catch(e=>console.error("assign:",e))),0);
+                setTimeout(()=>assigned.forEach(u=>DB.saveTrip(u).catch(saveFail("assign:"))),0);
                 log&&log("ASSIGN FOLLOWUP",`${selected.size} trips → ${assignTo}`);
                 setShowAssign(false);setAssignTo("");
               }} style={{padding:"8px 14px",borderRadius:7,fontWeight:700,fontSize:12,cursor:"pointer",
@@ -15759,7 +15772,7 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
       ? {...req, ownerVerified:true, ownerVerifiedBy:user?.name||user?.username||"", ownerVerifiedAt:new Date().toISOString()}
       : {...req, ownerVerified:false, ownerVerifiedBy:"", ownerVerifiedAt:""};
     setDieselRequests(prev=>prev.map(r=>r.id===req.id?updated:r));
-    DB.saveDieselRequest(updated).catch(e=>console.error("saveDieselRequest ownerVerified:",e));
+    DB.saveDieselRequest(updated).catch(saveFail("saveDieselRequest ownerVerified:"));
     log&&log(value?"REQUEST VERIFIED":"REQUEST VERIFICATION REMOVED", `Indent #${req.indentNo} · ${req.truckNo} by ${user?.name||user?.username}`);
   };
 
@@ -16940,7 +16953,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
           loanTxns: [...(vehicle.loanTxns||[]), loanTxn],
         };
         setVehicles(prev => prev.map(v => v.truckNo===trip.truckNo ? updatedVeh : v));
-        DB.saveVehicle(updatedVeh).catch(e=>console.warn("saveVehicle diesel adj:", e));
+        DB.saveVehicle(updatedVeh).catch(saveFail("saveVehicle diesel adj:"));
         log("DIESEL ADJ → LOAN", `${trip.truckNo} ₹${deductAmt} added to loan for auto-recovery in next trip`);
       }
 
@@ -17061,7 +17074,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
       ? {...req, ownerVerified:true, ownerVerifiedBy:user?.name||user?.username||"", ownerVerifiedAt:new Date().toISOString()}
       : {...req, ownerVerified:false, ownerVerifiedBy:"", ownerVerifiedAt:""};
     setDieselRequests(prev=>prev.map(r=>r.id===req.id?updated:r));
-    DB.saveDieselRequest(updated).catch(e=>console.error("saveDieselRequest ownerVerified:",e));
+    DB.saveDieselRequest(updated).catch(saveFail("saveDieselRequest ownerVerified:"));
     log&&log(value?"REQUEST VERIFIED":"REQUEST VERIFICATION REMOVED", `Indent #${req.indentNo} · ${req.truckNo} by ${user?.name||user?.username}`);
   };
 
@@ -17098,7 +17111,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
   const sendNoLrActionItem = (req, overrideEmpId) => {
     const { ai, empName } = buildNoLrActionItem(req, overrideEmpId);
     setActionItems(prev=>[ai, ...(prev||[])]);
-    DB.saveActionItem(ai).catch(e=>console.error("saveActionItem diesel_no_lr:",e));
+    DB.saveActionItem(ai).catch(saveFail("saveActionItem diesel_no_lr:"));
     log&&log("DIESEL NO-LR ACTION ITEM", `Indent #${req.indentNo} · ${req.truckNo} → ${empName}`);
   };
 
@@ -17303,11 +17316,11 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
         const req = result.request;
         const updated = {...req, ownerVerified:true, ownerVerifiedBy:user?.name||user?.username||"", ownerVerifiedAt:new Date().toISOString()};
         setDieselRequests(prev=>prev.map(r=>r.id===req.id?updated:r));
-        try { await DB.saveDieselRequest(updated); } catch(e) { console.error("saveDieselRequest stmt-match:",e); }
+        try { await DB.saveDieselRequest(updated); } catch(e) { saveFail("saveDieselRequest stmt-match:")(e); }
         if(!req.lrNo) {
           const { ai, empName } = buildNoLrActionItem(updated);
           setActionItems(prev=>[ai, ...(prev||[])]);
-          DB.saveActionItem(ai).catch(e=>console.error("saveActionItem stmt no-lr:",e));
+          DB.saveActionItem(ai).catch(saveFail("saveActionItem stmt no-lr:"));
           log&&log("DIESEL NO-LR ACTION ITEM", `Indent #${req.indentNo} · ${req.truckNo} → ${empName} (from statement reconcile)`);
         }
         checkedCount++;
@@ -17331,7 +17344,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
           confirmedReason:"Reconciled from pump statement upload",
         };
         setDieselRequests(p=>[confirmedReq, ...(p||[])]);
-        try { await DB.saveDieselRequest(confirmedReq); } catch(e) { console.error("saveDieselRequest stmt-create:",e); }
+        try { await DB.saveDieselRequest(confirmedReq); } catch(e) { saveFail("saveDieselRequest stmt-create:")(e); }
         if(!(vehicles||[]).find(v=>v.truckNo===row.vehicleNo)) {
           const nv={id:uid(),truckNo:row.vehicleNo,ownerName:"",phone:"",driverName:"",driverPhone:"",
             driverLicense:"",accountNo:"",ifsc:"",loan:0,loanRecovered:0,deductPerTrip:0,
@@ -17342,7 +17355,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
         }
         const { ai, empName } = buildNoLrActionItem(confirmedReq);
         setActionItems(prev=>[ai, ...(prev||[])]);
-        DB.saveActionItem(ai).catch(e=>console.error("saveActionItem stmt-create no-lr:",e));
+        DB.saveActionItem(ai).catch(saveFail("saveActionItem stmt-create no-lr:"));
         log&&log("DIESEL FROM STATEMENT", `Indent #${confirmedReq.indentNo} · ${row.vehicleNo} · ${fmt(amt)} → ${empName}`);
         createdCount++;
       }
@@ -18540,7 +18553,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                       loan:0, loanRecovered:0, deductPerTrip:0, shortageDeductPerTrip:0,
                       tafalExempt:false, loanTxns:[], shortageTxns:[], createdBy:user?.username||""};
                     setVehicles(p=>[...(p||[]),v]);
-                    DB.saveVehicle(v).catch(e=>console.error("saveVehicle from diesel form:",e));
+                    DB.saveVehicle(v).catch(saveFail("saveVehicle from diesel form:"));
                     log&&log("NEW VEHICLE",`${v.truckNo} added from diesel request form`);
                   }}
                 />
@@ -19026,7 +19039,7 @@ This was already dispensed — only delete if it was recorded in error.`;
                                 const cleared = isSlot2
                                   ? {...t, dieselIndentNo2:"", dieselEstimate2:0, dieselEstimate:Math.max(0,(+t.dieselEstimate||0)-est2)}
                                   : {...t, dieselIndentNo:"", dieselEstimate:est2, dieselIndentLocked:!!t.dieselIndentNo2};
-                                DB.saveTrip(cleared).catch(e=>console.error("cascade saveTrip:",e));
+                                DB.saveTrip(cleared).catch(saveFail("cascade saveTrip:"));
                                 log("INDENT CASCADE CLEAR", `LR ${t.lrNo||t.truckNo} — diesel ${isSlot2?"2nd indent":""} cleared (indent #${req.indentNo} deleted)`);
                                 return cleared;
                               });
@@ -21441,7 +21454,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                   const v = e.target.value;
                   setSettings(p=>{
                     const updated={...(p||{}),pouchPerTrip: v===""?"":+v};
-                    DB.saveSettings(updated).catch(err=>console.error("saveSettings pouchPerTrip:",err));
+                    DB.saveSettings(updated).catch(saveFail("saveSettings pouchPerTrip:"));
                     return updated;
                   });
                 }} style={{width:100,background:C.card,border:`1.5px solid ${C.border}`,
@@ -21633,15 +21646,16 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                   if(!lAmt||+lAmt<=0){alert("Enter loan amount.\nಸಾಲದ ಮೊತ್ತ ನಮೂದಿಸಿ.");return;}
                   const targetId = (ownerVehs.length>1 && lAcct2) ? lAcct2 : v.id;
                   const txn={id:uid(),type:"given",date:lDate,amount:+lAmt,ref:lRef,accountName:lAcct,empId:lEmpId,note:""};
-                  setVehicles(p=>p.map(x=>{
-                    if(x.id!==targetId) return x;
-                    const updated={...x, loan:(x.loan||0)+ +lAmt, loanTxns:[...(x.loanTxns||[]),txn]};
-                    DB.saveVehicle(updated).catch(e=>console.error("saveVehicle addLoan:",e));
-                    return updated;
-                  }));
+                  const _cur = (vehicles||[]).find(x=>x.id===targetId);
+                  if(!_cur){ alert("Vehicle not found — the loan was NOT added. Reload and try again."); return; }
+                  const _updated = {..._cur, loan:(_cur.loan||0)+ +lAmt, loanTxns:[...(_cur.loanTxns||[]),txn]};
+                  setVehicles(p=>p.map(x=>x.id===targetId?_updated:x));
                   const targetTruck = ownerVehs.find(x=>x.id===targetId)?.truckNo||v.truckNo;
                   const empTag = (employees||[]).find(e=>e.id===lEmpId);
-                  log("ADD LOAN",`${ownerName||targetTruck} via ${targetTruck} ₹${fmt(+lAmt)} ref:${lRef||"—"}${empTag?` — held: ${empTag.name}`:""}`);
+                  // the activity log says "ADD LOAN" only once the database has confirmed it; a failure is shown in the red banner
+                  DB.saveVehicle(_updated)
+                    .then(()=>log("ADD LOAN",`${ownerName||targetTruck} via ${targetTruck} ₹${fmt(+lAmt)} ref:${lRef||"—"}${empTag?` — held: ${empTag.name}`:""}`))
+                    .catch(e=>{ saveFail("Add loan")(e); alert(`⚠ LOAN NOT SAVED for ${targetTruck}: ${e.message||e}\nDo not hand over the money record — reload and check.`); });
                   setLAmt(""); setLDate(today()); setLRef(""); setLAcct(""); setLAcct2(""); setLEmpId("");
                   setLSheet(null);
                 }} color={C.red} full>Add Loan</Btn>
@@ -21687,12 +21701,11 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                     : null;
                   const targetRecovId = targetVeh ? targetVeh.id : v.id;
                   const txn={id:uid(),type:"recovery",date:rDate,amount:+rAmt,lrNo:rLR,ref:rRef,note:""};
-                  setVehicles(p=>p.map(x=>{
-                    if(x.id!==targetRecovId) return x;
-                    const updated={...x, loanRecovered:(x.loanRecovered||0)+ +rAmt, loanTxns:[...(x.loanTxns||[]),txn]};
-                    DB.saveVehicle(updated).catch(e=>console.error("saveVehicle loanRecov:",e));
-                    return updated;
-                  }));
+                  const _curR = (vehicles||[]).find(x=>x.id===targetRecovId);
+                  if(!_curR){ alert("Vehicle not found — the recovery was NOT recorded. Reload and try again."); return; }
+                  const _updR = {..._curR, loanRecovered:(_curR.loanRecovered||0)+ +rAmt, loanTxns:[...(_curR.loanTxns||[]),txn]};
+                  setVehicles(p=>p.map(x=>x.id===targetRecovId?_updR:x));
+                  DB.saveVehicle(_updR).catch(e=>{ saveFail("Loan recovery")(e); alert(`⚠ RECOVERY NOT SAVED: ${e.message||e}\nReload and check before relying on it.`); });
                   if(rLR){
                     setTrips(p=>p.map(t=>{
                       if((t.lrNo||t.id)!==rLR) return t;
@@ -21741,7 +21754,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                               if(!targetVeh) return;
                               const updated = {...targetVeh, loanTxns:(targetVeh.loanTxns||[]).map(t=>t.id===tx.id?{...t,empId:newEmpId}:t)};
                               setVehicles(p=>p.map(x=>x.id===tx._vehicleId?updated:x));
-                              DB.saveVehicle(updated).catch(err=>console.error("saveVehicle reassign loan empId:",err));
+                              DB.saveVehicle(updated).catch(saveFail("saveVehicle reassign loan empId:"));
                             }}
                             style={{marginTop:4,background:C.card,border:`1px solid ${C.border}`,borderRadius:6,
                               color:tx.empId?C.text:C.muted,fontSize:10,padding:"2px 4px",maxWidth:160}}>
@@ -21826,7 +21839,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                       setVehicles(p=>p.map(x=>{
                         if(x.id!==sSheet) return x;
                         const updated={...x,shortageDeductPerTrip:val};
-                        DB.saveVehicle(updated).catch(err=>console.error("saveVehicle sdpt:",err));
+                        DB.saveVehicle(updated).catch(saveFail("saveVehicle sdpt:"));
                         return updated;
                       }));
                       setSdptSaved(true);
@@ -21892,7 +21905,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                     const updated={...x,
                       shortageOwed:(x.shortageOwed||0)+amount,
                       shortageTxns:[...(x.shortageTxns||[]),txn]};
-                    DB.saveVehicle(updated).catch(e=>console.error("saveVehicle shortage:",e));
+                    DB.saveVehicle(updated).catch(saveFail("saveVehicle shortage:"));
                     return updated;
                   }));
                   const empTag = (employees||[]).find(e=>e.id===shEmpId);
@@ -21976,7 +21989,7 @@ The loan recovery will auto-fill on the next trip for each affected vehicle.`);
                               const newEmpId = e.target.value;
                               const updated = {...v, shortageTxns:(v.shortageTxns||[]).map(t=>t.id===tx.id?{...t,empId:newEmpId}:t)};
                               setVehicles(p=>p.map(x=>x.id===sSheet?updated:x));
-                              DB.saveVehicle(updated).catch(err=>console.error("saveVehicle reassign shortage empId:",err));
+                              DB.saveVehicle(updated).catch(saveFail("saveVehicle reassign shortage empId:"));
                             }}
                             style={{marginTop:4,background:C.card,border:`1px solid ${C.border}`,borderRadius:6,
                               color:tx.empId?C.text:C.muted,fontSize:10,padding:"2px 4px",maxWidth:160}}>
@@ -22670,7 +22683,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
   const deleteTx = async (txId) => {
     if(!window.confirm("Delete this wallet transaction?")) return;
     setCashTransfers(prev=>(prev||[]).filter(t=>t.id!==txId));
-    try { await DB.deleteCashTransfer(txId); } catch(e){ console.warn("deleteCashTransfer:",e); }
+    try { await DB.deleteCashTransfer(txId); } catch(e) { saveFail("deleteCashTransfer:")(e); }
   };
 
   const printWalletPDF = (emp) => {
@@ -22769,8 +22782,8 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
               const credit = {id:uid(), empId:xferTo, amount:+xferAmt, date:xferDate, type:"transfer",
                 note:`From ${fromName} — ${note}`, createdBy:user.username, createdAt:nowTs()};
               setCashTransfers(prev=>[credit,debit,...(Array.isArray(prev)?prev:[])]);
-              DB.saveCashTransfer(debit).catch(e=>console.error("saveCashTransfer xfer debit:",e));
-              DB.saveCashTransfer(credit).catch(e=>console.error("saveCashTransfer xfer credit:",e));
+              DB.saveCashTransfer(debit).catch(saveFail("saveCashTransfer xfer debit:"));
+              DB.saveCashTransfer(credit).catch(saveFail("saveCashTransfer xfer credit:"));
               log("WALLET TRANSFER", `${fromName} → ${toName} ₹${xferAmt}`);
               setXferSheet(false); setXferFrom(""); setXferTo(""); setXferAmt(""); setXferNote("");
             }} full color={C.teal}>Transfer</Btn>
@@ -23095,7 +23108,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                       </div>
                       <div style={{fontSize:10,color:C.muted}}>{tx.note||""}{tx.ref?` · ${tx.ref}`:""}</div>
                     </div>
-                    {isOwner&&<button onClick={()=>{if(!window.confirm(`Delete salary entry ₹${fmt(tx.amount)}?`))return; setCashTransfers(prev=>(prev||[]).filter(t=>t.id!==tx.id)); DB.deleteCashTransfer(tx.id).catch(console.warn);}} style={{marginLeft:8,background:"none",border:`1px solid ${C.red}44`,borderRadius:5,color:C.red,cursor:"pointer",fontSize:11,padding:"2px 7px",flexShrink:0}}>🗑</button>}
+                    {isOwner&&<button onClick={()=>{if(!window.confirm(`Delete salary entry ₹${fmt(tx.amount)}?`))return; setCashTransfers(prev=>(prev||[]).filter(t=>t.id!==tx.id)); DB.deleteCashTransfer(tx.id).catch(saveFail("Delete entry"));}} style={{marginLeft:8,background:"none",border:`1px solid ${C.red}44`,borderRadius:5,color:C.red,cursor:"pointer",fontSize:11,padding:"2px 7px",flexShrink:0}}>🗑</button>}
                   </div>
                 ))}
               </div>
@@ -23113,7 +23126,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                       </div>
                       <div style={{fontSize:10,color:C.muted}}>{tx.note||""}{tx.ref?` · ${tx.ref}`:""}</div>
                     </div>
-                    {isOwner&&<button onClick={()=>{if(!window.confirm(`Delete TAFAL entry ₹${fmt(tx.amount)}?`))return; setCashTransfers(prev=>(prev||[]).filter(t=>t.id!==tx.id)); DB.deleteCashTransfer(tx.id).catch(console.warn);}} style={{marginLeft:8,background:"none",border:`1px solid ${C.red}44`,borderRadius:5,color:C.red,cursor:"pointer",fontSize:11,padding:"2px 7px",flexShrink:0}}>🗑</button>}
+                    {isOwner&&<button onClick={()=>{if(!window.confirm(`Delete TAFAL entry ₹${fmt(tx.amount)}?`))return; setCashTransfers(prev=>(prev||[]).filter(t=>t.id!==tx.id)); DB.deleteCashTransfer(tx.id).catch(saveFail("Delete entry"));}} style={{marginLeft:8,background:"none",border:`1px solid ${C.red}44`,borderRadius:5,color:C.red,cursor:"pointer",fontSize:11,padding:"2px 7px",flexShrink:0}}>🗑</button>}
                   </div>
                 ))}
               </div>
@@ -23376,7 +23389,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
           setEmployees(prev => prev.map(x => {
             if(x.id!==trucksSheet) return x;
             const upd = {...x, linkedTrucks: next};
-            DB.saveEmployee(upd).catch(err=>console.error("saveEmployee linkedTrucks:",err));
+            DB.saveEmployee(upd).catch(saveFail("saveEmployee linkedTrucks:"));
             return upd;
           }));
         };
@@ -23384,7 +23397,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
           setEmployees(prev => prev.map(x => {
             if(x.id!==trucksSheet) return x;
             const upd = {...x, tafalExempt: !x.tafalExempt};
-            DB.saveEmployee(upd).catch(err=>console.error("saveEmployee tafalExempt:",err));
+            DB.saveEmployee(upd).catch(saveFail("saveEmployee tafalExempt:"));
             return upd;
           }));
         };
@@ -23392,7 +23405,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
           setEmployees(prev => prev.map(x => {
             if(x.id!==trucksSheet) return x;
             const upd = {...x, pouchExempt: !x.pouchExempt};
-            DB.saveEmployee(upd).catch(err=>console.error("saveEmployee pouchExempt:",err));
+            DB.saveEmployee(upd).catch(saveFail("saveEmployee pouchExempt:"));
             return upd;
           }));
         };
@@ -23403,7 +23416,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
           setEmployees(prev => prev.map(x => {
             if(x.id!==trucksSheet) return x;
             const upd = {...x, pouchDeadlineEnforced: !(x.pouchDeadlineEnforced !== false)};
-            DB.saveEmployee(upd).catch(err=>console.error("saveEmployee pouchDeadlineEnforced:",err));
+            DB.saveEmployee(upd).catch(saveFail("saveEmployee pouchDeadlineEnforced:"));
             return upd;
           }));
         };
@@ -23453,7 +23466,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                       setEmployees(prev => prev.map(x => {
                         if(x.id!==trucksSheet) return x;
                         const upd = {...x, pouchAmount: v==="" ? null : Math.max(0, +v)};
-                        DB.saveEmployee(upd).catch(err=>console.error("saveEmployee pouchAmount:",err));
+                        DB.saveEmployee(upd).catch(saveFail("saveEmployee pouchAmount:"));
                         return upd;
                       }));
                     }}
@@ -23475,7 +23488,7 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                   <button onClick={()=>setEmployees(prev=>prev.map(x=>{
                       if(x.id!==trucksSheet) return x;
                       const upd={...x, ownTrucksOnly:!x.ownTrucksOnly};
-                      DB.saveEmployee(upd).catch(err=>console.error("saveEmployee ownTrucksOnly:",err));
+                      DB.saveEmployee(upd).catch(saveFail("saveEmployee ownTrucksOnly:"));
                       return upd;
                     }))}
                     style={{padding:"7px 16px",borderRadius:8,border:`1.5px solid ${emp.ownTrucksOnly?C.purple:C.border}`,
@@ -23930,7 +23943,7 @@ function ManualInvoiceSheet({ setTrips, invoiceRegistry=[], setInvoiceRegistry, 
       const reg = {id:no, invoiceNo:no, invoiceDate:invDate, client, material, totalAmt:grand,
         diCount:selectedRows.length, status:"active", createdAt:ts, createdBy:user?.name||"", deletedAt:"", deletedBy:""};
       setInvoiceRegistry && setInvoiceRegistry(prev=>[reg, ...(prev||[]).filter(i=>i.invoiceNo!==no)]);
-      await DB.saveInvoiceRegistry(reg).catch(e=>console.error("saveInvoiceRegistry:",e));
+      await DB.saveInvoiceRegistry(reg).catch(saveFail("saveInvoiceRegistry:"));
 
       log && log(`Manual invoice ${no} — ${selectedRows.length} DI(s) billed · freight ₹${money(freight)} + GST ₹${money(gstTotal)} = ₹${money(grand)} · ${client} · ${material}`);
       setDone({invNo:no, count:selectedRows.length, freight, gstTotal, grand, path});
@@ -24636,7 +24649,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         lrNo: "", orderType: "outbound", client: chosenClient||"", type: "outbound",
       }));
       setTrips(prev => [...prev, ...prevFYTrips]);
-      Promise.all(prevFYTrips.map(t => DB.saveTrip(t).catch(e => console.error("saveTrip prevFY:",e))));
+      Promise.all(prevFYTrips.map(t => DB.saveTrip(t).catch(saveFail("saveTrip prevFY:"))));
       log && log("PrevFY "+prevFYTrips.length+" DIs saved under "+invNo+" ("+fyLabel+")");
     }
 
@@ -24777,7 +24790,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     });
 
     const updatedTrips = [...updatedTripsMap.values()];
-    Promise.all(updatedTrips.map(t => DB.saveTrip(t).catch(e=>console.error("saveTrip invoice scan:",e))))
+    Promise.all(updatedTrips.map(t => DB.saveTrip(t).catch(saveFail("saveTrip invoice scan:"))))
       .then(()=>console.log(`Invoice ${invNo}: ${billedCount} DI line(s) billed`));
 
     if(billedCount > 0 && setInvoiceRegistry) {
@@ -24792,13 +24805,13 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         deletedAt: "", deletedBy: "",
       };
       setInvoiceRegistry(prev => [regEntry, ...(prev||[]).filter(inv=>inv.invoiceNo!==invNo)]);
-      DB.saveInvoiceRegistry(regEntry).catch(e=>console.error("saveInvoiceRegistry:",e));
+      DB.saveInvoiceRegistry(regEntry).catch(saveFail("saveInvoiceRegistry:"));
     }
 
     const allNewActionItems = [...missingActionItems, ...mismatchActionItems, ...conflictActionItems];
     if(allNewActionItems.length > 0 && setActionItems) {
       setActionItems(prev => [...allNewActionItems, ...(prev||[])]);
-      Promise.all(allNewActionItems.map(ai => DB.saveActionItem(ai).catch(e=>console.error("saveActionItem:",e))));
+      Promise.all(allNewActionItems.map(ai => DB.saveActionItem(ai).catch(saveFail("saveActionItem:"))));
     }
 
     const parts = [];
@@ -24880,7 +24893,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
             shortageOwed:(x.shortageOwed||0)+amount,
             shortageTxns:[...(x.shortageTxns||[]),txn],
             ...(sdpt>0?{shortageDeductPerTrip:sdpt}:{})};
-          DB.saveVehicle(updated).catch(e=>console.error("saveVehicle shortage from scan:",e));
+          DB.saveVehicle(updated).catch(saveFail("saveVehicle shortage from scan:"));
           return updated;
         }));
         log && log(`SHORTAGE from PA: ${d._truckNo} ₹${fmt(amount)} LR:${d._lrNo||"—"} UTR:${utr}`);
@@ -24904,7 +24917,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         createdAt: new Date().toISOString(),
       }));
       setActionItems(prev=>[...openItems, ...(prev||[])]);
-      openItems.forEach(ai => DB.saveActionItem(ai).catch(e=>console.error("saveActionItem unassigned_shortage:",e)));
+      openItems.forEach(ai => DB.saveActionItem(ai).catch(saveFail("saveActionItem unassigned_shortage:")));
       log && log(`SHORTAGE (unassigned): ${openItems.length} entr${openItems.length===1?"y":"ies"} saved as open Action Item(s), UTR:${utr}`);
     }
 
@@ -24968,7 +24981,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
       return t;
     }));
     // Persist paid trips to DB
-    Promise.all(paidTripObjects.map(t=>DB.saveTrip(t).catch(e=>console.error("saveTrip payment scan:",e))))
+    Promise.all(paidTripObjects.map(t=>DB.saveTrip(t).catch(saveFail("saveTrip payment scan:"))))
       .then(()=>console.log(`Payment UTR ${utr}: ${paidTripObjects.length} trips marked paid in DB`));
     // Delete party files from Supabase Storage for paid trips
     if(paidTrips.length>0){
@@ -24981,7 +24994,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         .filter(it=>!(actionItems||[]).some(a=>a.id===it.id));
       if(xd.length>0) {
         setActionItems(prev=>[...xd, ...(prev||[])]);
-        xd.forEach(it=>DB.saveActionItem(it).catch(e=>console.error("saveActionItem extra_deduction:",e)));
+        xd.forEach(it=>DB.saveActionItem(it).catch(saveFail("saveActionItem extra_deduction:")));
         log && log(`EXTRA DEDUCTION: ${xd.length} invoice(s), ₹${xd.reduce((s,x)=>s+x.amount,0).toFixed(2)} short-paid · UTR:${utr}`);
       }
     }
@@ -25081,7 +25094,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     log && log("Payment advice UTR "+utr+" applied — "+shorts.length+" shortage(s), "+confirmedDebitEntries.length+" expense(s), hold ₹"+Number(scanResult.holdAmount||0).toLocaleString("en-IN"));
     if(scanResult._draftId) {   // came from an e-mailed advice — close its draft
       const dr = (advDrafts||[]).find(x=>x.id===scanResult._draftId);
-      if(dr) { const done={...dr, status:"saved", savedAt:new Date().toISOString(), ts:Date.now()}; setAdvDrafts(prev=>prev.map(x=>x.id===done.id?done:x)); DB.saveAdviceDraft(done).catch(e=>console.error("saveAdviceDraft:",e)); }
+      if(dr) { const done={...dr, status:"saved", savedAt:new Date().toISOString(), ts:Date.now()}; setAdvDrafts(prev=>prev.map(x=>x.id===done.id?done:x)); DB.saveAdviceDraft(done).catch(saveFail("saveAdviceDraft:")); }
     }
     setScanResult(null);
   };
@@ -25175,7 +25188,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     const orphanedActionItems = (actionItems||[]).filter(ai=>ai.invoiceNo===invoiceNo);
     if(orphanedActionItems.length>0 && setActionItems) {
       setActionItems(prev=>(prev||[]).filter(ai=>ai.invoiceNo!==invoiceNo));
-      orphanedActionItems.forEach(ai => DB.deleteActionItem(ai.id).catch(e=>console.error("deleteActionItem cascade:",e)));
+      orphanedActionItems.forEach(ai => DB.deleteActionItem(ai.id).catch(saveFail("deleteActionItem cascade:")));
     }
     log && log(`Invoice ${invoiceNo} deleted by ${user?.name}`);
   };
@@ -25213,7 +25226,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     });
     setTrips(revertedTrips);
     // Persist to DB
-    try { await DB.deletePayment(id); } catch(e){ console.error("delete payment:",e); }
+    try { await DB.deletePayment(id); } catch(e) { saveFail("delete payment:")(e); }
     const touchedIds = new Set((trips||[])
       .filter(t => t.utr===utr || (t.diLines||[]).some(d=>d.utr===utr))
       .map(t=>t.id));
@@ -25233,7 +25246,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
       if(toDelete.length>0) {
         setGstReleases(prev=>(prev||[]).filter(r=>r.utr!==utr));
         for(const r of toDelete) {
-          try { await DB.deleteGstRelease(r.id); } catch(e){ console.error("delete gstRelease:",e); }
+          try { await DB.deleteGstRelease(r.id); } catch(e) { saveFail("delete gstRelease:")(e); }
         }
       }
     }
@@ -25611,7 +25624,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
           const dismiss = (ai) => {
             if(!window.confirm("Dismiss this action item? This does not bill anything — use this only if you've resolved it manually.")) return;
             setActionItems(prev=>(prev||[]).filter(x=>x.id!==ai.id));
-            DB.deleteActionItem(ai.id).catch(e=>console.error("deleteActionItem dismiss:",e));
+            DB.deleteActionItem(ai.id).catch(saveFail("deleteActionItem dismiss:"));
             log && log("Dismissed action item — "+ai.type+(ai.diNo?" · DI "+ai.diNo:"")+(ai.dieselIndentNo?" · Indent #"+ai.dieselIndentNo:""));
           };
 
@@ -25631,14 +25644,14 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
               shortageOwed:(veh.shortageOwed||0)+part.assigned,
               shortageTxns:[...(veh.shortageTxns||[]),txn]};
             setVehicles(p=>p.map(x=>x.truckNo===truckNo?updated:x));
-            DB.saveVehicle(updated).catch(e=>console.error("saveVehicle shortage assign:",e));
+            DB.saveVehicle(updated).catch(saveFail("saveVehicle shortage assign:"));
             if(part.remaining>0) {   // vehicle-wise split: the rest of the debit note stays open
               const rest = {...ai, amount:part.remaining};
               setActionItems(prev=>(prev||[]).map(x=>x.id===ai.id?rest:x));
-              DB.saveActionItem(rest).catch(e=>console.error("saveActionItem shortage remainder:",e));
+              DB.saveActionItem(rest).catch(saveFail("saveActionItem shortage remainder:"));
             } else {
               setActionItems(prev=>(prev||[]).filter(x=>x.id!==ai.id));
-              DB.deleteActionItem(ai.id).catch(e=>console.error("deleteActionItem assign:",e));
+              DB.deleteActionItem(ai.id).catch(saveFail("deleteActionItem assign:"));
             }
             log && log(`SHORTAGE ASSIGNED: ${truckNo} ₹${fmt(part.assigned)}${part.remaining>0?` (₹${fmt(part.remaining)} still open)`:""} · UTR:${ai.invoiceNo}`);
           };
@@ -25724,7 +25737,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                         <div style={{fontSize:11,color:C.muted,marginTop:2}}>Invoice ₹{fmt(ai.appTotal||ai.invoiceAmt||0)} · expected payment ₹{fmt(ai.expectedPay||ai.expectedAmt||0)} · received ₹{fmt(Math.round(((ai.expectedPay||ai.expectedAmt||0)-(ai.amount||0))*100)/100)}</div>
                       </div>
                       <div style={{display:"flex",flexDirection:"column",gap:4}}>
-                        <button onClick={()=>{ const done={...ai,status:"done",resolvedAt:today(),resolvedBy:user?.name||""}; setActionItems(prev=>(prev||[]).map(x=>x.id===ai.id?done:x)); DB.saveActionItem(done).catch(e=>console.error("saveActionItem xd resolve:",e)); log && log("Extra deduction resolved — "+ai.invoiceNo+" ₹"+fmt(ai.amount||0)); }}
+                        <button onClick={()=>{ const done={...ai,status:"done",resolvedAt:today(),resolvedBy:user?.name||""}; setActionItems(prev=>(prev||[]).map(x=>x.id===ai.id?done:x)); DB.saveActionItem(done).catch(saveFail("saveActionItem xd resolve:")); log && log("Extra deduction resolved — "+ai.invoiceNo+" ₹"+fmt(ai.amount||0)); }}
                           style={{background:C.green,border:"none",borderRadius:8,color:"#fff",fontSize:11,padding:"5px 9px",cursor:"pointer",fontWeight:700}}>✓ Resolved with Shree</button>
                         <button onClick={()=>dismiss(ai)} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,fontSize:11,padding:"4px 8px",cursor:"pointer"}}>Dismiss</button>
                       </div>
@@ -27698,7 +27711,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
         const targetEmp = (employees||[]).find(e=>e.id===newAccEmpId);
         if(targetEmp) {
           const updEmp = {...targetEmp, accounts:[...(targetEmp.accounts||[]), finalAcc]};
-          DB.saveEmployee(updEmp).catch(e=>console.error("saveEmployee:",e));
+          DB.saveEmployee(updEmp).catch(saveFail("saveEmployee:"));
           // Update local recipientId
           finalAcc._empId   = newAccEmpId;
           finalAcc._empName = targetEmp.name;
@@ -27742,7 +27755,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
     };
     if(isEditing) {
       setPaymentRequests(prev=>(prev||[]).map(r=>r.id===pr.id?pr:r));
-      DB.savePaymentRequest(pr).catch(e=>console.error("savePaymentRequest:",e));
+      DB.savePaymentRequest(pr).catch(saveFail("savePaymentRequest:"));
       log("PAY REQUEST EDITED",`LR:${t.lrNo} ${recipientName} ₹${Number(amount).toLocaleString("en-IN")}`);
       setSubmitted(true);
     } else {
@@ -28136,13 +28149,13 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed
       createdBy: user.username, createdAt: nowTs(),
     }));
     setDriverPays(prev => [...newPays, ...(Array.isArray(prev)?prev:[])]);
-    newPays.forEach(p => DB.saveDriverPay(p).catch(e=>console.error("saveDriverPay loan recovery:",e)));
+    newPays.forEach(p => DB.saveDriverPay(p).catch(saveFail("saveDriverPay loan recovery:")));
     // 2) Mark those trips settled (balance fully recovered, just not via bank transfer)
     setTrips(prev => prev.map(t => {
       const rt = recoverTrips.find(x=>x.id===t.id);
       if(!rt) return t;
       const updated = {...t, driverSettled:true, settledBy:user.username, netPaid:rt.netDue};
-      DB.saveTrip(updated).catch(e=>console.error("saveTrip loan recovery settle:",e));
+      DB.saveTrip(updated).catch(saveFail("saveTrip loan recovery settle:"));
       return updated;
     }));
     // Close out any pending payment request for these trips — they're now fully
@@ -28153,7 +28166,7 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed
         setPaymentRequests(prev => (prev||[]).map(r => {
           if(r.lrNo!==rt.lrNo || r.status!=="pending") return r;
           const done = {...r, status:"done", paidAt:today(), paidBy:user.username};
-          DB.savePaymentRequest(done).catch(e=>console.error("savePaymentRequest recovery:",e));
+          DB.savePaymentRequest(done).catch(saveFail("savePaymentRequest recovery:"));
           return done;
         }));
       });
@@ -28165,7 +28178,7 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed
         const txn = {id:uid(), type:"recovery", date:today(), amount:recoverTotal,
           note:`Recovered from vehicle balance(s): ${recoverTrips.map(t=>t.truckNo).join(", ")}`};
         const upd = {...e, loanRecovered:(e.loanRecovered||0)+recoverTotal, loanTxns:[...(e.loanTxns||[]),txn]};
-        DB.saveEmployee(upd).catch(err=>console.error("saveEmployee loan recovery:",err));
+        DB.saveEmployee(upd).catch(saveFail("saveEmployee loan recovery:"));
         return upd;
       }));
     } else if(recoverTarget==="wallet" && setCashTransfers) {
@@ -28173,7 +28186,7 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed
         note:`Recovered from vehicle balance(s): ${recoverTrips.map(t=>t.truckNo).join(", ")}`,
         createdBy:user.username, createdAt:nowTs()};
       setCashTransfers(prev => [wxn, ...(Array.isArray(prev)?prev:[])]);
-      DB.saveCashTransfer(wxn).catch(e=>console.error("saveCashTransfer loan recovery:",e));
+      DB.saveCashTransfer(wxn).catch(saveFail("saveCashTransfer loan recovery:"));
     }
     log("LOAN/WALLET RECOVERY", `${emp?.name||empId} ₹${recoverTotal} from ${recoverTrips.map(t=>t.truckNo).join(", ")}`);
     setRecoverSelected(new Set()); setRecoverMode(false); setRecoverConfirm(false);
@@ -28993,7 +29006,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
         createdBy: user.username, createdAt: nowTs(), ts: Date.now(),
       };
       setAdvices(prev=>[a,...(prev||[])]);
-      DB.savePaymentAdvice(a).catch(e=>console.warn("savePaymentAdvice:",e));
+      DB.savePaymentAdvice(a).catch(saveFail("savePaymentAdvice:"));
     } catch(e) { console.warn("recordAdvice:", e); }
   };
   const [paySheet,  setPaySheet]  = useState(null);
@@ -29088,7 +29101,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
       noDieselAt: nowTs(),
     };
     setTrips(prev => prev.map(x=>x.id===t.id?updated:x));
-    DB.saveTrip(updated).catch(e=>console.error("saveTrip noDieselConfirmed:",e));
+    DB.saveTrip(updated).catch(saveFail("saveTrip noDieselConfirmed:"));
     log("NO DIESEL CONFIRMED", `LR:${t.lrNo} ${t.truckNo} — for ${dieselGateEmp?.name||"unassigned"}, by ${user.name||user.username}`);
     dieselGateAdvance();
   };
@@ -29194,7 +29207,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
         const old = (balSnaps||[]).find(x=>x.id===id);
         if(old && old.total===rec.total && old.held===rec.held && old.trips===rec.trips) return;
         setBalSnaps(prev=>[...(prev||[]).filter(x=>x.id!==id), rec]);
-        DB.saveBalanceSnapshot(rec).catch(e=>console.warn("saveBalanceSnapshot:", e));
+        DB.saveBalanceSnapshot(rec).catch(saveFail("saveBalanceSnapshot:"));
       });
     }, 6000);
     return ()=>clearTimeout(tm);
@@ -29211,7 +29224,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
       setTrips(prev=>prev.map(t=>{
         if(!t.dieselIndentNo || !t.dieselIndentNo.trim() || t.dieselIndentLocked) return t;
         const upd={...t, dieselIndentLocked:true};
-        DB.saveTrip(upd).catch(e=>console.error("saveTrip lock self-heal:",e));
+        DB.saveTrip(upd).catch(saveFail("saveTrip lock self-heal:"));
         return upd;
       }));
     }
@@ -29252,7 +29265,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
       const req = attachedByTripId.get(t.id);
       if(!req || t.dieselIndentNo) return t;
       const upd = {...t, dieselIndentNo:String(req.indentNo), dieselIndentLocked:true};
-      DB.saveTrip(upd).catch(e=>console.error("saveTrip dieselIndentNo self-heal:",e));
+      DB.saveTrip(upd).catch(saveFail("saveTrip dieselIndentNo self-heal:"));
       log && log("DIESEL LINK SELF-HEAL", `LR:${t.lrNo} ${t.truckNo} — restored Indent #${req.indentNo} (was wiped)`);
       return upd;
     }));
@@ -29272,7 +29285,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
       }));
       toSettle.forEach(tw=>{
         const updated = {...tw, driverSettled:true, settledBy:"auto", netPaid:tw.netDue};
-        DB.saveTrip(updated).catch(e=>console.warn("auto-settle saveTrip:",e));
+        DB.saveTrip(updated).catch(saveFail("auto-settle saveTrip:"));
         if(tw.lrNo) markRequestsDoneForLR(tw.lrNo);
       });
 
@@ -29326,7 +29339,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
     setPaymentRequests(prev=>(prev||[]).map(r=>{
       if(!stalePending.find(s=>s.id===r.id)) return r;
       const done={...r,status:"done",paidAt:today(),paidBy:"auto"};
-      DB.savePaymentRequest(done).catch(e=>console.error("savePaymentRequest stale cleanup:",e));
+      DB.savePaymentRequest(done).catch(saveFail("savePaymentRequest stale cleanup:"));
       return done;
     }));
   // eslint-disable-next-line
@@ -29382,7 +29395,7 @@ This will auto-recover in the next trip.`);
     setPaymentRequests(prev=>(prev||[]).map(r=>{
       if(r.lrNo!==lrNo||r.status!=="pending") return r;
       const done={...r,status:"done",paidAt:today(),paidBy:user.username};
-      DB.savePaymentRequest(done).catch(e=>console.error("savePaymentRequest:",e));
+      DB.savePaymentRequest(done).catch(saveFail("savePaymentRequest:"));
       return done;
     }));
     log("PAY REQUEST AUTO-DONE",`LR:${lrNo} — ${pending.length} request(s) marked done`);
@@ -29401,7 +29414,7 @@ This will auto-recover in the next trip.`);
       amount:+pf.amount, utr:pf.utr, date:pf.date, paidTo:pf.paidTo, notes:pf.notes,
       createdBy:user.username, createdAt:nowTs()};
     setDriverPays(prev=>[...(prev||[]),p]);
-    DB.saveDriverPay(p).catch(e=>console.error("saveDriverPay error:",e));
+    DB.saveDriverPay(p).catch(saveFail("saveDriverPay error:"));
     log("DRIVER PAYMENT",`LR:${t.lrNo} ${t.truckNo} — ${fmt(+pf.amount)} UTR:${pf.utr}`);
     autoSettle(t.id, +pf.amount);
     markRequestsDoneForLR(t.lrNo);
@@ -29472,7 +29485,7 @@ This will auto-recover in the next trip.`);
         for(const req of linked) {
           const detached = {...req, status: req.confirmedAmount!=null ? "confirmed" : "open", tripId:"", lrNo:""};
           setDieselRequests(prev=>(prev||[]).map(r=>r.id===req.id?detached:r));
-          DB.saveDieselRequest(detached).catch(e=>console.error("diesel detach (pay selected):",e));
+          DB.saveDieselRequest(detached).catch(saveFail("diesel detach (pay selected):"));
           log("DIESEL DETACH", `Indent #${req.indentNo} ← LR ${t.lrNo||"—"} (owner pay-selected)`);
         }
       }
@@ -29485,7 +29498,7 @@ This will auto-recover in the next trip.`);
         if(veh) {
           const nv = syncTripRecoveryToVehicle(veh, u);
           setVehicles(prev=>prev.map(v=>v.id===nv.id?nv:v));
-          DB.saveVehicle(nv).catch(e=>console.warn("vehicle sync (pay selected):",e));
+          DB.saveVehicle(nv).catch(saveFail("vehicle sync (pay selected):"));
         }
       }
       log("SKIP DEDUCTION", `LR:${t.lrNo||"—"} ${t.truckNo} — removed ${did.join(", ")} before payment`);
@@ -29521,7 +29534,7 @@ This will auto-recover in the next trip.`);
       if(netDue - (paidBefore + paidNow[tripId]) <= 0.5 && !t.driverSettled) {
         const done = {...t, driverSettled:true, settledBy:user.username, netPaid:netDue};
         setTrips(prev=>prev.map(x=>x.id===done.id?done:x));
-        DB.saveTrip(done).catch(e=>console.warn("settle (pay selected):",e));
+        DB.saveTrip(done).catch(saveFail("settle (pay selected):"));
         log("AUTO SETTLED", `LR:${t.lrNo} ${t.truckNo} — paid in full`);
       }
       if(t.lrNo) markRequestsDoneForLR(t.lrNo);
@@ -29556,7 +29569,7 @@ This will auto-recover in the next trip.`);
             : t));
           // Persist to DB
           const revertedTrip = {...trip, driverSettled:false, settledBy:"", netPaid:0};
-          try { await DB.saveTrip(revertedTrip); } catch(e){ console.error("revert trip on pay delete:",e); }
+          try { await DB.saveTrip(revertedTrip); } catch(e) { saveFail("revert trip on pay delete:")(e); }
           log && log("UNSETTLE", `LR:${trip.lrNo} ${trip.truckNo} — payment deleted, balance restored ₹${newBal.toLocaleString("en-IN")}`);
           // Note: done payment requests stay done even if payment is deleted
           // User creates a fresh request for the remaining balance
@@ -29825,7 +29838,7 @@ This will auto-recover in the next trip.`);
                     if(!selectedTripIds.has(t.id)) return t;
                     if(t.lrNo) settledLRs.add(t.lrNo);
                     const updated = {...t, driverSettled:true, settledBy:user.username, netPaid:t.netDue||0, pouchBalance:0};
-                    DB.saveTrip(updated).catch(e=>console.error("saveTrip bulk settle:",e));
+                    DB.saveTrip(updated).catch(saveFail("saveTrip bulk settle:"));
                     return updated;
                   }));
                   // Close out any still-pending payment request tied to these trips —
@@ -29834,7 +29847,7 @@ This will auto-recover in the next trip.`);
                   setPaymentRequests(prev => (prev||[]).map(r => {
                     if(r.status!=="pending" || !settledLRs.has(r.lrNo)) return r;
                     const done = {...r, status:"done", paidAt:today(), paidBy:user.username};
-                    DB.savePaymentRequest(done).catch(e=>console.error("savePaymentRequest bulk settle:",e));
+                    DB.savePaymentRequest(done).catch(saveFail("savePaymentRequest bulk settle:"));
                     return done;
                   }));
                   log("BULK MARK SETTLED", `${count} trip(s) marked fully paid`);
@@ -30461,7 +30474,7 @@ This will auto-recover in the next trip.`);
                     <button onClick={()=>{
                       const updated = {...pr, amount: currentBalance};
                       setPaymentRequests(prev=>(prev||[]).map(r=>r.id===pr.id?updated:r));
-                      DB.savePaymentRequest(updated).catch(e=>console.error("savePaymentRequest:",e));
+                      DB.savePaymentRequest(updated).catch(saveFail("savePaymentRequest:"));
                       log("PAY REQUEST UPDATED",`LR:${pr.lrNo} amount ${fmt(pr.amount)}→${fmt(currentBalance)}`);
                     }} style={{flexShrink:0,background:C.teal,color:"#fff",border:"none",
                       borderRadius:8,padding:"6px 12px",fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
@@ -30504,7 +30517,7 @@ This will auto-recover in the next trip.`);
                         <Btn onClick={()=>{
                           const updated={...pr,status:"done",paidAt:today(),paidBy:user.username};
                           setPaymentRequests(prev=>(prev||[]).map(r=>r.id===pr.id?updated:r));
-                          DB.savePaymentRequest(updated).catch(e=>console.error("savePaymentRequest:",e));
+                          DB.savePaymentRequest(updated).catch(saveFail("savePaymentRequest:"));
                           log("PAY REQUEST DONE",`LR:${pr.lrNo} ${pr.recipientName} ₹${fmt(pr.amount)}`);
                         }} sm color={C.green}>✓ Mark Done</Btn>
                       )}
@@ -30519,7 +30532,7 @@ This will auto-recover in the next trip.`);
                         <Btn onClick={()=>{
                           if(!window.confirm("Delete this payment request?")) return;
                           setPaymentRequests(prev=>(prev||[]).filter(r=>r.id!==pr.id));
-                          DB.deletePaymentRequest(pr.id).catch(e=>console.error("deletePaymentRequest:",e));
+                          DB.deletePaymentRequest(pr.id).catch(saveFail("deletePaymentRequest:"));
                           log("PAY REQUEST DELETED",`LR:${pr.lrNo}`);
                         }} sm outline color={C.red}>🗑</Btn>
                       )}
@@ -30660,7 +30673,7 @@ This will auto-recover in the next trip.`);
           onReleasePouch={(tr)=>{
             const upd = {...tr, pouchReleased:true};
             setTrips(prev=>(prev||[]).map(x=>x.id===tr.id?{...x,pouchReleased:true}:x));
-            DB.saveTrip({...(trips||[]).find(x=>x.id===tr.id)||tr, pouchReleased:true}).catch(e=>console.error("saveTrip pouchReleased:",e));
+            DB.saveTrip({...(trips||[]).find(x=>x.id===tr.id)||tr, pouchReleased:true}).catch(saveFail("saveTrip pouchReleased:"));
             log("POUCH RELEASED",`LR:${tr.lrNo} ₹${tr.pouchBalance||0} included in payment request`);
           }}
           onClose={()=>setPayReqSheet(null)}
@@ -30960,7 +30973,7 @@ function ExpensesLedger({expenses, setExpenses, payments, vehicles=[], trips=[],
   const deleteExpense = (e) => {
     if(!window.confirm(`Delete "${e.label}" — ₹${fmt(e.amount)}? This can't be undone.`)) return;
     setExpenses(prev=>(prev||[]).filter(x=>x.id!==e.id));
-    DB.deleteExpense(e.id).catch(err=>console.error("deleteExpense:",err));
+    DB.deleteExpense(e.id).catch(saveFail("deleteExpense:"));
     log && log("EXPENSE DELETED", `${e.label} — ${fmt(e.amount)} · ${e.category}`);
   };
 
