@@ -1,7 +1,7 @@
 import { pouchAmountFor } from "./pouch_logic.js";
 import { includeInByEmployee, employeeStatement, statementHtml } from "./byemp_logic.js";
 import { draftStatus } from "./advice_mail.js";
-import { checkInvoiceLine, extraDeductionItems, splitShortage, appInvoiceTotals, holdsByInvoice } from "./advice_check.js";
+import { checkInvoiceLine, extraDeductionItems, splitShortage, appInvoiceTotals, holdsByInvoice, cleanAdvices } from "./advice_check.js";
 import { restrictToSelection, diCat, tripHasCategory, followupByVehicle, followupHtml } from "./di_category.js";
 import { bookableLoanRecovery, PREV_YEAR_TYPE } from "./loan_ledger_logic.js";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
@@ -24099,6 +24099,13 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
   const [advBusy, setAdvBusy] = useState(false);
   const loadAdvDrafts = React.useCallback(()=>{ setAdvBusy(true); DB.getAdviceDrafts().then(x=>setAdvDrafts(x||[])).catch(()=>{}).finally(()=>setAdvBusy(false)); },[]);
   React.useEffect(()=>{ loadAdvDrafts(); },[loadAdvDrafts]);
+  // Advices with nothing to look at (all invoices in the app, paid exactly as expected, no notes/shortages): can be saved in one go
+  const cleanList = useMemo(()=>{
+    const have = new Set((trips||[]).flatMap(t=>[t.invoiceNo, ...(t.diLines||[]).map(d=>d.invoiceNo)]).filter(Boolean).map(x=>x.trim()));
+    const recordedUtrs = new Set((payments||[]).map(p=>p.utr).filter(Boolean));
+    return cleanAdvices((advDrafts||[]).filter(d=>d.advice), {have, appTotals:appInvTotals, recordedUtrs, from:"2026-04-01"});
+  },[advDrafts, trips, payments, appInvTotals]);
+  const [bulk, setBulk] = useState(null);   // {queue:[draft ids], total, done} while "Save clean advices" is running
   const [scanning,    setScanning]    = useState(false);
   const [scanError,   setScanError]   = useState(null);
   const [applyingInvoice, setApplyingInvoice] = useState(false);
@@ -25078,6 +25085,25 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     setScanResult(null);
   };
 
+  // "Save clean advices": feeds the clean drafts one at a time through the SAME applyPaymentScan the Apply button uses,
+  // each on a fresh render so trips/payments are up to date before the next one.
+  React.useEffect(()=>{
+    if(!bulk) return;
+    const finish = (note) => { setBulk(null); setScanResult(null); alert(note); };
+    if(bulk.queue.length===0){ finish(`Saved ${bulk.done} clean advice(s).`); return; }
+    const id = bulk.queue[0];
+    if(scanResult && scanResult._bulk && scanResult._draftId===id){
+      applyPaymentScan();
+      setScanResult(null);
+      setBulk(b=>b?{...b, queue:b.queue.slice(1), done:b.done+1}:b);
+      return;
+    }
+    if(scanResult) { finish(`Stopped after ${bulk.done} advice(s): another scan was opened.`); return; }
+    const d = cleanList.find(x=>x.id===id);
+    if(!d){ setBulk(b=>b?{...b, queue:b.queue.slice(1)}:b); return; }   // no longer clean (e.g. already saved) → skip
+    setScanResult({...d.advice, type:"payment", _draftId:d.id, _bulk:true});
+  },[bulk, scanResult]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // delete (owner only)
   const deleteInvoice = async (invoiceNo) => {
     if(!window.confirm(`Delete invoice ${invoiceNo}? This will unmark all its trips.`)) return;
@@ -25867,7 +25893,14 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                 <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,padding:14,marginBottom:16}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
                     <div style={{fontSize:13,fontWeight:700,color:C.text}}>📧 Advices from e-mail <span style={{color:C.muted,fontWeight:400}}>· {open.length} to review</span></div>
-                    <button onClick={loadAdvDrafts} disabled={advBusy} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:6,color:C.muted,fontSize:11,padding:"3px 10px",cursor:"pointer"}}>{advBusy?"…":"↻ Refresh"}</button>
+                    <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+                      {(cleanList.length>0||bulk) && <button disabled={!!bulk||!!scanResult||(payments||[]).length===0} onClick={()=>{
+                        const tot = cleanList.reduce((s,x)=>s+(+x.total||0),0);
+                        if(!window.confirm(`Save ${cleanList.length} clean advice(s) — ₹${fmtINR(tot)} in total?\n\nEach one records the payment and marks its invoices Paid, exactly like the Apply button. Only advices where every invoice is in the app and paid exactly as expected (2% TDS, 18% GST held), with no debit/credit notes, shortages or GST releases.`)) return;
+                        setBulk({queue:cleanList.map(x=>x.id), total:cleanList.length, done:0});
+                      }} style={{background:bulk?C.dim:C.green,color:"#fff",border:"none",borderRadius:6,fontSize:11,fontWeight:700,padding:"4px 10px",cursor:bulk?"wait":"pointer"}}>{bulk?`Saving ${bulk.done} of ${bulk.total}…`:`✓ Save clean advices (${cleanList.length})`}</button>}
+                      <button onClick={loadAdvDrafts} disabled={advBusy||!!bulk} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:6,color:C.muted,fontSize:11,padding:"3px 10px",cursor:"pointer"}}>{advBusy?"…":"↻ Refresh"}</button>
+                    </div>
                   </div>
                   <div style={{display:"flex",flexDirection:"column",gap:6}}>
                     {open.length===0 && <div style={{fontSize:12,color:C.muted}}>Nothing waiting — every advice from e-mail is saved.</div>}
