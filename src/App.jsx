@@ -25867,7 +25867,8 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                     <button onClick={loadAdvDrafts} disabled={advBusy} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:6,color:C.muted,fontSize:11,padding:"3px 10px",cursor:"pointer"}}>{advBusy?"…":"↻ Refresh"}</button>
                   </div>
                   <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                    {rows.map(r=>{ const [lab,col]=chip[r.live.status]||chip.check; return (
+                    {open.length===0 && <div style={{fontSize:12,color:C.muted}}>Nothing waiting — every advice from e-mail is saved.</div>}
+                    {open.map(r=>{ const [lab,col]=chip[r.live.status]||chip.check; return (
                       <div key={r.id} style={{border:`1px solid ${col}55`,borderRadius:8,padding:"8px 10px",display:"flex",justifyContent:"space-between",gap:8,alignItems:"center",flexWrap:"wrap"}}>
                         <div style={{fontSize:12}}>
                           <div><b>UTR {r.utr}</b> · {r.payDate} · ₹{fmtINR(r.total)}</div>
@@ -25879,6 +25880,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                         </div>
                       </div>); })}
                   </div>
+                  {rows.length-open.length>0 && <div style={{fontSize:11,color:C.muted,marginTop:6}}>✔ {rows.length-open.length} already saved (hidden)</div>}
                   <div style={{fontSize:10,color:C.muted,marginTop:6}}>An advice stays here until you save it. If an invoice is missing, upload it, then come back and press ↻ Refresh — the draft picks it up.</div>
                 </div>
               );

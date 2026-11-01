@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { parseAdviceMail, isAdviceMail, draftStatus } from "../src/advice_mail.js";
+import { parseAdviceMail, parseAdviceHtml, isAdviceMail, draftStatus } from "../src/advice_mail.js";
 const fx = (n) => fs.readFileSync(new URL("./fixtures/" + n, import.meta.url), "utf8");
 let n = 0; const t = (name, f) => { f(); n++; console.log("ok -", name); };
 
@@ -43,5 +43,17 @@ t("draft status: ready when every invoice is already in the app, else waiting fo
 t("an advice that does not reconcile is never 'ready'", () => {
   const bad = parseAdviceMail(fx("advice_two_invoices.txt").replace("186936.96", "186936.00"));
   assert.equal(draftStatus(bad, new Set(["SMYE107927100089", "SMYE107027100218"])).status, "check");
+});
+t("the real e-mail HTML (unclosed <tr>, th header, <B> totals) parses to the same advice as the text version", () => {
+  const h = parseAdviceHtml(fx("advice_real.html")), x = parseAdviceMail(fx("advice_two_invoices.txt"));
+  assert.equal(h.utr, "2018318075"); assert.equal(h.paymentDate, "2026-10-15"); assert.equal(h.totalPaid, 346670.10);
+  assert.equal(h.invoices.length, 2); assert.equal(h.reconciled, true);
+  assert.deepEqual(h.invoices, x.invoices);
+  assert.equal(h.totalBilled, 417419.10); assert.equal(h.holdAmount, 63674.10); assert.equal(h.tdsDeducted, 7074.90);
+});
+t("html: credit-note cells like '28497.00 -' and entities still parse", () => {
+  const h = fx("advice_real.html").replace("<td> <B> Total </B> </td>", "<td> Service Sales </td>").replace("&amp;", "&");
+  assert.ok(parseAdviceHtml(h));   // does not throw on odd rows
+  assert.equal(parseAdviceHtml("<html>nothing</html>"), null); assert.equal(parseAdviceHtml(""), null); assert.equal(parseAdviceHtml(null), null);
 });
 console.log(n + " tests passed");
