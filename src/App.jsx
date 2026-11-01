@@ -25820,7 +25820,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                         </div>
                         <div style={{display:"flex",gap:6,alignItems:"center"}}>
                           <span style={{fontSize:10,fontWeight:700,color:col,border:`1px solid ${col}`,borderRadius:10,padding:"2px 8px"}}>{lab}</span>
-                          {r.live.status!=="saved" && <button onClick={()=>{ setScanError(null); setScanResult({...r.advice, type:"payment", _draftId:r.id}); window.scrollTo({top:0,behavior:"smooth"}); }} style={{background:C.accent||"#1565c0",color:"#fff",border:"none",borderRadius:6,padding:"5px 12px",cursor:"pointer",fontWeight:700,fontSize:11}}>Review</button>}
+                          {r.live.status!=="saved" && <button onClick={()=>{ setScanError(null); setScanResult({...r.advice, type:"payment", _draftId:r.id}); setTimeout(()=>document.getElementById("advice-review-panel")?.scrollIntoView({behavior:"smooth",block:"start"}),200); }} style={{background:C.accent||"#1565c0",color:"#fff",border:"none",borderRadius:6,padding:"5px 12px",cursor:"pointer",fontWeight:700,fontSize:11}}>Review</button>}
                         </div>
                       </div>); })}
                   </div>
@@ -25877,7 +25877,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
               )}
 
               {scanResult&&!scanError&&(
-                <div style={{marginTop:12,background:C.green+"11",border:`1px solid ${C.green}44`,borderRadius:8,padding:12}}>
+                <div id="advice-review-panel" style={{marginTop:12,background:C.green+"11",border:`1px solid ${C.green}44`,borderRadius:8,padding:12}}>
                   <div style={{fontWeight:700,color:C.green,marginBottom:10,fontSize:13}}>
                     ✅ {scanResult.type==="invoice"?"Invoice":"Payment Advice"} scanned
                   </div>
