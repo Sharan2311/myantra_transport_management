@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { expectedFor, checkInvoiceLine, extraDeductionItems, splitShortage } from "../src/advice_check.js";
+import { expectedFor, checkInvoiceLine, extraDeductionItems, splitShortage, invoiceBaseFromTrips, appInvoiceTotals, holdsByInvoice } from "../src/advice_check.js";
 let n = 0; const t = (name, f) => { f(); n++; console.log("ok -", name); };
 const L = (o) => ({ invoiceNo: "PMYE107027100045", invDate: "2026-10-26", docType: "Invoice", totalAmt: 928481.82, paymentAmt: 771112.02, hold: 141632.82, tds: 15736.98, ...o });
 
@@ -43,4 +43,61 @@ t("shortage split rejects zero, negative, too much or junk", () => {
   for (const a of [0, -5, 30000, NaN, "abc", undefined]) assert.equal(splitShortage({ amount: 28497 }, a).ok, false);
 });
 t("shortage split handles paise without float drift", () => assert.deepEqual(splitShortage({ amount: 100.3 }, 0.1), { ok: true, assigned: 0.1, remaining: 100.2 }));
+
+// ── GST release + invoice value from trips (1 Nov 2026) ─────────────────────────────────────────
+// Real case SMYE107027100090: July advice paid 145817.14, TDS 2975.86, hold 26782.74 on a bill of 175575.74;
+// the August advice paid 26782.74 with no TDS and no hold = the GST release. The app shows this invoice as ₹1,48,793 (before GST).
+const JUL = { invoiceNo: "SMYE107027100090", docType: "Invoice", totalAmt: 175575.74, paymentAmt: 145817.14, hold: 26782.74, tds: 2975.86 };
+const AUG = { invoiceNo: "SMYE107027100090", docType: "Invoice", totalAmt: 26782.74, paymentAmt: 26782.74, hold: 0, tds: 0 };
+const trips = [
+  { id: "a", diLines: [{ billed: true, invoiceNo: "SMYE107027100090", billedAmt: 32025 }, { billed: true, invoiceNo: "SMYE107027100090", billedAmt: 20130 }, { billed: false, invoiceNo: "X", billedAmt: 5 }] },
+  { id: "b", diLines: [{ billed: true, invoiceNo: "SMYE107027100090", billedAmt: 29280 }, { billed: true, invoiceNo: "SMYE107027100090", billedAmt: 28608 }] },
+  { id: "c", diLines: [{ billed: true, invoiceNo: "SMYE107027100090", billedAmt: 31000 }, { billed: true, invoiceNo: "SMYE107027100090", billedAmt: 7750 }] },
+  { id: "d", invoiceNo: "SINGLE1", billedToShree: 1000 },
+  { id: "e", invoiceNo: "NOTBILLED", billedToShree: 0 },
+];
+t("invoice value in the app = sum of its billed DI amounts (before GST), single-DI trips too", () => {
+  const m = invoiceBaseFromTrips(trips);
+  assert.equal(m["SMYE107027100090"], 148793); assert.equal(m["SINGLE1"], 1000); assert.equal(m["X"], undefined); assert.equal(m["NOTBILLED"], undefined);
+});
+t("app invoice total: register value (GST included) wins, otherwise trips value + 18% GST", () => {
+  const totals = appInvoiceTotals([{ invoiceNo: "REG1", totalAmt: 11800, status: "active" }, { invoiceNo: "DEL", totalAmt: 5, status: "deleted" }], trips);
+  assert.equal(totals["REG1"], 11800); assert.equal(totals["SMYE107027100090"], 175575.74); assert.equal(totals["DEL"], undefined); assert.equal(totals["SINGLE1"], 1180);
+});
+t("the July advice (hold taken) is a normal line and ok against the trips-based value", () => {
+  assert.equal(checkInvoiceLine(JUL, 175575.74).state, "ok");
+});
+t("GST release: payment exactly equals the hold of an earlier advice → gst_release, never an extra deduction", () => {
+  const c = checkInvoiceLine(AUG, 175575.74, [26782.74]);
+  assert.equal(c.state, "gst_release"); assert.equal(c.shortfall, 0); assert.equal(c.source, "earlier_hold");
+});
+t("GST release is recognised without the earlier advice when it equals 18% of the app invoice value", () => {
+  const c = checkInvoiceLine(AUG, 175575.74, []);
+  assert.equal(c.state, "gst_release"); assert.equal(c.source, "app_value");
+});
+t("GST release is recognised even when the invoice value is not known, if the earlier hold matches", () => {
+  assert.equal(checkInvoiceLine(AUG, 0, [26782.74]).state, "gst_release");
+});
+t("zero hold, zero TDS but the amount matches nothing → release_unmatched (warn, no follow-up item)", () => {
+  const c = checkInvoiceLine({ ...AUG, paymentAmt: 20000, totalAmt: 20000 }, 175575.74, [26782.74]);
+  assert.equal(c.state, "release_unmatched"); assert.equal(c.shortfall, 0);
+});
+t("a normal line (hold > 0) that happens to equal an old hold is NOT a release", () => {
+  assert.notEqual(checkInvoiceLine({ ...JUL, paymentAmt: 26782.74 }, 175575.74, [26782.74]).state, "gst_release");
+});
+t("a line with TDS is not a release", () => assert.notEqual(checkInvoiceLine({ ...AUG, tds: 10 }, 175575.74, [26782.74]).state, "gst_release"));
+t("holdsByInvoice: holds from OTHER advices on or before this payment date", () => {
+  const advs = [
+    { utr: "U1", paymentDate: "2026-07-02", invoices: [JUL] },
+    { utr: "U2", paymentDate: "2026-08-17", invoices: [AUG] },
+    { utr: "U3", paymentDate: "2026-09-30", invoices: [{ ...JUL, hold: 5 }] },
+  ];
+  const h = holdsByInvoice(advs, { utr: "U2", paymentDate: "2026-08-17" });
+  assert.deepEqual(h["SMYE107027100090"], [26782.74]);
+});
+t("follow-up items skip GST releases and unmatched releases", () => {
+  const adv = { utr: "U2", paymentDate: "2026-08-17", invoices: [AUG, { ...AUG, invoiceNo: "Z", paymentAmt: 20000, totalAmt: 20000 }] };
+  const items = extraDeductionItems(adv, { "SMYE107027100090": 175575.74, Z: 175575.74 }, "2026-11-01T00:00:00Z", { "SMYE107027100090": [26782.74], Z: [26782.74] });
+  assert.equal(items.length, 0);
+});
 console.log(n + " tests passed");
