@@ -1,6 +1,6 @@
 import { pouchAmountFor } from "./pouch_logic.js";
 import { includeInByEmployee, employeeStatement, statementHtml } from "./byemp_logic.js";
-import { draftStatus } from "./advice_mail.js";
+import { draftStatus, searchAdvices } from "./advice_mail.js";
 import { checkInvoiceLine, extraDeductionItems, splitShortage, appInvoiceTotals, holdsByInvoice, cleanAdvices } from "./advice_check.js";
 import { restrictToSelection, diCat, tripHasCategory, followupByVehicle, followupHtml } from "./di_category.js";
 import { bookableLoanRecovery, PREV_YEAR_TYPE } from "./loan_ledger_logic.js";
@@ -24105,6 +24105,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     const recordedUtrs = new Set((payments||[]).map(p=>p.utr).filter(Boolean));
     return cleanAdvices((advDrafts||[]).filter(d=>d.advice), {have, appTotals:appInvTotals, recordedUtrs, from:"2026-04-01"});
   },[advDrafts, trips, payments, appInvTotals]);
+  const [advSearch, setAdvSearch] = useState("");   // search the e-mailed advices by UTR or invoice number
   const [bulk, setBulk] = useState(null);   // {queue:[draft ids], total, done} while "Save clean advices" is running
   const [scanning,    setScanning]    = useState(false);
   const [scanError,   setScanError]   = useState(null);
@@ -25887,6 +25888,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                 return {...d, live};
               }).sort((a,b)=>String(b.payDate).localeCompare(String(a.payDate)));
               const open = rows.filter(r=>r.live.status!=="saved");
+              const shown = advSearch.trim() ? searchAdvices(rows, advSearch) : open;
               if(rows.length===0) return null;
               const chip = {ready:["✓ Ready to save",C.green], waiting:["⏳ Waiting for invoice",C.orange], check:["⚠ Totals don't match",C.red], saved:["✔ Saved",C.muted]};
               return (
@@ -25902,9 +25904,15 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                       <button onClick={loadAdvDrafts} disabled={advBusy||!!bulk} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:6,color:C.muted,fontSize:11,padding:"3px 10px",cursor:"pointer"}}>{advBusy?"…":"↻ Refresh"}</button>
                     </div>
                   </div>
+                  <div style={{display:"flex",gap:6,marginBottom:8}}>
+                    <input value={advSearch} onChange={e=>setAdvSearch(e.target.value)} placeholder="🔍 Search by UTR or invoice number (saved ones too)" inputMode="search"
+                      style={{flex:1,minWidth:0,background:C.card2||C.bg,border:`1px solid ${C.border}`,borderRadius:6,color:C.text,fontSize:12,padding:"7px 10px"}}/>
+                    {advSearch && <button onClick={()=>setAdvSearch("")} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:6,color:C.muted,fontSize:12,padding:"0 10px",cursor:"pointer"}}>✕</button>}
+                  </div>
                   <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                    {open.length===0 && <div style={{fontSize:12,color:C.muted}}>Nothing waiting — every advice from e-mail is saved.</div>}
-                    {open.map(r=>{ const [lab,col]=chip[r.live.status]||chip.check; return (
+                    {!advSearch.trim() && open.length===0 && <div style={{fontSize:12,color:C.muted}}>Nothing waiting — every advice from e-mail is saved.</div>}
+                    {advSearch.trim() && shown.length===0 && <div style={{fontSize:12,color:C.muted}}>No e-mailed advice matches “{advSearch.trim()}”.</div>}
+                    {shown.map(r=>{ const [lab,col]=chip[r.live.status]||chip.check; return (
                       <div key={r.id} style={{border:`1px solid ${col}55`,borderRadius:8,padding:"8px 10px",display:"flex",justifyContent:"space-between",gap:8,alignItems:"center",flexWrap:"wrap"}}>
                         <div style={{fontSize:12}}>
                           <div><b>UTR {r.utr}</b> · {r.payDate} · ₹{fmtINR(r.total)}</div>
@@ -25916,7 +25924,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                         </div>
                       </div>); })}
                   </div>
-                  {rows.length-open.length>0 && <div style={{fontSize:11,color:C.muted,marginTop:6}}>✔ {rows.length-open.length} already saved (hidden)</div>}
+                  {!advSearch.trim() && rows.length-open.length>0 && <div style={{fontSize:11,color:C.muted,marginTop:6}}>✔ {rows.length-open.length} already saved (hidden)</div>}
                   <div style={{fontSize:10,color:C.muted,marginTop:6}}>An advice stays here until you save it. If an invoice is missing, upload it, then come back and press ↻ Refresh — the draft picks it up.</div>
                 </div>
               );
