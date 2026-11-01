@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { expectedFor, checkInvoiceLine, extraDeductionItems, splitShortage, invoiceBaseFromTrips, appInvoiceTotals, holdsByInvoice } from "../src/advice_check.js";
+import { expectedFor, checkInvoiceLine, extraDeductionItems, splitShortage, invoiceBaseFromTrips, appInvoiceTotals, holdsByInvoice, isCleanAdvice, cleanAdvices } from "../src/advice_check.js";
 let n = 0; const t = (name, f) => { f(); n++; console.log("ok -", name); };
 const L = (o) => ({ invoiceNo: "PMYE107027100045", invDate: "2026-10-26", docType: "Invoice", totalAmt: 928481.82, paymentAmt: 771112.02, hold: 141632.82, tds: 15736.98, ...o });
 
@@ -99,5 +99,32 @@ t("follow-up items skip GST releases and unmatched releases", () => {
   const adv = { utr: "U2", paymentDate: "2026-08-17", invoices: [AUG, { ...AUG, invoiceNo: "Z", paymentAmt: 20000, totalAmt: 20000 }] };
   const items = extraDeductionItems(adv, { "SMYE107027100090": 175575.74, Z: 175575.74 }, "2026-11-01T00:00:00Z", { "SMYE107027100090": [26782.74], Z: [26782.74] });
   assert.equal(items.length, 0);
+});
+
+// ── "Save clean advices" (owner, 1 Nov 2026): only advices with nothing to look at ─────────────────────────────
+const CL = (o) => ({ utr: "C1", paymentDate: "2026-10-16", reconciled: true, shortages: [], expenses: [], penalties: [],
+  invoices: [L({ invoiceNo: "A" }), L({ invoiceNo: "B" })], ...o });
+const ctx = (o) => ({ have: new Set(["A", "B"]), appTotals: { A: 928481.82, B: 928481.82 }, recordedUtrs: new Set(), ...o });
+t("clean: every freight invoice in the app and paid exactly as expected", () => assert.equal(isCleanAdvice(CL(), ctx()), true));
+t("not clean: an invoice is not in the app", () => assert.equal(isCleanAdvice(CL(), ctx({ have: new Set(["A"]) })), false));
+t("not clean: one invoice paid less than expected (extra deduction)", () => assert.equal(isCleanAdvice(CL({ invoices: [L({ invoiceNo: "A" }), L({ invoiceNo: "B", paymentAmt: 761112.02 })] }), ctx()), false));
+t("not clean: invoice value unknown (cannot check)", () => assert.equal(isCleanAdvice(CL(), ctx({ appTotals: { A: 928481.82 } })), false));
+t("not clean: GST release lines stay for manual review", () => assert.equal(isCleanAdvice(CL({ invoices: [L({ invoiceNo: "A", hold: 0, tds: 0, paymentAmt: 141632.82 })] }), ctx()), false));
+t("not clean: debit note / credit note line", () => assert.equal(isCleanAdvice(CL({ invoices: [L({ invoiceNo: "A" }), { invoiceNo: "KR1", docType: "Service Sales", totalAmt: -28497, paymentAmt: -28497, hold: 0, tds: 0 }] }), ctx()), false));
+t("not clean: shortages, expenses or penalties present", () => {
+  assert.equal(isCleanAdvice(CL({ shortages: [{ lrNo: "1" }] }), ctx()), false);
+  assert.equal(isCleanAdvice(CL({ expenses: [{ x: 1 }] }), ctx()), false);
+  assert.equal(isCleanAdvice(CL({ penalties: [{ x: 1 }] }), ctx()), false);
+});
+t("not clean: totals did not reconcile, empty advice, or UTR already recorded", () => {
+  assert.equal(isCleanAdvice(CL({ reconciled: false }), ctx()), false);
+  assert.equal(isCleanAdvice(CL({ invoices: [] }), ctx()), false);
+  assert.equal(isCleanAdvice(CL(), ctx({ recordedUtrs: new Set(["C1"]) })), false);
+});
+t("not clean: before the start date", () => assert.equal(isCleanAdvice(CL({ paymentDate: "2026-03-30" }), ctx({ from: "2026-04-01" })), false));
+t("cleanAdvices: skips saved/discarded drafts and lists oldest payment first", () => {
+  const d = (id, utr, date, status = "waiting") => ({ id, status, utr, advice: CL({ utr, paymentDate: date }) });
+  const out = cleanAdvices([d("1", "U3", "2026-10-20"), d("2", "U1", "2026-09-01"), d("3", "U2", "2026-09-15", "saved"), d("4", "U4", "2026-09-16", "discarded")], ctx());
+  assert.deepEqual(out.map((x) => x.id), ["2", "1"]);
 });
 console.log(n + " tests passed");
