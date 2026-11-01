@@ -1,6 +1,7 @@
 import { pouchAmountFor } from "./pouch_logic.js";
 import { includeInByEmployee, employeeStatement, statementHtml } from "./byemp_logic.js";
 import { draftStatus } from "./advice_mail.js";
+import { checkInvoiceLine, extraDeductionItems, splitShortage } from "./advice_check.js";
 import { restrictToSelection, diCat, tripHasCategory, followupByVehicle, followupHtml } from "./di_category.js";
 import { bookableLoanRecovery, PREV_YEAR_TYPE } from "./loan_ledger_logic.js";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
@@ -24089,6 +24090,8 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
   const [activeTab,   setActiveTab]   = useState("overview");
   const [scanResult,  setScanResult]  = useState(null);
   // ── Payment advices read from e-mail → drafts for owner review ──────────────
+  // invoice value already in the app, by invoice number (incl. GST) — the yardstick for checking an advice
+  const appInvTotals = useMemo(()=>{ const m={}; (invoiceRegistry||[]).forEach(r=>{ if(r.status!=="deleted" && r.invoiceNo) m[r.invoiceNo.trim()]=+r.totalAmt||0; }); return m; },[invoiceRegistry]);
   const [advDrafts, setAdvDrafts] = useState([]);
   const [advBusy, setAdvBusy] = useState(false);
   const loadAdvDrafts = React.useCallback(()=>{ setAdvBusy(true); DB.getAdviceDrafts().then(x=>setAdvDrafts(x||[])).catch(()=>{}).finally(()=>setAdvBusy(false)); },[]);
@@ -24886,7 +24889,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
         lrNo: d._lrNo||"",
         invoiceNo: utr, // reference field — carries the UTR so it's traceable to the advice
         invoiceDate: pDate||"",
-        note: d._fromExpenseLine ? "From payment advice — no truck identified at review time" : `From unmatched invoice ${d.invoiceNo} — no truck identified at review time`,
+        note: d._fromExpenseLine ? "From payment advice — no truck identified at review time" : `Debit note ${d.invoiceNo} — ask Shree for the vehicle-wise detail, then assign each vehicle's share`,
         createdAt: new Date().toISOString(),
       }));
       setActionItems(prev=>[...openItems, ...(prev||[])]);
@@ -24959,6 +24962,17 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     // Delete party files from Supabase Storage for paid trips
     if(paidTrips.length>0){
       paidTrips.forEach(tid => deletePartyFiles(tid).catch(e=>console.warn("File delete error:",e)));
+    }
+
+    // Extra deductions: payment below (app invoice value − 2% TDS) with no reason → follow up with Shree
+    if(setActionItems) {
+      const xd = extraDeductionItems({...scanResult, paymentDate:pDate}, appInvTotals, new Date().toISOString())
+        .filter(it=>!(actionItems||[]).some(a=>a.id===it.id));
+      if(xd.length>0) {
+        setActionItems(prev=>[...xd, ...(prev||[])]);
+        xd.forEach(it=>DB.saveActionItem(it).catch(e=>console.error("saveActionItem extra_deduction:",e)));
+        log && log(`EXTRA DEDUCTION: ${xd.length} invoice(s), ₹${xd.reduce((s,x)=>s+x.amount,0).toFixed(2)} short-paid · UTR:${utr}`);
+      }
     }
 
     const pa={id:"PA"+Date.now(), utr, paymentDate:pDate,
@@ -25561,6 +25575,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
           const conflict = open.filter(ai=>ai.type==="duplicate_di");
           const noDiesel = open.filter(ai=>ai.type==="no_diesel_confirmed");
           const unassignedShort = open.filter(ai=>ai.type==="unassigned_shortage");
+          const extraDed = open.filter(ai=>ai.type==="extra_deduction");
           const dieselNoLr = open.filter(ai=>ai.type==="diesel_no_lr");
 
           const dismiss = (ai) => {
@@ -25573,21 +25588,29 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
           // Assign a deferred shortage to a truck — writes the vehicle ledger
           // entry (same shape as the immediate-assign path in the scan review)
           // then closes the action item, same as any other resolution here.
-          const assignShortage = (ai, truckNo, lrNo) => {
+          const assignShortage = (ai, truckNo, lrNo, amt) => {
             if(!truckNo) { alert("Pick a truck first."); return; }
             const veh = (vehicles||[]).find(v=>v.truckNo===truckNo);
             if(!veh) return;
+            const part = splitShortage(ai, typeof amt==="number" ? amt : (+ai.amount||0));
+            if(!part.ok) { alert("Enter an amount between ₹0.01 and ₹"+fmt(ai.amount||0)+"."); return; }
             const txn = {id:uid(), type:"shortage", date:ai.invoiceDate||today(),
-              qty:0, lrNo:lrNo||ai.lrNo||"", amount:ai.amount||0,
+              qty:0, lrNo:lrNo||ai.lrNo||"", amount:part.assigned,
               note:`Payment advice UTR:${ai.invoiceNo} (assigned later via Action Items)`};
             const updated = {...veh,
-              shortageOwed:(veh.shortageOwed||0)+(ai.amount||0),
+              shortageOwed:(veh.shortageOwed||0)+part.assigned,
               shortageTxns:[...(veh.shortageTxns||[]),txn]};
             setVehicles(p=>p.map(x=>x.truckNo===truckNo?updated:x));
             DB.saveVehicle(updated).catch(e=>console.error("saveVehicle shortage assign:",e));
-            setActionItems(prev=>(prev||[]).filter(x=>x.id!==ai.id));
-            DB.deleteActionItem(ai.id).catch(e=>console.error("deleteActionItem assign:",e));
-            log && log(`SHORTAGE ASSIGNED: ${truckNo} ₹${fmt(ai.amount||0)} · UTR:${ai.invoiceNo}`);
+            if(part.remaining>0) {   // vehicle-wise split: the rest of the debit note stays open
+              const rest = {...ai, amount:part.remaining};
+              setActionItems(prev=>(prev||[]).map(x=>x.id===ai.id?rest:x));
+              DB.saveActionItem(rest).catch(e=>console.error("saveActionItem shortage remainder:",e));
+            } else {
+              setActionItems(prev=>(prev||[]).filter(x=>x.id!==ai.id));
+              DB.deleteActionItem(ai.id).catch(e=>console.error("deleteActionItem assign:",e));
+            }
+            log && log(`SHORTAGE ASSIGNED: ${truckNo} ₹${fmt(part.assigned)}${part.remaining>0?` (₹${fmt(part.remaining)} still open)`:""} · UTR:${ai.invoiceNo}`);
           };
 
           return (
@@ -25614,6 +25637,10 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   <div style={{fontSize:11,color:C.muted}}>Shortages awaiting a truck</div>
                 </div>
                 <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.border}`}}>
+                  <div style={{fontSize:20,fontWeight:800,color:C.red}}>{extraDed.length}</div>
+                  <div style={{fontSize:11,color:C.muted}}>Extra deductions to follow up</div>
+                </div>
+                <div style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${C.border}`}}>
                   <div style={{fontSize:20,fontWeight:800,color:C.orange}}>{dieselNoLr.length}</div>
                   <div style={{fontSize:11,color:C.muted}}>Diesel — no LR attached</div>
                 </div>
@@ -25636,7 +25663,12 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                         </div>
                         <button onClick={()=>dismiss(ai)} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,fontSize:11,padding:"4px 8px",cursor:"pointer"}}>Dismiss</button>
                       </div>
-                      <select onChange={e=>{ if(e.target.value) assignShortage(ai, e.target.value); }}
+                      <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:6}}>
+                        <span style={{fontSize:11,color:C.muted}}>Amount for this vehicle ₹</span>
+                        <input id={"sa-"+ai.id} type="number" step="0.01" defaultValue={ai.amount||0} key={ai.id+"-"+(ai.amount||0)}
+                          style={{width:110,background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 8px",fontSize:12,color:C.text}}/>
+                      </div>
+                      <select onChange={e=>{ if(e.target.value){ const a=parseFloat(document.getElementById("sa-"+ai.id)?.value); assignShortage(ai, e.target.value, undefined, a); e.target.value=""; } }}
                         defaultValue=""
                         style={{width:"100%",background:C.bg,border:`1.5px solid ${C.red}`,
                           borderRadius:6,padding:"7px 10px",fontSize:12,color:C.text,outline:"none"}}>
@@ -25646,6 +25678,29 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                     </div>
                   );
                 })}
+              </div>
+
+              <div style={{fontSize:12,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:8}}>
+                💸 Extra deductions — follow up with Shree ({extraDed.length})
+              </div>
+              {extraDed.length===0 && <div style={{color:C.muted,fontSize:13,marginBottom:16}}>None open.</div>}
+              <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:20}}>
+                {extraDed.map(ai=>(
+                  <div key={ai.id} style={{background:C.card,borderRadius:10,padding:"11px 14px",border:`1px solid ${C.red}44`}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+                      <div>
+                        <div style={{fontWeight:800,fontSize:14,color:C.red}}>₹{fmt(ai.amount||0)} extra deducted</div>
+                        <div style={{fontSize:12,color:C.text,marginTop:2}}>Invoice <b>{ai.invoiceNo}</b> · UTR {ai.utr||ai.grNo||"—"}</div>
+                        <div style={{fontSize:11,color:C.muted,marginTop:2}}>Invoice ₹{fmt(ai.appTotal||ai.invoiceAmt||0)} · expected payment ₹{fmt(ai.expectedPay||ai.expectedAmt||0)} · received ₹{fmt(Math.round(((ai.expectedPay||ai.expectedAmt||0)-(ai.amount||0))*100)/100)}</div>
+                      </div>
+                      <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                        <button onClick={()=>{ const done={...ai,status:"done",resolvedAt:today(),resolvedBy:user?.name||""}; setActionItems(prev=>(prev||[]).map(x=>x.id===ai.id?done:x)); DB.saveActionItem(done).catch(e=>console.error("saveActionItem xd resolve:",e)); log && log("Extra deduction resolved — "+ai.invoiceNo+" ₹"+fmt(ai.amount||0)); }}
+                          style={{background:C.green,border:"none",borderRadius:8,color:"#fff",fontSize:11,padding:"5px 9px",cursor:"pointer",fontWeight:700}}>✓ Resolved with Shree</button>
+                        <button onClick={()=>dismiss(ai)} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,fontSize:11,padding:"4px 8px",cursor:"pointer"}}>Dismiss</button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
 
               <div style={{fontSize:12,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:8}}>
@@ -26137,10 +26192,23 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                             <div style={{fontWeight:700,fontSize:11,color:C.text,marginBottom:4}}>🧾 Invoices in this advice ({(scanResult.invoices||[]).filter(i=>!i._fromExpenseLine).length})</div>
                             {(scanResult.invoices||[]).filter(i=>!i._fromExpenseLine).map((i,k)=>{
                               const inApp = _have.has((i.invoiceNo||"").trim());
+                              const isFreight = /^invoice$/i.test(i.docType||"Invoice") && Number(i.paymentAmt||0)>0;
+                              const chk = isFreight ? checkInvoiceLine(i, appInvTotals[(i.invoiceNo||"").trim()]) : null;
                               return (
-                                <div key={k} style={{display:"flex",justifyContent:"space-between",gap:8,fontSize:11,padding:"3px 0",borderTop:k?`1px dashed ${C.border}`:"none"}}>
-                                  <span><b style={{fontFamily:"monospace"}}>{i.invoiceNo||"—"}</b> <span style={{color:inApp?C.green:C.orange,fontWeight:700}}>{inApp?"✓ in app":"not in app"}</span>{i.invDate?<span style={{color:C.muted}}> · {i.invDate}</span>:null}</span>
-                                  <span style={{fontFamily:"monospace",color:Number(i.paymentAmt||0)<0?C.red:C.text}}>₹{fmtINR(i.paymentAmt!=null?i.paymentAmt:i.totalAmt)}</span>
+                                <div key={k} style={{fontSize:11,padding:"3px 0",borderTop:k?`1px dashed ${C.border}`:"none"}}>
+                                  <div style={{display:"flex",justifyContent:"space-between",gap:8}}>
+                                    <span><b style={{fontFamily:"monospace"}}>{i.invoiceNo||"—"}</b> <span style={{color:inApp?C.green:C.orange,fontWeight:700}}>{inApp?"✓ in app":"not in app"}</span>{i.invDate?<span style={{color:C.muted}}> · {i.invDate}</span>:null}</span>
+                                    <span style={{fontFamily:"monospace",color:Number(i.paymentAmt||0)<0?C.red:C.text}}>₹{fmtINR(i.paymentAmt!=null?i.paymentAmt:i.totalAmt)}</span>
+                                  </div>
+                                  {chk && chk.state!=="no_app_value" && (
+                                    <div style={{color:C.muted,fontSize:10,marginTop:1}}>
+                                      App invoice ₹{fmtINR(chk.expected.total)} · base ₹{fmtINR(chk.expected.base)} · TDS 2% ₹{fmtINR(chk.expected.tds)} · expected payment ₹{fmtINR(chk.expected.pay)}
+                                      {chk.state==="ok" && <b style={{color:C.green}}> · ✓ as expected</b>}
+                                      {chk.state==="overpaid" && <b style={{color:C.orange}}> · paid ₹{fmtINR(chk.actualPay-chk.expected.pay)} more than expected</b>}
+                                      {chk.state==="extra_deduction" && <b style={{color:C.red}}> · ⚠ ₹{fmtINR(chk.shortfall)} extra deducted — will be added to follow-up with Shree</b>}
+                                    </div>
+                                  )}
+                                  {chk && chk.state==="no_app_value" && <div style={{color:C.orange,fontSize:10,marginTop:1}}>Invoice value not in the app yet — can't check the deduction</div>}
                                 </div>
                               );
                             })}
