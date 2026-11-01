@@ -24118,6 +24118,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
     const recordedUtrs = new Set((payments||[]).map(p=>p.utr).filter(Boolean));
     return cleanAdvices((advDrafts||[]).filter(d=>d.advice), {have, appTotals:appInvTotals, recordedUtrs, from:"2026-04-01"});
   },[advDrafts, trips, payments, appInvTotals]);
+  const [advOpen, setAdvOpen] = useState(false);   // the e-mail advices card is a dropdown (collapsed by default) — it is long
   const [advSearch, setAdvSearch] = useState("");   // search the e-mailed advices by UTR or invoice number
   const [bulk, setBulk] = useState(null);   // {queue:[draft ids], total, done} while "Save clean advices" is running
   const [scanning,    setScanning]    = useState(false);
@@ -25907,7 +25908,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
               return (
                 <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,padding:14,marginBottom:16}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                    <div style={{fontSize:13,fontWeight:700,color:C.text}}>📧 Advices from e-mail <span style={{color:C.muted,fontWeight:400}}>· {open.length} to review</span></div>
+                    <div onClick={()=>setAdvOpen(o=>!o)} role="button" style={{fontSize:13,fontWeight:700,color:C.text,cursor:"pointer",flex:1,minWidth:0,userSelect:"none"}}>{advOpen?"▾":"▸"} 📧 Advices from e-mail <span style={{color:C.muted,fontWeight:400}}>· {open.length} to review{cleanList.length>0?` · ${cleanList.length} clean`:""}</span></div>
                     <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
                       {(cleanList.length>0||bulk) && <button disabled={!!bulk||!!scanResult||(payments||[]).length===0} onClick={()=>{
                         const tot = cleanList.reduce((s,x)=>s+(+x.total||0),0);
@@ -25917,6 +25918,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                       <button onClick={loadAdvDrafts} disabled={advBusy||!!bulk} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:6,color:C.muted,fontSize:11,padding:"3px 10px",cursor:"pointer"}}>{advBusy?"…":"↻ Refresh"}</button>
                     </div>
                   </div>
+                  {advOpen && (<>
                   <div style={{display:"flex",gap:6,marginBottom:8}}>
                     <input value={advSearch} onChange={e=>setAdvSearch(e.target.value)} placeholder="🔍 Search by UTR or invoice number (saved ones too)" inputMode="search"
                       style={{flex:1,minWidth:0,background:C.card2||C.bg,border:`1px solid ${C.border}`,borderRadius:6,color:C.text,fontSize:12,padding:"7px 10px"}}/>
@@ -25939,6 +25941,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                   </div>
                   {!advSearch.trim() && rows.length-open.length>0 && <div style={{fontSize:11,color:C.muted,marginTop:6}}>✔ {rows.length-open.length} already saved (hidden)</div>}
                   <div style={{fontSize:10,color:C.muted,marginTop:6}}>An advice stays here until you save it. If an invoice is missing, upload it, then come back and press ↻ Refresh — the draft picks it up.</div>
+                  </>)}
                 </div>
               );
             })()}
