@@ -49,3 +49,11 @@ export const draftStatus = (advice, haveInvoiceNos) => {
   if (!advice?.reconciled) return { status: "check", missing };
   return { status: missing.length ? "waiting" : "ready", missing };
 };
+
+// The mails are HTML (an unclosed <tr> per row, <th> header, <B> around totals). Turn the table into the
+// same pipe-separated lines the text parser reads, so there is ONE parser for both.
+const decode = (t) => t.replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'");
+export const htmlToAdviceText = (html) => decode(String(html ?? "")
+  .replace(/<\/t[dh]\s*>/gi, " | ").replace(/<tr\b[^>]*>/gi, "\n| ").replace(/<br\s*\/?>/gi, "\n").replace(/<\/table>/gi, "\n")
+  .replace(/<[^>]+>/g, " ")).split("\n").map((l) => l.replace(/[ \t\r]+/g, " ").trim()).join("\n");
+export const parseAdviceHtml = (html) => parseAdviceMail(htmlToAdviceText(html));

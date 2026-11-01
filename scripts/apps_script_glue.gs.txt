@@ -1,0 +1,71 @@
+
+// ════════════════════════════════════════════════════════════════════════════
+// Google Apps Script glue — reads Shree "Payment Advise" mails and saves them as DRAFTS in the app.
+// Nothing is paid or recorded: the owner reviews each draft in Payments → "Advices from e-mail".
+// ════════════════════════════════════════════════════════════════════════════
+const SUPABASE_URL = "__SUPABASE_URL__";
+const SUPABASE_KEY = "__SUPABASE_KEY__";
+const BACKFILL_FROM = "2026/04/01";           // first run reads everything from this date
+const MAX_RUN_MS = 5 * 60 * 1000;             // Apps Script stops a run at 6 min; we stop earlier and you simply run again
+
+function draftRow_(advice, msg) {
+  return {
+    id: "EML-" + advice.utr, utr: advice.utr, pay_date: advice.paymentDate, total: advice.totalPaid, advice: advice,
+    status: advice.reconciled ? "waiting" : "check", missing: [], source: "email", msg_id: msg.getId(),
+    mail_date: advice.paymentDate, created_at: new Date().toISOString(), ts: Date.now(),
+  };
+}
+
+function post_(rows) {
+  // on_conflict=id + ignore-duplicates: an advice already in the app (even one you have SAVED) is never overwritten
+  const res = UrlFetchApp.fetch(SUPABASE_URL + "/rest/v1/mye_advice_drafts?on_conflict=id", {
+    method: "post", contentType: "application/json", muteHttpExceptions: true,
+    headers: { apikey: SUPABASE_KEY, Authorization: "Bearer " + SUPABASE_KEY, Prefer: "resolution=ignore-duplicates,return=minimal" },
+    payload: JSON.stringify(rows),
+  });
+  const code = res.getResponseCode();
+  if (code >= 300) throw new Error("Supabase " + code + ": " + res.getContentText());
+  return rows.length;
+}
+
+function runSync_(query, maxMs) {
+  const started = Date.now(), sum = { mails: 0, sent: 0, skipped: 0, unreadable: 0, partial: false };
+  let batch = [];
+  const flush = () => { if (batch.length) { sum.sent += post_(batch); batch = []; } };
+  for (let start = 0; ; start += 50) {
+    const threads = GmailApp.search(query, start, 50);
+    if (!threads.length) break;
+    for (const th of threads) {
+      for (const msg of th.getMessages()) {
+        if (!isAdviceMail({ sender: msg.getFrom(), subject: msg.getSubject() })) { sum.skipped++; continue; }
+        sum.mails++;
+        const advice = parseAdviceHtml(msg.getBody()) || parseAdviceMail(msg.getPlainBody());
+        if (!advice) { sum.unreadable++; Logger.log("UNREADABLE mail " + msg.getId() + " dated " + msg.getDate()); continue; }
+        batch.push(draftRow_(advice, msg));
+        if (batch.length >= 20) flush();
+      }
+      if (Date.now() - started > maxMs) { flush(); sum.partial = true; return sum; }
+    }
+  }
+  flush();
+  return sum;
+}
+
+// 1) RUN THIS ONCE by hand: reads every Payment Advise since BACKFILL_FROM. If it says "partial", just run it again.
+function backfill() {
+  const s = runSync_('from:noreply@shreecement.com subject:"Payment Advise" after:' + BACKFILL_FROM, MAX_RUN_MS);
+  Logger.log("BACKFILL " + JSON.stringify(s) + (s.partial ? "  → not finished, run backfill again" : "  → done"));
+}
+
+// 2) Runs every hour (installed by installHourlyTrigger): only looks at the last 3 days.
+function hourly() {
+  const s = runSync_('from:noreply@shreecement.com subject:"Payment Advise" newer_than:3d', MAX_RUN_MS);
+  Logger.log("HOURLY " + JSON.stringify(s));
+}
+
+// 3) RUN THIS ONCE by hand after backfill: makes hourly() run automatically every hour.
+function installHourlyTrigger() {
+  ScriptApp.getProjectTriggers().filter((t) => t.getHandlerFunction() === "hourly").forEach((t) => ScriptApp.deleteTrigger(t));
+  ScriptApp.newTrigger("hourly").timeBased().everyHours(1).create();
+  Logger.log("Hourly trigger installed");
+}

@@ -1,7 +1,7 @@
 import { pouchAmountFor } from "./pouch_logic.js";
 import { includeInByEmployee, employeeStatement, statementHtml } from "./byemp_logic.js";
 import { draftStatus } from "./advice_mail.js";
-import { checkInvoiceLine, extraDeductionItems, splitShortage } from "./advice_check.js";
+import { checkInvoiceLine, extraDeductionItems, splitShortage, appInvoiceTotals, holdsByInvoice } from "./advice_check.js";
 import { restrictToSelection, diCat, tripHasCategory, followupByVehicle, followupHtml } from "./di_category.js";
 import { bookableLoanRecovery, PREV_YEAR_TYPE } from "./loan_ledger_logic.js";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
@@ -24091,8 +24091,11 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
   const [scanResult,  setScanResult]  = useState(null);
   // ── Payment advices read from e-mail → drafts for owner review ──────────────
   // invoice value already in the app, by invoice number (incl. GST) — the yardstick for checking an advice
-  const appInvTotals = useMemo(()=>{ const m={}; (invoiceRegistry||[]).forEach(r=>{ if(r.status!=="deleted" && r.invoiceNo) m[r.invoiceNo.trim()]=+r.totalAmt||0; }); return m; },[invoiceRegistry]);
+  // Invoice value incl. GST: the register's value when present, else the billed DI amounts from trips + 18% (the register holds only some invoices)
+  const appInvTotals = useMemo(()=>appInvoiceTotals(invoiceRegistry, trips),[invoiceRegistry, trips]);
   const [advDrafts, setAdvDrafts] = useState([]);
+  // GST holds taken by other advices (e-mail drafts and saved payments) — a later payment equal to a hold is that invoice's GST release
+  const holdsFor = React.useCallback((adv)=>holdsByInvoice([...(advDrafts||[]).map(d=>d.advice), ...(payments||[])], {utr:adv?.utr, paymentDate:adv?.paymentDate}),[advDrafts, payments]);
   const [advBusy, setAdvBusy] = useState(false);
   const loadAdvDrafts = React.useCallback(()=>{ setAdvBusy(true); DB.getAdviceDrafts().then(x=>setAdvDrafts(x||[])).catch(()=>{}).finally(()=>setAdvBusy(false)); },[]);
   React.useEffect(()=>{ loadAdvDrafts(); },[loadAdvDrafts]);
@@ -24966,7 +24969,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
 
     // Extra deductions: payment below (app invoice value − 2% TDS) with no reason → follow up with Shree
     if(setActionItems) {
-      const xd = extraDeductionItems({...scanResult, paymentDate:pDate}, appInvTotals, new Date().toISOString())
+      const xd = extraDeductionItems({...scanResult, paymentDate:pDate}, appInvTotals, new Date().toISOString(), holdsFor({...scanResult, paymentDate:pDate}))
         .filter(it=>!(actionItems||[]).some(a=>a.id===it.id));
       if(xd.length>0) {
         setActionItems(prev=>[...xd, ...(prev||[])]);
@@ -25867,7 +25870,8 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                     <button onClick={loadAdvDrafts} disabled={advBusy} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:6,color:C.muted,fontSize:11,padding:"3px 10px",cursor:"pointer"}}>{advBusy?"…":"↻ Refresh"}</button>
                   </div>
                   <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                    {rows.map(r=>{ const [lab,col]=chip[r.live.status]||chip.check; return (
+                    {open.length===0 && <div style={{fontSize:12,color:C.muted}}>Nothing waiting — every advice from e-mail is saved.</div>}
+                    {open.map(r=>{ const [lab,col]=chip[r.live.status]||chip.check; return (
                       <div key={r.id} style={{border:`1px solid ${col}55`,borderRadius:8,padding:"8px 10px",display:"flex",justifyContent:"space-between",gap:8,alignItems:"center",flexWrap:"wrap"}}>
                         <div style={{fontSize:12}}>
                           <div><b>UTR {r.utr}</b> · {r.payDate} · ₹{fmtINR(r.total)}</div>
@@ -25879,6 +25883,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                         </div>
                       </div>); })}
                   </div>
+                  {rows.length-open.length>0 && <div style={{fontSize:11,color:C.muted,marginTop:6}}>✔ {rows.length-open.length} already saved (hidden)</div>}
                   <div style={{fontSize:10,color:C.muted,marginTop:6}}>An advice stays here until you save it. If an invoice is missing, upload it, then come back and press ↻ Refresh — the draft picks it up.</div>
                 </div>
               );
@@ -26187,20 +26192,31 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                       </div>
                       {(scanResult.invoices||[]).filter(i=>!i._fromExpenseLine).length>0&&(()=>{
                         const _have = new Set((trips||[]).flatMap(t=>[t.invoiceNo, ...(t.diLines||[]).map(d=>d.invoiceNo)]).filter(Boolean).map(x=>x.trim()));
+                        const _holds = holdsFor(scanResult);
                         return (
                           <div style={{background:C.card2,border:`1px solid ${C.border}`,borderRadius:6,padding:"8px 10px",marginBottom:10}}>
                             <div style={{fontWeight:700,fontSize:11,color:C.text,marginBottom:4}}>🧾 Invoices in this advice ({(scanResult.invoices||[]).filter(i=>!i._fromExpenseLine).length})</div>
                             {(scanResult.invoices||[]).filter(i=>!i._fromExpenseLine).map((i,k)=>{
                               const inApp = _have.has((i.invoiceNo||"").trim());
                               const isFreight = /^invoice$/i.test(i.docType||"Invoice") && Number(i.paymentAmt||0)>0;
-                              const chk = isFreight ? checkInvoiceLine(i, appInvTotals[(i.invoiceNo||"").trim()]) : null;
+                              const chk = isFreight ? checkInvoiceLine(i, appInvTotals[(i.invoiceNo||"").trim()], _holds[(i.invoiceNo||"").trim()]) : null;
                               return (
                                 <div key={k} style={{fontSize:11,padding:"3px 0",borderTop:k?`1px dashed ${C.border}`:"none"}}>
                                   <div style={{display:"flex",justifyContent:"space-between",gap:8}}>
                                     <span><b style={{fontFamily:"monospace"}}>{i.invoiceNo||"—"}</b> <span style={{color:inApp?C.green:C.orange,fontWeight:700}}>{inApp?"✓ in app":"not in app"}</span>{i.invDate?<span style={{color:C.muted}}> · {i.invDate}</span>:null}</span>
                                     <span style={{fontFamily:"monospace",color:Number(i.paymentAmt||0)<0?C.red:C.text}}>₹{fmtINR(i.paymentAmt!=null?i.paymentAmt:i.totalAmt)}</span>
                                   </div>
-                                  {chk && chk.state!=="no_app_value" && (
+                                  {chk && chk.state==="gst_release" && (
+                                    <div style={{color:C.green,fontSize:10,marginTop:1,fontWeight:700}}>
+                                      GST release — ₹{fmtINR(chk.actualPay)} {chk.source==="earlier_hold"?"equals the GST held on this invoice by an earlier advice":"equals 18% GST of the app invoice value"}
+                                    </div>
+                                  )}
+                                  {chk && chk.state==="release_unmatched" && (
+                                    <div style={{color:C.orange,fontSize:10,marginTop:1,fontWeight:700}}>
+                                      No TDS and no hold on this line, but ₹{fmtINR(chk.actualPay)} does not equal any GST hold I can see for this invoice — check before saving (the earlier advice may be from before April)
+                                    </div>
+                                  )}
+                                  {chk && chk.state!=="no_app_value" && chk.state!=="gst_release" && chk.state!=="release_unmatched" && (
                                     <div style={{color:C.muted,fontSize:10,marginTop:1}}>
                                       App invoice ₹{fmtINR(chk.expected.total)} · base ₹{fmtINR(chk.expected.base)} · TDS 2% ₹{fmtINR(chk.expected.tds)} · expected payment ₹{fmtINR(chk.expected.pay)}
                                       {chk.state==="ok" && <b style={{color:C.green}}> · ✓ as expected</b>}
