@@ -3725,7 +3725,7 @@ const lookupPincode = async (pincode) => {
   return null;
 };
 
-function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user, log, onClose, employees=[], cashTransfers=[], setCashTransfers, dieselRequests=[], setDieselRequests, manualDiesel=false, actionItems=[], setActionItems }) {
+function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user, log, onClose, employees=[], cashTransfers=[], setCashTransfers, dieselRequests=[], setDieselRequests, manualDiesel=false, actionItems=[], setActionItems, initialFiles=null }) {
   // Party pouch deduction for a vehicle: exempt → 0, per-vehicle override → that,
   // else the owner's global rate (settings.pouchPerTrip), else ₹700 fallback.
   // An employee-level pouch exemption (linked truck or assigned employee) wins over everything.
@@ -4033,6 +4033,15 @@ Rules:
       logScan("di_scan", false, 0);
     }
   };
+
+  // Files handed over from the single-trip drop zone (several DI/GR copies were dropped = a batch).
+  const initialDone = useRef(false);
+  useEffect(() => {
+    if(initialDone.current || !initialFiles || initialFiles.length===0) return;
+    initialDone.current = true;
+    addFiles(initialFiles);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const addFiles = files => {
     // Filter out files already in the queue (same name + size = same file uploaded twice)
@@ -6700,7 +6709,7 @@ function FileSourcePicker({ onFile, accept="image/*,application/pdf", label="Upl
   );
 }
 
-function DIUploader({ onExtracted, trips, settings, isIn, onFile=null, vehicles=[], employees=[], onInvoice=null, currentDI="" }) {
+function DIUploader({ onExtracted, trips, settings, isIn, onFile=null, vehicles=[], employees=[], onInvoice=null, currentDI="", onMultiGR=null }) {
   // onInvoice (party trip only): the zone takes several files at once — DI/GR copy and invoice(s) — and
   // each invoice is attached only if its DI number equals the trip's DI.
   const [notice,  setNotice]  = useState([]);
@@ -6851,7 +6860,11 @@ Rules:
     const readable = scans.filter(x => x.kind !== "unknown");
     const msgs = unreadable.map(x => `${x.file.name}: could not be read — ${x.error}`);
     const routed = routeDroppedDocs(readable, currentDI);
-    if (routed.blocked) { setError(routed.blocked); setNotice(msgs); setState("error"); return; }
+    if (routed.blocked) {
+      // More than one DI/GR copy dropped = a batch: hand ALL the files to the batch scanner.
+      if (onMultiGR) { setState("idle"); onMultiGR(files); return; }
+      setError(routed.blocked); setNotice(msgs); setState("error"); return;
+    }
     msgs.push(...routed.notices);
     routed.invoices.forEach(f => onInvoice(f));
     if (routed.gr) {
@@ -8246,6 +8259,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
   // Sealed invoice upload sheet
   const [sealedSheet, setSealedSheet] = useState(null); // trip object
   const [batchDISheet,  setBatchDISheet]  = useState(false); // morning batch GR scanner
+  const [batchInitialFiles, setBatchInitialFiles] = useState(null); // files handed over from the single-trip drop zone
   const [manualLrMode,  setManualLrMode]  = useState(false); // allow manual LR entry for old data
   const [manualDiesel,  setManualDiesel]  = useState(false); // always locked — diesel only from requests
 
@@ -10120,8 +10134,9 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
 
       {/* ── BATCH DI SCANNER SHEET ── */}
       {batchDISheet && (
-        <Sheet title="📋 Add Trip — Scan GR / DI Copies" onClose={()=>setBatchDISheet(false)} noBackdropClose>
+        <Sheet title="📋 Add Trip — Scan GR / DI Copies" onClose={()=>{setBatchDISheet(false);setBatchInitialFiles(null);}} noBackdropClose>
           <BatchDIScanner
+            initialFiles={batchInitialFiles}
             trips={trips} vehicles={vehicles} setVehicles={setVehicles}
             setTrips={setTrips} settings={settings} user={user} log={log}
             employees={employees||[]} cashTransfers={cashTransfers||[]} setCashTransfers={setCashTransfers}
@@ -10267,6 +10282,14 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                 <>
                   {/* Scan uploader — goes through same onDIExtracted → AskLRSheet flow */}
                   <DIUploader
+                  onMultiGR={files=>{
+                    // several DI/GR copies dropped = a batch: continue in the batch scanner with the same files
+                    setBatchInitialFiles(Array.from(files));
+                    setAddSheet(false); setF(blankForm()); setDiConflict(null); setWasScanned(false);
+                    setOrderTypeStep(null); setPartyStep("form");
+                    grFileRef.current=[]; invoiceFileRef.current=[];
+                    setBatchDISheet(true);
+                  }}
                   currentDI={f.diNo || diConflict?.extracted?.diNo || ""}
                   onInvoice={file=>{
                     const cur = Array.isArray(invoiceFileRef.current)?invoiceFileRef.current:(invoiceFileRef.current?[invoiceFileRef.current]:[]);
