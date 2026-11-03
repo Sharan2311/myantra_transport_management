@@ -4,6 +4,7 @@ import { draftStatus, searchAdvices } from "./advice_mail.js";
 import { checkInvoiceLine, extraDeductionItems, splitShortage, appInvoiceTotals, holdsByInvoice, cleanAdvices } from "./advice_check.js";
 import { restrictToSelection, diCat, tripHasCategory, followupByVehicle, followupHtml } from "./di_category.js";
 import { bookableLoanRecovery, PREV_YEAR_TYPE } from "./loan_ledger_logic.js";
+import { normDI, partyGrFile, partyDocsMissing, matchInvoices, routeDroppedDocs } from "./party_files.js";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { DB } from "./db.js";
 import HuskMod from "./Husk.jsx";
@@ -3790,7 +3791,8 @@ Extract ALL the following fields. Return ONLY a JSON object, no markdown.
   "ewayBillNo": "E-way Bill number",
   "ewayBillDate": "E-way Bill date in YYYY-MM-DD",
   "ewayBillExpDate": "E-way Bill expiry date in YYYY-MM-DD",
-  "incoTerms": "Inco terms (e.g. EXP, FTB, FOB)"
+  "incoTerms": "Inco terms (e.g. EXP, FTB, FOB)",
+  "docKind": "'invoice' if this document is a GST TAX INVOICE (has Invoice No, Bill To / Ship To, tax lines); 'gr' if it is a GR / Consignment Note / Delivery Instruction copy issued with the transporter's letterhead"
 }
 
 Rules:
@@ -3909,6 +3911,16 @@ Rules:
       // Block documents that belong to a different transporter than us
       if(extracted.transporterName && !isOwnTransporter(extracted.transporterName)) {
         throw new Error(`This document is for transporter "${extracted.transporterName}", not ${RC.companyName}. Upload rejected — please check you selected the right file.`);
+      }
+
+      // An INVOICE dropped together with the GR/DI copies is not a trip: keep it aside and
+      // let the matcher attach it to the party DI with the same DI number.
+      if(String(extracted.docKind||"").toLowerCase()==="invoice") {
+        setItems(prev => prev.map(x => x.id===id
+          ? {...x, status:"invoice", invoiceDi:normDI(extracted.diNo), error:null}
+          : x));
+        logScan("di_scan", true, data._costInr||0);
+        return;
       }
 
       const client = detectClient(extracted);
@@ -4050,6 +4062,21 @@ Rules:
   const doneItems  = items.filter(x => x.status==="done");
   const scanningNow = items.some(x => x.status==="scanning"||x.status==="pending");
 
+  // ── Invoices dropped with the DIs → attach to the party DI with the same DI number ──
+  const invoiceScans = items.filter(x=>x.status==="invoice").map(x=>({id:x.id, file:x.file, diNo:x.invoiceDi}));
+  const invoiceMatch = matchInvoices(doneItems, invoiceScans);
+  useEffect(() => {
+    if(scanningNow || invoiceMatch.attach.length===0) return;
+    invoiceMatch.attach.forEach(a => {
+      const sc = invoiceScans.find(z=>z.id===a.scanId);
+      if(!sc) return;
+      setItems(prev => prev.map(x => x.id===a.itemId && !x.invoiceFile
+        ? {...x, invoiceFile:sc.file, invoiceFileDiCheck:{status:"ok", msg:"Invoice matched by DI ✓"}}
+        : x));
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, scanningNow]);
+
   useEffect(() => {
     if(scanningNow || items.length===0 || groupsBuilt) return;
     if(items.some(x=>x.status==="pending"||x.status==="scanning")) return;
@@ -4184,14 +4211,7 @@ Rules:
       const frRate = +item.extracted?.frRate||0;
       if(frRate - (+item.givenRate) < 30) return false;
       // Only require GR/Invoice for DIs explicitly set as party order
-      if(item.orderType==="party" && (!item.grFile||!item.invoiceFile)) return false;
-      // Party mandatory fields — only enforced when mandatory_trip_fields feature is ON
-      if(canFeature("mandatory_trip_fields") && item.orderType==="party") {
-        if(!(item.partyDriverPhone||"").match(/^\d{10}$/)) return false;
-        if(!(item.salesOfficerPhone||"").match(/^\d{10}$/)) return false;
-        if(!(item.salesOfficerEmail||"").endsWith("shreecement.com")) return false;
-        if(!(item.partyNumber||"").trim()) return false;
-      }
+      if(partyDocsMissing(item).length>0) return false;
       // Block save if party file DI verification failed (mismatch)
       if(item.orderType==="party" && item.grFileDiCheck?.status==="error") return false;
       if(item.orderType==="party" && item.invoiceFileDiCheck?.status==="error") return false;
@@ -4240,13 +4260,7 @@ Rules:
       if(!item.givenRate || +item.givenRate<=0) return false;
       const frRate = +item.extracted?.frRate||0;
       if(frRate - (+item.givenRate) < 30) return false;
-      if(item.orderType==="party" && (!item.grFile||!item.invoiceFile)) return false;
-      if(canFeature("mandatory_trip_fields") && item.orderType==="party") {
-        if(!(item.partyDriverPhone||"").match(/^\d{10}$/)) return false;
-        if(!(item.salesOfficerPhone||"").match(/^\d{10}$/)) return false;
-        if(!(item.salesOfficerEmail||"").endsWith("shreecement.com")) return false;
-        if(!(item.partyNumber||"").trim()) return false;
-      }
+      if(partyDocsMissing(item).length>0) return false;
       if(item.orderType==="party" && item.grFileDiCheck?.status==="error") return false;
       if(item.orderType==="party" && item.invoiceFileDiCheck?.status==="error") return false;
       if(item.orderType==="party" && (item.grFileDiCheck?.status==="checking" || item.invoiceFileDiCheck?.status==="checking")) return false;
@@ -4334,33 +4348,11 @@ Rules:
         }
       }
 
-      // ── Mandatory trip fields (feature flag) ──────────────────────────────
-      if(canFeature("mandatory_trip_fields")) {
-        const groupItems = doneItems.filter(x=>g.diIds.includes(x.id));
-        const veh = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
-        const missing = [];
-        // Owner name / driver phone are NOT required to save: a missing one used to abort the
-        // whole save, so the wallet, diesel and recovery ledgers were never written for that trip.
-        // Party trips: party fields
-        const hasParty = groupItems.some(it=>it.orderType==="party");
-        if(hasParty) {
-          const partyItem = groupItems.find(it=>it.orderType==="party");
-          if(!(partyItem?.partyNumber||"").trim()) missing.push("Party Number (ಪಾರ್ಟಿ ನಂಬರ್)");
-          if(!(partyItem?.salesOfficerPhone||"").trim()) missing.push("Sales Officer Phone (ಸೇಲ್ಸ್ ಅಧಿಕಾರಿ ಫೋನ್)");
-          if(!(partyItem?.salesOfficerEmail||"").trim()) missing.push("Sales Officer Email (ಸೇಲ್ಸ್ ಅಧಿಕಾರಿ ಇಮೇಲ್)");
-          if(!(partyItem?.partyDriverPhone||"").trim()) missing.push("Party Driver Phone (ಪಾರ್ಟಿ ಡ್ರೈವರ್ ಫೋನ್)");
-        }
-        if(missing.length > 0) {
-          alert(`Truck ${g.truckNo}: Mandatory fields missing:\n\n${missing.map(m=>"  ⚠ "+m).join("\n")}\n\nPlease fill all required fields before saving.`);
-          return;
-        }
-      }
-
       // Party files per DI
       for(const item of groupItems) {
         if(item.orderType==="party") {
-          if(!item.grFile)      { alert(`Truck ${g.truckNo} · DI ${item.extracted?.diNo||"?"}: GR Copy required for Party order.`); return; }
-          if(!item.invoiceFile) { alert(`Truck ${g.truckNo} · DI ${item.extracted?.diNo||"?"}: Invoice required for Party order.`); return; }
+          const _miss = partyDocsMissing(item);
+          if(_miss.length) { alert(`Truck ${g.truckNo} · DI ${item.extracted?.diNo||"?"}: ${_miss.join(" and ")} missing for Party order.\nThis DI (and its vehicle's trip) is not saved until it is attached.`); return; }
         }
       }
 
@@ -4494,10 +4486,10 @@ Rules:
         const ex     = item.extracted;
         const tripId = uid();
         let grUrl="", invUrl="";
-        if(item.orderType==="party" && (item.grFile || item.invoiceFile)) {
+        if(item.orderType==="party" && (partyGrFile(item) || item.invoiceFile)) {
           const [grRes, invRes] = await Promise.all([
-            item.grFile    ? uploadPartyFile(tripId,"gr",item.grFile).catch(e=>{console.warn("GR upload failed:",e.message);return null;})      : Promise.resolve(null),
-            item.invoiceFile ? uploadPartyFile(tripId,"invoice",item.invoiceFile).catch(e=>{console.warn("Invoice upload failed:",e.message);return null;}) : Promise.resolve(null),
+            partyGrFile(item)    ? uploadPartyFile(tripId,"gr",partyGrFile(item)).catch(e=>{saveFail("GR copy upload (trip saved WITHOUT its GR — attach it on the trip):")(e);return null;})      : Promise.resolve(null),
+            item.invoiceFile ? uploadPartyFile(tripId,"invoice",item.invoiceFile).catch(e=>{saveFail("Invoice upload (trip saved WITHOUT its invoice — attach it on the trip):")(e);return null;}) : Promise.resolve(null),
           ]);
           if(grRes)  grUrl  = grRes.path;
           if(invRes) invUrl = invRes.path;
@@ -4762,10 +4754,10 @@ Rules:
         for(const item of groupItems) {
           const ex = item.extracted;
           let grUrl="", invUrl="";
-          if(item.orderType==="party" && (item.grFile || item.invoiceFile)) {
+          if(item.orderType==="party" && (partyGrFile(item) || item.invoiceFile)) {
             const [grRes, invRes] = await Promise.all([
-              item.grFile    ? uploadPartyFile(tripId,`gr_${ex.diNo||item.id}`,item.grFile).catch(e=>{console.warn("GR upload failed:",e.message);return null;})      : Promise.resolve(null),
-              item.invoiceFile ? uploadPartyFile(tripId,`inv_${ex.diNo||item.id}`,item.invoiceFile).catch(e=>{console.warn("Invoice upload failed:",e.message);return null;}) : Promise.resolve(null),
+              partyGrFile(item)    ? uploadPartyFile(tripId,`gr_${ex.diNo||item.id}`,partyGrFile(item)).catch(e=>{saveFail("GR copy upload (trip saved WITHOUT its GR — attach it on the trip):")(e);return null;})      : Promise.resolve(null),
+              item.invoiceFile ? uploadPartyFile(tripId,`inv_${ex.diNo||item.id}`,item.invoiceFile).catch(e=>{saveFail("Invoice upload (trip saved WITHOUT its invoice — attach it on the trip):")(e);return null;}) : Promise.resolve(null),
             ]);
             if(grRes)  grUrl  = grRes.path;
             if(invRes) invUrl = invRes.path;
@@ -5067,7 +5059,7 @@ Rules:
       <div style={{background:C.teal+"11",border:`1px solid ${C.teal}33`,borderRadius:12,padding:"12px 14px"}}>
         <div style={{color:C.teal,fontWeight:800,fontSize:13,marginBottom:4}}>📋 How it works</div>
         <div style={{color:C.muted,fontSize:12,lineHeight:1.7}}>
-          1. Upload 1 or more GR/DI PDFs — AI scans each one<br/>
+          1. Upload all GR/DI PDFs <b>and the party invoices together</b> — AI scans each one; each invoice is attached to its party DI by DI number (godown DIs need no invoice)<br/>
           2. DIs for the <b>same vehicle</b> are auto-grouped (select which to merge)<br/>
           3. Set <b>Order type + Driver rate</b> per DI · Set Tafal / Diesel / Advance per group<br/>
           4. Tap <b>Save</b> — LR number auto-assigned from DB sequence
@@ -5078,8 +5070,8 @@ Rules:
       <div style={{border:`2px dashed ${C.teal}`,borderRadius:14,padding:"20px",
           background:C.bg,display:"flex",flexDirection:"column",alignItems:"center",gap:10}}>
         <div style={{fontSize:32}}>📂</div>
-        <div style={{color:C.teal,fontWeight:800,fontSize:14}}>Upload GR PDFs</div>
-        <div style={{color:C.muted,fontSize:12}}>Upload 1 DI for a single trip · Upload multiple for batch — auto-grouped by vehicle</div>
+        <div style={{color:C.teal,fontWeight:800,fontSize:14}}>Upload GR / DI copies + party invoices</div>
+        <div style={{color:C.muted,fontSize:12}}>Select everything at once — invoices are matched to their DI automatically · auto-grouped by vehicle</div>
         <div style={{display:"flex",gap:10,width:"100%",maxWidth:320}}>
           <button onClick={()=>inputRef.current?.click()}
             style={{flex:1,background:C.teal+"22",border:`1.5px solid ${C.teal}66`,
@@ -5116,6 +5108,30 @@ Rules:
         </div>
       )}
 
+      {/* Invoices that could not be attached to a party DI */}
+      {!scanningNow && invoiceMatch.unmatched.length>0 && (
+        <div style={{background:"#fef3c7",border:"1px solid #f59e0b",borderRadius:10,padding:"10px 14px"}}>
+          <div style={{color:"#b45309",fontWeight:800,fontSize:13,marginBottom:6}}>
+            ⚠ {invoiceMatch.unmatched.length} invoice file{invoiceMatch.unmatched.length>1?"s":""} not attached
+          </div>
+          {invoiceMatch.unmatched.map(u=>(
+            <div key={u.scanId} style={{display:"flex",justifyContent:"space-between",gap:8,padding:"5px 0",borderTop:"1px solid #f59e0b44"}}>
+              <div style={{minWidth:0}}>
+                <div style={{fontSize:12,fontWeight:700,color:C.text}}>{u.file?.name||"file"}</div>
+                <div style={{fontSize:11,color:C.muted}}>
+                  {u.reason==="no_di"    && ("DI number could not be read"+(u.error?` — ${u.error}`:"")+". Upload it on its DI with the Upload Invoice button.")}
+                  {u.reason==="no_trip"  && "No scanned DI has this DI number — add that DI's GR copy too."}
+                  {u.reason==="not_party"&& "This DI is a godown order — no invoice needed. Set it to Party if it should have one."}
+                  {u.reason==="duplicate"&& "This DI already has an invoice — second file ignored."}
+                </div>
+              </div>
+              <button onClick={()=>setItems(prev=>prev.filter(x=>x.id!==u.scanId))}
+                style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:16,flexShrink:0}}>✕</button>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Error items */}
       {errorItems.length>0&&(
         <div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:10,padding:"10px 14px"}}>
@@ -5131,6 +5147,7 @@ Rules:
               <div style={{flex:1,minWidth:0}}>
                 <div style={{color:C.red,fontWeight:700,fontSize:12}}>{item.file?.name||"Unknown file"}</div>
                 <div style={{color:C.muted,fontSize:11,marginTop:2}}>{item.error||"Unknown error"}</div>
+                <div style={{color:C.muted,fontSize:10,marginTop:2}}>If this is a party invoice, attach it with Upload Invoice on its DI.</div>
               </div>
               <button onClick={()=>setItems(prev=>prev.filter(x=>x.id!==item.id))}
                 style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:16,flexShrink:0,padding:"0 4px"}}>✕</button>
@@ -5345,7 +5362,7 @@ Rules:
                           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
                             <div>
                               <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
-                                📱 DRIVER PHONE {item.partyDriverPhone?<span style={{color:C.green}}>✓</span>:<span style={{color:C.red}}>*</span>}
+                                📱 DRIVER PHONE <span style={{color:C.muted,fontWeight:500}}>(optional)</span>
                               </div>
                               <input value={item.partyDriverPhone||""} placeholder="10-digit mobile"
                                 onChange={e=>updateItem(item.id,"partyDriverPhone",e.target.value.replace(/\D/g,"").slice(0,10))}
@@ -5354,7 +5371,7 @@ Rules:
                             </div>
                             <div>
                               <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
-                                📱 SALES OFFICER PHONE {item.salesOfficerPhone?<span style={{color:C.green}}>✓</span>:<span style={{color:C.red}}>*</span>}
+                                📱 SALES OFFICER PHONE <span style={{color:C.muted,fontWeight:500}}>(optional)</span>
                               </div>
                               <input value={item.salesOfficerPhone||""} placeholder="10-digit mobile"
                                 onChange={e=>updateItem(item.id,"salesOfficerPhone",e.target.value.replace(/\D/g,"").slice(0,10))}
@@ -5363,7 +5380,7 @@ Rules:
                             </div>
                             <div>
                               <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
-                                ✉ SALES OFFICER EMAIL {item.salesOfficerEmail?.endsWith("shreecement.com")?<span style={{color:C.green}}>✓</span>:<span style={{color:C.red}}>* @shreecement.com</span>}
+                                ✉ SALES OFFICER EMAIL <span style={{color:C.muted,fontWeight:500}}>(optional)</span>
                               </div>
                               <input value={item.salesOfficerEmail||""} placeholder="name@shreecement.com"
                                 onChange={e=>updateItem(item.id,"salesOfficerEmail",e.target.value.trim().toLowerCase())}
@@ -5372,7 +5389,7 @@ Rules:
                             </div>
                             <div>
                               <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
-                                📋 PARTY NUMBER {item.partyNumber?<span style={{color:C.green}}>✓</span>:<span style={{color:C.red}}>*</span>}
+                                📋 PARTY NUMBER <span style={{color:C.muted,fontWeight:500}}>(optional)</span>
                               </div>
                               <input value={item.partyNumber||""} placeholder="Party order number"
                                 onChange={e=>updateItem(item.id,"partyNumber",e.target.value)}
@@ -5421,12 +5438,12 @@ Rules:
                           <div style={{display:"flex",gap:8}}>
                             <div style={{flex:1}}>
                               <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
-                                GR COPY {item.grFile?<span style={{color:C.green}}>✓</span>:<span style={{color:C.red}}>* required</span>}
+                                GR COPY {partyGrFile(item)?<span style={{color:C.green}}>✓ {item.grFile?"uploaded":"scanned copy"}</span>:<span style={{color:C.red}}>* required</span>}
                               </div>
-                              <label style={{display:"flex",alignItems:"center",gap:6,background:item.grFile?C.green+"11":C.bg,
-                                border:`1.5px solid ${item.grFile?C.green:C.border}`,borderRadius:8,
+                              <label style={{display:"flex",alignItems:"center",gap:6,background:partyGrFile(item)?C.green+"11":C.bg,
+                                border:`1.5px solid ${partyGrFile(item)?C.green:C.border}`,borderRadius:8,
                                 padding:"7px 10px",cursor:"pointer",fontSize:12}}>
-                                <span>{item.grFile?"📄 "+item.grFile.name:"📎 Upload GR"}</span>
+                                <span>{partyGrFile(item)?"📄 "+partyGrFile(item).name:"📎 Upload GR"}</span>
                                 <input type="file" accept="application/pdf,image/*" style={{display:"none"}}
                                   onChange={e=>{
                                     const f=e.target.files?.[0];
@@ -5439,7 +5456,7 @@ Rules:
                             </div>
                             <div style={{flex:1}}>
                               <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
-                                INVOICE {item.invoiceFile?<span style={{color:C.green}}>✓</span>:<span style={{color:C.red}}>* required</span>}
+                                INVOICE {item.invoiceFile?<span style={{color:C.green}}>✓</span>:<span style={{color:C.red}}>* required — drop it with the DIs, or upload here</span>}
                               </div>
                               <label style={{display:"flex",alignItems:"center",gap:6,background:item.invoiceFile?C.green+"11":C.bg,
                                 border:`1.5px solid ${item.invoiceFile?C.green:C.border}`,borderRadius:8,
@@ -6683,7 +6700,11 @@ function FileSourcePicker({ onFile, accept="image/*,application/pdf", label="Upl
   );
 }
 
-function DIUploader({ onExtracted, trips, settings, isIn, onFile=null, vehicles=[], employees=[] }) {
+function DIUploader({ onExtracted, trips, settings, isIn, onFile=null, vehicles=[], employees=[], onInvoice=null, currentDI="" }) {
+  // onInvoice (party trip only): the zone takes several files at once — DI/GR copy and invoice(s) — and
+  // each invoice is attached only if its DI number equals the trip's DI.
+  const [notice,  setNotice]  = useState([]);
+  const multiInputRef = useRef(null);
   const [state,   setState]   = useState("idle"); // idle | reading | scanning | done | error
   const [preview, setPreview] = useState(null);   // base64 for image preview
   const [error,   setError]   = useState("");
@@ -6709,7 +6730,8 @@ Extract the following fields from this document image and return ONLY a JSON obj
   "qty": "Quantity in MT as a number only (no units)",
   "bags": "Number of bags as a number only (0 if not applicable)",
   "frRate": "Freight rate per MT in rupees as a number only (the Shree/company rate, not driver rate)",
-  "date": "Date in YYYY-MM-DD format"
+  "date": "Date in YYYY-MM-DD format",
+  "docKind": "'invoice' if this document is a GST TAX INVOICE (has Invoice No, Bill To / Ship To, tax lines); 'gr' if it is a GR / Consignment Note / Delivery Instruction copy issued with the transporter's letterhead"
 }
 Rules:
 - Return ONLY the JSON object, no explanation, no markdown, no backticks
@@ -6795,11 +6817,90 @@ Rules:
     }
   };
 
+  // Party trip: several files in one drop (DI/GR copy + invoice(s)).
+  const scanOne = async (file) => {
+    try {
+      const base64 = await fileToBase64(file);
+      const isImage = file.type.startsWith("image/");
+      if (!isImage && file.type !== "application/pdf") return { file, kind:"gr", diNo:"", error:"not a PDF or photo" };
+      const resp = await fetch("/.netlify/functions/scan-di", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ base64, anthropicKey: RC.anthropicKey, mediaType: file.type, prompt: PROMPT }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || data.error) return { file, kind:"unknown", diNo:"", error: data.error || "Server error" };
+      if (data.transporterName && !isOwnTransporter(data.transporterName))
+        return { file, kind:"unknown", diNo:"", error:`document is for transporter "${data.transporterName}"` };
+      logScan("di_scan", true, data._costInr||0);
+      return { file, kind: String(data.docKind||"").toLowerCase()==="invoice" ? "invoice" : "gr", diNo: normDI(data.diNo), extracted: data };
+    } catch(e) { return { file, kind:"unknown", diNo:"", error: e.message }; }
+  };
+
+  const handleFiles = async (fileList) => {
+    const files = Array.from(fileList || []).filter(Boolean);
+    if (!files.length) return;
+    if (!onInvoice) { handleFile(files[0]); return; }
+    setError(""); setNotice([]); setState("scanning");
+    const scans = [];
+    for (let i = 0; i < files.length; i++) {
+      scans.push(await scanOne(files[i]));
+      if (i < files.length - 1) await new Promise(r => setTimeout(r, 1200));
+    }
+    // A file that could not be read at all: say so (an unreadable GR is an error; an unreadable invoice is a notice)
+    const unreadable = scans.filter(x => x.kind === "unknown");
+    const readable = scans.filter(x => x.kind !== "unknown");
+    const msgs = unreadable.map(x => `${x.file.name}: could not be read — ${x.error}`);
+    const routed = routeDroppedDocs(readable, currentDI);
+    if (routed.blocked) { setError(routed.blocked); setNotice(msgs); setState("error"); return; }
+    msgs.push(...routed.notices);
+    routed.invoices.forEach(f => onInvoice(f));
+    if (routed.gr) {
+      const extracted = routed.gr.extracted;
+      const lrNo = (extracted.lrNo || "").trim();
+      const existingTrip = lrNo ? trips.find(t => t.lrNo === lrNo) : null;
+      setState("done");
+      if (onFile) onFile(routed.gr.file);
+      onExtracted({
+        ...extracted,
+        qty:    String(extracted.qty    || ""),
+        bags:   String(extracted.bags   || "0"),
+        frRate: String(extracted.frRate || ""),
+        tafal:  String(tafalAmountFor((vehicles||[]).find(v=>v.truckNo===(extracted.truckNo||"").toUpperCase().trim()), employees, settings)),
+        advance: "0", shortage: "0", shortageRecovery: "0", loanRecovery: "0", dieselEstimate: "0",
+        type: isIn ? "inbound" : "outbound",
+      }, existingTrip);
+    } else if (routed.invoices.length) {
+      setState("done");
+    } else {
+      setError(unreadable.length ? "Nothing could be read — try clearer photos." : "No DI / GR copy found in the files you selected.");
+      setState("error");
+    }
+    setNotice(msgs);
+  };
+
   const onDrop = (e) => {
     e.preventDefault();
+    if (onInvoice) { handleFiles(e.dataTransfer?.files); return; }
     const file = e.dataTransfer?.files?.[0];
     if (file) handleFile(file);
   };
+
+  const multiPicker = onInvoice && (
+    <>
+      <button onClick={()=>multiInputRef.current?.click()}
+        style={{background:C.blue+"22",border:`1.5px solid ${C.blue}66`,borderRadius:10,padding:"9px 14px",
+          color:C.blue,fontWeight:700,fontSize:13,cursor:"pointer"}}>
+        📁 Select DI / GR + invoice files together
+      </button>
+      <input ref={multiInputRef} type="file" multiple accept="image/*,application/pdf" style={{display:"none"}}
+        onChange={e=>{ if(e.target.files?.length) handleFiles(e.target.files); e.target.value=""; }} />
+    </>
+  );
+  const noticeBox = notice.length>0 && (
+    <div style={{background:"#fef3c7",border:"1px solid #f59e0b",borderRadius:8,padding:"8px 10px",marginTop:8,textAlign:"left"}}>
+      {notice.map((m,i)=><div key={i} style={{fontSize:11,color:"#92400e"}}>⚠ {m}</div>)}
+    </div>
+  );
 
   return (
     <div style={{marginBottom:16}}>
@@ -6820,11 +6921,13 @@ Rules:
             Upload DI / GR Copy
           </div>
           <div style={{color: C.muted, fontSize: 12}}>
-            Take a photo or upload PDF — AI will fill all fields
+            {onInvoice ? "Drop the DI / GR copy and the invoice together — the invoice is attached by DI number" : "Take a photo or upload PDF — AI will fill all fields"}
           </div>
+          {multiPicker}
           <FileSourcePicker onFile={handleFile} accept="image/*,application/pdf"
-            label="Take photo or upload PDF" color={C.blue} icon="📄" />
+            label={onInvoice ? "Single file: photo or PDF" : "Take photo or upload PDF"} color={C.blue} icon="📄" />
           {error && <div style={{color:C.red, fontSize:12, marginTop:4}}>{error}</div>}
+          {noticeBox}
         </div>
       )}
 
@@ -6866,11 +6969,17 @@ Rules:
           <div style={{color: C.green, fontWeight: 700, fontSize: 13}}>
             ✓ Document scanned — fields filled below
           </div>
-          <button onClick={() => { setState("idle"); setPreview(null); }}
+          <button onClick={() => { setState("idle"); setPreview(null); setNotice([]); }}
             style={{background:"none", border:`1px solid ${C.green}44`, color:C.green,
               borderRadius:8, padding:"4px 10px", fontSize:12, cursor:"pointer"}}>
             Scan another
           </button>
+        </div>
+      )}
+      {state === "done" && onInvoice && (
+        <div style={{marginTop:8,display:"flex",flexDirection:"column",alignItems:"flex-start",gap:6}}>
+          {multiPicker}
+          {noticeBox}
         </div>
       )}
 
@@ -8122,7 +8231,8 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
   });
   // Party order flow state
   const [orderTypeStep, setOrderTypeStep] = useState(null);
-  const [partyStep,     setPartyStep]     = useState("docs");
+  const [partyStep,     setPartyStep]     = useState("form"); // the separate "docs" step is gone: one drop zone in the form step
+  const [, bumpPartyDocs] = useState(0); // re-render when invoice files change in the ref
   const [uploadingFiles,setUploadingFiles]= useState(false);
   // Refs to hold file objects across re-renders without triggering state
   const grFileRef      = useRef([]); // array — supports multiple GR copies for multi-DI
@@ -8674,23 +8784,6 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       // here for the non-owner case.
       if(_net < 0 && user.role!=="owner"){
         if(!window.confirm(`Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\n\nThis trip will save, but needs owner approval before it can be billed or settled.\n\nContinue?`)) return;
-      }
-    }
-    // ── Mandatory trip fields (feature flag) ──────────────────────────────
-    if(canFeature("mandatory_trip_fields")) {
-      const t = editSheet;
-      const veh = (vehicles||[]).find(v=>v.truckNo===t.truckNo);
-      const missing = [];
-      // Owner name / driver phone no longer block the save (see batch save) — ledgers must always be written.
-      if(t.orderType==="party") {
-        if(!(t.partyNumber||"").trim()) missing.push("Party Number (ಪಾರ್ಟಿ ನಂಬರ್)");
-        if(!(t.salesOfficerPhone||"").trim()) missing.push("Sales Officer Phone (ಸೇಲ್ಸ್ ಅಧಿಕಾರಿ ಫೋನ್)");
-        if(!(t.salesOfficerEmail||"").trim()) missing.push("Sales Officer Email (ಸೇಲ್ಸ್ ಅಧಿಕಾರಿ ಇಮೇಲ್)");
-        if(!(t.partyDriverPhone||"").trim()) missing.push("Party Driver Phone (ಪಾರ್ಟಿ ಡ್ರೈವರ್ ಫೋನ್)");
-      }
-      if(missing.length > 0) {
-        alert(`Mandatory fields missing:\n\n${missing.map(m=>"  ⚠ "+m).join("\n")}\n\nPlease fill all required fields.\nಎಲ್ಲಾ ಕಡ್ಡಾಯ ಕ್ಷೇತ್ರಗಳನ್ನು ಭರ್ತಿ ಮಾಡಿ.`);
-        return;
       }
     }
     // ── Diesel indent lock — once a diesel request is attached, only an
@@ -10062,7 +10155,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       {addSheet && (
         <Sheet title={isIn?"New Raw Material Trip":"New Cement Trip"} onClose={()=>{
           setAddSheet(false);setF(blankForm());setDiConflict(null);setWasScanned(false);
-          setOrderTypeStep(null);setPartyStep("docs");setUploadingFiles(false);
+          setOrderTypeStep(null);setPartyStep("form");setUploadingFiles(false);
           grFileRef.current=[]; invoiceFileRef.current=[];
         }}>
           {manualLrMode && (
@@ -10084,7 +10177,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                 setF(blankForm(false));
               } else {
                 setOrderTypeStep("party");
-                setPartyStep("docs");
+                setPartyStep("form");
                 setF(blankForm(true));
               }
             }} />
@@ -10125,67 +10218,6 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
             </>
           )}
 
-          {/* STEP 1 (PARTY): Upload GR + Invoice — skippable if files already present */}
-          {orderTypeStep==="party" && partyStep==="docs" && (() => {
-            const hasGR  = Array.isArray(grFileRef.current)  ? grFileRef.current.length>0  : !!grFileRef.current;
-            const hasInv = Array.isArray(invoiceFileRef.current) ? invoiceFileRef.current.length>0 : !!invoiceFileRef.current;
-            return (
-              <div style={{display:"flex",flexDirection:"column",gap:12}}>
-                {/* If files already loaded (e.g. from prior scan), show skip option */}
-                {hasGR && hasInv && (
-                  <div style={{background:C.green+"11",border:`1px solid ${C.green}33`,borderRadius:10,
-                    padding:"12px 14px"}}>
-                    <div style={{color:C.green,fontWeight:700,fontSize:13,marginBottom:6}}>
-                      ✓ Files already uploaded from scan
-                    </div>
-                    <div style={{color:C.muted,fontSize:12,marginBottom:10}}>
-                      GR: {Array.isArray(grFileRef.current)?grFileRef.current.length:1} file(s) &nbsp;·&nbsp;
-                      Invoice: {Array.isArray(invoiceFileRef.current)?invoiceFileRef.current.length:1} file(s)
-                    </div>
-                    <div style={{display:"flex",gap:8}}>
-                      <Btn onClick={()=>setPartyStep("form")} full color={C.green}>
-                        Continue with these files →
-                      </Btn>
-                    </div>
-                    <div style={{marginTop:8,textAlign:"center"}}>
-                      <button onClick={()=>{grFileRef.current=[];invoiceFileRef.current=[];}}
-                        style={{background:"none",border:"none",color:C.muted,fontSize:12,
-                          cursor:"pointer",textDecoration:"underline"}}>
-                        Replace files instead
-                      </button>
-                    </div>
-                  </div>
-                )}
-                {/* Show upload form if no files yet, or if replacing */}
-                {(!hasGR || !hasInv) && (
-                  <>
-                    <PartyDocUpload
-                      tripId={f.id||"new"}
-                      grFileRef={grFileRef}
-                      invoiceFileRef={invoiceFileRef}
-                      onDone={()=>setPartyStep("form")}
-                      onBack={()=>setOrderTypeStep("selecting")}
-                    />
-                    <div style={{textAlign:"center",marginTop:4}}>
-                      <button onClick={()=>setPartyStep("form")}
-                        style={{background:"none",border:"none",color:C.muted,fontSize:12,
-                          cursor:"pointer",textDecoration:"underline"}}>
-                        Skip for now — upload files before saving
-                      </button>
-                      <div style={{fontSize:10,color:C.red,marginTop:2}}>
-                        ⚠ GR and Invoice are mandatory before saving
-                      </div>
-                    </div>
-                  </>
-                )}
-                {/* Back button when files exist but user wants to replace */}
-                {hasGR && hasInv && (
-                  <Btn onClick={()=>setOrderTypeStep("selecting")} full outline color={C.muted}>← Back</Btn>
-                )}
-              </div>
-            );
-          })()}
-
           {/* STEP 2 (PARTY): Fill trip form — same scan/conflict flow as godown */}
           {orderTypeStep==="party" && partyStep==="form" && (
             <>
@@ -10201,12 +10233,14 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                     </div>
                     <div style={{background:C.blue+"22",border:`1px solid ${C.blue}44`,borderRadius:8,
                       padding:"5px 10px",fontSize:11,color:invCount>0?C.blue:C.orange,fontWeight:700}}>
-                      {invCount>0?`✓ Inv: ${invCount} file(s)`:"⚠ No Invoice — add after scan"}
+                      {invCount>0?`✓ Inv: ${invCount} file(s)`:"⚠ No Invoice — drop it with the DI/GR copy"}
                     </div>
-                    <button onClick={()=>{setPartyStep("docs");setDiConflict(null);setWasScanned(false);}}
-                      style={{background:"none",border:"none",color:C.muted,fontSize:11,cursor:"pointer"}}>
-                      ✏ Add/Change files
-                    </button>
+                    {invCount>0 && (
+                      <button onClick={()=>{invoiceFileRef.current=[];bumpPartyDocs(x=>x+1);}}
+                        style={{background:"none",border:"none",color:C.muted,fontSize:11,cursor:"pointer"}}>
+                        ✕ Remove invoice
+                      </button>
+                    )}
                   </>);
                 })()}
               </div>
@@ -10232,7 +10266,14 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
               ) : (
                 <>
                   {/* Scan uploader — goes through same onDIExtracted → AskLRSheet flow */}
-                  <DIUploader onExtracted={e=>{
+                  <DIUploader
+                  currentDI={f.diNo || diConflict?.extracted?.diNo || ""}
+                  onInvoice={file=>{
+                    const cur = Array.isArray(invoiceFileRef.current)?invoiceFileRef.current:(invoiceFileRef.current?[invoiceFileRef.current]:[]);
+                    if(!cur.some(x=>x.name===file.name&&x.size===file.size)) invoiceFileRef.current=[...cur,file];
+                    bumpPartyDocs(x=>x+1);
+                  }}
+                  onExtracted={e=>{
                     // Preserve party orderType and district/state through the scan flow
                     const dc = detectClient(e);
                     setF(p=>({...p, orderType:"party", client:dc,
@@ -10247,6 +10288,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                     if(!cur.some(f=>f.name===file.name&&f.size===file.size)){
                       grFileRef.current=[...cur, file];
                     }
+                    bumpPartyDocs(x=>x+1);
                   }} />
 
                   {/* Show form only after scan + LR confirmed (wasScanned) or owner */}
@@ -10359,8 +10401,8 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                           const grReady  = await prepareFile(grFiles,  "gr");
                           const invReady = await prepareFile(invFiles, "invoice");
                           const [grRes, invRes] = await Promise.all([
-                            grReady  ? uploadPartyFile(tripId,"gr",grReady).catch(e=>{console.warn("GR upload failed:",e.message);return null;})      : Promise.resolve(null),
-                            invReady ? uploadPartyFile(tripId,"invoice",invReady).catch(e=>{console.warn("Invoice upload failed:",e.message);return null;}) : Promise.resolve(null),
+                            grReady  ? uploadPartyFile(tripId,"gr",grReady).catch(e=>{saveFail("GR copy upload (trip saved WITHOUT its GR — attach it on the trip):")(e);return null;})      : Promise.resolve(null),
+                            invReady ? uploadPartyFile(tripId,"invoice",invReady).catch(e=>{saveFail("Invoice upload (trip saved WITHOUT its invoice — attach it on the trip):")(e);return null;}) : Promise.resolve(null),
                           ]);
                           if(grRes)  grUrl  = grRes.path;
                           if(invRes) invUrl = invRes.path;
@@ -10433,7 +10475,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                               veh.truckNo!==tn2 ? veh : syncTripRecoveryToVehicle(veh, t)));
                           }
                           setAddSheet(false); setF(blankForm());
-                          setOrderTypeStep(null); setPartyStep("docs");
+                          setOrderTypeStep(null); setPartyStep("form");
                           grFileRef.current=[]; invoiceFileRef.current=[];
                         } catch(e){ alert("Error saving trip: "+e.message); }
                         finally { setUploadingFiles(false); }
