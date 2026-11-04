@@ -6,6 +6,7 @@ import { restrictToSelection, diCat, tripHasCategory, followupByVehicle, followu
 import { bookableLoanRecovery, PREV_YEAR_TYPE } from "./loan_ledger_logic.js";
 import { findPayment, normRef } from "./payment_finder.js";
 import { reconcileScreenshot } from "./payment_reconcile.js";
+import { payableAfterSkips, pouchHoldOf } from "./pay_selected_logic.js";
 import { normDI, partyGrFile, partyDocsMissing, matchInvoices, routeDroppedDocs } from "./party_files.js";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { DB } from "./db.js";
@@ -29219,16 +29220,8 @@ function PaySelectedSheet({ init, onSave, onCancel }) {
   const toggleSkip = (id, k) => setSkips(p => ({...p, [id]: {...(p[id]||{}), [k]: !(p[id]||{})[k]}}));
 
   // Balance after dropping the chosen deductions — same maths as tripWithBalance.
-  const calc = (t) => {
-    const s = skipOf(t.id);
-    const deducts = (t.advance||0) + (t.tafal||0)
-      + (s.diesel ? 0 : (t.dieselEstimate||0))
-      + ((t.shortage||0)*(t.givenRate||0))
-      + (s.shortage ? 0 : (t.shortageRecovery||0))
-      + (s.loan ? 0 : (t.loanRecovery||0));
-    const netDue = Math.max(0, (t.gross||0) - deducts);
-    return {netDue, payable: Math.max(0, netDue - (t.paidSoFar||0))};
-  };
+  // The party pouch is HELD (same as tripWithBalance / the selected-requests total) — see pay_selected_logic.js.
+  const calc = (t) => payableAfterSkips(t, skipOf(t.id));
 
   const [amount, setAmount] = useState(init.amount ? String(init.amount) : "");
   const [amountTouched, setAmountTouched] = useState(!!init.amount);
@@ -29929,7 +29922,7 @@ This will auto-recover in the next trip.`);
         ? t.diLines.reduce((a,d)=>a+(d.qty||0)*(d.givenRate||0),0)
         : (t.qty||0)*(t.givenRate||0);
       const deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)+((t.shortage||0)*(t.givenRate||0))
-        +(t.shortageRecovery||0)+(t.loanRecovery||0);
+        +(t.shortageRecovery||0)+(t.loanRecovery||0)+pouchHoldOf(t);
       const netDue = Math.max(0, gross - deducts);
       const paidBefore = (driverPays||[]).filter(p=>p.tripId===tripId).reduce((a,p)=>a+(p.amount||0),0);
       if(netDue - (paidBefore + paidNow[tripId]) <= 0.5 && !t.driverSettled) {
