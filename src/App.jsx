@@ -4,6 +4,7 @@ import { draftStatus, searchAdvices } from "./advice_mail.js";
 import { checkInvoiceLine, extraDeductionItems, splitShortage, appInvoiceTotals, holdsByInvoice, cleanAdvices } from "./advice_check.js";
 import { restrictToSelection, diCat, tripHasCategory, followupByVehicle, followupHtml } from "./di_category.js";
 import { bookableLoanRecovery, PREV_YEAR_TYPE } from "./loan_ledger_logic.js";
+import { findPayment, normRef } from "./payment_finder.js";
 import { normDI, partyGrFile, partyDocsMissing, matchInvoices, routeDroppedDocs } from "./party_files.js";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { DB } from "./db.js";
@@ -2874,6 +2875,8 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
         <div style={{color:C.text,fontSize:18,fontWeight:800}}>{greeting}, {user.name.split(" ")[0]} 👋</div>
         <div style={{color:C.muted,fontSize:12,marginTop:2}}>{new Date().toLocaleDateString("en-IN",{weekday:"long",day:"numeric",month:"long"})}</div>
       </div>
+
+      {user.role==="owner" && <FindPaymentCard vehicles={vehicles} employees={employees} />}
 
       {/* Quick Actions — fleet_manager sees no RM Trip button */}
       {can(user,"trips") && (
@@ -13015,6 +13018,119 @@ function DieselReceiptScan({ selected, pumps, dieselRequests=[], cashAmount, use
         </div>
       )}
       {error && <div style={{color:C.red,fontSize:13,background:C.red+"11",borderRadius:8,padding:"10px 12px"}}>{error}</div>}
+    </div>
+  );
+}
+
+// ─── FIND A PAYMENT (owner) ───────────────────────────────────────────────────
+// Type a bank reference / UTR or upload the payment screenshot: shows where it is recorded
+// (vehicle loan, employee loan, wallet transfer, driver payment, payment request). Read-only.
+function FindPaymentCard({ vehicles, employees }) {
+  const [open, setOpen]       = useState(false);
+  const [ref, setRef]         = useState("");
+  const [amount, setAmount]   = useState("");
+  const [date, setDate]       = useState("");
+  const [name, setName]       = useState("");
+  const [extraRefs, setExtra] = useState([]); // second id from a screenshot (reference no + transaction id)
+  const [busy, setBusy]       = useState(false);
+  const [result, setResult]   = useState(null);
+  const [errors, setErrors]   = useState([]);
+
+  const run = async (q) => {
+    setBusy(true); setResult(null); setErrors([]);
+    const refs = [...(q.refs||[])].map(normRef).filter(r=>r.length>=8);
+    const amt = +q.amount || 0;
+    const errs = [];
+    // The app only keeps recent rows in memory, so ask the database directly for the big ledgers.
+    const orFor = (textCols) => {
+      const parts = [];
+      refs.forEach(r => textCols.forEach(c => parts.push(`${c}.ilike.%${r}%`)));
+      if (amt > 0) parts.push(`amount.eq.${amt}`);
+      return parts.join(",");
+    };
+    const pull = async (label, table, cols) => {
+      const filter = orFor(cols);
+      if (!filter) return [];
+      const { data, error } = await supabase.from(table).select("*").or(filter).limit(500);
+      if (error) { errs.push(`${label}: search failed — ${error.message}`); return []; }
+      return data || [];
+    };
+    try {
+      const [ct, dp, pr] = await Promise.all([
+        pull("Wallet transfers", "mye_cash_transfers", ["utr","ref","note"]),
+        pull("Driver payments", "mye_driver_payments", ["utr","notes"]),
+        pull("Payment requests", "mye_payment_requests", ["notes"]),
+      ]);
+      const data = {
+        vehicles: vehicles||[], employees: employees||[],
+        cashTransfers: ct.map(r=>({id:r.id, empId:r.emp_id, amount:r.amount, date:r.date, note:r.note, utr:r.utr, ref:r.ref, type:r.type, lrNo:r.lr_no})),
+        driverPayments: dp.map(r=>({id:r.id, tripId:r.trip_id, truckNo:r.truck_no, lrNo:r.lr_no, amount:r.amount, utr:r.utr, date:r.date, notes:r.notes, paidTo:r.paid_to})),
+        paymentRequests: pr.map(r=>({id:r.id, tripId:r.trip_id, lrNo:r.lr_no, truckNo:r.truck_no, amount:r.amount, recipientName:r.recipient_name, status:r.status, notes:r.notes, paidAt:r.paid_at, createdAt:r.created_at})),
+      };
+      setResult({ ...findPayment({ refs: q.refs, amount: amt, date: q.date, name: q.name }, data), asked: q });
+    } catch(e) { errs.push("Search failed — " + (e.message||e)); }
+    setErrors(errs); setBusy(false);
+  };
+
+  const search = () => run({ refs:[ref, ...extraRefs], amount, date, name });
+
+  const fromScreenshot = (p) => {
+    const r1 = p.referenceNo || "", r2 = p.transactionId || "";
+    setRef(r1 || r2); setExtra(r1 && r2 ? [r2] : []);
+    setAmount(p.amount ? String(p.amount) : ""); setDate(p.paymentDate || ""); setName(p.paidTo || "");
+    run({ refs:[r1, r2], amount:p.amount, date:p.paymentDate, name:p.paidTo });
+  };
+
+  const inp = {background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,color:C.text,padding:"8px 10px",fontSize:13,outline:"none",boxSizing:"border-box",width:"100%"};
+  const show = (r, confirmed) => (
+    <div key={r.kind+r.id} style={{background:confirmed?C.green+"11":"#fef3c7",border:`1px solid ${confirmed?C.green:"#f59e0b"}`,borderRadius:10,padding:"8px 12px"}}>
+      <div style={{fontWeight:800,fontSize:12,color:confirmed?C.green:"#b45309"}}>
+        {confirmed ? "✓ Recorded" : "? Possible match"} — {r.label}
+      </div>
+      <div style={{fontSize:13,color:C.text,marginTop:2}}>{r.where}</div>
+      <div style={{fontSize:12,color:C.muted,marginTop:2}}>
+        ₹{(+r.amount||0).toLocaleString("en-IN")} · {r.date||"no date"}
+        {!confirmed && <> · matched on {r.reasons.join(" + ")} (reference not recorded)</>}
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:"10px 14px"}}>
+      <div onClick={()=>setOpen(o=>!o)} style={{display:"flex",justifyContent:"space-between",cursor:"pointer",fontWeight:800,fontSize:14,color:C.text}}>
+        <span>🔎 Find a payment</span><span style={{color:C.muted}}>{open?"▾":"▸"}</span>
+      </div>
+      {open && (
+        <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:10}}>
+          <div style={{fontSize:11,color:C.muted}}>Search by reference / UTR, or upload the bank screenshot — shows where it is recorded.</div>
+          <div style={{display:"flex",gap:8}}>
+            <input value={ref} onChange={e=>{setRef(e.target.value);setExtra([]);}} placeholder="Reference / UTR / transaction ID" style={inp}
+              onKeyDown={e=>{if(e.key==="Enter")search();}} />
+            <ScanPaymentBtn onResult={fromScreenshot} />
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <input value={amount} onChange={e=>setAmount(e.target.value.replace(/[^\d.]/g,""))} placeholder="Amount ₹ (optional)" style={inp} />
+            <input type="date" value={date} onChange={e=>setDate(e.target.value)} style={inp} />
+            <input value={name} onChange={e=>setName(e.target.value)} placeholder="Name (optional)" style={inp} />
+          </div>
+          <button onClick={search} disabled={busy||(!ref.trim()&&!(+amount>0&&date))}
+            style={{background:C.accent,color:"#fff",border:"none",borderRadius:10,padding:"10px",fontWeight:800,fontSize:13,cursor:"pointer",opacity:busy?0.6:1}}>
+            {busy?"Searching…":"Search"}
+          </button>
+          {errors.map((m,i)=><div key={i} style={{color:C.red,fontSize:12,fontWeight:700}}>⚠ {m}</div>)}
+          {result && (
+            <>
+              {result.exact.map(r=>show(r,true))}
+              {result.possible.map(r=>show(r,false))}
+              {result.exact.length===0 && result.possible.length===0 && errors.length===0 && (
+                <div style={{background:C.red+"11",border:`1px solid ${C.red}44`,borderRadius:10,padding:"8px 12px",color:C.red,fontSize:13,fontWeight:700}}>
+                  Not found — this reference is not recorded anywhere{(+result.asked.amount>0&&result.asked.date)?" and no entry has the same amount within 3 days":""}.
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }
