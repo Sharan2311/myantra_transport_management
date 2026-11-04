@@ -4,6 +4,9 @@ import { draftStatus, searchAdvices } from "./advice_mail.js";
 import { checkInvoiceLine, extraDeductionItems, splitShortage, appInvoiceTotals, holdsByInvoice, cleanAdvices } from "./advice_check.js";
 import { restrictToSelection, diCat, tripHasCategory, followupByVehicle, followupHtml } from "./di_category.js";
 import { bookableLoanRecovery, PREV_YEAR_TYPE } from "./loan_ledger_logic.js";
+import { findPayment, normRef } from "./payment_finder.js";
+import { reconcileScreenshot } from "./payment_reconcile.js";
+import { normDI, partyGrFile, partyDocsMissing, matchInvoices, routeDroppedDocs } from "./party_files.js";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { DB } from "./db.js";
 import HuskMod from "./Husk.jsx";
@@ -2333,7 +2336,7 @@ function AppMain() {
     pumpPayments, setPumpPayments:dbSetPumpPayments,
     dieselRequests, setDieselRequests:dbSetDieselRequests, dieselRequestsReady: rDR,
     settings:settings||{tafalPerTrip:300}, setSettings:dbSetSettings,
-    driverPays, setDriverPays:dbSetDriverPays,
+    driverPays, setDriverPays:dbSetDriverPays, reloadDriverPays,
     expenses, setExpenses:dbSetExpenses,
     gstReleases, setGstReleases:dbSetGstReleases,
     cashTransfers, setCashTransfers:dbSetCashTransfers,
@@ -2725,7 +2728,7 @@ function AppMain() {
   );
 }
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
-function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pumps, pumpPayments, driverPays, cashTransfers, activity, settings, setSettings, setTab, user, selectedFY, selectedClient, actionItems=[], clinkerBills=[]}) {
+function Dashboard({log, reloadDriverPays, trips, fyTrips, payments, vehicles, employees, indents, pumps, pumpPayments, driverPays, cashTransfers, activity, settings, setSettings, setTab, user, selectedFY, selectedClient, actionItems=[], clinkerBills=[]}) {
   const [dashMonth, setDashMonth] = useState(""); // "YYYY-MM" or "" = all
   const [uncreditedOpen, setUncreditedOpen] = useState(false);
   const [creditedOpen,   setCreditedOpen]   = useState(false);
@@ -2873,6 +2876,9 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
         <div style={{color:C.text,fontSize:18,fontWeight:800}}>{greeting}, {user.name.split(" ")[0]} 👋</div>
         <div style={{color:C.muted,fontSize:12,marginTop:2}}>{new Date().toLocaleDateString("en-IN",{weekday:"long",day:"numeric",month:"long"})}</div>
       </div>
+
+      {user.role==="owner" && <FindPaymentCard vehicles={vehicles} employees={employees} />}
+      {user.role==="owner" && <BulkPaymentCheck vehicles={vehicles} employees={employees} user={user} log={log} reloadDriverPays={reloadDriverPays} />}
 
       {/* Quick Actions — fleet_manager sees no RM Trip button */}
       {can(user,"trips") && (
@@ -3724,7 +3730,7 @@ const lookupPincode = async (pincode) => {
   return null;
 };
 
-function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user, log, onClose, employees=[], cashTransfers=[], setCashTransfers, dieselRequests=[], setDieselRequests, manualDiesel=false, actionItems=[], setActionItems }) {
+function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user, log, onClose, employees=[], cashTransfers=[], setCashTransfers, dieselRequests=[], setDieselRequests, manualDiesel=false, actionItems=[], setActionItems, initialFiles=null }) {
   // Party pouch deduction for a vehicle: exempt → 0, per-vehicle override → that,
   // else the owner's global rate (settings.pouchPerTrip), else ₹700 fallback.
   // An employee-level pouch exemption (linked truck or assigned employee) wins over everything.
@@ -3790,7 +3796,8 @@ Extract ALL the following fields. Return ONLY a JSON object, no markdown.
   "ewayBillNo": "E-way Bill number",
   "ewayBillDate": "E-way Bill date in YYYY-MM-DD",
   "ewayBillExpDate": "E-way Bill expiry date in YYYY-MM-DD",
-  "incoTerms": "Inco terms (e.g. EXP, FTB, FOB)"
+  "incoTerms": "Inco terms (e.g. EXP, FTB, FOB)",
+  "docKind": "'invoice' if this document is a GST TAX INVOICE (has Invoice No, Bill To / Ship To, tax lines); 'gr' if it is a GR / Consignment Note / Delivery Instruction copy issued with the transporter's letterhead"
 }
 
 Rules:
@@ -3911,6 +3918,16 @@ Rules:
         throw new Error(`This document is for transporter "${extracted.transporterName}", not ${RC.companyName}. Upload rejected — please check you selected the right file.`);
       }
 
+      // An INVOICE dropped together with the GR/DI copies is not a trip: keep it aside and
+      // let the matcher attach it to the party DI with the same DI number.
+      if(String(extracted.docKind||"").toLowerCase()==="invoice") {
+        setItems(prev => prev.map(x => x.id===id
+          ? {...x, status:"invoice", invoiceDi:normDI(extracted.diNo), error:null}
+          : x));
+        logScan("di_scan", true, data._costInr||0);
+        return;
+      }
+
       const client = detectClient(extracted);
 
       // ── Auto-detect orderType: godown vs party ────────────────────────────
@@ -4022,6 +4039,15 @@ Rules:
     }
   };
 
+  // Files handed over from the single-trip drop zone (several DI/GR copies were dropped = a batch).
+  const initialDone = useRef(false);
+  useEffect(() => {
+    if(initialDone.current || !initialFiles || initialFiles.length===0) return;
+    initialDone.current = true;
+    addFiles(initialFiles);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const addFiles = files => {
     // Filter out files already in the queue (same name + size = same file uploaded twice)
     const existingFileKeys = new Set(items.map(x=>x.file?`${x.file.name}|${x.file.size}`:""));
@@ -4049,6 +4075,21 @@ Rules:
   // ── Auto-build groups when all scans complete ─────────────────────────────────
   const doneItems  = items.filter(x => x.status==="done");
   const scanningNow = items.some(x => x.status==="scanning"||x.status==="pending");
+
+  // ── Invoices dropped with the DIs → attach to the party DI with the same DI number ──
+  const invoiceScans = items.filter(x=>x.status==="invoice").map(x=>({id:x.id, file:x.file, diNo:x.invoiceDi}));
+  const invoiceMatch = matchInvoices(doneItems, invoiceScans);
+  useEffect(() => {
+    if(scanningNow || invoiceMatch.attach.length===0) return;
+    invoiceMatch.attach.forEach(a => {
+      const sc = invoiceScans.find(z=>z.id===a.scanId);
+      if(!sc) return;
+      setItems(prev => prev.map(x => x.id===a.itemId && !x.invoiceFile
+        ? {...x, invoiceFile:sc.file, invoiceFileDiCheck:{status:"ok", msg:"Invoice matched by DI ✓"}}
+        : x));
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, scanningNow]);
 
   useEffect(() => {
     if(scanningNow || items.length===0 || groupsBuilt) return;
@@ -4184,14 +4225,7 @@ Rules:
       const frRate = +item.extracted?.frRate||0;
       if(frRate - (+item.givenRate) < 30) return false;
       // Only require GR/Invoice for DIs explicitly set as party order
-      if(item.orderType==="party" && (!item.grFile||!item.invoiceFile)) return false;
-      // Party mandatory fields — only enforced when mandatory_trip_fields feature is ON
-      if(canFeature("mandatory_trip_fields") && item.orderType==="party") {
-        if(!(item.partyDriverPhone||"").match(/^\d{10}$/)) return false;
-        if(!(item.salesOfficerPhone||"").match(/^\d{10}$/)) return false;
-        if(!(item.salesOfficerEmail||"").endsWith("shreecement.com")) return false;
-        if(!(item.partyNumber||"").trim()) return false;
-      }
+      if(partyDocsMissing(item).length>0) return false;
       // Block save if party file DI verification failed (mismatch)
       if(item.orderType==="party" && item.grFileDiCheck?.status==="error") return false;
       if(item.orderType==="party" && item.invoiceFileDiCheck?.status==="error") return false;
@@ -4240,13 +4274,7 @@ Rules:
       if(!item.givenRate || +item.givenRate<=0) return false;
       const frRate = +item.extracted?.frRate||0;
       if(frRate - (+item.givenRate) < 30) return false;
-      if(item.orderType==="party" && (!item.grFile||!item.invoiceFile)) return false;
-      if(canFeature("mandatory_trip_fields") && item.orderType==="party") {
-        if(!(item.partyDriverPhone||"").match(/^\d{10}$/)) return false;
-        if(!(item.salesOfficerPhone||"").match(/^\d{10}$/)) return false;
-        if(!(item.salesOfficerEmail||"").endsWith("shreecement.com")) return false;
-        if(!(item.partyNumber||"").trim()) return false;
-      }
+      if(partyDocsMissing(item).length>0) return false;
       if(item.orderType==="party" && item.grFileDiCheck?.status==="error") return false;
       if(item.orderType==="party" && item.invoiceFileDiCheck?.status==="error") return false;
       if(item.orderType==="party" && (item.grFileDiCheck?.status==="checking" || item.invoiceFileDiCheck?.status==="checking")) return false;
@@ -4334,33 +4362,11 @@ Rules:
         }
       }
 
-      // ── Mandatory trip fields (feature flag) ──────────────────────────────
-      if(canFeature("mandatory_trip_fields")) {
-        const groupItems = doneItems.filter(x=>g.diIds.includes(x.id));
-        const veh = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
-        const missing = [];
-        // Owner name / driver phone are NOT required to save: a missing one used to abort the
-        // whole save, so the wallet, diesel and recovery ledgers were never written for that trip.
-        // Party trips: party fields
-        const hasParty = groupItems.some(it=>it.orderType==="party");
-        if(hasParty) {
-          const partyItem = groupItems.find(it=>it.orderType==="party");
-          if(!(partyItem?.partyNumber||"").trim()) missing.push("Party Number (ಪಾರ್ಟಿ ನಂಬರ್)");
-          if(!(partyItem?.salesOfficerPhone||"").trim()) missing.push("Sales Officer Phone (ಸೇಲ್ಸ್ ಅಧಿಕಾರಿ ಫೋನ್)");
-          if(!(partyItem?.salesOfficerEmail||"").trim()) missing.push("Sales Officer Email (ಸೇಲ್ಸ್ ಅಧಿಕಾರಿ ಇಮೇಲ್)");
-          if(!(partyItem?.partyDriverPhone||"").trim()) missing.push("Party Driver Phone (ಪಾರ್ಟಿ ಡ್ರೈವರ್ ಫೋನ್)");
-        }
-        if(missing.length > 0) {
-          alert(`Truck ${g.truckNo}: Mandatory fields missing:\n\n${missing.map(m=>"  ⚠ "+m).join("\n")}\n\nPlease fill all required fields before saving.`);
-          return;
-        }
-      }
-
       // Party files per DI
       for(const item of groupItems) {
         if(item.orderType==="party") {
-          if(!item.grFile)      { alert(`Truck ${g.truckNo} · DI ${item.extracted?.diNo||"?"}: GR Copy required for Party order.`); return; }
-          if(!item.invoiceFile) { alert(`Truck ${g.truckNo} · DI ${item.extracted?.diNo||"?"}: Invoice required for Party order.`); return; }
+          const _miss = partyDocsMissing(item);
+          if(_miss.length) { alert(`Truck ${g.truckNo} · DI ${item.extracted?.diNo||"?"}: ${_miss.join(" and ")} missing for Party order.\nThis DI (and its vehicle's trip) is not saved until it is attached.`); return; }
         }
       }
 
@@ -4494,10 +4500,10 @@ Rules:
         const ex     = item.extracted;
         const tripId = uid();
         let grUrl="", invUrl="";
-        if(item.orderType==="party" && (item.grFile || item.invoiceFile)) {
+        if(item.orderType==="party" && (partyGrFile(item) || item.invoiceFile)) {
           const [grRes, invRes] = await Promise.all([
-            item.grFile    ? uploadPartyFile(tripId,"gr",item.grFile).catch(e=>{console.warn("GR upload failed:",e.message);return null;})      : Promise.resolve(null),
-            item.invoiceFile ? uploadPartyFile(tripId,"invoice",item.invoiceFile).catch(e=>{console.warn("Invoice upload failed:",e.message);return null;}) : Promise.resolve(null),
+            partyGrFile(item)    ? uploadPartyFile(tripId,"gr",partyGrFile(item)).catch(e=>{saveFail("GR copy upload (trip saved WITHOUT its GR — attach it on the trip):")(e);return null;})      : Promise.resolve(null),
+            item.invoiceFile ? uploadPartyFile(tripId,"invoice",item.invoiceFile).catch(e=>{saveFail("Invoice upload (trip saved WITHOUT its invoice — attach it on the trip):")(e);return null;}) : Promise.resolve(null),
           ]);
           if(grRes)  grUrl  = grRes.path;
           if(invRes) invUrl = invRes.path;
@@ -4762,10 +4768,10 @@ Rules:
         for(const item of groupItems) {
           const ex = item.extracted;
           let grUrl="", invUrl="";
-          if(item.orderType==="party" && (item.grFile || item.invoiceFile)) {
+          if(item.orderType==="party" && (partyGrFile(item) || item.invoiceFile)) {
             const [grRes, invRes] = await Promise.all([
-              item.grFile    ? uploadPartyFile(tripId,`gr_${ex.diNo||item.id}`,item.grFile).catch(e=>{console.warn("GR upload failed:",e.message);return null;})      : Promise.resolve(null),
-              item.invoiceFile ? uploadPartyFile(tripId,`inv_${ex.diNo||item.id}`,item.invoiceFile).catch(e=>{console.warn("Invoice upload failed:",e.message);return null;}) : Promise.resolve(null),
+              partyGrFile(item)    ? uploadPartyFile(tripId,`gr_${ex.diNo||item.id}`,partyGrFile(item)).catch(e=>{saveFail("GR copy upload (trip saved WITHOUT its GR — attach it on the trip):")(e);return null;})      : Promise.resolve(null),
+              item.invoiceFile ? uploadPartyFile(tripId,`inv_${ex.diNo||item.id}`,item.invoiceFile).catch(e=>{saveFail("Invoice upload (trip saved WITHOUT its invoice — attach it on the trip):")(e);return null;}) : Promise.resolve(null),
             ]);
             if(grRes)  grUrl  = grRes.path;
             if(invRes) invUrl = invRes.path;
@@ -5067,7 +5073,7 @@ Rules:
       <div style={{background:C.teal+"11",border:`1px solid ${C.teal}33`,borderRadius:12,padding:"12px 14px"}}>
         <div style={{color:C.teal,fontWeight:800,fontSize:13,marginBottom:4}}>📋 How it works</div>
         <div style={{color:C.muted,fontSize:12,lineHeight:1.7}}>
-          1. Upload 1 or more GR/DI PDFs — AI scans each one<br/>
+          1. Upload all GR/DI PDFs <b>and the party invoices together</b> — AI scans each one; each invoice is attached to its party DI by DI number (godown DIs need no invoice)<br/>
           2. DIs for the <b>same vehicle</b> are auto-grouped (select which to merge)<br/>
           3. Set <b>Order type + Driver rate</b> per DI · Set Tafal / Diesel / Advance per group<br/>
           4. Tap <b>Save</b> — LR number auto-assigned from DB sequence
@@ -5078,8 +5084,8 @@ Rules:
       <div style={{border:`2px dashed ${C.teal}`,borderRadius:14,padding:"20px",
           background:C.bg,display:"flex",flexDirection:"column",alignItems:"center",gap:10}}>
         <div style={{fontSize:32}}>📂</div>
-        <div style={{color:C.teal,fontWeight:800,fontSize:14}}>Upload GR PDFs</div>
-        <div style={{color:C.muted,fontSize:12}}>Upload 1 DI for a single trip · Upload multiple for batch — auto-grouped by vehicle</div>
+        <div style={{color:C.teal,fontWeight:800,fontSize:14}}>Upload GR / DI copies + party invoices</div>
+        <div style={{color:C.muted,fontSize:12}}>Select everything at once — invoices are matched to their DI automatically · auto-grouped by vehicle</div>
         <div style={{display:"flex",gap:10,width:"100%",maxWidth:320}}>
           <button onClick={()=>inputRef.current?.click()}
             style={{flex:1,background:C.teal+"22",border:`1.5px solid ${C.teal}66`,
@@ -5116,6 +5122,30 @@ Rules:
         </div>
       )}
 
+      {/* Invoices that could not be attached to a party DI */}
+      {!scanningNow && invoiceMatch.unmatched.length>0 && (
+        <div style={{background:"#fef3c7",border:"1px solid #f59e0b",borderRadius:10,padding:"10px 14px"}}>
+          <div style={{color:"#b45309",fontWeight:800,fontSize:13,marginBottom:6}}>
+            ⚠ {invoiceMatch.unmatched.length} invoice file{invoiceMatch.unmatched.length>1?"s":""} not attached
+          </div>
+          {invoiceMatch.unmatched.map(u=>(
+            <div key={u.scanId} style={{display:"flex",justifyContent:"space-between",gap:8,padding:"5px 0",borderTop:"1px solid #f59e0b44"}}>
+              <div style={{minWidth:0}}>
+                <div style={{fontSize:12,fontWeight:700,color:C.text}}>{u.file?.name||"file"}</div>
+                <div style={{fontSize:11,color:C.muted}}>
+                  {u.reason==="no_di"    && ("DI number could not be read"+(u.error?` — ${u.error}`:"")+". Upload it on its DI with the Upload Invoice button.")}
+                  {u.reason==="no_trip"  && "No scanned DI has this DI number — add that DI's GR copy too."}
+                  {u.reason==="not_party"&& "This DI is a godown order — no invoice needed. Set it to Party if it should have one."}
+                  {u.reason==="duplicate"&& "This DI already has an invoice — second file ignored."}
+                </div>
+              </div>
+              <button onClick={()=>setItems(prev=>prev.filter(x=>x.id!==u.scanId))}
+                style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:16,flexShrink:0}}>✕</button>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Error items */}
       {errorItems.length>0&&(
         <div style={{background:C.red+"11",border:`1px solid ${C.red}33`,borderRadius:10,padding:"10px 14px"}}>
@@ -5131,6 +5161,7 @@ Rules:
               <div style={{flex:1,minWidth:0}}>
                 <div style={{color:C.red,fontWeight:700,fontSize:12}}>{item.file?.name||"Unknown file"}</div>
                 <div style={{color:C.muted,fontSize:11,marginTop:2}}>{item.error||"Unknown error"}</div>
+                <div style={{color:C.muted,fontSize:10,marginTop:2}}>If this is a party invoice, attach it with Upload Invoice on its DI.</div>
               </div>
               <button onClick={()=>setItems(prev=>prev.filter(x=>x.id!==item.id))}
                 style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:16,flexShrink:0,padding:"0 4px"}}>✕</button>
@@ -5345,7 +5376,7 @@ Rules:
                           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
                             <div>
                               <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
-                                📱 DRIVER PHONE {item.partyDriverPhone?<span style={{color:C.green}}>✓</span>:<span style={{color:C.red}}>*</span>}
+                                📱 DRIVER PHONE <span style={{color:C.muted,fontWeight:500}}>(optional)</span>
                               </div>
                               <input value={item.partyDriverPhone||""} placeholder="10-digit mobile"
                                 onChange={e=>updateItem(item.id,"partyDriverPhone",e.target.value.replace(/\D/g,"").slice(0,10))}
@@ -5354,7 +5385,7 @@ Rules:
                             </div>
                             <div>
                               <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
-                                📱 SALES OFFICER PHONE {item.salesOfficerPhone?<span style={{color:C.green}}>✓</span>:<span style={{color:C.red}}>*</span>}
+                                📱 SALES OFFICER PHONE <span style={{color:C.muted,fontWeight:500}}>(optional)</span>
                               </div>
                               <input value={item.salesOfficerPhone||""} placeholder="10-digit mobile"
                                 onChange={e=>updateItem(item.id,"salesOfficerPhone",e.target.value.replace(/\D/g,"").slice(0,10))}
@@ -5363,7 +5394,7 @@ Rules:
                             </div>
                             <div>
                               <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
-                                ✉ SALES OFFICER EMAIL {item.salesOfficerEmail?.endsWith("shreecement.com")?<span style={{color:C.green}}>✓</span>:<span style={{color:C.red}}>* @shreecement.com</span>}
+                                ✉ SALES OFFICER EMAIL <span style={{color:C.muted,fontWeight:500}}>(optional)</span>
                               </div>
                               <input value={item.salesOfficerEmail||""} placeholder="name@shreecement.com"
                                 onChange={e=>updateItem(item.id,"salesOfficerEmail",e.target.value.trim().toLowerCase())}
@@ -5372,7 +5403,7 @@ Rules:
                             </div>
                             <div>
                               <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
-                                📋 PARTY NUMBER {item.partyNumber?<span style={{color:C.green}}>✓</span>:<span style={{color:C.red}}>*</span>}
+                                📋 PARTY NUMBER <span style={{color:C.muted,fontWeight:500}}>(optional)</span>
                               </div>
                               <input value={item.partyNumber||""} placeholder="Party order number"
                                 onChange={e=>updateItem(item.id,"partyNumber",e.target.value)}
@@ -5421,12 +5452,12 @@ Rules:
                           <div style={{display:"flex",gap:8}}>
                             <div style={{flex:1}}>
                               <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
-                                GR COPY {item.grFile?<span style={{color:C.green}}>✓</span>:<span style={{color:C.red}}>* required</span>}
+                                GR COPY {partyGrFile(item)?<span style={{color:C.green}}>✓ {item.grFile?"uploaded":"scanned copy"}</span>:<span style={{color:C.red}}>* required</span>}
                               </div>
-                              <label style={{display:"flex",alignItems:"center",gap:6,background:item.grFile?C.green+"11":C.bg,
-                                border:`1.5px solid ${item.grFile?C.green:C.border}`,borderRadius:8,
+                              <label style={{display:"flex",alignItems:"center",gap:6,background:partyGrFile(item)?C.green+"11":C.bg,
+                                border:`1.5px solid ${partyGrFile(item)?C.green:C.border}`,borderRadius:8,
                                 padding:"7px 10px",cursor:"pointer",fontSize:12}}>
-                                <span>{item.grFile?"📄 "+item.grFile.name:"📎 Upload GR"}</span>
+                                <span>{partyGrFile(item)?"📄 "+partyGrFile(item).name:"📎 Upload GR"}</span>
                                 <input type="file" accept="application/pdf,image/*" style={{display:"none"}}
                                   onChange={e=>{
                                     const f=e.target.files?.[0];
@@ -5439,7 +5470,7 @@ Rules:
                             </div>
                             <div style={{flex:1}}>
                               <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:3}}>
-                                INVOICE {item.invoiceFile?<span style={{color:C.green}}>✓</span>:<span style={{color:C.red}}>* required</span>}
+                                INVOICE {item.invoiceFile?<span style={{color:C.green}}>✓</span>:<span style={{color:C.red}}>* required — drop it with the DIs, or upload here</span>}
                               </div>
                               <label style={{display:"flex",alignItems:"center",gap:6,background:item.invoiceFile?C.green+"11":C.bg,
                                 border:`1.5px solid ${item.invoiceFile?C.green:C.border}`,borderRadius:8,
@@ -6683,7 +6714,11 @@ function FileSourcePicker({ onFile, accept="image/*,application/pdf", label="Upl
   );
 }
 
-function DIUploader({ onExtracted, trips, settings, isIn, onFile=null, vehicles=[], employees=[] }) {
+function DIUploader({ onExtracted, trips, settings, isIn, onFile=null, vehicles=[], employees=[], onInvoice=null, currentDI="", onMultiGR=null }) {
+  // onInvoice (party trip only): the zone takes several files at once — DI/GR copy and invoice(s) — and
+  // each invoice is attached only if its DI number equals the trip's DI.
+  const [notice,  setNotice]  = useState([]);
+  const multiInputRef = useRef(null);
   const [state,   setState]   = useState("idle"); // idle | reading | scanning | done | error
   const [preview, setPreview] = useState(null);   // base64 for image preview
   const [error,   setError]   = useState("");
@@ -6709,7 +6744,8 @@ Extract the following fields from this document image and return ONLY a JSON obj
   "qty": "Quantity in MT as a number only (no units)",
   "bags": "Number of bags as a number only (0 if not applicable)",
   "frRate": "Freight rate per MT in rupees as a number only (the Shree/company rate, not driver rate)",
-  "date": "Date in YYYY-MM-DD format"
+  "date": "Date in YYYY-MM-DD format",
+  "docKind": "'invoice' if this document is a GST TAX INVOICE (has Invoice No, Bill To / Ship To, tax lines); 'gr' if it is a GR / Consignment Note / Delivery Instruction copy issued with the transporter's letterhead"
 }
 Rules:
 - Return ONLY the JSON object, no explanation, no markdown, no backticks
@@ -6795,11 +6831,94 @@ Rules:
     }
   };
 
+  // Party trip: several files in one drop (DI/GR copy + invoice(s)).
+  const scanOne = async (file) => {
+    try {
+      const base64 = await fileToBase64(file);
+      const isImage = file.type.startsWith("image/");
+      if (!isImage && file.type !== "application/pdf") return { file, kind:"gr", diNo:"", error:"not a PDF or photo" };
+      const resp = await fetch("/.netlify/functions/scan-di", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ base64, anthropicKey: RC.anthropicKey, mediaType: file.type, prompt: PROMPT }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || data.error) return { file, kind:"unknown", diNo:"", error: data.error || "Server error" };
+      if (data.transporterName && !isOwnTransporter(data.transporterName))
+        return { file, kind:"unknown", diNo:"", error:`document is for transporter "${data.transporterName}"` };
+      logScan("di_scan", true, data._costInr||0);
+      return { file, kind: String(data.docKind||"").toLowerCase()==="invoice" ? "invoice" : "gr", diNo: normDI(data.diNo), extracted: data };
+    } catch(e) { return { file, kind:"unknown", diNo:"", error: e.message }; }
+  };
+
+  const handleFiles = async (fileList) => {
+    const files = Array.from(fileList || []).filter(Boolean);
+    if (!files.length) return;
+    if (!onInvoice) { handleFile(files[0]); return; }
+    setError(""); setNotice([]); setState("scanning");
+    const scans = [];
+    for (let i = 0; i < files.length; i++) {
+      scans.push(await scanOne(files[i]));
+      if (i < files.length - 1) await new Promise(r => setTimeout(r, 1200));
+    }
+    // A file that could not be read at all: say so (an unreadable GR is an error; an unreadable invoice is a notice)
+    const unreadable = scans.filter(x => x.kind === "unknown");
+    const readable = scans.filter(x => x.kind !== "unknown");
+    const msgs = unreadable.map(x => `${x.file.name}: could not be read — ${x.error}`);
+    const routed = routeDroppedDocs(readable, currentDI);
+    if (routed.blocked) {
+      // More than one DI/GR copy dropped = a batch: hand ALL the files to the batch scanner.
+      if (onMultiGR) { setState("idle"); onMultiGR(files); return; }
+      setError(routed.blocked); setNotice(msgs); setState("error"); return;
+    }
+    msgs.push(...routed.notices);
+    routed.invoices.forEach(f => onInvoice(f));
+    if (routed.gr) {
+      const extracted = routed.gr.extracted;
+      const lrNo = (extracted.lrNo || "").trim();
+      const existingTrip = lrNo ? trips.find(t => t.lrNo === lrNo) : null;
+      setState("done");
+      if (onFile) onFile(routed.gr.file);
+      onExtracted({
+        ...extracted,
+        qty:    String(extracted.qty    || ""),
+        bags:   String(extracted.bags   || "0"),
+        frRate: String(extracted.frRate || ""),
+        tafal:  String(tafalAmountFor((vehicles||[]).find(v=>v.truckNo===(extracted.truckNo||"").toUpperCase().trim()), employees, settings)),
+        advance: "0", shortage: "0", shortageRecovery: "0", loanRecovery: "0", dieselEstimate: "0",
+        type: isIn ? "inbound" : "outbound",
+      }, existingTrip);
+    } else if (routed.invoices.length) {
+      setState("done");
+    } else {
+      setError(unreadable.length ? "Nothing could be read — try clearer photos." : "No DI / GR copy found in the files you selected.");
+      setState("error");
+    }
+    setNotice(msgs);
+  };
+
   const onDrop = (e) => {
     e.preventDefault();
+    if (onInvoice) { handleFiles(e.dataTransfer?.files); return; }
     const file = e.dataTransfer?.files?.[0];
     if (file) handleFile(file);
   };
+
+  const multiPicker = onInvoice && (
+    <>
+      <button onClick={()=>multiInputRef.current?.click()}
+        style={{background:C.blue+"22",border:`1.5px solid ${C.blue}66`,borderRadius:10,padding:"9px 14px",
+          color:C.blue,fontWeight:700,fontSize:13,cursor:"pointer"}}>
+        📁 Select DI / GR + invoice files together
+      </button>
+      <input ref={multiInputRef} type="file" multiple accept="image/*,application/pdf" style={{display:"none"}}
+        onChange={e=>{ if(e.target.files?.length) handleFiles(e.target.files); e.target.value=""; }} />
+    </>
+  );
+  const noticeBox = notice.length>0 && (
+    <div style={{background:"#fef3c7",border:"1px solid #f59e0b",borderRadius:8,padding:"8px 10px",marginTop:8,textAlign:"left"}}>
+      {notice.map((m,i)=><div key={i} style={{fontSize:11,color:"#92400e"}}>⚠ {m}</div>)}
+    </div>
+  );
 
   return (
     <div style={{marginBottom:16}}>
@@ -6820,11 +6939,13 @@ Rules:
             Upload DI / GR Copy
           </div>
           <div style={{color: C.muted, fontSize: 12}}>
-            Take a photo or upload PDF — AI will fill all fields
+            {onInvoice ? "Drop the DI / GR copy and the invoice together — the invoice is attached by DI number" : "Take a photo or upload PDF — AI will fill all fields"}
           </div>
+          {multiPicker}
           <FileSourcePicker onFile={handleFile} accept="image/*,application/pdf"
-            label="Take photo or upload PDF" color={C.blue} icon="📄" />
+            label={onInvoice ? "Single file: photo or PDF" : "Take photo or upload PDF"} color={C.blue} icon="📄" />
           {error && <div style={{color:C.red, fontSize:12, marginTop:4}}>{error}</div>}
+          {noticeBox}
         </div>
       )}
 
@@ -6866,11 +6987,17 @@ Rules:
           <div style={{color: C.green, fontWeight: 700, fontSize: 13}}>
             ✓ Document scanned — fields filled below
           </div>
-          <button onClick={() => { setState("idle"); setPreview(null); }}
+          <button onClick={() => { setState("idle"); setPreview(null); setNotice([]); }}
             style={{background:"none", border:`1px solid ${C.green}44`, color:C.green,
               borderRadius:8, padding:"4px 10px", fontSize:12, cursor:"pointer"}}>
             Scan another
           </button>
+        </div>
+      )}
+      {state === "done" && onInvoice && (
+        <div style={{marginTop:8,display:"flex",flexDirection:"column",alignItems:"flex-start",gap:6}}>
+          {multiPicker}
+          {noticeBox}
         </div>
       )}
 
@@ -8122,7 +8249,8 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
   });
   // Party order flow state
   const [orderTypeStep, setOrderTypeStep] = useState(null);
-  const [partyStep,     setPartyStep]     = useState("docs");
+  const [partyStep,     setPartyStep]     = useState("form"); // the separate "docs" step is gone: one drop zone in the form step
+  const [, bumpPartyDocs] = useState(0); // re-render when invoice files change in the ref
   const [uploadingFiles,setUploadingFiles]= useState(false);
   // Refs to hold file objects across re-renders without triggering state
   const grFileRef      = useRef([]); // array — supports multiple GR copies for multi-DI
@@ -8136,6 +8264,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
   // Sealed invoice upload sheet
   const [sealedSheet, setSealedSheet] = useState(null); // trip object
   const [batchDISheet,  setBatchDISheet]  = useState(false); // morning batch GR scanner
+  const [batchInitialFiles, setBatchInitialFiles] = useState(null); // files handed over from the single-trip drop zone
   const [manualLrMode,  setManualLrMode]  = useState(false); // allow manual LR entry for old data
   const [manualDiesel,  setManualDiesel]  = useState(false); // always locked — diesel only from requests
 
@@ -8674,23 +8803,6 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       // here for the non-owner case.
       if(_net < 0 && user.role!=="owner"){
         if(!window.confirm(`Net to Driver is ₹${_net.toLocaleString("en-IN")} (negative).\n\nThis trip will save, but needs owner approval before it can be billed or settled.\n\nContinue?`)) return;
-      }
-    }
-    // ── Mandatory trip fields (feature flag) ──────────────────────────────
-    if(canFeature("mandatory_trip_fields")) {
-      const t = editSheet;
-      const veh = (vehicles||[]).find(v=>v.truckNo===t.truckNo);
-      const missing = [];
-      // Owner name / driver phone no longer block the save (see batch save) — ledgers must always be written.
-      if(t.orderType==="party") {
-        if(!(t.partyNumber||"").trim()) missing.push("Party Number (ಪಾರ್ಟಿ ನಂಬರ್)");
-        if(!(t.salesOfficerPhone||"").trim()) missing.push("Sales Officer Phone (ಸೇಲ್ಸ್ ಅಧಿಕಾರಿ ಫೋನ್)");
-        if(!(t.salesOfficerEmail||"").trim()) missing.push("Sales Officer Email (ಸೇಲ್ಸ್ ಅಧಿಕಾರಿ ಇಮೇಲ್)");
-        if(!(t.partyDriverPhone||"").trim()) missing.push("Party Driver Phone (ಪಾರ್ಟಿ ಡ್ರೈವರ್ ಫೋನ್)");
-      }
-      if(missing.length > 0) {
-        alert(`Mandatory fields missing:\n\n${missing.map(m=>"  ⚠ "+m).join("\n")}\n\nPlease fill all required fields.\nಎಲ್ಲಾ ಕಡ್ಡಾಯ ಕ್ಷೇತ್ರಗಳನ್ನು ಭರ್ತಿ ಮಾಡಿ.`);
-        return;
       }
     }
     // ── Diesel indent lock — once a diesel request is attached, only an
@@ -10027,8 +10139,9 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
 
       {/* ── BATCH DI SCANNER SHEET ── */}
       {batchDISheet && (
-        <Sheet title="📋 Add Trip — Scan GR / DI Copies" onClose={()=>setBatchDISheet(false)} noBackdropClose>
+        <Sheet title="📋 Add Trip — Scan GR / DI Copies" onClose={()=>{setBatchDISheet(false);setBatchInitialFiles(null);}} noBackdropClose>
           <BatchDIScanner
+            initialFiles={batchInitialFiles}
             trips={trips} vehicles={vehicles} setVehicles={setVehicles}
             setTrips={setTrips} settings={settings} user={user} log={log}
             employees={employees||[]} cashTransfers={cashTransfers||[]} setCashTransfers={setCashTransfers}
@@ -10062,7 +10175,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       {addSheet && (
         <Sheet title={isIn?"New Raw Material Trip":"New Cement Trip"} onClose={()=>{
           setAddSheet(false);setF(blankForm());setDiConflict(null);setWasScanned(false);
-          setOrderTypeStep(null);setPartyStep("docs");setUploadingFiles(false);
+          setOrderTypeStep(null);setPartyStep("form");setUploadingFiles(false);
           grFileRef.current=[]; invoiceFileRef.current=[];
         }}>
           {manualLrMode && (
@@ -10084,7 +10197,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                 setF(blankForm(false));
               } else {
                 setOrderTypeStep("party");
-                setPartyStep("docs");
+                setPartyStep("form");
                 setF(blankForm(true));
               }
             }} />
@@ -10125,67 +10238,6 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
             </>
           )}
 
-          {/* STEP 1 (PARTY): Upload GR + Invoice — skippable if files already present */}
-          {orderTypeStep==="party" && partyStep==="docs" && (() => {
-            const hasGR  = Array.isArray(grFileRef.current)  ? grFileRef.current.length>0  : !!grFileRef.current;
-            const hasInv = Array.isArray(invoiceFileRef.current) ? invoiceFileRef.current.length>0 : !!invoiceFileRef.current;
-            return (
-              <div style={{display:"flex",flexDirection:"column",gap:12}}>
-                {/* If files already loaded (e.g. from prior scan), show skip option */}
-                {hasGR && hasInv && (
-                  <div style={{background:C.green+"11",border:`1px solid ${C.green}33`,borderRadius:10,
-                    padding:"12px 14px"}}>
-                    <div style={{color:C.green,fontWeight:700,fontSize:13,marginBottom:6}}>
-                      ✓ Files already uploaded from scan
-                    </div>
-                    <div style={{color:C.muted,fontSize:12,marginBottom:10}}>
-                      GR: {Array.isArray(grFileRef.current)?grFileRef.current.length:1} file(s) &nbsp;·&nbsp;
-                      Invoice: {Array.isArray(invoiceFileRef.current)?invoiceFileRef.current.length:1} file(s)
-                    </div>
-                    <div style={{display:"flex",gap:8}}>
-                      <Btn onClick={()=>setPartyStep("form")} full color={C.green}>
-                        Continue with these files →
-                      </Btn>
-                    </div>
-                    <div style={{marginTop:8,textAlign:"center"}}>
-                      <button onClick={()=>{grFileRef.current=[];invoiceFileRef.current=[];}}
-                        style={{background:"none",border:"none",color:C.muted,fontSize:12,
-                          cursor:"pointer",textDecoration:"underline"}}>
-                        Replace files instead
-                      </button>
-                    </div>
-                  </div>
-                )}
-                {/* Show upload form if no files yet, or if replacing */}
-                {(!hasGR || !hasInv) && (
-                  <>
-                    <PartyDocUpload
-                      tripId={f.id||"new"}
-                      grFileRef={grFileRef}
-                      invoiceFileRef={invoiceFileRef}
-                      onDone={()=>setPartyStep("form")}
-                      onBack={()=>setOrderTypeStep("selecting")}
-                    />
-                    <div style={{textAlign:"center",marginTop:4}}>
-                      <button onClick={()=>setPartyStep("form")}
-                        style={{background:"none",border:"none",color:C.muted,fontSize:12,
-                          cursor:"pointer",textDecoration:"underline"}}>
-                        Skip for now — upload files before saving
-                      </button>
-                      <div style={{fontSize:10,color:C.red,marginTop:2}}>
-                        ⚠ GR and Invoice are mandatory before saving
-                      </div>
-                    </div>
-                  </>
-                )}
-                {/* Back button when files exist but user wants to replace */}
-                {hasGR && hasInv && (
-                  <Btn onClick={()=>setOrderTypeStep("selecting")} full outline color={C.muted}>← Back</Btn>
-                )}
-              </div>
-            );
-          })()}
-
           {/* STEP 2 (PARTY): Fill trip form — same scan/conflict flow as godown */}
           {orderTypeStep==="party" && partyStep==="form" && (
             <>
@@ -10201,12 +10253,14 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                     </div>
                     <div style={{background:C.blue+"22",border:`1px solid ${C.blue}44`,borderRadius:8,
                       padding:"5px 10px",fontSize:11,color:invCount>0?C.blue:C.orange,fontWeight:700}}>
-                      {invCount>0?`✓ Inv: ${invCount} file(s)`:"⚠ No Invoice — add after scan"}
+                      {invCount>0?`✓ Inv: ${invCount} file(s)`:"⚠ No Invoice — drop it with the DI/GR copy"}
                     </div>
-                    <button onClick={()=>{setPartyStep("docs");setDiConflict(null);setWasScanned(false);}}
-                      style={{background:"none",border:"none",color:C.muted,fontSize:11,cursor:"pointer"}}>
-                      ✏ Add/Change files
-                    </button>
+                    {invCount>0 && (
+                      <button onClick={()=>{invoiceFileRef.current=[];bumpPartyDocs(x=>x+1);}}
+                        style={{background:"none",border:"none",color:C.muted,fontSize:11,cursor:"pointer"}}>
+                        ✕ Remove invoice
+                      </button>
+                    )}
                   </>);
                 })()}
               </div>
@@ -10232,7 +10286,22 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
               ) : (
                 <>
                   {/* Scan uploader — goes through same onDIExtracted → AskLRSheet flow */}
-                  <DIUploader onExtracted={e=>{
+                  <DIUploader
+                  onMultiGR={files=>{
+                    // several DI/GR copies dropped = a batch: continue in the batch scanner with the same files
+                    setBatchInitialFiles(Array.from(files));
+                    setAddSheet(false); setF(blankForm()); setDiConflict(null); setWasScanned(false);
+                    setOrderTypeStep(null); setPartyStep("form");
+                    grFileRef.current=[]; invoiceFileRef.current=[];
+                    setBatchDISheet(true);
+                  }}
+                  currentDI={f.diNo || diConflict?.extracted?.diNo || ""}
+                  onInvoice={file=>{
+                    const cur = Array.isArray(invoiceFileRef.current)?invoiceFileRef.current:(invoiceFileRef.current?[invoiceFileRef.current]:[]);
+                    if(!cur.some(x=>x.name===file.name&&x.size===file.size)) invoiceFileRef.current=[...cur,file];
+                    bumpPartyDocs(x=>x+1);
+                  }}
+                  onExtracted={e=>{
                     // Preserve party orderType and district/state through the scan flow
                     const dc = detectClient(e);
                     setF(p=>({...p, orderType:"party", client:dc,
@@ -10247,6 +10316,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                     if(!cur.some(f=>f.name===file.name&&f.size===file.size)){
                       grFileRef.current=[...cur, file];
                     }
+                    bumpPartyDocs(x=>x+1);
                   }} />
 
                   {/* Show form only after scan + LR confirmed (wasScanned) or owner */}
@@ -10359,8 +10429,8 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                           const grReady  = await prepareFile(grFiles,  "gr");
                           const invReady = await prepareFile(invFiles, "invoice");
                           const [grRes, invRes] = await Promise.all([
-                            grReady  ? uploadPartyFile(tripId,"gr",grReady).catch(e=>{console.warn("GR upload failed:",e.message);return null;})      : Promise.resolve(null),
-                            invReady ? uploadPartyFile(tripId,"invoice",invReady).catch(e=>{console.warn("Invoice upload failed:",e.message);return null;}) : Promise.resolve(null),
+                            grReady  ? uploadPartyFile(tripId,"gr",grReady).catch(e=>{saveFail("GR copy upload (trip saved WITHOUT its GR — attach it on the trip):")(e);return null;})      : Promise.resolve(null),
+                            invReady ? uploadPartyFile(tripId,"invoice",invReady).catch(e=>{saveFail("Invoice upload (trip saved WITHOUT its invoice — attach it on the trip):")(e);return null;}) : Promise.resolve(null),
                           ]);
                           if(grRes)  grUrl  = grRes.path;
                           if(invRes) invUrl = invRes.path;
@@ -10433,7 +10503,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                               veh.truckNo!==tn2 ? veh : syncTripRecoveryToVehicle(veh, t)));
                           }
                           setAddSheet(false); setF(blankForm());
-                          setOrderTypeStep(null); setPartyStep("docs");
+                          setOrderTypeStep(null); setPartyStep("form");
                           grFileRef.current=[]; invoiceFileRef.current=[];
                         } catch(e){ alert("Error saving trip: "+e.message); }
                         finally { setUploadingFiles(false); }
@@ -12950,6 +13020,334 @@ function DieselReceiptScan({ selected, pumps, dieselRequests=[], cashAmount, use
         </div>
       )}
       {error && <div style={{color:C.red,fontSize:13,background:C.red+"11",borderRadius:8,padding:"10px 12px"}}>{error}</div>}
+    </div>
+  );
+}
+
+// Gathers everything "Find a payment" and the bulk screenshot check search through. The app only keeps recent
+// rows in memory, so the big ledgers are asked of the database directly. Failures are returned, never hidden.
+async function loadFindData({ vehicles, employees, refs, amount }) {
+  const cleanRefs = (refs||[]).map(normRef).filter(r=>r.length>=8);
+  const amt = +amount || 0;
+  const errs = [];
+  const orFor = (textCols) => {
+    const parts = [];
+    cleanRefs.forEach(r => textCols.forEach(c => parts.push(`${c}.ilike.%${r}%`)));
+    if (amt > 0) parts.push(`amount.eq.${amt}`);
+    return parts.join(",");
+  };
+  const pull = async (label, table, cols) => {
+    const filter = orFor(cols);
+    if (!filter) return [];
+    const { data, error } = await supabase.from(table).select("*").or(filter).limit(500);
+    if (error) { errs.push(`${label}: search failed — ${error.message}`); return []; }
+    return data || [];
+  };
+  let ct=[], dp=[], pr=[];
+  try {
+    [ct, dp, pr] = await Promise.all([
+      pull("Wallet transfers", "mye_cash_transfers", ["utr","ref","note"]),
+      pull("Driver payments", "mye_driver_payments", ["utr","notes"]),
+      pull("Payment requests", "mye_payment_requests", ["notes"]),
+    ]);
+  } catch(e) { errs.push("Search failed — " + (e.message||e)); }
+  const data = {
+    vehicles: vehicles||[], employees: employees||[],
+    cashTransfers: ct.map(r=>({id:r.id, empId:r.emp_id, amount:r.amount, date:r.date, note:r.note, utr:r.utr, ref:r.ref, type:r.type, lrNo:r.lr_no})),
+    driverPayments: dp.map(r=>({id:r.id, tripId:r.trip_id, truckNo:r.truck_no, lrNo:r.lr_no, amount:r.amount, utr:r.utr, date:r.date, notes:r.notes, paidTo:r.paid_to})),
+    paymentRequests: pr.map(r=>({id:r.id, tripId:r.trip_id, lrNo:r.lr_no, truckNo:r.truck_no, amount:r.amount, recipientName:r.recipient_name, status:r.status, notes:r.notes, paidAt:r.paid_at, createdAt:r.created_at})),
+  };
+  return { data, errs };
+}
+
+// ─── FIND A PAYMENT (owner) ───────────────────────────────────────────────────
+// Type a bank reference / UTR or upload the payment screenshot: shows where it is recorded
+// (vehicle loan, employee loan, wallet transfer, driver payment, payment request). Read-only.
+function FindPaymentCard({ vehicles, employees }) {
+  const [open, setOpen]       = useState(false);
+  const [ref, setRef]         = useState("");
+  const [amount, setAmount]   = useState("");
+  const [date, setDate]       = useState("");
+  const [name, setName]       = useState("");
+  const [extraRefs, setExtra] = useState([]); // second id from a screenshot (reference no + transaction id)
+  const [busy, setBusy]       = useState(false);
+  const [result, setResult]   = useState(null);
+  const [errors, setErrors]   = useState([]);
+
+  const run = async (q) => {
+    setBusy(true); setResult(null); setErrors([]);
+    const refs = [...(q.refs||[])];
+    const amt = +q.amount || 0;
+    const { data, errs } = await loadFindData({ vehicles, employees, refs, amount: amt });
+    setResult({ ...findPayment({ refs, amount: amt, date: q.date, name: q.name }, data), asked: q });
+    setErrors(errs); setBusy(false);
+  };
+
+  const search = () => run({ refs:[ref, ...extraRefs], amount, date, name });
+
+  const fromScreenshot = (p) => {
+    const r1 = p.referenceNo || "", r2 = p.transactionId || "";
+    setRef(r1 || r2); setExtra(r1 && r2 ? [r2] : []);
+    setAmount(p.amount ? String(p.amount) : ""); setDate(p.paymentDate || ""); setName(p.paidTo || "");
+    run({ refs:[r1, r2], amount:p.amount, date:p.paymentDate, name:p.paidTo });
+  };
+
+  const inp = {background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,color:C.text,padding:"8px 10px",fontSize:13,outline:"none",boxSizing:"border-box",width:"100%"};
+  const show = (r, confirmed) => (
+    <div key={r.kind+r.id} style={{background:confirmed?C.green+"11":"#fef3c7",border:`1px solid ${confirmed?C.green:"#f59e0b"}`,borderRadius:10,padding:"8px 12px"}}>
+      <div style={{fontWeight:800,fontSize:12,color:confirmed?C.green:"#b45309"}}>
+        {confirmed ? "✓ Recorded" : "? Possible match"} — {r.label}
+      </div>
+      <div style={{fontSize:13,color:C.text,marginTop:2}}>{r.where}</div>
+      <div style={{fontSize:12,color:C.muted,marginTop:2}}>
+        ₹{(+r.amount||0).toLocaleString("en-IN")} · {r.date||"no date"}
+        {!confirmed && <> · matched on {r.reasons.join(" + ")} (reference not recorded)</>}
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:"10px 14px"}}>
+      <div onClick={()=>setOpen(o=>!o)} style={{display:"flex",justifyContent:"space-between",cursor:"pointer",fontWeight:800,fontSize:14,color:C.text}}>
+        <span>🔎 Find a payment</span><span style={{color:C.muted}}>{open?"▾":"▸"}</span>
+      </div>
+      {open && (
+        <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:10}}>
+          <div style={{fontSize:11,color:C.muted}}>Search by reference / UTR, or upload the bank screenshot — shows where it is recorded.</div>
+          <div style={{display:"flex",gap:8}}>
+            <input value={ref} onChange={e=>{setRef(e.target.value);setExtra([]);}} placeholder="Reference / UTR / transaction ID" style={inp}
+              onKeyDown={e=>{if(e.key==="Enter")search();}} />
+            <ScanPaymentBtn onResult={fromScreenshot} />
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <input value={amount} onChange={e=>setAmount(e.target.value.replace(/[^\d.]/g,""))} placeholder="Amount ₹ (optional)" style={inp} />
+            <input type="date" value={date} onChange={e=>setDate(e.target.value)} style={inp} />
+            <input value={name} onChange={e=>setName(e.target.value)} placeholder="Name (optional)" style={inp} />
+          </div>
+          <button onClick={search} disabled={busy||(!ref.trim()&&!(+amount>0&&date))}
+            style={{background:C.accent,color:"#fff",border:"none",borderRadius:10,padding:"10px",fontWeight:800,fontSize:13,cursor:"pointer",opacity:busy?0.6:1}}>
+            {busy?"Searching…":"Search"}
+          </button>
+          {errors.map((m,i)=><div key={i} style={{color:C.red,fontSize:12,fontWeight:700}}>⚠ {m}</div>)}
+          {result && (
+            <>
+              {result.exact.map(r=>show(r,true))}
+              {result.possible.map(r=>show(r,false))}
+              {result.exact.length===0 && result.possible.length===0 && errors.length===0 && (
+                <div style={{background:C.red+"11",border:`1px solid ${C.red}44`,borderRadius:10,padding:"8px 12px",color:C.red,fontSize:13,fontWeight:700}}>
+                  Not found — this reference is not recorded anywhere{(+result.asked.amount>0&&result.asked.date)?" and no entry has the same amount within 3 days":""}.
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── BULK PAYMENT SCREENSHOT CHECK (owner) ────────────────────────────────────
+// Upload many bank screenshots. Each row shows the screenshot amount, the amount recorded in the database and
+// where it is recorded. If the database holds MORE under a reference and the extra is exactly money the trips
+// should have held back (pouch / advance / tafal / diesel / recoveries), the row offers a reviewed per-trip
+// correction of the driver payments; the trips' balances follow because they are computed from those payments.
+function BulkPaymentCheck({ vehicles, employees, user, log, reloadDriverPays }) {
+  const [open, setOpen]   = useState(false);
+  const [items, setItems] = useState([]);
+  const [expanded, setExpanded] = useState(null);
+  const inputRef = useRef();
+  const upd = (id, patch) => setItems(p => p.map(x => x.id===id ? {...x, ...patch} : x));
+  const inr = n => "₹" + (Math.round((+n||0)*100)/100).toLocaleString("en-IN");
+
+  const scanShot = async (file) => {
+    const b64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result.split(",")[1]); r.onerror = rej; r.readAsDataURL(file); });
+    const resp = await fetch("/.netlify/functions/scan-payment", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ base64: b64, anthropicKey: RC.anthropicKey, mediaType: file.type||"image/jpeg" }),
+    });
+    const parsed = await resp.json();
+    if (!resp.ok || parsed.error) throw new Error(parsed.error || "Scan failed");
+    logScan("payment_scan", true, parsed._costInr||0);
+    return parsed;
+  };
+
+  const analyze = async (scan) => {
+    const refs = [scan.referenceNo, scan.transactionId].filter(Boolean);
+    if (!refs.map(normRef).some(r=>r.length>=8) && !(+scan.amount>0 && scan.paymentDate))
+      return { kind:"unreadable", errs:["The reference could not be read from this screenshot."] };
+    const { data, errs } = await loadFindData({ vehicles, employees, refs, amount: scan.amount });
+    const cleanRefs = refs.map(normRef).filter(r=>r.length>=8);
+    const hit = data.driverPayments.filter(d => cleanRefs.some(q => normRef(d.utr).includes(q)));
+    if (hit.length) {
+      const ids = [...new Set(hit.map(h=>h.tripId))];
+      const [tr, pays, raw] = await Promise.all([
+        supabase.from("mye_trips").select("id,lr_no,truck_no,qty,given_rate,di_lines,advance,tafal,diesel_estimate,shortage,shortage_recovery,loan_recovery,order_type,pouch_balance,pouch_released").in("id", ids),
+        supabase.from("mye_driver_payments").select("trip_id,amount").in("trip_id", ids),
+        supabase.from("mye_driver_payments").select("id,notes,amount").in("id", hit.map(h=>h.id)),
+      ]);
+      const bad = tr.error || pays.error || raw.error;
+      if (bad) return { kind:"error", errs:[...errs, "Could not load the trips for this reference — " + bad.message] };
+      const trips = {};
+      (tr.data||[]).forEach(t => { trips[t.id] = { id:t.id, lrNo:t.lr_no, truckNo:t.truck_no, qty:t.qty, givenRate:t.given_rate, diLines:t.di_lines||[],
+        advance:t.advance, tafal:t.tafal, dieselEstimate:t.diesel_estimate, shortage:t.shortage, shortageRecovery:t.shortage_recovery,
+        loanRecovery:t.loan_recovery, orderType:t.order_type, pouchBalance:t.pouch_balance, pouchReleased:t.pouch_released }; });
+      const paidByTrip = {};
+      (pays.data||[]).forEach(p => { paidByTrip[p.trip_id] = (paidByTrip[p.trip_id]||0) + (+p.amount||0); });
+      const notes = {}; (raw.data||[]).forEach(r => { notes[r.id] = r.notes||""; });
+      const rec = reconcileScreenshot({ amount: scan.amount, rows: hit, trips, paidByTrip });
+      return { kind:"driver", rec, notes, errs, recordedAmount: rec.recordedTotal,
+        where: [`Driver payments · ${hit.length} row${hit.length>1?"s":""} on ${ids.length} trip${ids.length>1?"s":""}`] };
+    }
+    const found = findPayment({ refs, amount: scan.amount, date: scan.paymentDate, name: scan.paidTo }, data);
+    const top = found.exact[0] || found.possible[0];
+    return { kind: found.exact.length ? "elsewhere" : (found.possible.length ? "possible" : "none"), found, errs,
+      recordedAmount: top ? top.amount : null, where: (found.exact.length ? found.exact : found.possible).map(r=>r.where) };
+  };
+
+  const processOne = async (it) => {
+    try {
+      const scan = await scanShot(it.file);
+      upd(it.id, { status:"analyzing", scan });
+      const analysis = await analyze(scan);
+      upd(it.id, { status:"done", analysis });
+    } catch(e) { logScan("payment_scan", false, 0); upd(it.id, { status:"error", error: e.message||String(e) }); }
+  };
+
+  const addFiles = async (fl) => {
+    const files = Array.from(fl||[]);
+    const fresh = files.map(file => ({ id: uid(), file, status:"scanning", scan:null, analysis:null, error:"" }));
+    if (!fresh.length) return;
+    setItems(p => [...p, ...fresh]);
+    for (let i=0; i<fresh.length; i++) {
+      await processOne(fresh[i]);
+      if (i < fresh.length-1) await new Promise(r=>setTimeout(r, 1200));
+    }
+  };
+
+  const save = async (it) => {
+    const rec = it.analysis.rec;
+    const lines = rec.changes.map(c => `LR ${c.lrNo}: paid ${inr(c.oldAmount)} → ${inr(c.newAmount)}   (balance ${inr(c.balanceBefore)} → ${inr(c.balanceAfter)})`).join("\n");
+    if (!window.confirm(`Correct ${rec.changes.length} payment row${rec.changes.length>1?"s":""} so the reference totals ${inr(it.scan.amount)}?\n\n${lines}\n\nThe held amounts stay owed to the driver.`)) return;
+    upd(it.id, { saving:true, saveErr:"" });
+    const failures = [];
+    for (const c of rec.changes) {
+      const note = `${it.analysis.notes[c.rowId]||""} | Adjusted ${today()}: ${inr(c.oldAmount)} → ${inr(c.newAmount)} (bank screenshot ${inr(it.scan.amount)})`.trim().replace(/^\|\s*/,"");
+      const q = c.newAmount > 0
+        ? supabase.from("mye_driver_payments").update({ amount:c.newAmount, notes:note }).eq("id", c.rowId).select("id,amount").maybeSingle()
+        : supabase.from("mye_driver_payments").delete().eq("id", c.rowId).select("id").maybeSingle();
+      const { data, error } = await q;
+      if (error) { failures.push(`LR ${c.lrNo}: ${error.message}`); continue; }
+      if (c.newAmount > 0 && (!data || Math.round(+data.amount*100) !== Math.round(c.newAmount*100))) { failures.push(`LR ${c.lrNo}: the new amount was not stored`); continue; }
+      if (c.newAmount <= 0 && data) { failures.push(`LR ${c.lrNo}: the row could not be removed`); continue; }
+      log && log("PAYMENT RECONCILE", `ref ${it.scan.referenceNo||it.scan.transactionId} · LR ${c.lrNo} · ${inr(c.oldAmount)} → ${inr(c.newAmount)} (bank ${inr(it.scan.amount)})`);
+    }
+    try { reloadDriverPays && await reloadDriverPays(); } catch(_) {}
+    if (failures.length) {
+      const msg = `NOT fully saved — ${failures.join("; ")}`;
+      saveFail("Payment correction:")(new Error(msg));
+      upd(it.id, { saving:false, saveErr: msg });
+    } else {
+      upd(it.id, { saving:false, saved:true, saveErr:"" });
+    }
+  };
+
+  const statusCell = (it) => {
+    if (it.status==="scanning") return <span style={{color:C.blue}}>⏳ reading…</span>;
+    if (it.status==="analyzing") return <span style={{color:C.blue}}>⏳ checking…</span>;
+    if (it.status==="error") return <span style={{color:C.red,fontWeight:700}}>⚠ {it.error}</span>;
+    const a = it.analysis, amt = +it.scan.amount||0;
+    if (it.saved) return <span style={{color:C.green,fontWeight:800}}>✓ Saved</span>;
+    if (a.kind==="unreadable" || a.kind==="error") return <span style={{color:C.red,fontWeight:700}}>⚠ {a.errs.join(" ")}</span>;
+    if (a.kind==="driver") {
+      const r = a.rec;
+      if (r.status==="ok") return <span style={{color:C.green,fontWeight:800}}>✓ Matches</span>;
+      if (r.status==="adjust") return <span style={{color:"#b45309",fontWeight:800}}>Differs by {inr(r.diff)} — covered by holds</span>;
+      return <span style={{color:C.red,fontWeight:800}}>✕ {r.reason}</span>;
+    }
+    if (a.kind==="elsewhere") return Math.abs((+a.recordedAmount||0)-amt)<0.5
+      ? <span style={{color:C.green,fontWeight:800}}>✓ Recorded</span>
+      : <span style={{color:C.red,fontWeight:800}}>✕ Recorded as {inr(a.recordedAmount)} — differs ({inr((+a.recordedAmount||0)-amt)})</span>;
+    if (a.kind==="possible") return <span style={{color:"#b45309",fontWeight:800}}>? Possible match (reference not recorded)</span>;
+    return <span style={{color:C.red,fontWeight:800}}>✕ Not found</span>;
+  };
+
+  const th = {textAlign:"left",fontSize:10,color:C.muted,padding:"4px 6px",borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"};
+  const td = {fontSize:12,color:C.text,padding:"6px",borderBottom:`1px solid ${C.border}`,verticalAlign:"top"};
+
+  return (
+    <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:"10px 14px"}}>
+      <div onClick={()=>setOpen(o=>!o)} style={{display:"flex",justifyContent:"space-between",cursor:"pointer",fontWeight:800,fontSize:14,color:C.text}}>
+        <span>🧾 Bulk check payment screenshots</span><span style={{color:C.muted}}>{open?"▾":"▸"}</span>
+      </div>
+      {open && (
+        <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:10}}>
+          <div style={{fontSize:11,color:C.muted}}>Upload many bank screenshots. Each row shows the screenshot amount, what the database has under that reference, and where. Nothing changes unless you review and press Save on a row.</div>
+          <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+            <button onClick={()=>inputRef.current?.click()}
+              style={{background:C.accent+"22",border:`1.5px solid ${C.accent}`,color:C.accent,borderRadius:10,padding:"9px 14px",fontWeight:800,fontSize:13,cursor:"pointer"}}>
+              📁 Select screenshots
+            </button>
+            {items.length>0 && <button onClick={()=>{setItems([]);setExpanded(null);}} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer",textDecoration:"underline"}}>Clear table</button>}
+            <input ref={inputRef} type="file" multiple accept="image/*" style={{display:"none"}}
+              onChange={e=>{ if(e.target.files?.length) addFiles(e.target.files); e.target.value=""; }} />
+          </div>
+          {items.length>0 && (
+            <div style={{overflowX:"auto"}}>
+              <table style={{width:"100%",borderCollapse:"collapse",minWidth:640}}>
+                <thead><tr>
+                  <th style={th}>Screenshot</th><th style={th}>Reference</th><th style={th}>Screenshot ₹</th>
+                  <th style={th}>Database ₹</th><th style={th}>Where recorded</th><th style={th}>Result</th><th style={th}></th>
+                </tr></thead>
+                <tbody>
+                  {items.map(it => {
+                    const a = it.analysis, sc = it.scan;
+                    return (
+                      <React.Fragment key={it.id}>
+                        <tr>
+                          <td style={td}>{it.file.name}<div style={{color:C.muted,fontSize:10}}>{sc?.paidTo||""}{sc?.paymentDate?` · ${sc.paymentDate}`:""}</div></td>
+                          <td style={{...td,wordBreak:"break-all"}}>{sc?.referenceNo||sc?.transactionId||"—"}</td>
+                          <td style={td}>{sc?.amount!=null?inr(sc.amount):"—"}</td>
+                          <td style={td}>{a && a.recordedAmount!=null ? inr(a.recordedAmount) : "—"}</td>
+                          <td style={td}>{(a?.where||[]).map((w,i)=><div key={i}>{w}</div>)}</td>
+                          <td style={td}>{statusCell(it)}{it.saveErr && <div style={{color:C.red,fontSize:11,fontWeight:700}}>⚠ {it.saveErr}</div>}</td>
+                          <td style={td}>
+                            {a?.kind==="driver" && a.rec.status==="adjust" && !it.saved && (
+                              <button onClick={()=>setExpanded(expanded===it.id?null:it.id)}
+                                style={{background:"#f59e0b22",border:"1px solid #f59e0b",color:"#b45309",borderRadius:8,padding:"4px 8px",fontSize:11,fontWeight:800,cursor:"pointer"}}>
+                                {expanded===it.id?"Hide":"Review"}
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                        {expanded===it.id && a?.kind==="driver" && a.rec.status==="adjust" && !it.saved && (
+                          <tr><td colSpan={7} style={{...td,background:C.bg}}>
+                            <div style={{fontSize:11,color:C.muted,marginBottom:6}}>Only trips that were paid more than they are owed (after pouch, advance, tafal, diesel, shortage and recoveries) are reduced. The held amount stays owed.</div>
+                            <table style={{width:"100%",borderCollapse:"collapse"}}>
+                              <thead><tr><th style={th}>LR</th><th style={th}>Paid now</th><th style={th}>Paid after</th><th style={th}>Pouch held</th><th style={th}>Other deductions</th><th style={th}>Balance now → after</th></tr></thead>
+                              <tbody>{a.rec.changes.map(c=>(
+                                <tr key={c.rowId}>
+                                  <td style={td}>{c.lrNo}</td><td style={td}>{inr(c.oldAmount)}</td><td style={td}><b>{inr(c.newAmount)}</b></td>
+                                  <td style={td}>{inr(c.pouchHold)}</td><td style={td}>{inr(c.otherDeducts)}</td>
+                                  <td style={td}>{inr(c.balanceBefore)} → <b>{inr(c.balanceAfter)}</b></td>
+                                </tr>))}
+                              </tbody>
+                            </table>
+                            <div style={{marginTop:8,fontSize:12}}>Total after correction: <b>{inr(a.rec.recordedTotal - a.rec.diff)}</b> = screenshot {inr(sc.amount)} ✓</div>
+                            <button onClick={()=>save(it)} disabled={it.saving}
+                              style={{marginTop:8,background:C.accent,color:"#fff",border:"none",borderRadius:10,padding:"9px 16px",fontWeight:800,fontSize:13,cursor:"pointer",opacity:it.saving?0.6:1}}>
+                              {it.saving?"Saving…":"Save this payment"}
+                            </button>
+                          </td></tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
