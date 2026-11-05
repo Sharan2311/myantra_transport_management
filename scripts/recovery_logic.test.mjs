@@ -174,4 +174,27 @@ t("overview html has every employee, the grand total and the overlap note", () =
   assert.match(h, /GRAND TOTAL TO RECOVER/); assert.match(h, /Al&lt;i&gt;/); assert.match(h, /counted once/);
 });
 
+t("Upendra case: net across the owner's trucks is what is shown and totalled, per-truck figures are marked as 'alone'", () => {
+  const a = veh({ truckNo: "KA28AA4790", ownerName: "Upendra", loan: 3000, loanTxns: [rec(125000)] });
+  const b = veh({ truckNo: "KA28AA9261", ownerName: "Upendra", loan: 100000, loanTxns: [rec(120000)] });
+  const c = veh({ truckNo: "KA28AB4580", ownerName: "Upendra", loan: 429000, loanTxns: [rec(95000)] });
+  const tr = [...trips("KA28AA4790", 3, 0), ...trips("KA28AA9261", 3, 0), ...trips("KA28AB4580", 3, 0)];
+  const r = buildRecovery({ empId: E, employees: [], vehicles: [a, b, c], trips: tr, cashTransfers: [] });
+  assert.equal(r.owners.length, 1);
+  assert.equal(r.owners[0].loanGiven, 532000); assert.equal(r.owners[0].loanRecovered, 340000); assert.equal(r.owners[0].loanPending, 192000);
+  assert.equal(r.totals.vehicleLoanPending, 192000);
+  const h = recoveryReportHtml(r, { groupBy: "vehicle" });
+  assert.match(h, /net across 3 trucks/); assert.match(h, /1,92,000/); assert.match(h, /this truck alone/);
+  assert.ok(h.indexOf("net across 3 trucks") > h.indexOf("KA28AB4580"));
+});
+
+t("an owner's trucks that sit under another employee are reported, not silently ignored", () => {
+  const a = veh({ truckNo: "KA01F0001", ownerName: "Same", loan: 100000, loanTxns: [rec(10000)] });
+  const b = veh({ truckNo: "KA01F0002", ownerName: "Same", loan: 5000, loanTxns: [rec(60000)] });
+  const r = buildRecovery({ empId: E, employees: [], vehicles: [a, b], trips: [...trips("KA01F0001", 3, 0), ...trips("KA01F0002", 0, 3)], cashTransfers: [] });
+  assert.equal(r.trucks.length, 1);
+  assert.equal(r.owners[0].others.count, 1); assert.equal(r.owners[0].others.net, -55000);
+  assert.match(recoveryReportHtml(r), /also has 1 other truck/);
+});
+
 console.log(`\n${n} tests passed`);
