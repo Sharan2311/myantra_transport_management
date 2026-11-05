@@ -184,8 +184,8 @@ t("Upendra case: net across the owner's trucks is what is shown and totalled, pe
   assert.equal(r.owners[0].loanGiven, 532000); assert.equal(r.owners[0].loanRecovered, 340000); assert.equal(r.owners[0].loanPending, 192000);
   assert.equal(r.totals.vehicleLoanPending, 192000);
   const h = recoveryReportHtml(r, { groupBy: "vehicle" });
-  assert.match(h, /net across 3 trucks/); assert.match(h, /1,92,000/); assert.match(h, /this truck alone/);
-  assert.ok(h.indexOf("net across 3 trucks") > h.indexOf("KA28AB4580"));
+  assert.match(h, /net loan across all 3 trucks/); assert.match(h, /1,92,000/); assert.match(h, /this truck alone/);
+  assert.ok(h.indexOf("net loan across all 3 trucks") > h.indexOf("KA28AB4580"));
 });
 
 t("an owner's trucks that sit under another employee are reported, not silently ignored", () => {
@@ -194,7 +194,58 @@ t("an owner's trucks that sit under another employee are reported, not silently 
   const r = buildRecovery({ empId: E, employees: [], vehicles: [a, b], trips: [...trips("KA01F0001", 3, 0), ...trips("KA01F0002", 0, 3)], cashTransfers: [] });
   assert.equal(r.trucks.length, 1);
   assert.equal(r.owners[0].others.count, 1); assert.equal(r.owners[0].others.net, -55000);
-  assert.match(recoveryReportHtml(r), /also has 1 other truck/);
+  assert.match(recoveryReportHtml(r), /1 other truck\(s\) of Same/);
+});
+
+t("a small linked entry does not take a truck that someone else mostly drives (4580: 9,000 of 4,29,000 linked to Sandeep, 20 of 35 trips Shrikantha)", () => {
+  const v = veh({ truckNo: "KA28AB4580", ownerName: "Upendra", loan: 429000, loanTxns: [given(420000), given(9000, "SAN")] });
+  const emps = [{ id: "SAN", name: "Sandeep" }, { id: "SHR", name: "Shrikantha" }];
+  const tr = [...Array.from({ length: 20 }, () => ({ truckNo: "KA28AB4580", assignedEmpId: "SHR" })), ...Array.from({ length: 15 }, () => ({ truckNo: "KA28AB4580", assignedEmpId: "X" }))];
+  const asg = assignTrucks({ employees: emps, vehicles: [v], trips: tr });
+  assert.equal(asg.owner.get(v.id), "SHR");
+  // but an employee holding at least half the loan as linked loan does win the truck
+  const w = veh({ truckNo: "KA28AB9999", loan: 100000, loanTxns: [given(60000, "SAN"), given(40000)] });
+  const tr2 = Array.from({ length: 5 }, () => ({ truckNo: "KA28AB9999", assignedEmpId: "SHR" }));
+  assert.equal(assignTrucks({ employees: emps, vehicles: [w], trips: tr2 }).owner.get(w.id), "SAN");
+});
+
+t("Rachesh case: 9505 alone reads 1,55,000 but his other trucks' recovery makes the owner net 15,000, and that is what is totalled", () => {
+  const main = veh({ truckNo: "KA29A9505", ownerName: "Rachesh", loan: 200000, loanTxns: [given(200000, "RAC"), rec(45000)] });
+  const o1 = veh({ truckNo: "AP20TB6661", ownerName: "Rachesh", loan: 0, loanTxns: [rec(35000)] });
+  const o2 = veh({ truckNo: "KA32D1604", ownerName: "Rachesh", loan: 0, loanTxns: [rec(55000)] });
+  const o3 = veh({ truckNo: "KA32D1622", ownerName: "Rachesh", loan: 0, loanTxns: [rec(25000)] });
+  const o4 = veh({ truckNo: "TS12UD0131", ownerName: "Rachesh", loan: 0, loanTxns: [rec(25000)] });
+  const vs = [main, o1, o2, o3, o4];
+  const emps = [{ id: "RAC", name: "Rachesh" }];
+  const tr = [...trips("KA29A9505", 0, 0)];
+  const asg = assignTrucks({ employees: emps, vehicles: vs, trips: tr });
+  const r = buildRecovery({ empId: "RAC", employees: emps, vehicles: vs, trips: tr, cashTransfers: [], assignment: asg });
+  assert.equal(r.trucks.length, 1); assert.equal(r.trucks[0].loanNet, 155000);
+  assert.equal(r.owners[0].loanGiven, 200000); assert.equal(r.owners[0].loanRecovered, 185000);
+  assert.equal(r.owners[0].loanPending, 15000); assert.equal(r.totals.vehicleLoanPending, 15000);
+  assert.equal(r.owners[0].others.count, 4);
+  assert.match(recoveryReportHtml(r, { groupBy: "vehicle" }), /net loan across all 5 trucks/);
+});
+
+t("the owner's net is counted under ONE employee: the one holding the loan; the other employee's sheet shows 0 for him", () => {
+  const a = veh({ truckNo: "KA01G0001", ownerName: "Own", loan: 100000, loanTxns: [given(100000)] });
+  const b = veh({ truckNo: "KA01G0002", ownerName: "Own", loan: 0, loanTxns: [rec(30000)] });
+  const emps = [{ id: E, name: "A" }, { id: "EMP2", name: "B" }];
+  const tr = [...trips("KA01G0001", 3, 0), ...Array.from({ length: 3 }, () => ({ truckNo: "KA01G0002", assignedEmpId: "EMP2" }))];
+  const asg = assignTrucks({ employees: emps, vehicles: [a, b], trips: tr });
+  const ra = buildRecovery({ empId: E, employees: emps, vehicles: [a, b], trips: tr, cashTransfers: [], assignment: asg });
+  const rb = buildRecovery({ empId: "EMP2", employees: emps, vehicles: [a, b], trips: tr, cashTransfers: [], assignment: asg });
+  assert.equal(ra.totals.vehicleLoanPending, 70000);
+  assert.equal(rb.totals.vehicleLoanPending, 0); assert.equal(rb.owners[0].countedUnder, "A");
+  const o = buildRecoveryOverview({ employees: emps, vehicles: [a, b], trips: tr, cashTransfers: [] });
+  assert.equal(o.totals.vehicleLoan, 70000);
+});
+
+t("an owner none of whose trucks is assigned goes to 'not linked to any employee', netted across his trucks", () => {
+  const a = veh({ truckNo: "KA01H0001", ownerName: "Free", loan: 50000, loanTxns: [given(50000)] });
+  const b = veh({ truckNo: "KA01H0002", ownerName: "Free", loan: 0, loanTxns: [rec(20000)] });
+  const o = buildRecoveryOverview({ employees: [{ id: E, name: "A" }], vehicles: [a, b], trips: [], cashTransfers: [] });
+  assert.equal(o.unassigned.vehicleLoan, 30000);
 });
 
 console.log(`\n${n} tests passed`);

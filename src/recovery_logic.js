@@ -40,7 +40,7 @@ export function candidateTrucks({ empId, vehicles, trips }) {
     const reasons = [];
     if (linkedLoan > 0) reasons.push("loan linked to him");
     if (majority) reasons.push("most trips his");
-    out.push({ vehicle: v, tripsHim: c.him, tripsTotal: c.total, linkedLoan, linkedOther, reasons });
+    out.push({ vehicle: v, tripsHim: c.him, tripsTotal: c.total, linkedLoan, linkedOther, majority, reasons });
   }
   return out.sort((a, b) => String(a.vehicle.truckNo).localeCompare(String(b.vehicle.truckNo)));
 }
@@ -68,43 +68,82 @@ const truckRowOf = c => {
   };
 };
 
-// owner groups: loan is netted across the owner's trucks and clamped once
-const ownersOf = trucks => {
+const ownerKeyOf = v => { const o = (v.ownerName || "").trim().toLowerCase(); return o ? "o:" + o : "v:" + v.id; };
+const recoveredOf = v => (v.loanTxns || []).filter(x => x.type === "recovery").reduce((s, x) => s + n(x.amount), 0);
+
+// Owner groups. The loan is netted across ALL of the owner's trucks (the app-wide rule, ownerLoanStatus): a loan is given
+// against one truck but recovered on whichever truck runs the trip, so judging it truck by truck inflates the balance.
+// `vehicles` is every vehicle, so the owner's trucks that are not in this sheet still offset the loan.
+// The owner's net is counted under ONE employee (the "carrier", see assignTrucks); in every other sheet it shows as 0 there.
+const ownersOf = (trucks, vehicles = null, ctx = {}) => {
   const groups = new Map();
   trucks.forEach(t => {
     const key = t.ownerName ? "o:" + t.ownerName.toLowerCase() : "v:" + t.id;
-    if (!groups.has(key)) groups.set(key, { owner: t.ownerName || t.truckNo, trucks: [] });
+    if (!groups.has(key)) groups.set(key, { key, owner: t.ownerName || t.truckNo, trucks: [] });
     groups.get(key).trucks.push(t);
   });
   return [...groups.values()].map(g => {
-    const given = g.trucks.reduce((s, t) => s + t.loanGiven, 0);
-    const recovered = g.trucks.reduce((s, t) => s + t.loanRecovered, 0);
+    const inSheet = new Set(g.trucks.map(t => t.id));
+    const everyone = vehicles ? vehicles.filter(v => hasLedger(v) && ownerKeyOf(v) === g.key) : [];
+    const pool = vehicles ? everyone : g.trucks.map(t => ({ loan: t.loanGiven, loanTxns: [{ type: "recovery", amount: t.loanRecovered }] , id: t.id, truckNo: t.truckNo }));
+    const given = pool.reduce((s, v) => s + n(v.loan), 0);
+    const recovered = pool.reduce((s, v) => s + recoveredOf(v), 0);
     const net = given - recovered;
-    return { owner: g.owner, trucks: g.trucks, loanGiven: given, loanRecovered: recovered,
-      loanPending: Math.max(0, net), overRecovered: Math.max(0, -net),
+    const others = pool.filter(v => !inSheet.has(v.id));
+    const othersNet = others.reduce((s, v) => s + n(v.loan) - recoveredOf(v), 0);
+    const carrier = ctx.carrier ? (ctx.carrier.get(g.key) ?? null) : undefined;   // undefined = no assignment given: count here
+    const counted = !ctx.carrier || carrier === (ctx.empId ?? null);
+    return { owner: g.owner, key: g.key, trucks: g.trucks, loanGiven: given, loanRecovered: recovered, loanNet: net,
+      loanPending: counted ? Math.max(0, net) : 0, overRecovered: Math.max(0, -net),
+      counted, countedUnder: counted ? "" : (ctx.nameOf ? ctx.nameOf(carrier) : "another employee"),
+      others: { count: others.length, trucks: others.map(v => v.truckNo), net: othersNet },
       shortagePending: g.trucks.reduce((s, t) => s + t.shortagePending, 0) };
   }).sort((a, b) => a.owner.localeCompare(b.owner));
 };
 
-// Each truck is counted under exactly ONE employee. When a truck qualifies for several, the winner is the employee with
-// the most loan linked to him on that truck, then the most trips on it, then the first in the employee list.
-// Returns { owner: Map(vehicleId -> empId), resolved: [{ truckNo, counted, also: [names] }] }.
+// Each truck is counted under exactly ONE employee. When a truck qualifies for several:
+//   1. an employee holding at least half of the truck's loan given as linked loan,
+//   2. else the employee with most of the truck's trips (a majority),
+//   3. else the most loan linked to him, 4. else the most trips, 5. else the first in the employee list.
+// (A small linked entry, e.g. 9,000 of a 4,29,000 loan, must not take a truck that someone else mostly drives.)
+// The owner's loan (netted across all his trucks) is carried by one employee: the one holding the most loan given on his
+// trucks, else the most trucks; an owner none of whose trucks is assigned goes to "not linked to any employee" (carrier null).
+// Returns { owner: Map(vehicleId -> empId), carrier: Map(ownerKey -> empId|null), resolved: [...] }.
 export function assignTrucks({ employees, vehicles, trips }) {
-  const claims = new Map(); // vehicleId -> [{ empId, name, linked, trips, order }]
+  const claims = new Map(); // vehicleId -> [{ empId, name, linked, trips, majority, order }]
   (employees || []).forEach((e, order) => {
     for (const c of candidateTrucks({ empId: e.id, vehicles, trips })) {
       const list = claims.get(c.vehicle.id) || [];
-      list.push({ empId: e.id, name: e.name, linked: c.linkedLoan, trips: c.tripsHim, order, truckNo: c.vehicle.truckNo });
+      list.push({ empId: e.id, name: e.name, linked: c.linkedLoan, trips: c.tripsHim, majority: c.majority, order, truckNo: c.vehicle.truckNo, loan: n(c.vehicle.loan) });
       claims.set(c.vehicle.id, list);
     }
   });
+  const rank = x => [x.linked > 0 && x.linked * 2 >= x.loan ? 1 : 0, x.majority ? 1 : 0, x.linked, x.trips, -x.order];
+  const cmp = (a, b) => { const A = rank(a), B = rank(b); for (let i = 0; i < A.length; i++) if (A[i] !== B[i]) return B[i] - A[i]; return 0; };
   const owner = new Map(), resolved = [];
   for (const [vid, list] of claims) {
-    const best = [...list].sort((a, b) => b.linked - a.linked || b.trips - a.trips || a.order - b.order)[0];
+    const best = [...list].sort(cmp)[0];
     owner.set(vid, best.empId);
     if (list.length > 1) resolved.push({ truckNo: best.truckNo, counted: best.name, also: list.filter(x => x !== best).map(x => x.name) });
   }
-  return { owner, resolved };
+  // owner carrier
+  const byOwner = new Map(); // ownerKey -> Map(empId -> {loan, count})
+  const order = new Map((employees || []).map((e, i) => [e.id, i]));
+  for (const v of vehicles || []) {
+    const eid = owner.get(v.id);
+    if (!eid || !hasLedger(v)) continue;
+    const k = ownerKeyOf(v);
+    const m = byOwner.get(k) || new Map();
+    const cur = m.get(eid) || { loan: 0, count: 0 };
+    cur.loan += n(v.loan); cur.count++;
+    m.set(eid, cur); byOwner.set(k, m);
+  }
+  const carrier = new Map();
+  for (const [k, m] of byOwner) {
+    const best = [...m.entries()].sort((a, b) => b[1].loan - a[1].loan || b[1].count - a[1].count || order.get(a[0]) - order.get(b[0]))[0];
+    carrier.set(k, best[0]);
+  }
+  return { owner, carrier, resolved };
 }
 
 export function buildRecovery({ empId, employees, vehicles, trips, cashTransfers, excluded = new Set(), assignment = null }) {
@@ -114,16 +153,8 @@ export function buildRecovery({ empId, employees, vehicles, trips, cashTransfers
   const included = all.filter(c => !excluded.has(c.vehicle.id));
 
   const trucks = included.map(truckRowOf);
-  const owners = ownersOf(trucks);
-
-  // The owner's other trucks that carry a loan/shortage ledger but are NOT in this sheet (another employee's, or excluded):
-  // their recovery also offsets this owner's loan, so say so instead of leaving the figure looking inflated.
-  owners.forEach(o => {
-    const key = o.trucks[0].ownerName.toLowerCase();
-    const others = key ? (vehicles || []).filter(v => hasLedger(v) && (v.ownerName || "").trim().toLowerCase() === key && !o.trucks.some(t => t.id === v.id)) : [];
-    const net = others.reduce((sum, v) => sum + n(v.loan) - (v.loanTxns || []).filter(x => x.type === "recovery").reduce((q, x) => q + n(x.amount), 0), 0);
-    o.others = { count: others.length, trucks: others.map(v => v.truckNo), net };
-  });
+  const nameOf = id => (employees || []).find(e => e.id === id)?.name || "another employee";
+  const owners = ownersOf(trucks, vehicles || [], { carrier: assignment ? assignment.carrier : null, empId, nameOf });
 
   const vehicleLoanPending = owners.reduce((s, o) => s + o.loanPending, 0);
   const rawTruckLoanSum = trucks.reduce((s, t) => s + t.loanNet, 0);
@@ -156,20 +187,22 @@ export function recoveryReportHtml(r, { groupBy = "vehicle", company = "", date 
 
   const vrow = (t, alone) => `<tr class="v"><td>${esc(t.truckNo)}</td><td>${esc(t.ownerName)}</td><td class="n">${inr(t.loanGiven)}</td><td class="n">${inr(t.loanRecovered)}</td><td class="n">${inr(t.loanNet)}${alone ? '<br><span style="color:#777;font-weight:normal">this truck alone</span>' : ""}</td><td class="n">${inr(t.shortageOwed)}</td><td class="n">${inr(t.shortageRecovered)}</td><td class="n">${inr(t.shortagePending)}</td><td>${esc(note(t))}</td></tr>`;
   const vehicleRows = r.owners.map(o => {
-    const multi = o.trucks.length > 1;
-    const sub = multi ? `<tr class="o"><td colspan="2"><b>${esc(o.owner)} — net across ${o.trucks.length} trucks</b></td><td class="n">${inr(o.loanGiven)}</td><td class="n">${inr(o.loanRecovered)}</td><td class="n"><b>${inr(o.loanPending)}</b></td><td colspan="3"></td><td>${o.overRecovered > 0 ? "Over-recovered ₹" + inr(o.overRecovered) : "Loan recovered on one truck offsets the others"}</td></tr>` : "";
-    const other = o.others && o.others.count > 0 ? `<tr><td colspan="9" style="color:#92400e">${esc(o.owner)} also has ${o.others.count} other truck(s) with loan entries not in this sheet (${esc(o.others.trucks.join(", "))}); their net loan is ₹${inr(o.others.net)} and also offsets this owner's loan.</td></tr>` : "";
+    const multi = o.trucks.length > 1 || o.others.count > 0;
+    const allCount = o.trucks.length + o.others.count;
+    const status = !o.counted ? `Counted under ${esc(o.countedUnder)}, not here` : o.overRecovered > 0 ? "Over-recovered ₹" + inr(o.overRecovered) : "Recovery on any of his trucks offsets the others";
+    const sub = multi ? `<tr class="o"><td colspan="2"><b>${esc(o.owner)} — net loan across all ${allCount} truck${allCount > 1 ? "s" : ""}</b></td><td class="n">${inr(o.loanGiven)}</td><td class="n">${inr(o.loanRecovered)}</td><td class="n"><b>${inr(o.loanPending)}</b></td><td colspan="3"></td><td>${status}</td></tr>` : "";
+    const other = o.others.count > 0 ? `<tr><td colspan="9" style="color:#92400e">Included in the net above: ${o.others.count} other truck(s) of ${esc(o.owner)} not in this sheet (${esc(o.others.trucks.join(", "))}), net ₹${inr(o.others.net)}.</td></tr>` : "";
     return o.trucks.map(t => vrow(t, multi)).join("") + sub + other;
   }).join("");
   const ownerRows = r.owners.map(o =>
-    `<tr class="o"><td>${esc(o.owner)}</td><td>${esc(o.trucks.map(t => t.truckNo).join(", "))}</td><td class="n">${inr(o.loanGiven)}</td><td class="n">${inr(o.loanRecovered)}</td><td class="n">${inr(o.loanPending)}</td><td class="n">${inr(o.shortagePending)}</td><td>${o.overRecovered > 0 ? "Over-recovered ₹" + inr(o.overRecovered) : ""}</td></tr>`).join("");
+    `<tr class="o"><td>${esc(o.owner)}</td><td>${esc(o.trucks.map(t => t.truckNo).join(", "))}</td><td class="n">${inr(o.loanGiven)}</td><td class="n">${inr(o.loanRecovered)}</td><td class="n">${inr(o.loanPending)}</td><td class="n">${inr(o.shortagePending)}</td><td>${!o.counted ? "Counted under " + esc(o.countedUnder) : o.overRecovered > 0 ? "Over-recovered ₹" + inr(o.overRecovered) : (o.others.count > 0 ? "Net includes " + o.others.count + " other truck(s)" : "")}</td></tr>`).join("");
 
   const loanTable = groupBy === "owner"
     ? `<h3>Vehicle loans &amp; shortage — owner-wise</h3><table><thead>${th("Owner", "Trucks", "Loan given", "Loan recovered", "Loan pending", "Shortage pending", "Note")}</thead><tbody>${ownerRows || `<tr><td colspan="7">No vehicles</td></tr>`}</tbody>
        <tfoot><tr><td colspan="4">Total</td><td class="n">${inr(T.vehicleLoanPending)}</td><td class="n">${inr(T.shortagePending)}</td><td></td></tr></tfoot></table>`
     : `<h3>Vehicle loans &amp; shortage — vehicle-wise</h3><table><thead>${th("Truck", "Owner", "Loan given", "Loan recovered", "Loan net", "Shortage", "Shortage rec.", "Shortage pending", "Why listed")}</thead><tbody>${vehicleRows || `<tr><td colspan="9">No vehicles</td></tr>`}</tbody>
        <tfoot><tr><td colspan="4">Sum of trucks</td><td class="n">${inr(T.rawTruckLoanSum)}</td><td colspan="2"></td><td class="n">${inr(T.shortagePending)}</td><td></td></tr>
-       ${T.ownerNettingAdjustment !== 0 ? `<tr><td colspan="4">Owner netting (over-recovery on one truck offsets the owner's other trucks)</td><td class="n">+${inr(T.ownerNettingAdjustment)}</td><td colspan="4"></td></tr>` : ""}
+       ${T.ownerNettingAdjustment !== 0 ? `<tr><td colspan="4">Owner netting across all of each owner's trucks (recovery on any truck offsets the others)</td><td class="n">${T.ownerNettingAdjustment < 0 ? "-" : "+"}${inr(Math.abs(T.ownerNettingAdjustment))}</td><td colspan="4"></td></tr>` : ""}
        <tr><td colspan="4">Vehicle loan pending</td><td class="n">${inr(T.vehicleLoanPending)}</td><td colspan="4"></td></tr></tfoot></table>`;
 
   const el = r.empLoan;
@@ -213,7 +246,8 @@ export function buildRecoveryOverview({ employees, vehicles, trips, cashTransfer
   const tripCount = new Map();
   for (const t of trips || []) { const k = normTruck(t.truckNo); if (k) tripCount.set(k, (tripCount.get(k) || 0) + 1); }
   const orphan = (vehicles || []).filter(v => hasLedger(v) && !asg.owner.has(v.id)).map(v => truckRowOf({ vehicle: v, tripsHim: 0, tripsTotal: tripCount.get(normTruck(v.truckNo)) || 0, reasons: ["not linked to any employee"], linkedOther: 0 }));
-  const orphanOwners = ownersOf(orphan);
+  const nameOf = id => (employees || []).find(e => e.id === id)?.name || "another employee";
+  const orphanOwners = ownersOf(orphan, vehicles || [], { carrier: asg.carrier, empId: null, nameOf });
   const unassigned = {
     rows: orphan.sort((a, b) => a.truckNo.localeCompare(b.truckNo)), owners: orphanOwners,
     trucks: orphan.length,
