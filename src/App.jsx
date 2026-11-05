@@ -6,6 +6,7 @@ import { restrictToSelection, diCat, tripHasCategory, followupByVehicle, followu
 import { bookableLoanRecovery, PREV_YEAR_TYPE } from "./loan_ledger_logic.js";
 import { findPayment, normRef } from "./payment_finder.js";
 import { reconcileScreenshot } from "./payment_reconcile.js";
+import { findDieselDuplicates } from "./diesel_dupes.js";
 import { payableAfterSkips, pouchHoldOf } from "./pay_selected_logic.js";
 import { normDI, partyGrFile, partyDocsMissing, matchInvoices, routeDroppedDocs } from "./party_files.js";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
@@ -17118,6 +17119,105 @@ function DieselReceiptReviewCard({ req, pumps, dieselRequests=[], user, log, vie
   );
 }
 
+// Owner-only: diesel requests that duplicate an attached indent (same vehicle, date, amount), each with its
+// reason. Nothing is deleted without the owner pressing a button; every delete is verified against the
+// database and a failure is shown on the row (and in the save-failed banner), never swallowed.
+function DuplicateDieselPanel({ dieselRequests, trips, log, setDieselRequests }) {
+  const found = useMemo(() => findDieselDuplicates(dieselRequests, trips), [dieselRequests, trips]);
+  const [busy, setBusy] = useState("");
+  const [errs, setErrs] = useState({});
+  const [summary, setSummary] = useState("");
+
+  const deleteOne = async (d) => {
+    try {
+      await DB.deleteDieselRequestVerified(d.id);
+      setDieselRequests(p => (p||[]).filter(r => r.id !== d.id));
+      log("DELETE DIESEL DUPLICATE", `Indent #${d.indentNo} · ${d.truckNo} · ${d.date} · ₹${d.amount} (${d.status}) — duplicate of ${d.keep.map(k=>"#"+k.indentNo).join(", ")}`);
+      setErrs(e => { const n = {...e}; delete n[d.id]; return n; });
+      return true;
+    } catch (e) {
+      setErrs(x => ({ ...x, [d.id]: e.message || String(e) }));
+      saveFail("Duplicate diesel delete (#" + d.indentNo + "):")(e);
+      return false;
+    }
+  };
+  const delOne = async (d) => {
+    if (!window.confirm(`Delete ${d.status} indent #${d.indentNo} for ${d.truckNo} (₹${d.amount.toLocaleString("en-IN")}, ${d.date})?\n\n${d.reasons[0]}`)) return;
+    setBusy(d.id); setSummary("");
+    await deleteOne(d);
+    setBusy("");
+  };
+  const delAll = async () => {
+    const list = found.deletable;
+    if (!list.length) return;
+    if (!window.confirm(`Delete all ${list.length} duplicate request${list.length>1?"s":""} listed here?\n\nThe attached indent for each one is kept. Failed deletes stay in the list.`)) return;
+    setBusy("all"); setSummary("");
+    let ok = 0, failed = 0;
+    for (const d of list) { (await deleteOne(d)) ? ok++ : failed++; }
+    setBusy("");
+    setSummary(failed ? `⚠ Deleted ${ok}, FAILED ${failed} — failed ones are still listed with the reason.` : `✓ Deleted all ${ok} duplicate request${ok>1?"s":""}.`);
+  };
+
+  const statusColor = s => s==="confirmed" ? C.teal : C.orange;
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:10}}>
+      <div style={{background:C.card,borderRadius:10,padding:"10px 14px",fontSize:12,color:C.muted}}>
+        Pending or confirmed requests with the <b>same vehicle, date and amount</b> as an attached indent. The attached indent is kept; nothing is deleted until you press a button.
+      </div>
+      {summary && <div style={{background:summary.startsWith("✓")?C.green+"22":C.red+"22",border:`1px solid ${summary.startsWith("✓")?C.green:C.red}`,borderRadius:8,padding:"8px 12px",fontSize:12,fontWeight:700,color:summary.startsWith("✓")?C.green:C.red}}>{summary}</div>}
+      {found.deletable.length>0 && (
+        <button onClick={delAll} disabled={!!busy}
+          style={{background:C.red,border:"none",borderRadius:10,color:"#fff",fontWeight:800,fontSize:13,padding:"11px 14px",cursor:busy?"default":"pointer",opacity:busy?0.6:1}}>
+          {busy==="all" ? "Deleting…" : `🗑 Delete all ${found.deletable.length} duplicate${found.deletable.length>1?"s":""}`}
+        </button>
+      )}
+      {found.deletable.length===0 && <div style={{textAlign:"center",color:C.muted,padding:24,fontSize:13}}>✓ No duplicate requests to delete.</div>}
+      {found.deletable.map(d => (
+        <div key={d.id} style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${errs[d.id]?C.red:C.border}`}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+            <div>
+              <div style={{fontWeight:800,fontSize:14}}>#{d.indentNo} · {d.truckNo}</div>
+              <div style={{fontSize:12,color:C.muted}}>{d.date} · ₹{d.amount.toLocaleString("en-IN")}{d.createdBy?` · by ${d.createdBy}`:""}</div>
+            </div>
+            <span style={{fontSize:10,fontWeight:800,color:statusColor(d.status),border:`1px solid ${statusColor(d.status)}`,borderRadius:10,padding:"2px 8px"}}>{d.status==="open"?"PENDING":"CONFIRMED"}</span>
+          </div>
+          <div style={{fontSize:12,marginTop:8,lineHeight:1.5}}>
+            {d.reasons.map((r,i)=><div key={i}>• {r}</div>)}
+            <div style={{color:C.green,fontWeight:700,marginTop:4}}>Keeps: {d.keep.map(k=>`#${k.indentNo}${k.lrNo?" (LR "+k.lrNo+")":""}`).join(", ")}</div>
+            {d.warnings.map((w,i)=><div key={i} style={{color:"#d97706"}}>⚠ {w}</div>)}
+            {errs[d.id] && <div style={{color:C.red,fontWeight:700,marginTop:4}}>✗ Delete failed: {errs[d.id]}</div>}
+          </div>
+          <div style={{marginTop:8,textAlign:"right"}}>
+            <button onClick={()=>delOne(d)} disabled={!!busy}
+              style={{background:"none",border:`1px solid ${C.red}`,borderRadius:8,color:C.red,fontSize:12,fontWeight:700,padding:"5px 12px",cursor:busy?"default":"pointer",opacity:busy?0.6:1}}>
+              {busy===d.id ? "Deleting…" : "🗑 Delete this one"}
+            </button>
+          </div>
+        </div>
+      ))}
+      {found.blocked.length>0 && (
+        <div style={{marginTop:6}}>
+          <div style={{fontSize:12,fontWeight:800,color:C.muted,marginBottom:6}}>NOT DELETABLE — still linked to a trip ({found.blocked.length})</div>
+          {found.blocked.map(d => (
+            <div key={d.id} style={{background:C.card,borderRadius:10,padding:"10px 12px",marginBottom:6,fontSize:12,opacity:0.85}}>
+              <b>#{d.indentNo} · {d.truckNo}</b> · {d.date} · ₹{d.amount.toLocaleString("en-IN")}
+              <div style={{color:C.muted}}>{d.reasons[d.reasons.length-1]}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {found.review.length>0 && (
+        <div style={{marginTop:6}}>
+          <div style={{fontSize:12,fontWeight:800,color:C.muted,marginBottom:6}}>FOR YOUR REVIEW — no attached indent to keep ({found.review.length})</div>
+          {found.review.map((g,i) => (
+            <div key={i} style={{background:C.card,borderRadius:10,padding:"10px 12px",marginBottom:6,fontSize:12}}>{g.reason}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, driverPays, setDriverPays, user, log, viewOnly=false, dieselRequests=[], setDieselRequests, dieselRequestsReady=false, settings, actionItems=[], setActionItems, navTarget, setNavTarget}) {
   const [view,        setView]        = useState("requests");
   // Daily verification checklist — owner-only, one-time permanent mark per
@@ -17466,6 +17566,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
     .sort((a,b)=>(b.indentNo||0)-(a.indentNo||0));
   const verifiedCount = (dieselRequests||[]).filter(r => (r.status==="confirmed"||r.status==="attached") && r.ownerVerified).length;
   const verifiableTotal = (dieselRequests||[]).filter(r => r.status==="confirmed"||r.status==="attached").length;
+  const dupDeletableCount = user.role==="owner" ? findDieselDuplicates(dieselRequests, trips).deletable.length : 0;
 
   const markOwnerVerified = (req, value) => {
     if(user?.role!=="owner") { alert("Only the owner can mark requests as checked."); return; }
@@ -18314,7 +18415,12 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
         ...(user.role==="owner"?[{id:"reconcile", label:"🔍 Reconcile", color:C.red}]:[]),
         {id:"history",  label:"Alerts", color:C.muted},
         ...(user.role==="owner"?[{id:"verify", label:`Verify (${verifiedCount}/${verifiableTotal})`, color:C.purple}]:[]),
+        ...(user.role==="owner"?[{id:"dupes", label:`🧹 Duplicates${dupDeletableCount>0?` (${dupDeletableCount})`:""}`, color:dupDeletableCount>0?C.red:C.muted}]:[]),
       ]} active={view} onSelect={setView} />
+
+      {view==="dupes" && user.role==="owner" && (
+        <DuplicateDieselPanel dieselRequests={dieselRequests} trips={trips} log={log} setDieselRequests={setDieselRequests} />
+      )}
 
       {/* ── DAILY VERIFICATION CHECKLIST — owner only ── */}
       {view==="verify" && user.role==="owner" && (

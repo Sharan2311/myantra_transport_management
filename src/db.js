@@ -868,6 +868,14 @@ export const DB = {
     const { error } = await supabase.from('mye_diesel_requests').delete().eq('id', id);
     if(error) throw error;
   },
+  // Same delete, but proves it happened: returns the deleted row and throws if the database
+  // deleted nothing (e.g. blocked by permissions), so a failed delete can never look like a success.
+  deleteDieselRequestVerified: async (id) => {
+    const { data, error } = await supabase.from('mye_diesel_requests').delete().eq('id', id).select('id');
+    if(error) throw error;
+    if(!data || data.length === 0) throw new Error('Database did not delete the request (nothing matched or not allowed).');
+    return data[0];
+  },
 
   getActivity: async () => {
     // Load last 90 days of activity (UI filters further to 7/14/30 days)
