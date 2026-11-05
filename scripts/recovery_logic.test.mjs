@@ -1,6 +1,6 @@
 // Run: node scripts/recovery_logic.test.mjs
 import assert from "node:assert/strict";
-import { candidateTrucks, buildRecovery, recoveryReportHtml, walletBalanceOf, buildRecoveryOverview, recoveryOverviewHtml } from "../src/recovery_logic.js";
+import { candidateTrucks, buildRecovery, recoveryReportHtml, walletBalanceOf, buildRecoveryOverview, recoveryOverviewHtml, assignTrucks } from "../src/recovery_logic.js";
 
 let n = 0;
 const t = (name, fn) => { fn(); n++; console.log("ok -", name); };
@@ -134,21 +134,41 @@ t("overview: one row per employee, totals add up, unassigned trucks reported sep
   assert.equal(o.totals.employees, 11300 + 5400);
   assert.equal(o.unassigned.trucks, 1); assert.equal(o.unassigned.vehicleLoan, 7000);
   assert.equal(o.totals.withUnassigned, 16700 + 7000);
-  assert.deepEqual(o.overlaps, []);
+  assert.deepEqual(o.resolved, []);
 });
 
-t("overview: a truck qualifying for two employees is flagged, and a positive wallet counts too", () => {
+t("a truck qualifying for two employees is counted once: most linked loan wins, then most trips, then list order", () => {
   const a = veh({ truckNo: "KA01D0001", loan: 100, loanTxns: [given(100, "EMP2")] });
-  const o = buildRecoveryOverview({ employees: [{ id: E, name: "A" }, { id: "EMP2", name: "B" }], vehicles: [a], trips: trips("KA01D0001", 3, 0), cashTransfers: [{ empId: E, amount: 50 }] });
-  assert.equal(o.overlaps.length, 1); assert.deepEqual(o.overlaps[0].employees.sort(), ["A", "B"]);
+  const emps = [{ id: E, name: "A" }, { id: "EMP2", name: "B" }];
+  const asg = assignTrucks({ employees: emps, vehicles: [a], trips: trips("KA01D0001", 3, 0) });
+  assert.equal(asg.owner.get(a.id), "EMP2");
+  assert.equal(asg.resolved.length, 1); assert.equal(asg.resolved[0].counted, "B"); assert.deepEqual(asg.resolved[0].also, ["A"]);
+  const o = buildRecoveryOverview({ employees: emps, vehicles: [a], trips: trips("KA01D0001", 3, 0), cashTransfers: [{ empId: E, amount: 50 }] });
+  assert.equal(o.rows.find(r => r.name === "B").vehicleLoan, 100);
+  assert.equal(o.rows.find(r => r.name === "A").vehicleLoan, 0);
+  assert.equal(o.totals.vehicleLoan, 100);
   assert.equal(o.rows.find(r => r.name === "A").wallet, 50);
+  // no linked loan: the employee with more trips wins
+  const b = veh({ truckNo: "KA01D0002", loan: 100, loanTxns: [{ type: "given", amount: 100 }] });
+  const tr = [...Array.from({ length: 3 }, () => ({ truckNo: "KA01D0002", assignedEmpId: E })), ...Array.from({ length: 4 }, () => ({ truckNo: "KA01D0002", assignedEmpId: "EMP2" }))];
+  assert.equal(assignTrucks({ employees: emps, vehicles: [b], trips: tr }).owner.get(b.id), "EMP2");
+});
+
+t("with an assignment, a single employee's sheet only shows trucks assigned to him", () => {
+  const a = veh({ truckNo: "KA01D0003", loan: 100, loanTxns: [given(100, "EMP2")] });
+  const emps = [{ id: E, name: "A" }, { id: "EMP2", name: "B" }];
+  const tr = trips("KA01D0003", 3, 0);
+  const assignment = assignTrucks({ employees: emps, vehicles: [a], trips: tr });
+  assert.equal(buildRecovery({ empId: E, employees: emps, vehicles: [a], trips: tr, cashTransfers: [], assignment }).trucks.length, 0);
+  assert.equal(buildRecovery({ empId: "EMP2", employees: emps, vehicles: [a], trips: tr, cashTransfers: [], assignment }).trucks.length, 1);
+  assert.equal(buildRecovery({ empId: E, employees: emps, vehicles: [a], trips: tr, cashTransfers: [] }).trucks.length, 1);
 });
 
 t("overview html has every employee, the grand total and the overlap note", () => {
   const a = veh({ truckNo: "KA01E0001", loan: 100, loanTxns: [given(100, "EMP2")] });
   const o = buildRecoveryOverview({ employees: [{ id: E, name: "Al<i>" }, { id: "EMP2", name: "B" }], vehicles: [a], trips: trips("KA01E0001", 3, 0), cashTransfers: [] });
   const h = recoveryOverviewHtml(o, { company: "Co" });
-  assert.match(h, /GRAND TOTAL TO RECOVER/); assert.match(h, /Al&lt;i&gt;/); assert.match(h, /more than one employee/);
+  assert.match(h, /GRAND TOTAL TO RECOVER/); assert.match(h, /Al&lt;i&gt;/); assert.match(h, /counted once/);
 });
 
 console.log(`\n${n} tests passed`);
