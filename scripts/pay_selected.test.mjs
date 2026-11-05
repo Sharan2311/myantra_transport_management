@@ -1,6 +1,6 @@
 // Run: node scripts/pay_selected.test.mjs
 import assert from "node:assert/strict";
-import { pouchHoldOf, payableAfterSkips, payEligible, paySelectionTotal, payOrder } from "../src/pay_selected_logic.js";
+import { pouchHoldOf, payableAfterSkips, payEligible, paySelectionTotal, payOrder, allocateTotal, splitReduction, reductionCheck } from "../src/pay_selected_logic.js";
 
 let n = 0;
 const t = (name, fn) => { fn(); n++; console.log("ok -", name); };
@@ -56,6 +56,41 @@ t("By Employee selection: only trips with money payable now and not settled are 
 t("Pay Selected order: oldest first, then created time", () => {
   const o = payOrder([{ id: "x", date: "2026-10-02", createdAt: "1" }, { id: "y", date: "2026-10-01", createdAt: "9" }, { id: "z", date: "2026-10-01", createdAt: "2" }]);
   assert.deepEqual(o.map(x => x.id), ["z", "y", "x"]);
+});
+
+t("allocateTotal fills oldest first and reports what does not fit", () => {
+  const items = [{ id: "a", payable: 100 }, { id: "b", payable: 200 }, { id: "c", payable: 50 }];
+  assert.deepEqual(allocateTotal(items, 250), { alloc: { a: 100, b: 150 }, unallocated: 0 });
+  assert.equal(allocateTotal(items, 400).unallocated, 50);
+  assert.deepEqual(allocateTotal(items, 0).alloc, {});
+});
+
+t("splitReduction: reductions from the oldest trips first, bank covers the rest, every trip still sums to its allocation", () => {
+  const alloc = { a: 100, b: 200, c: 50 };
+  const r = splitReduction(alloc, ["a", "b", "c"], 150);
+  assert.deepEqual(r.red, { a: 100, b: 50 });
+  assert.deepEqual(r.bank, { b: 150, c: 50 });
+  for (const id of ["a", "b", "c"]) assert.equal((r.red[id] || 0) + (r.bank[id] || 0), alloc[id]);
+  assert.deepEqual(splitReduction(alloc, ["a", "b", "c"], 0).red, {});
+  assert.deepEqual(splitReduction(alloc, ["a", "b", "c"], 350).bank, {});
+});
+
+t("example: 50,000 ticked, wallet 10,000 + loan 5,000 -> bank 35,000", () => {
+  const items = [{ id: "a", payable: 30000 }, { id: "b", payable: 20000 }];
+  const { alloc } = allocateTotal(items, 50000);
+  const { red, bank } = splitReduction(alloc, ["a", "b"], 15000);
+  assert.equal(Object.values(red).reduce((x, y) => x + y, 0), 15000);
+  assert.equal(Object.values(bank).reduce((x, y) => x + y, 0), 35000);
+});
+
+t("reductionCheck: loan over due, wallet zero, and over-settling are rejected", () => {
+  const base = { loanDue: 5000, walletBal: -3000, loanRed: 0, walletRed: 0, settle: 100, totalPayable: 100 };
+  assert.equal(reductionCheck(base).ok, true);
+  assert.equal(reductionCheck({ ...base, loanRed: 5001 }).ok, false);
+  assert.equal(reductionCheck({ ...base, walletBal: 0, walletRed: 10 }).ok, false);
+  assert.equal(reductionCheck({ ...base, settle: 200 }).ok, false);
+  assert.equal(reductionCheck({ ...base, loanRed: -1 }).ok, false);
+  assert.equal(reductionCheck({ ...base, walletBal: 1176, walletRed: 2000, settle: 2000, totalPayable: 2000 }).ok, true);
 });
 
 console.log(`\n${n} tests passed`);

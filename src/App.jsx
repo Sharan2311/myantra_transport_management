@@ -9,8 +9,8 @@ import { reconcileScreenshot } from "./payment_reconcile.js";
 import { findDieselDuplicates } from "./diesel_dupes.js";
 import { dieselReportHtml } from "./diesel_report.js";
 import { recoverCapFor, recoverOk, walletAfter, walletDelta, defaultTarget } from "./recover_target.js";
-import { buildRecovery, recoveryReportHtml, buildRecoveryOverview, recoveryOverviewHtml, assignTrucks } from "./recovery_logic.js";
-import { payableAfterSkips, pouchHoldOf, payEligible, paySelectionTotal, payOrder } from "./pay_selected_logic.js";
+import { walletBalanceOf, buildRecovery, recoveryReportHtml, buildRecoveryOverview, recoveryOverviewHtml, assignTrucks } from "./recovery_logic.js";
+import { payableAfterSkips, pouchHoldOf, payEligible, paySelectionTotal, payOrder, allocateTotal, splitReduction, reductionCheck } from "./pay_selected_logic.js";
 import { normDI, partyGrFile, partyDocsMissing, matchInvoices, routeDroppedDocs } from "./party_files.js";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { DB } from "./db.js";
@@ -29526,6 +29526,12 @@ function PaySelectedSheet({ init, onSave, onCancel }) {
   const [paidTo, setPaidTo] = useState(init.paidTo || "");
   const [notes, setNotes] = useState(init.notes || "");
   const [saving, setSaving] = useState(false);
+  // Optional loan / wallet reduction (By Employee flow): part of the ticked total is settled against the employee's
+  // loan and/or wallet instead of a bank payment.
+  const canReduce = !!init.empId;
+  const [loanRed, setLoanRed] = useState("");
+  const [walletRed, setWalletRed] = useState("");
+  const lr = canReduce ? (+loanRed || 0) : 0, wr = canReduce ? (+walletRed || 0) : 0;
 
   // Initial ticks: all trips, or (scan flow) oldest-first until the amount is covered.
   const [checked, setChecked] = useState(() => {
@@ -29540,19 +29546,18 @@ function PaySelectedSheet({ init, onSave, onCancel }) {
 
   // Keep the amount equal to the total until the owner types their own.
   React.useEffect(() => {
-    if (!amountTouched) setAmount(totalPayable ? String(Math.round(totalPayable*100)/100) : "");
+    if (!amountTouched) { const bank = Math.max(0, totalPayable - lr - wr); setAmount(bank ? String(Math.round(bank*100)/100) : ""); }
     // eslint-disable-next-line
-  }, [totalPayable, amountTouched]);
+  }, [totalPayable, amountTouched, lr, wr]);
 
-  const amt = +amount || 0;
-  const alloc = {}; let rem = amt;
-  for (const t of checkedTrips) {
-    const a = Math.round(Math.min(rem, calc(t).payable) * 100) / 100;
-    if (a > 0) { alloc[t.id] = a; rem = Math.round((rem - a) * 100) / 100; }
-  }
-  const unallocated = rem;
+  const amt = +amount || 0;                    // bank amount (carries the reference ID)
+  const settle = Math.round((amt + lr + wr) * 100) / 100;   // bank + reductions = what the ticked trips are settled by
+  const { alloc: allocAll, unallocated } = allocateTotal(checkedTrips.map(t => ({ id: t.id, payable: calc(t).payable })), settle);
+  const { red: redAlloc, bank: alloc } = splitReduction(allocAll, checkedTrips.map(t => t.id), lr + wr);
+  const redCheck = canReduce ? reductionCheck({ loanDue: init.loanDue, walletBal: init.walletBal, loanRed: lr, walletRed: wr, settle, totalPayable }) : { ok: true, errors: [] };
+  const walletAfterRed = (+init.walletBal || 0) + ((+init.walletBal || 0) === 0 ? 0 : ((+init.walletBal || 0) < 0 ? wr : -wr));
   const skipCount = checkedTrips.filter(t => { const s = skipOf(t.id); return s.loan||s.shortage||s.diesel; }).length;
-  const canSave = amt > 0 && unallocated <= 0.5 && checkedTrips.length > 0 && !saving;
+  const canSave = settle > 0 && unallocated <= 0.5 && checkedTrips.length > 0 && redCheck.ok && !saving;
 
   const toggle = id => setChecked(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
@@ -29567,7 +29572,10 @@ function PaySelectedSheet({ init, onSave, onCancel }) {
         diesel: !!s.diesel && ((t.dieselEstimate||0) > 0 || !!t.dieselIndentNo || !!t.dieselIndentNo2),
       };
     }).filter(s => s.loan || s.shortage || s.diesel);
-    const lines = [`Record ${fmt(amt)} across ${Object.keys(alloc).length} trip(s)${utr.trim()?` — UTR ${utr.trim()}`:""}?`];
+    const lines = [`Record ${fmt(settle)} across ${Object.keys(allocAll).length} trip(s)?`];
+    if (amt > 0) lines.push(`• Bank payment ${fmt(amt)}${utr.trim()?` — UTR ${utr.trim()}`:" (no reference ID entered)"}`);
+    if (lr > 0) lines.push(`• Loan reduced by ${fmt(lr)} (due ${fmt(init.loanDue)} → ${fmt(Math.max(0, (+init.loanDue||0) - lr))})`);
+    if (wr > 0) lines.push(`• Wallet reduced by ${fmt(wr)} (${fmt(init.walletBal)} → ${fmt(walletAfterRed)})`);
     skipList.forEach(s => {
       const t = trips.find(x => x.id === s.tripId);
       const parts = [s.loan?`loan ₹${t.loanRecovery}`:"", s.shortage?`shortage ₹${t.shortageRecovery}`:"", s.diesel?`diesel ₹${t.dieselEstimate||0} (indent detached)`:""].filter(Boolean);
@@ -29579,8 +29587,14 @@ function PaySelectedSheet({ init, onSave, onCancel }) {
       id: uid(), tripId: t.id, truckNo: t.truckNo, lrNo: t.lrNo,
       amount: alloc[t.id], utr: utr.trim(), date, paidTo: paidTo.trim(), notes: notes.trim(),
     }));
+    const redNote = `Paid against employee ${[lr>0?"loan":"", wr>0?"wallet":""].filter(Boolean).join("/")} — ${init.empName||"employee"}`;
+    const reductionPayments = checkedTrips.filter(t => redAlloc[t.id] > 0).map(t => ({
+      id: uid(), tripId: t.id, truckNo: t.truckNo, lrNo: t.lrNo,
+      amount: redAlloc[t.id], utr: "", date, paidTo: init.empName || "", notes: redNote,
+    }));
+    const reduction = (lr > 0 || wr > 0) ? { empId: init.empId, empName: init.empName || "", loan: lr, wallet: wr, payments: reductionPayments, date } : null;
     setSaving(true);
-    try { await onSave({ payments, skips: skipList }); } finally { setSaving(false); }
+    try { await onSave({ payments, skips: skipList, reduction }); } finally { setSaving(false); }
   };
 
   const chip = (on, label, onClick) => (
@@ -29628,15 +29642,27 @@ function PaySelectedSheet({ init, onSave, onCancel }) {
           })}
         </div>
 
-        <Field label="Amount Paid ₹" value={amount} onChange={v=>{setAmount(v); setAmountTouched(true);}} type="number" />
-        {amt > 0 && unallocated > 0.5 && (
+        {canReduce && (
+          <div style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 12px",display:"flex",flexDirection:"column",gap:8}}>
+            <div style={{fontSize:12,fontWeight:800,color:C.text}}>Settle part against {init.empName||"employee"}'s loan / wallet (optional)</div>
+            <div style={{display:"flex",gap:10}}>
+              <Field label={`Reduce loan ₹ (due ${fmt(init.loanDue||0)})`} value={loanRed} onChange={setLoanRed} type="number" half />
+              <Field label={`Reduce wallet ₹ (now ${(+init.walletBal||0)<0?"-":""}${fmt(Math.abs(+init.walletBal||0))})`} value={walletRed} onChange={setWalletRed} type="number" half />
+            </div>
+            {wr > 0 && (+init.walletBal||0) !== 0 && <div style={{fontSize:11,color:C.muted}}>Wallet {(+init.walletBal||0)<0?"-":""}{fmt(Math.abs(+init.walletBal||0))} → {walletAfterRed<0?"-":""}{fmt(Math.abs(walletAfterRed))}</div>}
+            {redCheck.errors.map(e=><div key={e} style={{fontSize:11,color:C.red}}>⚠ {e}</div>)}
+            {(lr>0||wr>0) && <div style={{fontSize:11,color:C.muted}}>Untick trips above until the total matches. Reductions {fmt(lr+wr)} + bank {fmt(amt)} = {fmt(settle)} of {fmt(totalPayable)} ticked.</div>}
+          </div>
+        )}
+        <Field label={canReduce ? "Bank amount paid ₹" : "Amount Paid ₹"} value={amount} onChange={v=>{setAmount(v); setAmountTouched(true);}} type="number" />
+        {settle > 0 && unallocated > 0.5 && (
           <div style={{background:C.orange+"11",border:`1px solid ${C.orange}44`,borderRadius:8,padding:"8px 10px",fontSize:12,color:C.orange}}>
             ⚠ {fmt(unallocated)} is more than the ticked trips need — tick more trips or lower the amount.
           </div>
         )}
-        {amt > 0 && unallocated <= 0.5 && amt < totalPayable - 0.5 && (
+        {settle > 0 && unallocated <= 0.5 && settle < totalPayable - 0.5 && (
           <div style={{background:C.blue+"11",borderRadius:8,padding:"8px 10px",fontSize:12,color:C.blue}}>
-            Amount is {fmt(totalPayable-amt)} less than the total — filled oldest first, the last trip gets a part payment.
+            Amount is {fmt(totalPayable-settle)} less than the total — filled oldest first, the last trip gets a part payment.
           </div>
         )}
         <div style={{display:"flex",gap:10}}>
@@ -29652,7 +29678,7 @@ function PaySelectedSheet({ init, onSave, onCancel }) {
           📄 Download Payment Advice (PDF)
         </Btn>
         <Btn onClick={handleSave} full color={C.green} disabled={!canSave}>
-          {saving ? "Saving…" : `✓ Record ${fmt(amt)}${skipCount?` · ${skipCount} trip(s) edited`:""}`}
+          {saving ? "Saving…" : `✓ Record ${fmt(settle)}${skipCount?` · ${skipCount} trip(s) edited`:""}`}
         </Btn>
       </div>
     </Sheet>
@@ -30151,7 +30177,7 @@ This will auto-recover in the next trip.`);
   // then record ONE UTR split across the trips and settle any that hit zero.
   // Deliberately does NOT go through autoSettle(): that works off the pre-edit
   // balance and would mis-read the extra as an overpayment (and add a loan).
-  const paySelectedTrips = async ({payments, skips}) => {
+  const paySelectedTrips = async ({payments, skips, reduction=null}) => {
     const utrToCheck = (payments[0]?.utr||"").trim();
     if(utrToCheck) {
       const dupUtr = (driverPays||[]).find(p=>(p.utr||"").trim()===utrToCheck);
@@ -30194,23 +30220,51 @@ This will auto-recover in the next trip.`);
       log("SKIP DEDUCTION", `LR:${t.lrNo||"—"} ${t.truckNo} — removed ${did.join(", ")} before payment`);
     }
     const withMeta = payments.map(p => ({...p, paidTo:p.paidTo||"", createdBy:user.username, createdAt:nowTs()}));
-    setDriverPays(prev=>[...(prev||[]),...withMeta]);
-    for(const p of withMeta) {
+    // Part of the total may be settled against the employee's loan / wallet instead of by bank.
+    const redPays = (reduction?.payments||[]).map(p => ({...p, paidTo:p.paidTo||"", createdBy:user.username, createdAt:nowTs()}));
+    const allPays = [...withMeta, ...redPays];
+    setDriverPays(prev=>[...(prev||[]),...allPays]);
+    for(const p of allPays) {
       log("DRIVER PAYMENT", `LR:${p.lrNo} ${p.truckNo} — ${fmt(p.amount)} UTR:${p.utr}`);
       try { await DB.saveDriverPay(p); }
       catch(e) {
         if(e.message?.includes("unique") || e.code==="23505") {
-          setDriverPays(prev=>prev.filter(x=>!withMeta.find(m=>m.id===x.id)));
+          setDriverPays(prev=>prev.filter(x=>!allPays.find(m=>m.id===x.id)));
           alert(`🚫 DB rejected: UTR ${p.utr} already exists. Payments were not saved (any deduction edits already applied stay).`);
           return;
         }
         throw e;
       }
     }
-    recordAdvice(withMeta);
+    recordAdvice(withMeta);   // the advice lists the bank payment only
+    // Loan / wallet reduction: written right after the trip payments so a failure is shown, never silent.
+    if(reduction && (reduction.loan>0 || reduction.wallet>0)) {
+      const trucksTxt = redPays.map(p=>p.truckNo).filter((v,i,a)=>a.indexOf(v)===i).join(", ");
+      const note = `Settled via Pay Selected from vehicle balance(s): ${trucksTxt}`;
+      if(reduction.loan>0) {
+        const e = (employees||[]).find(x=>x.id===reduction.empId);
+        if(e) {
+          const txn = {id:uid(), type:"recovery", date:reduction.date||today(), amount:reduction.loan, note};
+          const upd = {...e, loanRecovered:(e.loanRecovered||0)+reduction.loan, loanTxns:[...(e.loanTxns||[]),txn]};
+          setEmployees(prev=>prev.map(x=>x.id===upd.id?upd:x));
+          try { await DB.saveEmployee(upd); }
+          catch(err) { alert(`⚠ The trip payments were saved, but the LOAN reduction of ${fmt(reduction.loan)} for ${e.name} could NOT be saved: ${err.message}\n\nFix the loan balance by hand.`); }
+        }
+      }
+      if(reduction.wallet>0) {
+        const bal = walletBalanceOf(cashTransfers, reduction.empId);
+        if(bal!==0) {
+          const wxn = {id:uid(), empId:reduction.empId, amount:walletDelta(bal, reduction.wallet), date:reduction.date||today(), type:"transfer", note, createdBy:user.username, createdAt:nowTs()};
+          setCashTransfers(prev=>[wxn, ...(Array.isArray(prev)?prev:[])]);
+          try { await DB.saveCashTransfer(wxn); }
+          catch(err) { alert(`⚠ The trip payments were saved, but the WALLET reduction of ${fmt(reduction.wallet)} could NOT be saved: ${err.message}\n\nFix the wallet balance by hand.`); }
+        }
+      }
+      log("PAY SELECTED LOAN/WALLET", `${reduction.empName||reduction.empId}: loan ${fmt(reduction.loan)}, wallet ${fmt(reduction.wallet)}`);
+    }
     // Settle trips whose balance reached zero (against the EDITED trip)
     const paidNow = {};
-    withMeta.forEach(p=>{ paidNow[p.tripId]=(paidNow[p.tripId]||0)+p.amount; });
+    allPays.forEach(p=>{ paidNow[p.tripId]=(paidNow[p.tripId]||0)+p.amount; });
     for(const tripId of Object.keys(paidNow)) {
       const t = edited[tripId] || (trips||[]).find(x=>x.id===tripId);
       if(!t) continue;
@@ -30731,7 +30785,8 @@ This will auto-recover in the next trip.`);
                   setDriverPays={setDriverPays} setTrips={setTrips} setEmployees={setEmployees}
                   setCashTransfers={setCashTransfers} cashTransfers={cashTransfers}
                   user={user} log={log}
-                  onPaySelected={selTrips=>setPaySelSheet({trips:selTrips, paidTo:emp?.name||"", title:"💰 Pay Selected Trips"})}
+                  onPaySelected={selTrips=>setPaySelSheet({trips:selTrips, paidTo:emp?.name||"", title:"💰 Pay Selected Trips",
+                    ...(empId!=="unassigned" && emp ? {empId, empName:emp.name, loanDue:Math.max(0,(emp.loan||0)-(emp.loanRecovered||0)), walletBal:walletBalanceOf(cashTransfers, empId)} : {})})}
                 />
               );
             })}
