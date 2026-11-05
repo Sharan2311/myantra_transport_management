@@ -1365,6 +1365,7 @@ function RecoveryMod({trips, vehicles, employees, cashTransfers, user, allTripsL
   const [empId, setEmpId] = useState("");
   const [groupBy, setGroupBy] = useState("vehicle");
   const [excluded, setExcluded] = useState(new Set());
+  const [showUnassigned, setShowUnassigned] = useState(false);
   const triedLoad = useRef(false);
   // Trip counts decide which trucks are his, so every trip must be loaded (the app only loads the last 90 days by default).
   useEffect(()=>{ if(!allTripsLoaded && !loadingAllTrips && !triedLoad.current){ triedLoad.current = true; loadAllTrips && loadAllTrips(); } },[allTripsLoaded, loadingAllTrips]);
@@ -1432,6 +1433,25 @@ function RecoveryMod({trips, vehicles, employees, cashTransfers, user, allTripsL
             </tbody>
           </table>
         </div>
+        {overview.unassigned.rows.length>0 && (
+          <div style={{marginTop:8}}>
+            <button onClick={()=>setShowUnassigned(p=>!p)} style={{fontSize:11,fontWeight:700,cursor:"pointer",background:"transparent",border:`1px solid ${C.border}`,borderRadius:8,padding:"4px 10px",color:C.text}}>
+              {showUnassigned?"▾":"▸"} Details: {overview.unassigned.rows.length} vehicle{overview.unassigned.rows.length>1?"s":""} not linked to any employee
+            </button>
+            {showUnassigned && (
+              <div style={{marginTop:6,display:"flex",flexDirection:"column",gap:6}}>
+                {overview.unassigned.rows.map(t=>(
+                  <div key={t.id} style={{border:`1px solid ${C.border}`,borderRadius:10,padding:"6px 10px",fontSize:11,color:C.text}}>
+                    <div style={{fontWeight:800}}>{t.truckNo} <span style={{fontWeight:500,color:C.muted}}>· {t.ownerName||"no owner"} · {t.tripsTotal} trip{t.tripsTotal===1?"":"s"}</span></div>
+                    <div>Loan {fmt(t.loanGiven)} − recovered {fmt(t.loanRecovered)} = <b>{fmt(t.loanNet)}</b></div>
+                    {(t.shortageOwed>0||t.shortageRecovered>0) && <div>Shortage {fmt(t.shortageOwed)} − recovered {fmt(t.shortageRecovered)} = <b>{fmt(t.shortagePending)}</b></div>}
+                  </div>
+                ))}
+                <div style={{fontSize:10,color:C.muted}}>Loan is netted per owner (pending {fmt(overview.unassigned.vehicleLoan)}); shortage is per truck (pending {fmt(overview.unassigned.shortage)}). These trucks have no linked loan and no majority of trips with any employee.</div>
+              </div>
+            )}
+          </div>
+        )}
         <div style={{fontSize:10,color:C.muted,marginTop:6}}>Wallet = current balance, counted in full. Tap an employee to see and edit their sheet.{overview.resolved.length>0 && ` ${overview.resolved.length} truck(s) qualified for more than one employee and are counted once, under the employee with the most linked loan, then the most trips: ${overview.resolved.map(o=>`${o.truckNo} → ${o.counted} (also ${o.also.join(", ")})`).join("; ")}.`}</div>
       </div>
       <select value={empId} onChange={e=>pickEmp(e.target.value)}
