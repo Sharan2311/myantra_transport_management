@@ -10,7 +10,7 @@ import { findDieselDuplicates } from "./diesel_dupes.js";
 import { dieselReportHtml } from "./diesel_report.js";
 import { recoverCapFor, recoverOk, walletAfter, walletDelta, defaultTarget } from "./recover_target.js";
 import { buildRecovery, recoveryReportHtml, buildRecoveryOverview, recoveryOverviewHtml, assignTrucks } from "./recovery_logic.js";
-import { payableAfterSkips, pouchHoldOf } from "./pay_selected_logic.js";
+import { payableAfterSkips, pouchHoldOf, payEligible, paySelectionTotal, payOrder } from "./pay_selected_logic.js";
 import { normDI, partyGrFile, partyDocsMissing, matchInvoices, routeDroppedDocs } from "./party_files.js";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { DB } from "./db.js";
@@ -28758,8 +28758,14 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
 // ─── EMPLOYEE TRIP GROUP ─────────────────────────────────────────────────────
 // Groups all unpaid trips for one employee — can request payment for each or all together
 function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed=0, settledCount=0, heldOnly=[], prevSnap=null, balSnaps=[], paymentRequests, setPaymentRequests, setPayReqSheet, requestPaymentGuarded, vehicles, fmt,
-  setDriverPays, setTrips, setEmployees, setCashTransfers, cashTransfers, user, log }) {
+  setDriverPays, setTrips, setEmployees, setCashTransfers, cashTransfers, user, log, onPaySelected }) {
   const [open, setOpen] = useState(true);
+  // "Pay selected": tick any number of this employee's trips (or all) and record one payment with a reference ID
+  const [payMode, setPayMode] = useState(false);
+  const [paySel, setPaySel] = useState(new Set());
+  const canPaySel = (user?.role==="owner"||user?.role==="manager") && !!onPaySelected;
+  const payable = payEligible(empTrips);
+  const paySelTotal = paySelectionTotal(empTrips, paySel);
   const [selected, setSelected] = useState(new Set(empTrips.map(t=>t.id)));
   const C = window._MY_COLORS || {};
   const isOwner = user?.role==="owner";
@@ -28895,6 +28901,30 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed
 
       {open && (
         <div style={{padding:"10px 14px",display:"flex",flexDirection:"column",gap:8}}>
+          {canPaySel && payable.length>0 && (
+            <div style={{background:"#ecfdf5",border:"1px solid #10b98155",borderRadius:10,padding:"8px 10px",display:"flex",flexDirection:"column",gap:6}}>
+              {!payMode ? (
+                <button onClick={()=>{setPayMode(true);setPaySel(new Set());}}
+                  style={{background:"#10b981",color:"#fff",border:"none",borderRadius:8,padding:"8px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+                  ☑ Select trips to pay ({payable.length} payable · {fmt(payable.reduce((s,t)=>s+t.balance,0))})
+                </button>
+              ) : (
+                <>
+                  <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",fontSize:12}}>
+                    <button onClick={()=>setPaySel(new Set(payable.map(t=>t.id)))} style={{fontSize:11,fontWeight:700,cursor:"pointer"}}>Select all ({payable.length})</button>
+                    <button onClick={()=>setPaySel(new Set())} style={{fontSize:11,cursor:"pointer"}}>Clear</button>
+                    <button onClick={()=>{setPayMode(false);setPaySel(new Set());}} style={{fontSize:11,cursor:"pointer",marginLeft:"auto"}}>Cancel</button>
+                  </div>
+                  <div style={{fontSize:12,fontWeight:700,color:"#065f46"}}>{paySel.size} trip{paySel.size===1?"":"s"} selected · {fmt(paySelTotal)}</div>
+                  <button disabled={paySel.size===0}
+                    onClick={()=>{ onPaySelected(payOrder(payable.filter(t=>paySel.has(t.id)))); setPayMode(false); setPaySel(new Set()); }}
+                    style={{background:paySel.size===0?"#ccc":"#059669",color:"#fff",border:"none",borderRadius:8,padding:"9px",fontSize:12,fontWeight:800,cursor:paySel.size===0?"not-allowed":"pointer"}}>
+                    💰 Pay Selected — enter reference ID
+                  </button>
+                </>
+              )}
+            </div>
+          )}
           {/* Select all */}
           <div style={{display:"flex",alignItems:"center",gap:8,fontSize:12}}>
             <input type="checkbox" checked={selected.size>0 && selected.size<=MAX_GROUP}
@@ -28914,6 +28944,9 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed
             <div key={t.id} style={{display:"flex",alignItems:"center",gap:10,
               background:"#f8fafc",borderRadius:8,padding:"8px 10px",
               border:`1px solid ${hasPendingReq(t.id)?"#a855f733":"#e2e8f0"}`}}>
+              {payMode && (payable.some(x=>x.id===t.id)
+                ? <input type="checkbox" title="Select to pay" checked={paySel.has(t.id)} onChange={()=>setPaySel(p=>{const n=new Set(p); n.has(t.id)?n.delete(t.id):n.add(t.id); return n;})} style={{width:17,height:17,flexShrink:0,accentColor:"#059669"}} />
+                : <span style={{width:17,flexShrink:0}} />)}
               <input type="checkbox" checked={selected.has(t.id)}
                 onChange={()=>setSelected(p=>{
                 const n=new Set(p);
@@ -30698,6 +30731,7 @@ This will auto-recover in the next trip.`);
                   setDriverPays={setDriverPays} setTrips={setTrips} setEmployees={setEmployees}
                   setCashTransfers={setCashTransfers} cashTransfers={cashTransfers}
                   user={user} log={log}
+                  onPaySelected={selTrips=>setPaySelSheet({trips:selTrips, paidTo:emp?.name||"", title:"💰 Pay Selected Trips"})}
                 />
               );
             })}

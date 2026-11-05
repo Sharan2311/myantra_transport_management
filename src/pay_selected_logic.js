@@ -18,3 +18,10 @@ export function payableAfterSkips(t, s = {}) {
   const netDue = Math.max(0, (+t.gross || 0) - deducts);
   return { netDue, payable: Math.max(0, netDue - (+t.paidSoFar || 0)) };
 }
+
+// By Employee "select trips to pay": a trip can be ticked when money is still payable now and it is not already settled
+// (same rule as the Unpaid list). Select-all picks exactly those; the total is what the Pay Selected sheet will start from.
+export const payEligible = trips => (trips || []).filter(t => (+t.balance || 0) > 0 && !t.driverSettled);
+export const paySelectionTotal = (trips, selectedIds) =>
+  payEligible(trips).filter(t => selectedIds.has(t.id)).reduce((s, t) => s + (+t.balance || 0), 0);
+export const payOrder = trips => [...(trips || [])].sort((a, b) => (a.date || "").localeCompare(b.date || "") || (a.createdAt || "").localeCompare(b.createdAt || ""));
