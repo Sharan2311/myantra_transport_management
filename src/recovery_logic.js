@@ -2,7 +2,8 @@
 //   - vehicle loans (owner-level netting, clamped once — same rule as ownerLoanStatus in App.jsx)
 //   - vehicle shortage (per vehicle, never negative — same as the shortage dashboard)
 //   - the employee's own loan (employee.loan - employee.loanRecovered)
-//   - wallet (signed current balance; negative = employee owes the company)
+//   - wallet (current balance, counted in full whichever way it points: negative = employee owes the company,
+//     positive = employee holds company cash that has to be accounted for)
 // A truck belongs to an employee when a loan entry on it is linked to him, or most of the truck's trips are assigned to him.
 // Pure functions only: the screen and the PDF both read this, so they cannot disagree.
 
@@ -95,15 +96,16 @@ export function buildRecovery({ empId, employees, vehicles, trips, cashTransfers
   const empLoanPending = Math.max(0, empLoanGiven - empLoanRecovered);
   const walletBalance = walletBalanceOf(cashTransfers, empId);
   const walletOwed = Math.max(0, -walletBalance);
+  const walletCounted = Math.abs(walletBalance);
 
   return {
     emp, trucks, owners, excludedCount: all.length - included.length, candidateCount: all.length,
     empLoan: { given: empLoanGiven, recovered: empLoanRecovered, pending: empLoanPending, txns: emp?.loanTxns || [] },
-    wallet: { balance: walletBalance, owed: walletOwed },
+    wallet: { balance: walletBalance, owed: walletOwed, counted: walletCounted },
     totals: {
       vehicleLoanPending, rawTruckLoanSum, ownerNettingAdjustment: vehicleLoanPending - rawTruckLoanSum,
-      shortagePending, empLoanPending, walletOwed,
-      grand: vehicleLoanPending + shortagePending + empLoanPending + walletOwed,
+      shortagePending, empLoanPending, walletOwed, walletCounted,
+      grand: vehicleLoanPending + shortagePending + empLoanPending + walletCounted,
     },
   };
 }
@@ -135,14 +137,15 @@ export function recoveryReportHtml(r, { groupBy = "vehicle", company = "", date 
     <tfoot><tr><td colspan="2">Given ${inr(el.given)} · Recovered ${inr(el.recovered)}</td><td class="n">${inr(el.pending)}</td><td>pending</td></tr></tfoot></table>`;
 
   const w = r.wallet;
-  const walletTable = `<h3>Wallet</h3><table><tbody><tr><td>Current wallet balance</td><td class="n">${w.balance < 0 ? "-" : ""}${inr(Math.abs(w.balance))}</td><td>${w.balance < 0 ? "Employee owes the company" : w.balance > 0 ? "Employee holds company cash (not counted as pending)" : "Nil"}</td></tr>
-    <tr><td><b>Wallet pending (owed)</b></td><td class="n"><b>${inr(w.owed)}</b></td><td></td></tr></tbody></table>`;
+  const walletTable = `<h3>Wallet</h3><table><tbody><tr><td>Current wallet balance</td><td class="n">${w.balance < 0 ? "-" : ""}${inr(Math.abs(w.balance))}</td><td>${w.balance < 0 ? "Employee owes the company" : w.balance > 0 ? "Employee holds company cash — counted as pending" : "Nil"}</td></tr>
+    <tr><td><b>Wallet counted in total</b></td><td class="n"><b>${inr(w.counted)}</b></td><td></td></tr></tbody></table>`;
 
+  const w0 = r.wallet;
   const summary = `<h3>Total pending recovery</h3><table><tbody>
     <tr><td>Vehicle loans</td><td class="n">${inr(T.vehicleLoanPending)}</td></tr>
     <tr><td>Vehicle shortage</td><td class="n">${inr(T.shortagePending)}</td></tr>
     <tr><td>${esc(name)}'s own loan</td><td class="n">${inr(T.empLoanPending)}</td></tr>
-    <tr><td>Wallet owed</td><td class="n">${inr(T.walletOwed)}</td></tr>
+    <tr><td>Wallet balance (${w0.balance < 0 ? "owed by employee" : w0.balance > 0 ? "cash held by employee" : "nil"})</td><td class="n">${inr(T.walletCounted)}</td></tr>
     <tr class="g"><td>GRAND TOTAL PENDING</td><td class="n">${inr(T.grand)}</td></tr></tbody></table>`;
 
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Recovery — ${esc(name)}</title><style>

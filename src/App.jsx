@@ -1399,11 +1399,11 @@ function RecoveryMod({trips, vehicles, employees, cashTransfers, user, allTripsL
       </select>
       {r && (<>
         <div style={{background:C.card,border:`1.5px solid ${C.border}`,borderRadius:12,padding:12}}>
-          {[["Vehicle loans",T.vehicleLoanPending],["Vehicle shortage",T.shortagePending],[`${r.emp?.name||"Employee"}'s own loan`,T.empLoanPending],["Wallet owed",T.walletOwed]].map(([l,v])=>(
+          {[["Vehicle loans",T.vehicleLoanPending],["Vehicle shortage",T.shortagePending],[`${r.emp?.name||"Employee"}'s own loan`,T.empLoanPending],[r.wallet.balance<0?"Wallet (owed by employee)":r.wallet.balance>0?"Wallet (cash held by employee)":"Wallet",T.walletCounted]].map(([l,v])=>(
             <div key={l} style={{display:"flex",justifyContent:"space-between",fontSize:13,padding:"3px 0",color:C.text}}><span>{l}</span><b>{fmt(v)}</b></div>
           ))}
           <div style={{display:"flex",justifyContent:"space-between",fontSize:16,fontWeight:800,borderTop:`1px solid ${C.border}`,marginTop:6,paddingTop:6,color:C.accent}}><span>Total pending</span><span>{fmt(T.grand)}</span></div>
-          <div style={{fontSize:11,color:C.muted,marginTop:6}}>Current wallet balance: <b>{r.wallet.balance<0?"-":""}{fmt(Math.abs(r.wallet.balance))}</b>{r.wallet.balance<0?" (employee owes the company)":r.wallet.balance>0?" (employee holds company cash — not counted)":""}</div>
+          <div style={{fontSize:11,color:C.muted,marginTop:6}}>Current wallet balance: <b>{r.wallet.balance<0?"-":""}{fmt(Math.abs(r.wallet.balance))}</b>{r.wallet.balance<0?" (employee owes the company)":r.wallet.balance>0?" (employee holds company cash — counted in the total)":""}</div>
         </div>
         <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
           {chip("vehicle","By vehicle")}{chip("owner","By owner")}
