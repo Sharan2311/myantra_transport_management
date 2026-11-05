@@ -54,33 +54,29 @@ const shortageOf = v => {
   };
 };
 
-export function buildRecovery({ empId, employees, vehicles, trips, cashTransfers, excluded = new Set() }) {
-  const emp = (employees || []).find(e => e.id === empId) || null;
-  const all = candidateTrucks({ empId, vehicles, trips });
-  const included = all.filter(c => !excluded.has(c.vehicle.id));
+const truckRowOf = c => {
+  const v = c.vehicle;
+  const loanGiven = n(v.loan);
+  const loanRecovered = (v.loanTxns || []).filter(x => x.type === "recovery").reduce((s, x) => s + n(x.amount), 0);
+  const sh = shortageOf(v);
+  return {
+    id: v.id, truckNo: v.truckNo, ownerName: (v.ownerName || "").trim(),
+    tripsHim: c.tripsHim, tripsTotal: c.tripsTotal, reasons: c.reasons, linkedOther: c.linkedOther,
+    loanGiven, loanRecovered, loanNet: loanGiven - loanRecovered,
+    shortageOwed: sh.owed, shortageRecovered: sh.recovered, shortagePending: Math.max(0, sh.owed - sh.recovered),
+    loanTxns: v.loanTxns || [], shortageTxns: v.shortageTxns || [],
+  };
+};
 
-  const trucks = included.map(c => {
-    const v = c.vehicle;
-    const loanGiven = n(v.loan);
-    const loanRecovered = (v.loanTxns || []).filter(x => x.type === "recovery").reduce((s, x) => s + n(x.amount), 0);
-    const sh = shortageOf(v);
-    return {
-      id: v.id, truckNo: v.truckNo, ownerName: (v.ownerName || "").trim(),
-      tripsHim: c.tripsHim, tripsTotal: c.tripsTotal, reasons: c.reasons, linkedOther: c.linkedOther,
-      loanGiven, loanRecovered, loanNet: loanGiven - loanRecovered,
-      shortageOwed: sh.owed, shortageRecovered: sh.recovered, shortagePending: Math.max(0, sh.owed - sh.recovered),
-      loanTxns: v.loanTxns || [], shortageTxns: v.shortageTxns || [],
-    };
-  });
-
-  // owner groups: loan is netted across the owner's included trucks and clamped once
+// owner groups: loan is netted across the owner's trucks and clamped once
+const ownersOf = trucks => {
   const groups = new Map();
-  trucks.forEach((t, i) => {
+  trucks.forEach(t => {
     const key = t.ownerName ? "o:" + t.ownerName.toLowerCase() : "v:" + t.id;
     if (!groups.has(key)) groups.set(key, { owner: t.ownerName || t.truckNo, trucks: [] });
     groups.get(key).trucks.push(t);
   });
-  const owners = [...groups.values()].map(g => {
+  return [...groups.values()].map(g => {
     const given = g.trucks.reduce((s, t) => s + t.loanGiven, 0);
     const recovered = g.trucks.reduce((s, t) => s + t.loanRecovered, 0);
     const net = given - recovered;
@@ -88,6 +84,15 @@ export function buildRecovery({ empId, employees, vehicles, trips, cashTransfers
       loanPending: Math.max(0, net), overRecovered: Math.max(0, -net),
       shortagePending: g.trucks.reduce((s, t) => s + t.shortagePending, 0) };
   }).sort((a, b) => a.owner.localeCompare(b.owner));
+};
+
+export function buildRecovery({ empId, employees, vehicles, trips, cashTransfers, excluded = new Set() }) {
+  const emp = (employees || []).find(e => e.id === empId) || null;
+  const all = candidateTrucks({ empId, vehicles, trips });
+  const included = all.filter(c => !excluded.has(c.vehicle.id));
+
+  const trucks = included.map(truckRowOf);
+  const owners = ownersOf(trucks);
 
   const vehicleLoanPending = owners.reduce((s, o) => s + o.loanPending, 0);
   const rawTruckLoanSum = trucks.reduce((s, t) => s + t.loanNet, 0);
@@ -155,5 +160,54 @@ tfoot td{font-weight:bold;background:#f5f5f5}tr.g td{font-size:13px;background:#
 <h2>${esc(company)} — Pending recovery: ${esc(name)}</h2>
 <div class="sub">${r.trucks.length} vehicle${r.trucks.length === 1 ? "" : "s"} included${r.excludedCount ? `, ${r.excludedCount} excluded` : ""}${date ? " · " + esc(date) : ""} · amounts in ₹</div>
 ${summary}${loanTable}${empLoanTable}${walletTable}
+</body></html>`;
+}
+
+// Everyone at once: one row per employee, plus the vehicles that belong to nobody.
+// A truck is listed under an employee by the same rule as buildRecovery. If a truck qualifies for two employees it is
+// reported in `overlaps` (and counted under both rows) so the owner can see where the grand total may count it twice.
+export function buildRecoveryOverview({ employees, vehicles, trips, cashTransfers }) {
+  const rows = [];
+  const seen = new Map(); // vehicle id -> [employee names]
+  for (const e of employees || []) {
+    const r = buildRecovery({ empId: e.id, employees, vehicles, trips, cashTransfers });
+    r.trucks.forEach(t => seen.set(t.id, [...(seen.get(t.id) || []), e.name]));
+    const T = r.totals;
+    rows.push({ empId: e.id, name: e.name, trucks: r.trucks.length, vehicleLoan: T.vehicleLoanPending, shortage: T.shortagePending,
+      ownLoan: T.empLoanPending, walletBalance: r.wallet.balance, wallet: T.walletCounted, total: T.grand });
+  }
+  const assigned = new Set(seen.keys());
+  const orphan = (vehicles || []).filter(v => hasLedger(v) && !assigned.has(v.id)).map(v => truckRowOf({ vehicle: v, tripsHim: 0, tripsTotal: 0, reasons: ["not linked to any employee"], linkedOther: 0 }));
+  const orphanOwners = ownersOf(orphan);
+  const unassigned = {
+    trucks: orphan.length,
+    vehicleLoan: orphanOwners.reduce((s, o) => s + o.loanPending, 0),
+    shortage: orphan.reduce((s, t) => s + t.shortagePending, 0),
+  };
+  unassigned.total = unassigned.vehicleLoan + unassigned.shortage;
+  const shown = rows.filter(r => r.total > 0 || r.walletBalance !== 0).sort((a, b) => b.total - a.total);
+  const sum = k => shown.reduce((s, r) => s + r[k], 0);
+  const overlaps = [...seen.entries()].filter(([, names]) => names.length > 1).map(([id, names]) => {
+    const v = (vehicles || []).find(x => x.id === id);
+    return { truckNo: v?.truckNo || id, employees: names };
+  });
+  const totals = { vehicleLoan: sum("vehicleLoan"), shortage: sum("shortage"), ownLoan: sum("ownLoan"), wallet: sum("wallet"), employees: sum("total") };
+  totals.withUnassigned = totals.employees + unassigned.total;
+  return { rows: shown, unassigned, totals, overlaps };
+}
+
+export function recoveryOverviewHtml(o, { company = "", date = "" } = {}) {
+  const body = o.rows.map(r => `<tr><td>${esc(r.name)}</td><td class="n">${r.trucks}</td><td class="n">${inr(r.vehicleLoan)}</td><td class="n">${inr(r.shortage)}</td><td class="n">${inr(r.ownLoan)}</td><td class="n">${r.walletBalance < 0 ? "-" : ""}${inr(Math.abs(r.walletBalance))}</td><td class="n">${inr(r.total)}</td></tr>`).join("");
+  const T = o.totals;
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Recovery — all employees</title><style>
+body{font-family:Arial,sans-serif;font-size:11px;margin:16px;color:#111}h2{margin:0 0 4px}.sub{color:#555;margin-bottom:8px}
+table{border-collapse:collapse;width:100%}th,td{border:1px solid #bbb;padding:4px 6px;text-align:left}th{background:#e5e7eb}.n{text-align:right;white-space:nowrap}
+tfoot td{font-weight:bold;background:#f5f5f5}tr.g td{background:#fde68a;font-size:13px}@media print{body{margin:6mm}}</style></head><body onload="window.print()">
+<h2>${esc(company)} — Pending recovery: all employees</h2><div class="sub">${date ? esc(date) + " · " : ""}amounts in ₹ · wallet shown as current balance (negative = employee owes) and counted in full</div>
+<table><thead><tr><th>Employee</th><th>Trucks</th><th>Vehicle loans</th><th>Shortage</th><th>Own loan</th><th>Wallet balance</th><th>Total to recover</th></tr></thead><tbody>${body || `<tr><td colspan="7">Nothing pending</td></tr>`}</tbody>
+<tfoot><tr><td>Total (employees)</td><td></td><td class="n">${inr(T.vehicleLoan)}</td><td class="n">${inr(T.shortage)}</td><td class="n">${inr(T.ownLoan)}</td><td class="n">${inr(T.wallet)}</td><td class="n">${inr(T.employees)}</td></tr>
+<tr><td>Vehicles not linked to any employee (${o.unassigned.trucks})</td><td></td><td class="n">${inr(o.unassigned.vehicleLoan)}</td><td class="n">${inr(o.unassigned.shortage)}</td><td></td><td></td><td class="n">${inr(o.unassigned.total)}</td></tr>
+<tr class="g"><td colspan="6">GRAND TOTAL TO RECOVER</td><td class="n">${inr(T.withUnassigned)}</td></tr></tfoot></table>
+${o.overlaps.length ? `<p><b>Note:</b> ${o.overlaps.length} truck(s) qualify for more than one employee and are counted under each: ${esc(o.overlaps.map(x => x.truckNo + " (" + x.employees.join(" / ") + ")").join("; "))}.</p>` : ""}
 </body></html>`;
 }
