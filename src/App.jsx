@@ -1476,18 +1476,18 @@ function RecoveryMod({trips, vehicles, employees, cashTransfers, user, allTripsL
         </div>
         <div style={{fontSize:11,color:C.muted}}>{r.trucks.length} of {r.candidateCount} vehicles included. Untick a vehicle to leave it out of the totals and the PDF.</div>
         {full.owners.map(g=>{
-          const multi = g.trucks.length>1;
           const og = r.owners.find(o=>o.owner===g.owner);   // same owner with the unticked trucks left out
+          const multi = g.trucks.length>1 || (g.others && g.others.count>0) || (og && og.others.count>0);
           return (
             <div key={g.owner} style={{display:"flex",flexDirection:"column",gap:6}}>
               {multi && og && (
                 <div style={{background:C.teal+"18",border:`1.5px solid ${C.teal}`,borderRadius:12,padding:"8px 10px",fontSize:12,color:C.text}}>
-                  <div style={{fontWeight:800}}>{g.owner} — net loan across {og.trucks.length} truck{og.trucks.length>1?"s":""}: {fmt(og.loanPending)}</div>
-                  <div style={{color:C.muted}}>Given {fmt(og.loanGiven)} − recovered {fmt(og.loanRecovered)}{og.overRecovered>0?` · over-recovered ${fmt(og.overRecovered)}`:""}. Recovery on one truck offsets the others, so judge the balance by this figure, not by one truck.</div>
+                  <div style={{fontWeight:800}}>{g.owner} — net loan across all {og.trucks.length+og.others.count} truck{og.trucks.length+og.others.count>1?"s":""}: {fmt(og.loanNet<0?0:og.loanNet)}{!og.counted?` (counted under ${og.countedUnder}, not here)`:""}</div>
+                  <div style={{color:C.muted}}>Given {fmt(og.loanGiven)} − recovered {fmt(og.loanRecovered)}{og.overRecovered>0?` · over-recovered ${fmt(og.overRecovered)}`:""}. Recovery on any of his trucks offsets the others, so judge the balance by this figure, not by one truck.</div>
                 </div>
               )}
               {og && og.others && og.others.count>0 && (
-                <div style={{fontSize:11,color:"#92400e"}}>{g.owner} also has {og.others.count} other truck(s) with loan entries that are not in this sheet ({og.others.trucks.join(", ")}); their net loan is {fmt(og.others.net)} and also offsets this owner's loan.</div>
+                <div style={{fontSize:11,color:"#92400e"}}>Included in the net above: {og.others.count} other truck(s) of {g.owner} that are not in this sheet ({og.others.trucks.join(", ")}), net {fmt(og.others.net)}.</div>
               )}
               {g.trucks.map(t=>{
                 const on = !excluded.has(t.id);
@@ -1512,12 +1512,12 @@ function RecoveryMod({trips, vehicles, employees, cashTransfers, user, allTripsL
             {r.owners.map(o=>(
               <div key={o.owner} style={{display:"flex",justifyContent:"space-between",padding:"2px 0"}}>
                 <span>{o.owner} <span style={{color:C.muted}}>({o.trucks.length} truck{o.trucks.length>1?"s":""})</span></span>
-                <b>{fmt(o.loanPending)}{o.overRecovered>0?` (over-recovered ${fmt(o.overRecovered)})`:""}</b>
+                <b>{fmt(o.loanPending)}{o.overRecovered>0?` (over-recovered ${fmt(o.overRecovered)})`:""}{!o.counted?` (counted under ${o.countedUnder})`:""}</b>
               </div>
             ))}
           </div>
         )}
-        {T.ownerNettingAdjustment!==0 && <div style={{fontSize:11,color:C.muted}}>Sum of trucks is {fmt(T.rawTruckLoanSum)}; owner netting adds {fmt(T.ownerNettingAdjustment)} (an owner's over-recovery on one truck offsets their other trucks, and a loan is never shown below 0 per owner — same rule as the Loan Dashboard).</div>}
+        {T.ownerNettingAdjustment!==0 && <div style={{fontSize:11,color:C.muted}}>Adding up this sheet's trucks one by one gives {fmt(T.rawTruckLoanSum)}; after netting each owner across all his trucks (the same rule as the Loan Dashboard, never below 0 per owner) the vehicle loan is {fmt(T.vehicleLoanPending)}.</div>}
       </>)}
     </div>
   );
