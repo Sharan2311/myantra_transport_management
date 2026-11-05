@@ -25,3 +25,45 @@ export const payEligible = trips => (trips || []).filter(t => (+t.balance || 0) 
 export const paySelectionTotal = (trips, selectedIds) =>
   payEligible(trips).filter(t => selectedIds.has(t.id)).reduce((s, t) => s + (+t.balance || 0), 0);
 export const payOrder = trips => [...(trips || [])].sort((a, b) => (a.date || "").localeCompare(b.date || "") || (a.createdAt || "").localeCompare(b.createdAt || ""));
+
+// ── Pay Selected with loan / wallet reduction ────────────────────────────────────────────────────────────────
+// The ticked trips' total is settled partly by reducing the employee's loan and/or wallet and the rest by bank
+// (the bank part carries the reference ID). Everything is allocated oldest trip first; the reductions are
+// taken from the oldest trips first and the bank part covers what is left of each trip.
+const r2 = x => Math.round(x * 100) / 100;
+
+// items: [{ id, payable }] oldest first -> { alloc: {id: amount}, unallocated }
+export function allocateTotal(items, total) {
+  const alloc = {}; let rem = r2(+total || 0);
+  for (const it of items || []) {
+    const a = r2(Math.min(rem, +it.payable || 0));
+    if (a > 0) { alloc[it.id] = a; rem = r2(rem - a); }
+  }
+  return { alloc, unallocated: rem };
+}
+
+// alloc: {id: amount}; order: ids oldest first; reduction: total taken by loan+wallet
+// -> { red: {id: amount}, bank: {id: amount} } with red+bank == alloc per trip
+export function splitReduction(alloc, order, reduction) {
+  const red = {}, bank = {}; let rem = r2(+reduction || 0);
+  for (const id of order || []) {
+    const a = alloc[id] || 0;
+    if (!(a > 0)) continue;
+    const rd = r2(Math.min(rem, a));
+    rem = r2(rem - rd);
+    if (rd > 0) red[id] = rd;
+    if (r2(a - rd) > 0) bank[id] = r2(a - rd);
+  }
+  return { red, bank };
+}
+
+// Checks the loan / wallet reduction lines. walletBal: signed, negative = employee owes the company.
+export function reductionCheck({ loanDue, walletBal, loanRed, walletRed, settle, totalPayable }) {
+  const errors = [];
+  const lr = +loanRed || 0, wr = +walletRed || 0;
+  if (lr < 0 || wr < 0) errors.push("Reductions can't be negative.");
+  if (lr > (+loanDue || 0) + 0.005) errors.push("Loan reduction is more than the loan due.");
+  if (wr > 0 && (+walletBal || 0) === 0) errors.push("Wallet balance is 0 — there is nothing to reduce.");
+  if (settle > totalPayable + 0.5) errors.push("Bank amount plus reductions is more than the ticked trips need.");
+  return { ok: errors.length === 0, errors };
+}
