@@ -4,6 +4,10 @@ import { draftStatus, searchAdvices } from "./advice_mail.js";
 import { checkInvoiceLine, extraDeductionItems, splitShortage, appInvoiceTotals, holdsByInvoice, cleanAdvices } from "./advice_check.js";
 import { restrictToSelection, diCat, tripHasCategory, followupByVehicle, followupHtml } from "./di_category.js";
 import { bookableLoanRecovery, PREV_YEAR_TYPE } from "./loan_ledger_logic.js";
+import { findPayment, normRef } from "./payment_finder.js";
+import { reconcileScreenshot } from "./payment_reconcile.js";
+import { findDieselDuplicates } from "./diesel_dupes.js";
+import { payableAfterSkips, pouchHoldOf } from "./pay_selected_logic.js";
 import { normDI, partyGrFile, partyDocsMissing, matchInvoices, routeDroppedDocs } from "./party_files.js";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { DB } from "./db.js";
@@ -2334,7 +2338,7 @@ function AppMain() {
     pumpPayments, setPumpPayments:dbSetPumpPayments,
     dieselRequests, setDieselRequests:dbSetDieselRequests, dieselRequestsReady: rDR,
     settings:settings||{tafalPerTrip:300}, setSettings:dbSetSettings,
-    driverPays, setDriverPays:dbSetDriverPays,
+    driverPays, setDriverPays:dbSetDriverPays, reloadDriverPays,
     expenses, setExpenses:dbSetExpenses,
     gstReleases, setGstReleases:dbSetGstReleases,
     cashTransfers, setCashTransfers:dbSetCashTransfers,
@@ -2726,7 +2730,7 @@ function AppMain() {
   );
 }
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
-function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pumps, pumpPayments, driverPays, cashTransfers, activity, settings, setSettings, setTab, user, selectedFY, selectedClient, actionItems=[], clinkerBills=[]}) {
+function Dashboard({log, reloadDriverPays, trips, fyTrips, payments, vehicles, employees, indents, pumps, pumpPayments, driverPays, cashTransfers, activity, settings, setSettings, setTab, user, selectedFY, selectedClient, actionItems=[], clinkerBills=[]}) {
   const [dashMonth, setDashMonth] = useState(""); // "YYYY-MM" or "" = all
   const [uncreditedOpen, setUncreditedOpen] = useState(false);
   const [creditedOpen,   setCreditedOpen]   = useState(false);
@@ -2874,6 +2878,9 @@ function Dashboard({trips, fyTrips, payments, vehicles, employees, indents, pump
         <div style={{color:C.text,fontSize:18,fontWeight:800}}>{greeting}, {user.name.split(" ")[0]} 👋</div>
         <div style={{color:C.muted,fontSize:12,marginTop:2}}>{new Date().toLocaleDateString("en-IN",{weekday:"long",day:"numeric",month:"long"})}</div>
       </div>
+
+      {user.role==="owner" && <FindPaymentCard vehicles={vehicles} employees={employees} />}
+      {user.role==="owner" && <BulkPaymentCheck vehicles={vehicles} employees={employees} user={user} log={log} reloadDriverPays={reloadDriverPays} />}
 
       {/* Quick Actions — fleet_manager sees no RM Trip button */}
       {can(user,"trips") && (
@@ -13019,6 +13026,334 @@ function DieselReceiptScan({ selected, pumps, dieselRequests=[], cashAmount, use
   );
 }
 
+// Gathers everything "Find a payment" and the bulk screenshot check search through. The app only keeps recent
+// rows in memory, so the big ledgers are asked of the database directly. Failures are returned, never hidden.
+async function loadFindData({ vehicles, employees, refs, amount }) {
+  const cleanRefs = (refs||[]).map(normRef).filter(r=>r.length>=8);
+  const amt = +amount || 0;
+  const errs = [];
+  const orFor = (textCols) => {
+    const parts = [];
+    cleanRefs.forEach(r => textCols.forEach(c => parts.push(`${c}.ilike.%${r}%`)));
+    if (amt > 0) parts.push(`amount.eq.${amt}`);
+    return parts.join(",");
+  };
+  const pull = async (label, table, cols) => {
+    const filter = orFor(cols);
+    if (!filter) return [];
+    const { data, error } = await supabase.from(table).select("*").or(filter).limit(500);
+    if (error) { errs.push(`${label}: search failed — ${error.message}`); return []; }
+    return data || [];
+  };
+  let ct=[], dp=[], pr=[];
+  try {
+    [ct, dp, pr] = await Promise.all([
+      pull("Wallet transfers", "mye_cash_transfers", ["utr","ref","note"]),
+      pull("Driver payments", "mye_driver_payments", ["utr","notes"]),
+      pull("Payment requests", "mye_payment_requests", ["notes"]),
+    ]);
+  } catch(e) { errs.push("Search failed — " + (e.message||e)); }
+  const data = {
+    vehicles: vehicles||[], employees: employees||[],
+    cashTransfers: ct.map(r=>({id:r.id, empId:r.emp_id, amount:r.amount, date:r.date, note:r.note, utr:r.utr, ref:r.ref, type:r.type, lrNo:r.lr_no})),
+    driverPayments: dp.map(r=>({id:r.id, tripId:r.trip_id, truckNo:r.truck_no, lrNo:r.lr_no, amount:r.amount, utr:r.utr, date:r.date, notes:r.notes, paidTo:r.paid_to})),
+    paymentRequests: pr.map(r=>({id:r.id, tripId:r.trip_id, lrNo:r.lr_no, truckNo:r.truck_no, amount:r.amount, recipientName:r.recipient_name, status:r.status, notes:r.notes, paidAt:r.paid_at, createdAt:r.created_at})),
+  };
+  return { data, errs };
+}
+
+// ─── FIND A PAYMENT (owner) ───────────────────────────────────────────────────
+// Type a bank reference / UTR or upload the payment screenshot: shows where it is recorded
+// (vehicle loan, employee loan, wallet transfer, driver payment, payment request). Read-only.
+function FindPaymentCard({ vehicles, employees }) {
+  const [open, setOpen]       = useState(false);
+  const [ref, setRef]         = useState("");
+  const [amount, setAmount]   = useState("");
+  const [date, setDate]       = useState("");
+  const [name, setName]       = useState("");
+  const [extraRefs, setExtra] = useState([]); // second id from a screenshot (reference no + transaction id)
+  const [busy, setBusy]       = useState(false);
+  const [result, setResult]   = useState(null);
+  const [errors, setErrors]   = useState([]);
+
+  const run = async (q) => {
+    setBusy(true); setResult(null); setErrors([]);
+    const refs = [...(q.refs||[])];
+    const amt = +q.amount || 0;
+    const { data, errs } = await loadFindData({ vehicles, employees, refs, amount: amt });
+    setResult({ ...findPayment({ refs, amount: amt, date: q.date, name: q.name }, data), asked: q });
+    setErrors(errs); setBusy(false);
+  };
+
+  const search = () => run({ refs:[ref, ...extraRefs], amount, date, name });
+
+  const fromScreenshot = (p) => {
+    const r1 = p.referenceNo || "", r2 = p.transactionId || "";
+    setRef(r1 || r2); setExtra(r1 && r2 ? [r2] : []);
+    setAmount(p.amount ? String(p.amount) : ""); setDate(p.paymentDate || ""); setName(p.paidTo || "");
+    run({ refs:[r1, r2], amount:p.amount, date:p.paymentDate, name:p.paidTo });
+  };
+
+  const inp = {background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,color:C.text,padding:"8px 10px",fontSize:13,outline:"none",boxSizing:"border-box",width:"100%"};
+  const show = (r, confirmed) => (
+    <div key={r.kind+r.id} style={{background:confirmed?C.green+"11":"#fef3c7",border:`1px solid ${confirmed?C.green:"#f59e0b"}`,borderRadius:10,padding:"8px 12px"}}>
+      <div style={{fontWeight:800,fontSize:12,color:confirmed?C.green:"#b45309"}}>
+        {confirmed ? "✓ Recorded" : "? Possible match"} — {r.label}
+      </div>
+      <div style={{fontSize:13,color:C.text,marginTop:2}}>{r.where}</div>
+      <div style={{fontSize:12,color:C.muted,marginTop:2}}>
+        ₹{(+r.amount||0).toLocaleString("en-IN")} · {r.date||"no date"}
+        {!confirmed && <> · matched on {r.reasons.join(" + ")} (reference not recorded)</>}
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:"10px 14px"}}>
+      <div onClick={()=>setOpen(o=>!o)} style={{display:"flex",justifyContent:"space-between",cursor:"pointer",fontWeight:800,fontSize:14,color:C.text}}>
+        <span>🔎 Find a payment</span><span style={{color:C.muted}}>{open?"▾":"▸"}</span>
+      </div>
+      {open && (
+        <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:10}}>
+          <div style={{fontSize:11,color:C.muted}}>Search by reference / UTR, or upload the bank screenshot — shows where it is recorded.</div>
+          <div style={{display:"flex",gap:8}}>
+            <input value={ref} onChange={e=>{setRef(e.target.value);setExtra([]);}} placeholder="Reference / UTR / transaction ID" style={inp}
+              onKeyDown={e=>{if(e.key==="Enter")search();}} />
+            <ScanPaymentBtn onResult={fromScreenshot} />
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <input value={amount} onChange={e=>setAmount(e.target.value.replace(/[^\d.]/g,""))} placeholder="Amount ₹ (optional)" style={inp} />
+            <input type="date" value={date} onChange={e=>setDate(e.target.value)} style={inp} />
+            <input value={name} onChange={e=>setName(e.target.value)} placeholder="Name (optional)" style={inp} />
+          </div>
+          <button onClick={search} disabled={busy||(!ref.trim()&&!(+amount>0&&date))}
+            style={{background:C.accent,color:"#fff",border:"none",borderRadius:10,padding:"10px",fontWeight:800,fontSize:13,cursor:"pointer",opacity:busy?0.6:1}}>
+            {busy?"Searching…":"Search"}
+          </button>
+          {errors.map((m,i)=><div key={i} style={{color:C.red,fontSize:12,fontWeight:700}}>⚠ {m}</div>)}
+          {result && (
+            <>
+              {result.exact.map(r=>show(r,true))}
+              {result.possible.map(r=>show(r,false))}
+              {result.exact.length===0 && result.possible.length===0 && errors.length===0 && (
+                <div style={{background:C.red+"11",border:`1px solid ${C.red}44`,borderRadius:10,padding:"8px 12px",color:C.red,fontSize:13,fontWeight:700}}>
+                  Not found — this reference is not recorded anywhere{(+result.asked.amount>0&&result.asked.date)?" and no entry has the same amount within 3 days":""}.
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── BULK PAYMENT SCREENSHOT CHECK (owner) ────────────────────────────────────
+// Upload many bank screenshots. Each row shows the screenshot amount, the amount recorded in the database and
+// where it is recorded. If the database holds MORE under a reference and the extra is exactly money the trips
+// should have held back (pouch / advance / tafal / diesel / recoveries), the row offers a reviewed per-trip
+// correction of the driver payments; the trips' balances follow because they are computed from those payments.
+function BulkPaymentCheck({ vehicles, employees, user, log, reloadDriverPays }) {
+  const [open, setOpen]   = useState(false);
+  const [items, setItems] = useState([]);
+  const [expanded, setExpanded] = useState(null);
+  const inputRef = useRef();
+  const upd = (id, patch) => setItems(p => p.map(x => x.id===id ? {...x, ...patch} : x));
+  const inr = n => "₹" + (Math.round((+n||0)*100)/100).toLocaleString("en-IN");
+
+  const scanShot = async (file) => {
+    const b64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result.split(",")[1]); r.onerror = rej; r.readAsDataURL(file); });
+    const resp = await fetch("/.netlify/functions/scan-payment", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ base64: b64, anthropicKey: RC.anthropicKey, mediaType: file.type||"image/jpeg" }),
+    });
+    const parsed = await resp.json();
+    if (!resp.ok || parsed.error) throw new Error(parsed.error || "Scan failed");
+    logScan("payment_scan", true, parsed._costInr||0);
+    return parsed;
+  };
+
+  const analyze = async (scan) => {
+    const refs = [scan.referenceNo, scan.transactionId].filter(Boolean);
+    if (!refs.map(normRef).some(r=>r.length>=8) && !(+scan.amount>0 && scan.paymentDate))
+      return { kind:"unreadable", errs:["The reference could not be read from this screenshot."] };
+    const { data, errs } = await loadFindData({ vehicles, employees, refs, amount: scan.amount });
+    const cleanRefs = refs.map(normRef).filter(r=>r.length>=8);
+    const hit = data.driverPayments.filter(d => cleanRefs.some(q => normRef(d.utr).includes(q)));
+    if (hit.length) {
+      const ids = [...new Set(hit.map(h=>h.tripId))];
+      const [tr, pays, raw] = await Promise.all([
+        supabase.from("mye_trips").select("id,lr_no,truck_no,qty,given_rate,di_lines,advance,tafal,diesel_estimate,shortage,shortage_recovery,loan_recovery,order_type,pouch_balance,pouch_released").in("id", ids),
+        supabase.from("mye_driver_payments").select("trip_id,amount").in("trip_id", ids),
+        supabase.from("mye_driver_payments").select("id,notes,amount").in("id", hit.map(h=>h.id)),
+      ]);
+      const bad = tr.error || pays.error || raw.error;
+      if (bad) return { kind:"error", errs:[...errs, "Could not load the trips for this reference — " + bad.message] };
+      const trips = {};
+      (tr.data||[]).forEach(t => { trips[t.id] = { id:t.id, lrNo:t.lr_no, truckNo:t.truck_no, qty:t.qty, givenRate:t.given_rate, diLines:t.di_lines||[],
+        advance:t.advance, tafal:t.tafal, dieselEstimate:t.diesel_estimate, shortage:t.shortage, shortageRecovery:t.shortage_recovery,
+        loanRecovery:t.loan_recovery, orderType:t.order_type, pouchBalance:t.pouch_balance, pouchReleased:t.pouch_released }; });
+      const paidByTrip = {};
+      (pays.data||[]).forEach(p => { paidByTrip[p.trip_id] = (paidByTrip[p.trip_id]||0) + (+p.amount||0); });
+      const notes = {}; (raw.data||[]).forEach(r => { notes[r.id] = r.notes||""; });
+      const rec = reconcileScreenshot({ amount: scan.amount, rows: hit, trips, paidByTrip });
+      return { kind:"driver", rec, notes, errs, recordedAmount: rec.recordedTotal,
+        where: [`Driver payments · ${hit.length} row${hit.length>1?"s":""} on ${ids.length} trip${ids.length>1?"s":""}`] };
+    }
+    const found = findPayment({ refs, amount: scan.amount, date: scan.paymentDate, name: scan.paidTo }, data);
+    const top = found.exact[0] || found.possible[0];
+    return { kind: found.exact.length ? "elsewhere" : (found.possible.length ? "possible" : "none"), found, errs,
+      recordedAmount: top ? top.amount : null, where: (found.exact.length ? found.exact : found.possible).map(r=>r.where) };
+  };
+
+  const processOne = async (it) => {
+    try {
+      const scan = await scanShot(it.file);
+      upd(it.id, { status:"analyzing", scan });
+      const analysis = await analyze(scan);
+      upd(it.id, { status:"done", analysis });
+    } catch(e) { logScan("payment_scan", false, 0); upd(it.id, { status:"error", error: e.message||String(e) }); }
+  };
+
+  const addFiles = async (fl) => {
+    const files = Array.from(fl||[]);
+    const fresh = files.map(file => ({ id: uid(), file, status:"scanning", scan:null, analysis:null, error:"" }));
+    if (!fresh.length) return;
+    setItems(p => [...p, ...fresh]);
+    for (let i=0; i<fresh.length; i++) {
+      await processOne(fresh[i]);
+      if (i < fresh.length-1) await new Promise(r=>setTimeout(r, 1200));
+    }
+  };
+
+  const save = async (it) => {
+    const rec = it.analysis.rec;
+    const lines = rec.changes.map(c => `LR ${c.lrNo}: paid ${inr(c.oldAmount)} → ${inr(c.newAmount)}   (balance ${inr(c.balanceBefore)} → ${inr(c.balanceAfter)})`).join("\n");
+    if (!window.confirm(`Correct ${rec.changes.length} payment row${rec.changes.length>1?"s":""} so the reference totals ${inr(it.scan.amount)}?\n\n${lines}\n\nThe held amounts stay owed to the driver.`)) return;
+    upd(it.id, { saving:true, saveErr:"" });
+    const failures = [];
+    for (const c of rec.changes) {
+      const note = `${it.analysis.notes[c.rowId]||""} | Adjusted ${today()}: ${inr(c.oldAmount)} → ${inr(c.newAmount)} (bank screenshot ${inr(it.scan.amount)})`.trim().replace(/^\|\s*/,"");
+      const q = c.newAmount > 0
+        ? supabase.from("mye_driver_payments").update({ amount:c.newAmount, notes:note }).eq("id", c.rowId).select("id,amount").maybeSingle()
+        : supabase.from("mye_driver_payments").delete().eq("id", c.rowId).select("id").maybeSingle();
+      const { data, error } = await q;
+      if (error) { failures.push(`LR ${c.lrNo}: ${error.message}`); continue; }
+      if (c.newAmount > 0 && (!data || Math.round(+data.amount*100) !== Math.round(c.newAmount*100))) { failures.push(`LR ${c.lrNo}: the new amount was not stored`); continue; }
+      if (c.newAmount <= 0 && data) { failures.push(`LR ${c.lrNo}: the row could not be removed`); continue; }
+      log && log("PAYMENT RECONCILE", `ref ${it.scan.referenceNo||it.scan.transactionId} · LR ${c.lrNo} · ${inr(c.oldAmount)} → ${inr(c.newAmount)} (bank ${inr(it.scan.amount)})`);
+    }
+    try { reloadDriverPays && await reloadDriverPays(); } catch(_) {}
+    if (failures.length) {
+      const msg = `NOT fully saved — ${failures.join("; ")}`;
+      saveFail("Payment correction:")(new Error(msg));
+      upd(it.id, { saving:false, saveErr: msg });
+    } else {
+      upd(it.id, { saving:false, saved:true, saveErr:"" });
+    }
+  };
+
+  const statusCell = (it) => {
+    if (it.status==="scanning") return <span style={{color:C.blue}}>⏳ reading…</span>;
+    if (it.status==="analyzing") return <span style={{color:C.blue}}>⏳ checking…</span>;
+    if (it.status==="error") return <span style={{color:C.red,fontWeight:700}}>⚠ {it.error}</span>;
+    const a = it.analysis, amt = +it.scan.amount||0;
+    if (it.saved) return <span style={{color:C.green,fontWeight:800}}>✓ Saved</span>;
+    if (a.kind==="unreadable" || a.kind==="error") return <span style={{color:C.red,fontWeight:700}}>⚠ {a.errs.join(" ")}</span>;
+    if (a.kind==="driver") {
+      const r = a.rec;
+      if (r.status==="ok") return <span style={{color:C.green,fontWeight:800}}>✓ Matches</span>;
+      if (r.status==="adjust") return <span style={{color:"#b45309",fontWeight:800}}>Differs by {inr(r.diff)} — covered by holds</span>;
+      return <span style={{color:C.red,fontWeight:800}}>✕ {r.reason}</span>;
+    }
+    if (a.kind==="elsewhere") return Math.abs((+a.recordedAmount||0)-amt)<0.5
+      ? <span style={{color:C.green,fontWeight:800}}>✓ Recorded</span>
+      : <span style={{color:C.red,fontWeight:800}}>✕ Recorded as {inr(a.recordedAmount)} — differs ({inr((+a.recordedAmount||0)-amt)})</span>;
+    if (a.kind==="possible") return <span style={{color:"#b45309",fontWeight:800}}>? Possible match (reference not recorded)</span>;
+    return <span style={{color:C.red,fontWeight:800}}>✕ Not found</span>;
+  };
+
+  const th = {textAlign:"left",fontSize:10,color:C.muted,padding:"4px 6px",borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"};
+  const td = {fontSize:12,color:C.text,padding:"6px",borderBottom:`1px solid ${C.border}`,verticalAlign:"top"};
+
+  return (
+    <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:"10px 14px"}}>
+      <div onClick={()=>setOpen(o=>!o)} style={{display:"flex",justifyContent:"space-between",cursor:"pointer",fontWeight:800,fontSize:14,color:C.text}}>
+        <span>🧾 Bulk check payment screenshots</span><span style={{color:C.muted}}>{open?"▾":"▸"}</span>
+      </div>
+      {open && (
+        <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:10}}>
+          <div style={{fontSize:11,color:C.muted}}>Upload many bank screenshots. Each row shows the screenshot amount, what the database has under that reference, and where. Nothing changes unless you review and press Save on a row.</div>
+          <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+            <button onClick={()=>inputRef.current?.click()}
+              style={{background:C.accent+"22",border:`1.5px solid ${C.accent}`,color:C.accent,borderRadius:10,padding:"9px 14px",fontWeight:800,fontSize:13,cursor:"pointer"}}>
+              📁 Select screenshots
+            </button>
+            {items.length>0 && <button onClick={()=>{setItems([]);setExpanded(null);}} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer",textDecoration:"underline"}}>Clear table</button>}
+            <input ref={inputRef} type="file" multiple accept="image/*" style={{display:"none"}}
+              onChange={e=>{ if(e.target.files?.length) addFiles(e.target.files); e.target.value=""; }} />
+          </div>
+          {items.length>0 && (
+            <div style={{overflowX:"auto"}}>
+              <table style={{width:"100%",borderCollapse:"collapse",minWidth:640}}>
+                <thead><tr>
+                  <th style={th}>Screenshot</th><th style={th}>Reference</th><th style={th}>Screenshot ₹</th>
+                  <th style={th}>Database ₹</th><th style={th}>Where recorded</th><th style={th}>Result</th><th style={th}></th>
+                </tr></thead>
+                <tbody>
+                  {items.map(it => {
+                    const a = it.analysis, sc = it.scan;
+                    return (
+                      <React.Fragment key={it.id}>
+                        <tr>
+                          <td style={td}>{it.file.name}<div style={{color:C.muted,fontSize:10}}>{sc?.paidTo||""}{sc?.paymentDate?` · ${sc.paymentDate}`:""}</div></td>
+                          <td style={{...td,wordBreak:"break-all"}}>{sc?.referenceNo||sc?.transactionId||"—"}</td>
+                          <td style={td}>{sc?.amount!=null?inr(sc.amount):"—"}</td>
+                          <td style={td}>{a && a.recordedAmount!=null ? inr(a.recordedAmount) : "—"}</td>
+                          <td style={td}>{(a?.where||[]).map((w,i)=><div key={i}>{w}</div>)}</td>
+                          <td style={td}>{statusCell(it)}{it.saveErr && <div style={{color:C.red,fontSize:11,fontWeight:700}}>⚠ {it.saveErr}</div>}</td>
+                          <td style={td}>
+                            {a?.kind==="driver" && a.rec.status==="adjust" && !it.saved && (
+                              <button onClick={()=>setExpanded(expanded===it.id?null:it.id)}
+                                style={{background:"#f59e0b22",border:"1px solid #f59e0b",color:"#b45309",borderRadius:8,padding:"4px 8px",fontSize:11,fontWeight:800,cursor:"pointer"}}>
+                                {expanded===it.id?"Hide":"Review"}
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                        {expanded===it.id && a?.kind==="driver" && a.rec.status==="adjust" && !it.saved && (
+                          <tr><td colSpan={7} style={{...td,background:C.bg}}>
+                            <div style={{fontSize:11,color:C.muted,marginBottom:6}}>Only trips that were paid more than they are owed (after pouch, advance, tafal, diesel, shortage and recoveries) are reduced. The held amount stays owed.</div>
+                            <table style={{width:"100%",borderCollapse:"collapse"}}>
+                              <thead><tr><th style={th}>LR</th><th style={th}>Paid now</th><th style={th}>Paid after</th><th style={th}>Pouch held</th><th style={th}>Other deductions</th><th style={th}>Balance now → after</th></tr></thead>
+                              <tbody>{a.rec.changes.map(c=>(
+                                <tr key={c.rowId}>
+                                  <td style={td}>{c.lrNo}</td><td style={td}>{inr(c.oldAmount)}</td><td style={td}><b>{inr(c.newAmount)}</b></td>
+                                  <td style={td}>{inr(c.pouchHold)}</td><td style={td}>{inr(c.otherDeducts)}</td>
+                                  <td style={td}>{inr(c.balanceBefore)} → <b>{inr(c.balanceAfter)}</b></td>
+                                </tr>))}
+                              </tbody>
+                            </table>
+                            <div style={{marginTop:8,fontSize:12}}>Total after correction: <b>{inr(a.rec.recordedTotal - a.rec.diff)}</b> = screenshot {inr(sc.amount)} ✓</div>
+                            <button onClick={()=>save(it)} disabled={it.saving}
+                              style={{marginTop:8,background:C.accent,color:"#fff",border:"none",borderRadius:10,padding:"9px 16px",fontWeight:800,fontSize:13,cursor:"pointer",opacity:it.saving?0.6:1}}>
+                              {it.saving?"Saving…":"Save this payment"}
+                            </button>
+                          </td></tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── SCAN PAYMENT IMAGE ───────────────────────────────────────────────────────
 function ScanPaymentBtn({ onResult }) {
   const [scanning, setScanning] = useState(false);
@@ -16784,6 +17119,105 @@ function DieselReceiptReviewCard({ req, pumps, dieselRequests=[], user, log, vie
   );
 }
 
+// Owner-only: diesel requests that duplicate an attached indent (same vehicle, date, amount), each with its
+// reason. Nothing is deleted without the owner pressing a button; every delete is verified against the
+// database and a failure is shown on the row (and in the save-failed banner), never swallowed.
+function DuplicateDieselPanel({ dieselRequests, trips, log, setDieselRequests }) {
+  const found = useMemo(() => findDieselDuplicates(dieselRequests, trips), [dieselRequests, trips]);
+  const [busy, setBusy] = useState("");
+  const [errs, setErrs] = useState({});
+  const [summary, setSummary] = useState("");
+
+  const deleteOne = async (d) => {
+    try {
+      await DB.deleteDieselRequestVerified(d.id);
+      setDieselRequests(p => (p||[]).filter(r => r.id !== d.id));
+      log("DELETE DIESEL DUPLICATE", `Indent #${d.indentNo} · ${d.truckNo} · ${d.date} · ₹${d.amount} (${d.status}) — duplicate of ${d.keep.map(k=>"#"+k.indentNo).join(", ")}`);
+      setErrs(e => { const n = {...e}; delete n[d.id]; return n; });
+      return true;
+    } catch (e) {
+      setErrs(x => ({ ...x, [d.id]: e.message || String(e) }));
+      saveFail("Duplicate diesel delete (#" + d.indentNo + "):")(e);
+      return false;
+    }
+  };
+  const delOne = async (d) => {
+    if (!window.confirm(`Delete ${d.status} indent #${d.indentNo} for ${d.truckNo} (₹${d.amount.toLocaleString("en-IN")}, ${d.date})?\n\n${d.reasons[0]}`)) return;
+    setBusy(d.id); setSummary("");
+    await deleteOne(d);
+    setBusy("");
+  };
+  const delAll = async () => {
+    const list = found.deletable;
+    if (!list.length) return;
+    if (!window.confirm(`Delete all ${list.length} duplicate request${list.length>1?"s":""} listed here?\n\nThe attached indent for each one is kept. Failed deletes stay in the list.`)) return;
+    setBusy("all"); setSummary("");
+    let ok = 0, failed = 0;
+    for (const d of list) { (await deleteOne(d)) ? ok++ : failed++; }
+    setBusy("");
+    setSummary(failed ? `⚠ Deleted ${ok}, FAILED ${failed} — failed ones are still listed with the reason.` : `✓ Deleted all ${ok} duplicate request${ok>1?"s":""}.`);
+  };
+
+  const statusColor = s => s==="confirmed" ? C.teal : C.orange;
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:10}}>
+      <div style={{background:C.card,borderRadius:10,padding:"10px 14px",fontSize:12,color:C.muted}}>
+        Pending or confirmed requests with the <b>same vehicle, date and amount</b> as an attached indent. The attached indent is kept; nothing is deleted until you press a button.
+      </div>
+      {summary && <div style={{background:summary.startsWith("✓")?C.green+"22":C.red+"22",border:`1px solid ${summary.startsWith("✓")?C.green:C.red}`,borderRadius:8,padding:"8px 12px",fontSize:12,fontWeight:700,color:summary.startsWith("✓")?C.green:C.red}}>{summary}</div>}
+      {found.deletable.length>0 && (
+        <button onClick={delAll} disabled={!!busy}
+          style={{background:C.red,border:"none",borderRadius:10,color:"#fff",fontWeight:800,fontSize:13,padding:"11px 14px",cursor:busy?"default":"pointer",opacity:busy?0.6:1}}>
+          {busy==="all" ? "Deleting…" : `🗑 Delete all ${found.deletable.length} duplicate${found.deletable.length>1?"s":""}`}
+        </button>
+      )}
+      {found.deletable.length===0 && <div style={{textAlign:"center",color:C.muted,padding:24,fontSize:13}}>✓ No duplicate requests to delete.</div>}
+      {found.deletable.map(d => (
+        <div key={d.id} style={{background:C.card,borderRadius:12,padding:"12px 14px",border:`1px solid ${errs[d.id]?C.red:C.border}`}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+            <div>
+              <div style={{fontWeight:800,fontSize:14}}>#{d.indentNo} · {d.truckNo}</div>
+              <div style={{fontSize:12,color:C.muted}}>{d.date} · ₹{d.amount.toLocaleString("en-IN")}{d.createdBy?` · by ${d.createdBy}`:""}</div>
+            </div>
+            <span style={{fontSize:10,fontWeight:800,color:statusColor(d.status),border:`1px solid ${statusColor(d.status)}`,borderRadius:10,padding:"2px 8px"}}>{d.status==="open"?"PENDING":"CONFIRMED"}</span>
+          </div>
+          <div style={{fontSize:12,marginTop:8,lineHeight:1.5}}>
+            {d.reasons.map((r,i)=><div key={i}>• {r}</div>)}
+            <div style={{color:C.green,fontWeight:700,marginTop:4}}>Keeps: {d.keep.map(k=>`#${k.indentNo}${k.lrNo?" (LR "+k.lrNo+")":""}`).join(", ")}</div>
+            {d.warnings.map((w,i)=><div key={i} style={{color:"#d97706"}}>⚠ {w}</div>)}
+            {errs[d.id] && <div style={{color:C.red,fontWeight:700,marginTop:4}}>✗ Delete failed: {errs[d.id]}</div>}
+          </div>
+          <div style={{marginTop:8,textAlign:"right"}}>
+            <button onClick={()=>delOne(d)} disabled={!!busy}
+              style={{background:"none",border:`1px solid ${C.red}`,borderRadius:8,color:C.red,fontSize:12,fontWeight:700,padding:"5px 12px",cursor:busy?"default":"pointer",opacity:busy?0.6:1}}>
+              {busy===d.id ? "Deleting…" : "🗑 Delete this one"}
+            </button>
+          </div>
+        </div>
+      ))}
+      {found.blocked.length>0 && (
+        <div style={{marginTop:6}}>
+          <div style={{fontSize:12,fontWeight:800,color:C.muted,marginBottom:6}}>NOT DELETABLE — still linked to a trip ({found.blocked.length})</div>
+          {found.blocked.map(d => (
+            <div key={d.id} style={{background:C.card,borderRadius:10,padding:"10px 12px",marginBottom:6,fontSize:12,opacity:0.85}}>
+              <b>#{d.indentNo} · {d.truckNo}</b> · {d.date} · ₹{d.amount.toLocaleString("en-IN")}
+              <div style={{color:C.muted}}>{d.reasons[d.reasons.length-1]}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {found.review.length>0 && (
+        <div style={{marginTop:6}}>
+          <div style={{fontSize:12,fontWeight:800,color:C.muted,marginBottom:6}}>FOR YOUR REVIEW — no attached indent to keep ({found.review.length})</div>
+          {found.review.map((g,i) => (
+            <div key={i} style={{background:C.card,borderRadius:10,padding:"10px 12px",marginBottom:6,fontSize:12}}>{g.reason}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, driverPays, setDriverPays, user, log, viewOnly=false, dieselRequests=[], setDieselRequests, dieselRequestsReady=false, settings, actionItems=[], setActionItems, navTarget, setNavTarget}) {
   const [view,        setView]        = useState("requests");
   // Daily verification checklist — owner-only, one-time permanent mark per
@@ -17132,6 +17566,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
     .sort((a,b)=>(b.indentNo||0)-(a.indentNo||0));
   const verifiedCount = (dieselRequests||[]).filter(r => (r.status==="confirmed"||r.status==="attached") && r.ownerVerified).length;
   const verifiableTotal = (dieselRequests||[]).filter(r => r.status==="confirmed"||r.status==="attached").length;
+  const dupDeletableCount = user.role==="owner" ? findDieselDuplicates(dieselRequests, trips).deletable.length : 0;
 
   const markOwnerVerified = (req, value) => {
     if(user?.role!=="owner") { alert("Only the owner can mark requests as checked."); return; }
@@ -17980,7 +18415,12 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
         ...(user.role==="owner"?[{id:"reconcile", label:"🔍 Reconcile", color:C.red}]:[]),
         {id:"history",  label:"Alerts", color:C.muted},
         ...(user.role==="owner"?[{id:"verify", label:`Verify (${verifiedCount}/${verifiableTotal})`, color:C.purple}]:[]),
+        ...(user.role==="owner"?[{id:"dupes", label:`🧹 Duplicates${dupDeletableCount>0?` (${dupDeletableCount})`:""}`, color:dupDeletableCount>0?C.red:C.muted}]:[]),
       ]} active={view} onSelect={setView} />
+
+      {view==="dupes" && user.role==="owner" && (
+        <DuplicateDieselPanel dieselRequests={dieselRequests} trips={trips} log={log} setDieselRequests={setDieselRequests} />
+      )}
 
       {/* ── DAILY VERIFICATION CHECKLIST — owner only ── */}
       {view==="verify" && user.role==="owner" && (
@@ -28886,16 +29326,8 @@ function PaySelectedSheet({ init, onSave, onCancel }) {
   const toggleSkip = (id, k) => setSkips(p => ({...p, [id]: {...(p[id]||{}), [k]: !(p[id]||{})[k]}}));
 
   // Balance after dropping the chosen deductions — same maths as tripWithBalance.
-  const calc = (t) => {
-    const s = skipOf(t.id);
-    const deducts = (t.advance||0) + (t.tafal||0)
-      + (s.diesel ? 0 : (t.dieselEstimate||0))
-      + ((t.shortage||0)*(t.givenRate||0))
-      + (s.shortage ? 0 : (t.shortageRecovery||0))
-      + (s.loan ? 0 : (t.loanRecovery||0));
-    const netDue = Math.max(0, (t.gross||0) - deducts);
-    return {netDue, payable: Math.max(0, netDue - (t.paidSoFar||0))};
-  };
+  // The party pouch is HELD (same as tripWithBalance / the selected-requests total) — see pay_selected_logic.js.
+  const calc = (t) => payableAfterSkips(t, skipOf(t.id));
 
   const [amount, setAmount] = useState(init.amount ? String(init.amount) : "");
   const [amountTouched, setAmountTouched] = useState(!!init.amount);
@@ -29596,7 +30028,7 @@ This will auto-recover in the next trip.`);
         ? t.diLines.reduce((a,d)=>a+(d.qty||0)*(d.givenRate||0),0)
         : (t.qty||0)*(t.givenRate||0);
       const deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)+((t.shortage||0)*(t.givenRate||0))
-        +(t.shortageRecovery||0)+(t.loanRecovery||0);
+        +(t.shortageRecovery||0)+(t.loanRecovery||0)+pouchHoldOf(t);
       const netDue = Math.max(0, gross - deducts);
       const paidBefore = (driverPays||[]).filter(p=>p.tripId===tripId).reduce((a,p)=>a+(p.amount||0),0);
       if(netDue - (paidBefore + paidNow[tripId]) <= 0.5 && !t.driverSettled) {
