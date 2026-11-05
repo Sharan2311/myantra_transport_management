@@ -7,6 +7,7 @@ import { bookableLoanRecovery, PREV_YEAR_TYPE } from "./loan_ledger_logic.js";
 import { findPayment, normRef } from "./payment_finder.js";
 import { reconcileScreenshot } from "./payment_reconcile.js";
 import { findDieselDuplicates } from "./diesel_dupes.js";
+import { dieselReportHtml } from "./diesel_report.js";
 import { payableAfterSkips, pouchHoldOf } from "./pay_selected_logic.js";
 import { normDI, partyGrFile, partyDocsMissing, matchInvoices, routeDroppedDocs } from "./party_files.js";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
@@ -17566,6 +17567,31 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
     .sort((a,b)=>(b.indentNo||0)-(a.indentNo||0));
   const verifiedCount = (dieselRequests||[]).filter(r => (r.status==="confirmed"||r.status==="attached") && r.ownerVerified).length;
   const verifiableTotal = (dieselRequests||[]).filter(r => r.status==="confirmed"||r.status==="attached").length;
+  // Requests list after status chip + search + date range (shared by the list and the PDF report)
+  const drFilteredReqs = (dieselRequests||[]).filter(r=>{
+    if(drStatusFilter==="open"               && r.status!=="open") return false;
+    if(drStatusFilter==="confirmed"          && r.status!=="confirmed") return false;
+    if(drStatusFilter==="attached"           && !(r.status==="attached" && r.confirmedAmount!=null)) return false;
+    if(drStatusFilter==="attached_unconfirmed" && !(r.status==="attached" && r.confirmedAmount==null)) return false;
+    if(drStatusFilter==="reconciled" && r.status!=="reconciled") return false;
+    if(drSearch) {
+      const q = drSearch.toLowerCase();
+      if(!r.truckNo?.toLowerCase().includes(q)
+        && !String(r.indentNo||"").includes(q)
+        && !(r.requestedBy||"").toLowerCase().includes(q)) return false;
+    }
+    if(!filterFrom && !filterTo) return true;
+    const d = r.date||r.createdAt?.slice(0,10)||"";
+    if(filterFrom && d < filterFrom) return false;
+    if(filterTo && d > filterTo) return false;
+    return true;
+  });
+  const generateDieselRequestsPdf = (label) => {
+    const html = dieselReportHtml(drFilteredReqs, {filterLabel:label, from:filterFrom, to:filterTo, search:drSearch, company:RC.companyName||"", date:new Date().toLocaleDateString("en-IN"), pumps});
+    const w = window.open("","_blank");
+    if(!w){ alert("Pop-up blocked — allow pop-ups for this site to generate the PDF."); return; }
+    w.document.write(html); w.document.close();
+  };
   const dupDeletableCount = user.role==="owner" ? findDieselDuplicates(dieselRequests, trips).deletable.length : 0;
 
   const markOwnerVerified = (req, value) => {
@@ -19359,6 +19385,10 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                       </button>
                     );
                   })}
+                  <button onClick={()=>generateDieselRequestsPdf(chips.find(c=>c.id===drStatusFilter)?.label.replace(/^\S+\s/,"")||"All")}
+                    style={{marginLeft:"auto",background:"transparent",border:`1.5px solid ${C.accent}`,borderRadius:20,color:C.accent,fontSize:11,fontWeight:700,padding:"4px 10px",cursor:"pointer",whiteSpace:"nowrap"}}>
+                    📄 Generate PDF
+                  </button>
                 </div>
               );
             })()}
@@ -19369,27 +19399,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                 No diesel requests yet. Create one above before dispatching a truck.
               </div>
             )}
-            {[...(dieselRequests||[])].filter(r=>{
-              // Status filter
-              if(drStatusFilter==="open"               && r.status!=="open") return false;
-              if(drStatusFilter==="confirmed"          && r.status!=="confirmed") return false;
-              if(drStatusFilter==="attached"           && !(r.status==="attached" && r.confirmedAmount!=null)) return false;
-              if(drStatusFilter==="attached_unconfirmed" && !(r.status==="attached" && r.confirmedAmount==null)) return false;
-              if(drStatusFilter==="reconciled" && r.status!=="reconciled") return false;
-              // Search filter
-              if(drSearch) {
-                const q = drSearch.toLowerCase();
-                if(!r.truckNo?.toLowerCase().includes(q)
-                  && !String(r.indentNo||"").includes(q)
-                  && !(r.requestedBy||"").toLowerCase().includes(q)) return false;
-              }
-              // Date filter
-              if(!filterFrom && !filterTo) return true;
-              const d = r.date||r.createdAt?.slice(0,10)||"";
-              if(filterFrom && d < filterFrom) return false;
-              if(filterTo && d > filterTo) return false;
-              return true;
-            }).sort((a,b)=>b.indentNo-a.indentNo).map(req=>{
+            {[...drFilteredReqs].sort((a,b)=>b.indentNo-a.indentNo).map(req=>{
               const pump    = pumps.find(p=>p.id===req.pumpId);
               const statusColor = req.status==="attached"?(req.confirmedAmount!=null?C.green:"#d97706"):req.status==="confirmed"?C.teal:C.orange;
               // amount is always diesel+cash total
