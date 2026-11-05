@@ -196,9 +196,12 @@ export function buildRecoveryOverview({ employees, vehicles, trips, cashTransfer
     rows.push({ empId: e.id, name: e.name, trucks: r.trucks.length, vehicleLoan: T.vehicleLoanPending, shortage: T.shortagePending,
       ownLoan: T.empLoanPending, walletBalance: r.wallet.balance, wallet: T.walletCounted, total: T.grand });
   }
-  const orphan = (vehicles || []).filter(v => hasLedger(v) && !asg.owner.has(v.id)).map(v => truckRowOf({ vehicle: v, tripsHim: 0, tripsTotal: 0, reasons: ["not linked to any employee"], linkedOther: 0 }));
+  const tripCount = new Map();
+  for (const t of trips || []) { const k = normTruck(t.truckNo); if (k) tripCount.set(k, (tripCount.get(k) || 0) + 1); }
+  const orphan = (vehicles || []).filter(v => hasLedger(v) && !asg.owner.has(v.id)).map(v => truckRowOf({ vehicle: v, tripsHim: 0, tripsTotal: tripCount.get(normTruck(v.truckNo)) || 0, reasons: ["not linked to any employee"], linkedOther: 0 }));
   const orphanOwners = ownersOf(orphan);
   const unassigned = {
+    rows: orphan.sort((a, b) => a.truckNo.localeCompare(b.truckNo)), owners: orphanOwners,
     trucks: orphan.length,
     vehicleLoan: orphanOwners.reduce((s, o) => s + o.loanPending, 0),
     shortage: orphan.reduce((s, t) => s + t.shortagePending, 0),
@@ -210,6 +213,14 @@ export function buildRecoveryOverview({ employees, vehicles, trips, cashTransfer
   totals.withUnassigned = totals.employees + unassigned.total;
   return { rows: shown, unassigned, totals, resolved: asg.resolved };
 }
+
+const unassignedTable = o => {
+  const u = o.unassigned;
+  if (!u.rows.length) return "";
+  const body = u.rows.map(t => `<tr><td>${esc(t.truckNo)}</td><td>${esc(t.ownerName)}</td><td class="n">${t.tripsTotal}</td><td class="n">${inr(t.loanGiven)}</td><td class="n">${inr(t.loanRecovered)}</td><td class="n">${inr(t.loanNet)}</td><td class="n">${inr(t.shortageOwed)}</td><td class="n">${inr(t.shortageRecovered)}</td><td class="n">${inr(t.shortagePending)}</td></tr>`).join("");
+  return `<h3 style="margin:16px 0 4px;font-size:13px">Vehicles not linked to any employee — details</h3><table><thead><tr><th>Truck</th><th>Owner</th><th>Trips</th><th>Loan given</th><th>Loan recovered</th><th>Loan net</th><th>Shortage</th><th>Shortage rec.</th><th>Shortage pending</th></tr></thead><tbody>${body}</tbody>
+  <tfoot><tr><td colspan="5">Pending (loan netted per owner, shortage per truck)</td><td class="n">${inr(u.vehicleLoan)}</td><td colspan="2"></td><td class="n">${inr(u.shortage)}</td></tr></tfoot></table>`;
+};
 
 export function recoveryOverviewHtml(o, { company = "", date = "" } = {}) {
   const body = o.rows.map(r => `<tr><td>${esc(r.name)}</td><td class="n">${r.trucks}</td><td class="n">${inr(r.vehicleLoan)}</td><td class="n">${inr(r.shortage)}</td><td class="n">${inr(r.ownLoan)}</td><td class="n">${r.walletBalance < 0 ? "-" : ""}${inr(Math.abs(r.walletBalance))}</td><td class="n">${inr(r.total)}</td></tr>`).join("");
@@ -223,6 +234,7 @@ tfoot td{font-weight:bold;background:#f5f5f5}tr.g td{background:#fde68a;font-siz
 <tfoot><tr><td>Total (employees)</td><td></td><td class="n">${inr(T.vehicleLoan)}</td><td class="n">${inr(T.shortage)}</td><td class="n">${inr(T.ownLoan)}</td><td class="n">${inr(T.wallet)}</td><td class="n">${inr(T.employees)}</td></tr>
 <tr><td>Vehicles not linked to any employee (${o.unassigned.trucks})</td><td></td><td class="n">${inr(o.unassigned.vehicleLoan)}</td><td class="n">${inr(o.unassigned.shortage)}</td><td></td><td></td><td class="n">${inr(o.unassigned.total)}</td></tr>
 <tr class="g"><td colspan="6">GRAND TOTAL TO RECOVER</td><td class="n">${inr(T.withUnassigned)}</td></tr></tfoot></table>
+${unassignedTable(o)}
 ${o.resolved.length ? `<p><b>Note:</b> ${o.resolved.length} truck(s) qualified for more than one employee and are counted once, under the employee with the most linked loan, then the most trips: ${esc(o.resolved.map(x => x.truckNo + " → " + x.counted + " (also " + x.also.join(", ") + ")").join("; "))}.</p>` : ""}
 </body></html>`;
 }

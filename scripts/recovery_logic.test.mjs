@@ -135,6 +135,9 @@ t("overview: one row per employee, totals add up, unassigned trucks reported sep
   assert.equal(o.unassigned.trucks, 1); assert.equal(o.unassigned.vehicleLoan, 7000);
   assert.equal(o.totals.withUnassigned, 16700 + 7000);
   assert.deepEqual(o.resolved, []);
+  assert.equal(o.unassigned.rows.length, 1); assert.equal(o.unassigned.rows[0].truckNo, "KA01C0003");
+  assert.equal(o.unassigned.rows[0].tripsTotal, 4); assert.equal(o.unassigned.owners.length, 1);
+  assert.match(recoveryOverviewHtml(o), /not linked to any employee — details/); assert.match(recoveryOverviewHtml(o), /KA01C0003/);
 });
 
 t("a truck qualifying for two employees is counted once: most linked loan wins, then most trips, then list order", () => {

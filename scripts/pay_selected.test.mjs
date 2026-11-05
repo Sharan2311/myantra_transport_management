@@ -1,6 +1,6 @@
 // Run: node scripts/pay_selected.test.mjs
 import assert from "node:assert/strict";
-import { pouchHoldOf, payableAfterSkips } from "../src/pay_selected_logic.js";
+import { pouchHoldOf, payableAfterSkips, payEligible, paySelectionTotal, payOrder } from "../src/pay_selected_logic.js";
 
 let n = 0;
 const t = (name, fn) => { fn(); n++; console.log("ok -", name); };
@@ -43,6 +43,19 @@ t("godown trip: unchanged behaviour", () => {
 t("several selected trips: sum equals the sum of balances", () => {
   const list = [trip(), trip({ id: "u", balance: 16452 })];
   assert.equal(list.reduce((s, x) => s + payableAfterSkips(x, {}).payable, 0), list.reduce((s, x) => s + x.balance, 0));
+});
+
+t("By Employee selection: only trips with money payable now and not settled are eligible", () => {
+  const trips = [{ id: "a", balance: 100 }, { id: "b", balance: 0 }, { id: "c", balance: 50, driverSettled: true }, { id: "d", balance: 25 }];
+  assert.deepEqual(payEligible(trips).map(x => x.id), ["a", "d"]);
+  assert.equal(paySelectionTotal(trips, new Set(["a", "b", "c", "d"])), 125);
+  assert.equal(paySelectionTotal(trips, new Set(["d"])), 25);
+  assert.equal(paySelectionTotal(trips, new Set()), 0);
+});
+
+t("Pay Selected order: oldest first, then created time", () => {
+  const o = payOrder([{ id: "x", date: "2026-10-02", createdAt: "1" }, { id: "y", date: "2026-10-01", createdAt: "9" }, { id: "z", date: "2026-10-01", createdAt: "2" }]);
+  assert.deepEqual(o.map(x => x.id), ["z", "y", "x"]);
 });
 
 console.log(`\n${n} tests passed`);
