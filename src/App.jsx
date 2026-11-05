@@ -1475,17 +1475,34 @@ function RecoveryMod({trips, vehicles, employees, cashTransfers, user, allTripsL
           <button onClick={generate} style={{background:"transparent",border:`1.5px solid ${C.accent}`,borderRadius:20,color:C.accent,fontSize:11,fontWeight:700,padding:"4px 10px",cursor:"pointer"}}>📄 Generate PDF</button>
         </div>
         <div style={{fontSize:11,color:C.muted}}>{r.trucks.length} of {r.candidateCount} vehicles included. Untick a vehicle to leave it out of the totals and the PDF.</div>
-        {full.trucks.map(t=>{
-          const on = !excluded.has(t.id);
+        {full.owners.map(g=>{
+          const multi = g.trucks.length>1;
+          const og = r.owners.find(o=>o.owner===g.owner);   // same owner with the unticked trucks left out
           return (
-            <label key={t.id} style={{display:"flex",gap:10,alignItems:"flex-start",background:C.card,border:`1.5px solid ${on?C.border:"transparent"}`,borderRadius:12,padding:10,opacity:on?1:0.5,cursor:"pointer"}}>
-              <input type="checkbox" checked={on} onChange={()=>toggle(t.id)} style={{marginTop:3}} />
-              <div style={{flex:1,fontSize:12,color:C.text}}>
-                <div style={{fontWeight:800,fontSize:13}}>{t.truckNo} <span style={{fontWeight:500,color:C.muted}}>· {t.ownerName||"no owner"}</span></div>
-                <div style={{color:C.muted}}>{t.tripsHim} of {t.tripsTotal} trips assigned to him · {t.reasons.join(", ")}{t.linkedOther>0?` · ${fmt(t.linkedOther)} of loan linked to another employee`:""}</div>
-                <div>Loan {fmt(t.loanGiven)} − recovered {fmt(t.loanRecovered)} = <b>{fmt(t.loanNet)}</b>{t.shortageOwed>0||t.shortageRecovered>0?` · Shortage pending ${fmt(t.shortagePending)}`:""}</div>
-              </div>
-            </label>
+            <div key={g.owner} style={{display:"flex",flexDirection:"column",gap:6}}>
+              {multi && og && (
+                <div style={{background:C.teal+"18",border:`1.5px solid ${C.teal}`,borderRadius:12,padding:"8px 10px",fontSize:12,color:C.text}}>
+                  <div style={{fontWeight:800}}>{g.owner} — net loan across {og.trucks.length} truck{og.trucks.length>1?"s":""}: {fmt(og.loanPending)}</div>
+                  <div style={{color:C.muted}}>Given {fmt(og.loanGiven)} − recovered {fmt(og.loanRecovered)}{og.overRecovered>0?` · over-recovered ${fmt(og.overRecovered)}`:""}. Recovery on one truck offsets the others, so judge the balance by this figure, not by one truck.</div>
+                </div>
+              )}
+              {og && og.others && og.others.count>0 && (
+                <div style={{fontSize:11,color:"#92400e"}}>{g.owner} also has {og.others.count} other truck(s) with loan entries that are not in this sheet ({og.others.trucks.join(", ")}); their net loan is {fmt(og.others.net)} and also offsets this owner's loan.</div>
+              )}
+              {g.trucks.map(t=>{
+                const on = !excluded.has(t.id);
+                return (
+                  <label key={t.id} style={{display:"flex",gap:10,alignItems:"flex-start",background:C.card,border:`1.5px solid ${on?C.border:"transparent"}`,borderRadius:12,padding:10,opacity:on?1:0.5,cursor:"pointer",marginLeft:multi?10:0}}>
+                    <input type="checkbox" checked={on} onChange={()=>toggle(t.id)} style={{marginTop:3}} />
+                    <div style={{flex:1,fontSize:12,color:C.text}}>
+                      <div style={{fontWeight:800,fontSize:13}}>{t.truckNo} <span style={{fontWeight:500,color:C.muted}}>· {t.ownerName||"no owner"}</span></div>
+                      <div style={{color:C.muted}}>{t.tripsHim} of {t.tripsTotal} trips assigned to him · {t.reasons.join(", ")}{t.linkedOther>0?` · ${fmt(t.linkedOther)} of loan linked to another employee`:""}</div>
+                      <div>Loan {fmt(t.loanGiven)} − recovered {fmt(t.loanRecovered)} = <b style={multi?{color:C.muted,fontWeight:600}:undefined}>{fmt(t.loanNet)}</b>{multi?<span style={{color:C.muted}}> (this truck alone)</span>:""}{t.shortageOwed>0||t.shortageRecovered>0?` · Shortage pending ${fmt(t.shortagePending)}`:""}</div>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
           );
         })}
         {full.trucks.length===0 && <div style={{textAlign:"center",color:C.muted,padding:20}}>No vehicles with a loan or shortage are linked to this employee.</div>}
