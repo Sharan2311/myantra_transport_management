@@ -8,6 +8,7 @@ import { findPayment, normRef } from "./payment_finder.js";
 import { reconcileScreenshot } from "./payment_reconcile.js";
 import { findDieselDuplicates } from "./diesel_dupes.js";
 import { dieselReportHtml } from "./diesel_report.js";
+import { recoverCapFor, recoverOk, walletAfter, defaultTarget } from "./recover_target.js";
 import { buildRecovery, recoveryReportHtml, buildRecoveryOverview, recoveryOverviewHtml, assignTrucks } from "./recovery_logic.js";
 import { payableAfterSkips, pouchHoldOf } from "./pay_selected_logic.js";
 import { normDI, partyGrFile, partyDocsMissing, matchInvoices, routeDroppedDocs } from "./party_files.js";
@@ -28791,7 +28792,8 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed
 
   const recoverTrips = empTrips.filter(t=>recoverSelected.has(t.id));
   const recoverTotal = recoverTrips.reduce((s,t)=>s+t.balance,0);
-  const recoverCap = recoverTarget==="loan" ? loanBal : walletOwed;
+  const recoverCap = recoverCapFor(recoverTarget, loanBal);
+  const recoverAllowed = recoverOk(recoverTarget, loanBal, recoverTotal);
 
   const toggleRecover = (tripId) => setRecoverSelected(p=>{
     const n=new Set(p);
@@ -28800,7 +28802,7 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed
   });
 
   const runRecovery = () => {
-    if(recoverTrips.length===0 || recoverTotal<=0) return;
+    if(recoverTrips.length===0 || !recoverAllowed) return;
     if(user.role!=="owner" && recoverTrips.some(t=>t.pendingApproval)) {
       alert("One or more selected trips are pending owner approval (negative net pay) and can't be settled yet. Deselect them, or ask the owner to approve first.");
       return;
@@ -28970,13 +28972,13 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed
           </div>
 
           {/* ── Recover employee loan/wallet against these vehicle balances ── */}
-          {isOwner && empId!=="unassigned" && (loanBal>0 || walletOwed>0) && (
+          {isOwner && empId!=="unassigned" && (
             <div style={{marginTop:6,borderTop:"1px dashed #cbd5e1",paddingTop:10}}>
               {!recoverMode ? (
-                <button onClick={()=>{setRecoverMode(true);setRecoverSelected(new Set());}}
+                <button onClick={()=>{setRecoverMode(true);setRecoverSelected(new Set());setRecoverTarget(defaultTarget(loanBal));}}
                   style={{width:"100%",background:"#f59e0b22",border:"1.5px solid #f59e0b55",borderRadius:10,
                     color:"#b45309",padding:"9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
-                  💰 Recover Against {emp?.name}'s Loan/Wallet {loanBal>0?`(Loan due ${fmt(loanBal)})`:`(Wallet owed ${fmt(walletOwed)})`}
+                  💰 Recover Against {emp?.name}'s Loan/Wallet {loanBal>0?`(Loan due ${fmt(loanBal)})`:`(Wallet ${walletBal<0?"-":""}${fmt(Math.abs(walletBal))})`}
                 </button>
               ) : (
                 <div style={{background:"#fffbeb",border:"1px solid #f59e0b44",borderRadius:10,padding:"10px 12px",display:"flex",flexDirection:"column",gap:8}}>
@@ -28988,12 +28990,10 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed
                         Loan (due {fmt(loanBal)})
                       </label>
                     )}
-                    {walletOwed>0 && (
-                      <label style={{display:"flex",alignItems:"center",gap:5,fontSize:12}}>
-                        <input type="radio" checked={recoverTarget==="wallet"} onChange={()=>setRecoverTarget("wallet")} />
-                        Wallet (owed {fmt(walletOwed)})
-                      </label>
-                    )}
+                    <label style={{display:"flex",alignItems:"center",gap:5,fontSize:12}}>
+                      <input type="radio" checked={recoverTarget==="wallet"} onChange={()=>setRecoverTarget("wallet")} />
+                      Add to wallet (balance now {walletBal<0?"-":""}{fmt(Math.abs(walletBal))})
+                    </label>
                   </div>
                   <div style={{fontSize:11,color:"#666"}}>Pick vehicle balances below to apply toward this — manually select as many as needed:</div>
                   {empTrips.map(t=>(
@@ -29006,7 +29006,7 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed
                   ))}
                   <div style={{display:"flex",justifyContent:"space-between",fontSize:12,fontWeight:700,marginTop:2}}>
                     <span>Selected total</span>
-                    <span style={{color:recoverTotal>recoverCap?"#dc2626":"#16a34a"}}>{fmt(recoverTotal)} / {fmt(recoverCap)} due</span>
+                    <span style={{color:recoverTotal>recoverCap?"#dc2626":"#16a34a"}}>{recoverTarget==="wallet" ? `${fmt(recoverTotal)} → wallet becomes ${walletAfter(walletBal,recoverTotal)<0?"-":""}${fmt(Math.abs(walletAfter(walletBal,recoverTotal)))}` : `${fmt(recoverTotal)} / ${fmt(recoverCap)} due`}</span>
                   </div>
                   {recoverTotal>recoverCap && (
                     <div style={{fontSize:11,color:"#dc2626"}}>⚠ Selected total exceeds the outstanding {recoverTarget} balance — deselect some vehicles.</div>
@@ -29014,16 +29014,16 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed
                   <div style={{display:"flex",gap:8,marginTop:4}}>
                     <button onClick={()=>{setRecoverMode(false);setRecoverSelected(new Set());}}
                       style={{flex:1,background:"none",border:"1px solid #ccc",borderRadius:8,color:"#666",padding:"8px",fontSize:12,cursor:"pointer"}}>Cancel</button>
-                    <button onClick={()=>setRecoverConfirm(true)} disabled={recoverTotal<=0 || recoverTotal>recoverCap}
-                      style={{flex:1,background:recoverTotal<=0||recoverTotal>recoverCap?"#ccc":"#f59e0b",border:"none",borderRadius:8,color:"#fff",padding:"8px",fontSize:12,fontWeight:700,
-                        cursor:recoverTotal<=0||recoverTotal>recoverCap?"not-allowed":"pointer"}}>
+                    <button onClick={()=>setRecoverConfirm(true)} disabled={!recoverAllowed}
+                      style={{flex:1,background:!recoverAllowed?"#ccc":"#f59e0b",border:"none",borderRadius:8,color:"#fff",padding:"8px",fontSize:12,fontWeight:700,
+                        cursor:!recoverAllowed?"not-allowed":"pointer"}}>
                       Recover {fmt(recoverTotal)} →
                     </button>
                   </div>
                   {recoverConfirm && (
                     <div style={{background:"#fef2f2",border:"1px solid #dc2626",borderRadius:8,padding:"10px",marginTop:4}}>
                       <div style={{fontSize:12,color:"#7f1d1d",marginBottom:8}}>
-                        Confirm: {fmt(recoverTotal)} from {recoverTrips.map(t=>t.truckNo).join(", ")} will be marked "paid against employee {recoverTarget}" (zeroing their balance due), and {emp?.name}'s {recoverTarget} balance will be reduced by the same amount. This cannot be easily undone.
+                        Confirm: {fmt(recoverTotal)} from {recoverTrips.map(t=>t.truckNo).join(", ")} will be marked "paid against employee {recoverTarget}" (zeroing their balance due), and {recoverTarget==="wallet" ? `${emp?.name}'s wallet balance will increase by the same amount (${walletBal<0?"-":""}${fmt(Math.abs(walletBal))} → ${walletAfter(walletBal,recoverTotal)<0?"-":""}${fmt(Math.abs(walletAfter(walletBal,recoverTotal)))})` : `${emp?.name}'s loan balance will be reduced by the same amount`}. This cannot be easily undone.
                       </div>
                       <div style={{display:"flex",gap:8}}>
                         <button onClick={()=>setRecoverConfirm(false)}
