@@ -116,6 +116,15 @@ export function buildRecovery({ empId, employees, vehicles, trips, cashTransfers
   const trucks = included.map(truckRowOf);
   const owners = ownersOf(trucks);
 
+  // The owner's other trucks that carry a loan/shortage ledger but are NOT in this sheet (another employee's, or excluded):
+  // their recovery also offsets this owner's loan, so say so instead of leaving the figure looking inflated.
+  owners.forEach(o => {
+    const key = o.trucks[0].ownerName.toLowerCase();
+    const others = key ? (vehicles || []).filter(v => hasLedger(v) && (v.ownerName || "").trim().toLowerCase() === key && !o.trucks.some(t => t.id === v.id)) : [];
+    const net = others.reduce((sum, v) => sum + n(v.loan) - (v.loanTxns || []).filter(x => x.type === "recovery").reduce((q, x) => q + n(x.amount), 0), 0);
+    o.others = { count: others.length, trucks: others.map(v => v.truckNo), net };
+  });
+
   const vehicleLoanPending = owners.reduce((s, o) => s + o.loanPending, 0);
   const rawTruckLoanSum = trucks.reduce((s, t) => s + t.loanNet, 0);
   const shortagePending = trucks.reduce((s, t) => s + t.shortagePending, 0);
@@ -145,8 +154,13 @@ export function recoveryReportHtml(r, { groupBy = "vehicle", company = "", date 
   const T = r.totals;
   const note = t => (t.reasons.join(", ") + ` (${t.tripsHim}/${t.tripsTotal} trips his)`) + (t.linkedOther > 0 ? ` · ₹${inr(t.linkedOther)} of loan linked to another employee` : "");
 
-  const vehicleRows = r.trucks.map(t =>
-    `<tr class="v"><td>${esc(t.truckNo)}</td><td>${esc(t.ownerName)}</td><td class="n">${inr(t.loanGiven)}</td><td class="n">${inr(t.loanRecovered)}</td><td class="n">${inr(t.loanNet)}</td><td class="n">${inr(t.shortageOwed)}</td><td class="n">${inr(t.shortageRecovered)}</td><td class="n">${inr(t.shortagePending)}</td><td>${esc(note(t))}</td></tr>`).join("");
+  const vrow = (t, alone) => `<tr class="v"><td>${esc(t.truckNo)}</td><td>${esc(t.ownerName)}</td><td class="n">${inr(t.loanGiven)}</td><td class="n">${inr(t.loanRecovered)}</td><td class="n">${inr(t.loanNet)}${alone ? '<br><span style="color:#777;font-weight:normal">this truck alone</span>' : ""}</td><td class="n">${inr(t.shortageOwed)}</td><td class="n">${inr(t.shortageRecovered)}</td><td class="n">${inr(t.shortagePending)}</td><td>${esc(note(t))}</td></tr>`;
+  const vehicleRows = r.owners.map(o => {
+    const multi = o.trucks.length > 1;
+    const sub = multi ? `<tr class="o"><td colspan="2"><b>${esc(o.owner)} — net across ${o.trucks.length} trucks</b></td><td class="n">${inr(o.loanGiven)}</td><td class="n">${inr(o.loanRecovered)}</td><td class="n"><b>${inr(o.loanPending)}</b></td><td colspan="3"></td><td>${o.overRecovered > 0 ? "Over-recovered ₹" + inr(o.overRecovered) : "Loan recovered on one truck offsets the others"}</td></tr>` : "";
+    const other = o.others && o.others.count > 0 ? `<tr><td colspan="9" style="color:#92400e">${esc(o.owner)} also has ${o.others.count} other truck(s) with loan entries not in this sheet (${esc(o.others.trucks.join(", "))}); their net loan is ₹${inr(o.others.net)} and also offsets this owner's loan.</td></tr>` : "";
+    return o.trucks.map(t => vrow(t, multi)).join("") + sub + other;
+  }).join("");
   const ownerRows = r.owners.map(o =>
     `<tr class="o"><td>${esc(o.owner)}</td><td>${esc(o.trucks.map(t => t.truckNo).join(", "))}</td><td class="n">${inr(o.loanGiven)}</td><td class="n">${inr(o.loanRecovered)}</td><td class="n">${inr(o.loanPending)}</td><td class="n">${inr(o.shortagePending)}</td><td>${o.overRecovered > 0 ? "Over-recovered ₹" + inr(o.overRecovered) : ""}</td></tr>`).join("");
 
