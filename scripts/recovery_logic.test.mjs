@@ -1,6 +1,6 @@
 // Run: node scripts/recovery_logic.test.mjs
 import assert from "node:assert/strict";
-import { candidateTrucks, buildRecovery, recoveryReportHtml, walletBalanceOf } from "../src/recovery_logic.js";
+import { candidateTrucks, buildRecovery, recoveryReportHtml, walletBalanceOf, buildRecoveryOverview, recoveryOverviewHtml } from "../src/recovery_logic.js";
 
 let n = 0;
 const t = (name, fn) => { fn(); n++; console.log("ok -", name); };
@@ -117,6 +117,38 @@ t("report html mentions excluded count", () => {
   const a = veh({ truckNo: "KA01B2222", loan: 1, loanTxns: [given(1)] });
   const r = buildRecovery({ empId: E, employees: [], vehicles: [a], trips: trips("KA01B2222", 1, 0), cashTransfers: [], excluded: new Set([a.id]) });
   assert.match(recoveryReportHtml(r), /1 excluded/);
+});
+
+t("overview: one row per employee, totals add up, unassigned trucks reported separately", () => {
+  const a = veh({ truckNo: "KA01C0001", loan: 10000, loanTxns: [given(10000)], shortageTxns: [{ type: "shortage", amount: 300 }] });
+  const b = veh({ truckNo: "KA01C0002", loan: 5000, loanTxns: [given(5000)] });
+  const orphan = veh({ truckNo: "KA01C0003", loan: 7000, loanTxns: [given(7000)] });
+  const emps = [{ id: E, name: "A", loan: 1000, loanRecovered: 0 }, { id: "EMP2", name: "B", loan: 0, loanRecovered: 0 }, { id: "EMP3", name: "Idle", loan: 0, loanRecovered: 0 }];
+  const tr = [...trips("KA01C0001", 2, 0), ...Array.from({ length: 2 }, () => ({ truckNo: "KA01C0002", assignedEmpId: "EMP2" })), ...trips("KA01C0003", 1, 3)];
+  const ct = [{ empId: "EMP2", amount: -400 }];
+  const o = buildRecoveryOverview({ employees: emps, vehicles: [a, b, orphan], trips: tr, cashTransfers: ct });
+  assert.deepEqual(o.rows.map(r => r.name), ["A", "B"]);
+  assert.equal(o.rows[0].total, 10000 + 300 + 1000);
+  assert.equal(o.rows[1].total, 5000 + 400);
+  assert.equal(o.totals.vehicleLoan, 15000); assert.equal(o.totals.shortage, 300); assert.equal(o.totals.ownLoan, 1000); assert.equal(o.totals.wallet, 400);
+  assert.equal(o.totals.employees, 11300 + 5400);
+  assert.equal(o.unassigned.trucks, 1); assert.equal(o.unassigned.vehicleLoan, 7000);
+  assert.equal(o.totals.withUnassigned, 16700 + 7000);
+  assert.deepEqual(o.overlaps, []);
+});
+
+t("overview: a truck qualifying for two employees is flagged, and a positive wallet counts too", () => {
+  const a = veh({ truckNo: "KA01D0001", loan: 100, loanTxns: [given(100, "EMP2")] });
+  const o = buildRecoveryOverview({ employees: [{ id: E, name: "A" }, { id: "EMP2", name: "B" }], vehicles: [a], trips: trips("KA01D0001", 3, 0), cashTransfers: [{ empId: E, amount: 50 }] });
+  assert.equal(o.overlaps.length, 1); assert.deepEqual(o.overlaps[0].employees.sort(), ["A", "B"]);
+  assert.equal(o.rows.find(r => r.name === "A").wallet, 50);
+});
+
+t("overview html has every employee, the grand total and the overlap note", () => {
+  const a = veh({ truckNo: "KA01E0001", loan: 100, loanTxns: [given(100, "EMP2")] });
+  const o = buildRecoveryOverview({ employees: [{ id: E, name: "Al<i>" }, { id: "EMP2", name: "B" }], vehicles: [a], trips: trips("KA01E0001", 3, 0), cashTransfers: [] });
+  const h = recoveryOverviewHtml(o, { company: "Co" });
+  assert.match(h, /GRAND TOTAL TO RECOVER/); assert.match(h, /Al&lt;i&gt;/); assert.match(h, /more than one employee/);
 });
 
 console.log(`\n${n} tests passed`);

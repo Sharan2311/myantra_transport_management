@@ -8,7 +8,7 @@ import { findPayment, normRef } from "./payment_finder.js";
 import { reconcileScreenshot } from "./payment_reconcile.js";
 import { findDieselDuplicates } from "./diesel_dupes.js";
 import { dieselReportHtml } from "./diesel_report.js";
-import { buildRecovery, recoveryReportHtml } from "./recovery_logic.js";
+import { buildRecovery, recoveryReportHtml, buildRecoveryOverview, recoveryOverviewHtml } from "./recovery_logic.js";
 import { payableAfterSkips, pouchHoldOf } from "./pay_selected_logic.js";
 import { normDI, partyGrFile, partyDocsMissing, matchInvoices, routeDroppedDocs } from "./party_files.js";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
@@ -1380,6 +1380,13 @@ function RecoveryMod({trips, vehicles, employees, cashTransfers, user, allTripsL
     w.document.write(html); w.document.close();
   };
   const T = r?.totals;
+  const overview = useMemo(()=>buildRecoveryOverview({employees, vehicles, trips, cashTransfers}),[employees, vehicles, trips, cashTransfers]);
+  const generateAll = () => {
+    const html = recoveryOverviewHtml(overview, {company:RC.companyName||"", date:new Date().toLocaleDateString("en-IN")});
+    const w = window.open("","_blank");
+    if(!w){ alert("Pop-up blocked — allow pop-ups for this site to generate the PDF."); return; }
+    w.document.write(html); w.document.close();
+  };
   const chip = (id,label)=>(
     <button key={id} onClick={()=>setGroupBy(id)} style={{background:groupBy===id?C.teal:"transparent",border:`1.5px solid ${C.teal}`,borderRadius:20,color:groupBy===id?"#fff":C.teal,fontSize:11,fontWeight:700,padding:"4px 12px",cursor:"pointer"}}>{label}</button>
   );
@@ -1392,6 +1399,39 @@ function RecoveryMod({trips, vehicles, employees, cashTransfers, user, allTripsL
           {!loadingAllTrips && <button onClick={loadAllTrips} style={{marginLeft:8,fontWeight:700,cursor:"pointer"}}>Load all trips</button>}
         </div>
       )}
+      <div style={{background:C.card,border:`1.5px solid ${C.border}`,borderRadius:12,padding:12}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+          <div style={{fontWeight:800,fontSize:13,color:C.text}}>All employees</div>
+          <button onClick={generateAll} style={{background:"transparent",border:`1.5px solid ${C.accent}`,borderRadius:20,color:C.accent,fontSize:11,fontWeight:700,padding:"4px 10px",cursor:"pointer"}}>📄 PDF all employees</button>
+        </div>
+        <div style={{overflowX:"auto"}}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:11,color:C.text}}>
+            <thead><tr style={{color:C.muted,textAlign:"right"}}>
+              <th style={{textAlign:"left",padding:"3px 4px"}}>Employee</th><th>Vehicle loans</th><th>Shortage</th><th>Own loan</th><th>Wallet</th><th>To recover</th></tr></thead>
+            <tbody>
+              {overview.rows.map(x=>(
+                <tr key={x.empId} onClick={()=>pickEmp(x.empId)} style={{cursor:"pointer",textAlign:"right",background:x.empId===empId?C.teal+"22":"transparent"}}>
+                  <td style={{textAlign:"left",padding:"4px",fontWeight:700}}>{x.name} <span style={{color:C.muted,fontWeight:400}}>({x.trucks})</span></td>
+                  <td>{fmt(x.vehicleLoan)}</td><td>{fmt(x.shortage)}</td><td>{fmt(x.ownLoan)}</td>
+                  <td>{x.walletBalance<0?"-":""}{fmt(Math.abs(x.walletBalance))}</td><td style={{fontWeight:800}}>{fmt(x.total)}</td>
+                </tr>
+              ))}
+              <tr style={{textAlign:"right",borderTop:`1px solid ${C.border}`,fontWeight:800}}>
+                <td style={{textAlign:"left",padding:"4px"}}>Total — employees</td>
+                <td>{fmt(overview.totals.vehicleLoan)}</td><td>{fmt(overview.totals.shortage)}</td><td>{fmt(overview.totals.ownLoan)}</td><td>{fmt(overview.totals.wallet)}</td><td>{fmt(overview.totals.employees)}</td>
+              </tr>
+              <tr style={{textAlign:"right",color:C.muted}}>
+                <td style={{textAlign:"left",padding:"4px"}}>Vehicles not linked to any employee ({overview.unassigned.trucks})</td>
+                <td>{fmt(overview.unassigned.vehicleLoan)}</td><td>{fmt(overview.unassigned.shortage)}</td><td></td><td></td><td>{fmt(overview.unassigned.total)}</td>
+              </tr>
+              <tr style={{textAlign:"right",fontWeight:800,color:C.accent,fontSize:13}}>
+                <td style={{textAlign:"left",padding:"4px"}}>Grand total to recover</td><td colSpan={4}></td><td>{fmt(overview.totals.withUnassigned)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div style={{fontSize:10,color:C.muted,marginTop:6}}>Wallet = current balance, counted in full. Tap an employee to see and edit their sheet.{overview.overlaps.length>0 && ` ${overview.overlaps.length} truck(s) qualify for more than one employee and are counted under each: ${overview.overlaps.map(o=>`${o.truckNo} (${o.employees.join(" / ")})`).join("; ")}.`}</div>
+      </div>
       <select value={empId} onChange={e=>pickEmp(e.target.value)}
         style={{background:C.card,border:`1.5px solid ${empId?C.teal:C.border}`,borderRadius:10,color:C.text,padding:"10px 12px",fontSize:13}}>
         <option value="">👤 Choose an employee…</option>
