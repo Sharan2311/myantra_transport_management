@@ -86,9 +86,31 @@ const ownersOf = trucks => {
   }).sort((a, b) => a.owner.localeCompare(b.owner));
 };
 
-export function buildRecovery({ empId, employees, vehicles, trips, cashTransfers, excluded = new Set() }) {
+// Each truck is counted under exactly ONE employee. When a truck qualifies for several, the winner is the employee with
+// the most loan linked to him on that truck, then the most trips on it, then the first in the employee list.
+// Returns { owner: Map(vehicleId -> empId), resolved: [{ truckNo, counted, also: [names] }] }.
+export function assignTrucks({ employees, vehicles, trips }) {
+  const claims = new Map(); // vehicleId -> [{ empId, name, linked, trips, order }]
+  (employees || []).forEach((e, order) => {
+    for (const c of candidateTrucks({ empId: e.id, vehicles, trips })) {
+      const list = claims.get(c.vehicle.id) || [];
+      list.push({ empId: e.id, name: e.name, linked: c.linkedLoan, trips: c.tripsHim, order, truckNo: c.vehicle.truckNo });
+      claims.set(c.vehicle.id, list);
+    }
+  });
+  const owner = new Map(), resolved = [];
+  for (const [vid, list] of claims) {
+    const best = [...list].sort((a, b) => b.linked - a.linked || b.trips - a.trips || a.order - b.order)[0];
+    owner.set(vid, best.empId);
+    if (list.length > 1) resolved.push({ truckNo: best.truckNo, counted: best.name, also: list.filter(x => x !== best).map(x => x.name) });
+  }
+  return { owner, resolved };
+}
+
+export function buildRecovery({ empId, employees, vehicles, trips, cashTransfers, excluded = new Set(), assignment = null }) {
   const emp = (employees || []).find(e => e.id === empId) || null;
-  const all = candidateTrucks({ empId, vehicles, trips });
+  // with an assignment, a truck only shows under the employee it was assigned to
+  const all = candidateTrucks({ empId, vehicles, trips }).filter(c => !assignment || assignment.owner.get(c.vehicle.id) === empId);
   const included = all.filter(c => !excluded.has(c.vehicle.id));
 
   const trucks = included.map(truckRowOf);
@@ -164,20 +186,17 @@ ${summary}${loanTable}${empLoanTable}${walletTable}
 }
 
 // Everyone at once: one row per employee, plus the vehicles that belong to nobody.
-// A truck is listed under an employee by the same rule as buildRecovery. If a truck qualifies for two employees it is
-// reported in `overlaps` (and counted under both rows) so the owner can see where the grand total may count it twice.
-export function buildRecoveryOverview({ employees, vehicles, trips, cashTransfers }) {
+// Each truck is counted under one employee only (see assignTrucks); `resolved` lists the trucks that had to be decided.
+export function buildRecoveryOverview({ employees, vehicles, trips, cashTransfers, assignment = null }) {
+  const asg = assignment || assignTrucks({ employees, vehicles, trips });
   const rows = [];
-  const seen = new Map(); // vehicle id -> [employee names]
   for (const e of employees || []) {
-    const r = buildRecovery({ empId: e.id, employees, vehicles, trips, cashTransfers });
-    r.trucks.forEach(t => seen.set(t.id, [...(seen.get(t.id) || []), e.name]));
+    const r = buildRecovery({ empId: e.id, employees, vehicles, trips, cashTransfers, assignment: asg });
     const T = r.totals;
     rows.push({ empId: e.id, name: e.name, trucks: r.trucks.length, vehicleLoan: T.vehicleLoanPending, shortage: T.shortagePending,
       ownLoan: T.empLoanPending, walletBalance: r.wallet.balance, wallet: T.walletCounted, total: T.grand });
   }
-  const assigned = new Set(seen.keys());
-  const orphan = (vehicles || []).filter(v => hasLedger(v) && !assigned.has(v.id)).map(v => truckRowOf({ vehicle: v, tripsHim: 0, tripsTotal: 0, reasons: ["not linked to any employee"], linkedOther: 0 }));
+  const orphan = (vehicles || []).filter(v => hasLedger(v) && !asg.owner.has(v.id)).map(v => truckRowOf({ vehicle: v, tripsHim: 0, tripsTotal: 0, reasons: ["not linked to any employee"], linkedOther: 0 }));
   const orphanOwners = ownersOf(orphan);
   const unassigned = {
     trucks: orphan.length,
@@ -187,13 +206,9 @@ export function buildRecoveryOverview({ employees, vehicles, trips, cashTransfer
   unassigned.total = unassigned.vehicleLoan + unassigned.shortage;
   const shown = rows.filter(r => r.total > 0 || r.walletBalance !== 0).sort((a, b) => b.total - a.total);
   const sum = k => shown.reduce((s, r) => s + r[k], 0);
-  const overlaps = [...seen.entries()].filter(([, names]) => names.length > 1).map(([id, names]) => {
-    const v = (vehicles || []).find(x => x.id === id);
-    return { truckNo: v?.truckNo || id, employees: names };
-  });
   const totals = { vehicleLoan: sum("vehicleLoan"), shortage: sum("shortage"), ownLoan: sum("ownLoan"), wallet: sum("wallet"), employees: sum("total") };
   totals.withUnassigned = totals.employees + unassigned.total;
-  return { rows: shown, unassigned, totals, overlaps };
+  return { rows: shown, unassigned, totals, resolved: asg.resolved };
 }
 
 export function recoveryOverviewHtml(o, { company = "", date = "" } = {}) {
@@ -208,6 +223,6 @@ tfoot td{font-weight:bold;background:#f5f5f5}tr.g td{background:#fde68a;font-siz
 <tfoot><tr><td>Total (employees)</td><td></td><td class="n">${inr(T.vehicleLoan)}</td><td class="n">${inr(T.shortage)}</td><td class="n">${inr(T.ownLoan)}</td><td class="n">${inr(T.wallet)}</td><td class="n">${inr(T.employees)}</td></tr>
 <tr><td>Vehicles not linked to any employee (${o.unassigned.trucks})</td><td></td><td class="n">${inr(o.unassigned.vehicleLoan)}</td><td class="n">${inr(o.unassigned.shortage)}</td><td></td><td></td><td class="n">${inr(o.unassigned.total)}</td></tr>
 <tr class="g"><td colspan="6">GRAND TOTAL TO RECOVER</td><td class="n">${inr(T.withUnassigned)}</td></tr></tfoot></table>
-${o.overlaps.length ? `<p><b>Note:</b> ${o.overlaps.length} truck(s) qualify for more than one employee and are counted under each: ${esc(o.overlaps.map(x => x.truckNo + " (" + x.employees.join(" / ") + ")").join("; "))}.</p>` : ""}
+${o.resolved.length ? `<p><b>Note:</b> ${o.resolved.length} truck(s) qualified for more than one employee and are counted once, under the employee with the most linked loan, then the most trips: ${esc(o.resolved.map(x => x.truckNo + " → " + x.counted + " (also " + x.also.join(", ") + ")").join("; "))}.</p>` : ""}
 </body></html>`;
 }

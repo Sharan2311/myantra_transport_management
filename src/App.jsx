@@ -8,7 +8,7 @@ import { findPayment, normRef } from "./payment_finder.js";
 import { reconcileScreenshot } from "./payment_reconcile.js";
 import { findDieselDuplicates } from "./diesel_dupes.js";
 import { dieselReportHtml } from "./diesel_report.js";
-import { buildRecovery, recoveryReportHtml, buildRecoveryOverview, recoveryOverviewHtml } from "./recovery_logic.js";
+import { buildRecovery, recoveryReportHtml, buildRecoveryOverview, recoveryOverviewHtml, assignTrucks } from "./recovery_logic.js";
 import { payableAfterSkips, pouchHoldOf } from "./pay_selected_logic.js";
 import { normDI, partyGrFile, partyDocsMissing, matchInvoices, routeDroppedDocs } from "./party_files.js";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
@@ -1370,8 +1370,10 @@ function RecoveryMod({trips, vehicles, employees, cashTransfers, user, allTripsL
   useEffect(()=>{ if(!allTripsLoaded && !loadingAllTrips && !triedLoad.current){ triedLoad.current = true; loadAllTrips && loadAllTrips(); } },[allTripsLoaded, loadingAllTrips]);
 
   const pickEmp = id => { setEmpId(id); setExcluded(new Set()); };
-  const full = empId ? buildRecovery({empId, employees, vehicles, trips, cashTransfers}) : null;
-  const r = empId ? buildRecovery({empId, employees, vehicles, trips, cashTransfers, excluded}) : null;
+  // every truck is counted under one employee only
+  const assignment = useMemo(()=>assignTrucks({employees, vehicles, trips}),[employees, vehicles, trips]);
+  const full = empId ? buildRecovery({empId, employees, vehicles, trips, cashTransfers, assignment}) : null;
+  const r = empId ? buildRecovery({empId, employees, vehicles, trips, cashTransfers, excluded, assignment}) : null;
   const toggle = id => setExcluded(prev=>{ const n=new Set(prev); n.has(id)?n.delete(id):n.add(id); return n; });
   const generate = () => {
     const html = recoveryReportHtml(r, {groupBy, company:RC.companyName||"", date:new Date().toLocaleDateString("en-IN")});
@@ -1380,7 +1382,7 @@ function RecoveryMod({trips, vehicles, employees, cashTransfers, user, allTripsL
     w.document.write(html); w.document.close();
   };
   const T = r?.totals;
-  const overview = useMemo(()=>buildRecoveryOverview({employees, vehicles, trips, cashTransfers}),[employees, vehicles, trips, cashTransfers]);
+  const overview = useMemo(()=>buildRecoveryOverview({employees, vehicles, trips, cashTransfers, assignment}),[employees, vehicles, trips, cashTransfers, assignment]);
   const generateAll = () => {
     const html = recoveryOverviewHtml(overview, {company:RC.companyName||"", date:new Date().toLocaleDateString("en-IN")});
     const w = window.open("","_blank");
@@ -1430,7 +1432,7 @@ function RecoveryMod({trips, vehicles, employees, cashTransfers, user, allTripsL
             </tbody>
           </table>
         </div>
-        <div style={{fontSize:10,color:C.muted,marginTop:6}}>Wallet = current balance, counted in full. Tap an employee to see and edit their sheet.{overview.overlaps.length>0 && ` ${overview.overlaps.length} truck(s) qualify for more than one employee and are counted under each: ${overview.overlaps.map(o=>`${o.truckNo} (${o.employees.join(" / ")})`).join("; ")}.`}</div>
+        <div style={{fontSize:10,color:C.muted,marginTop:6}}>Wallet = current balance, counted in full. Tap an employee to see and edit their sheet.{overview.resolved.length>0 && ` ${overview.resolved.length} truck(s) qualified for more than one employee and are counted once, under the employee with the most linked loan, then the most trips: ${overview.resolved.map(o=>`${o.truckNo} → ${o.counted} (also ${o.also.join(", ")})`).join("; ")}.`}</div>
       </div>
       <select value={empId} onChange={e=>pickEmp(e.target.value)}
         style={{background:C.card,border:`1.5px solid ${empId?C.teal:C.border}`,borderRadius:10,color:C.text,padding:"10px 12px",fontSize:13}}>
