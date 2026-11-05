@@ -8,7 +8,7 @@ import { findPayment, normRef } from "./payment_finder.js";
 import { reconcileScreenshot } from "./payment_reconcile.js";
 import { findDieselDuplicates } from "./diesel_dupes.js";
 import { dieselReportHtml } from "./diesel_report.js";
-import { recoverCapFor, recoverOk, walletAfter, defaultTarget } from "./recover_target.js";
+import { recoverCapFor, recoverOk, walletAfter, walletDelta, defaultTarget } from "./recover_target.js";
 import { buildRecovery, recoveryReportHtml, buildRecoveryOverview, recoveryOverviewHtml, assignTrucks } from "./recovery_logic.js";
 import { payableAfterSkips, pouchHoldOf } from "./pay_selected_logic.js";
 import { normDI, partyGrFile, partyDocsMissing, matchInvoices, routeDroppedDocs } from "./party_files.js";
@@ -28793,7 +28793,7 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed
   const recoverTrips = empTrips.filter(t=>recoverSelected.has(t.id));
   const recoverTotal = recoverTrips.reduce((s,t)=>s+t.balance,0);
   const recoverCap = recoverCapFor(recoverTarget, loanBal);
-  const recoverAllowed = recoverOk(recoverTarget, loanBal, recoverTotal);
+  const recoverAllowed = recoverOk(recoverTarget, loanBal, recoverTotal, walletBal);
 
   const toggleRecover = (tripId) => setRecoverSelected(p=>{
     const n=new Set(p);
@@ -28849,7 +28849,7 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed
         return upd;
       }));
     } else if(recoverTarget==="wallet" && setCashTransfers) {
-      const wxn = {id:uid(), empId, amount:recoverTotal, date:today(), type:"transfer",
+      const wxn = {id:uid(), empId, amount:walletDelta(walletBal, recoverTotal), date:today(), type:"transfer",
         note:`Recovered from vehicle balance(s): ${recoverTrips.map(t=>t.truckNo).join(", ")}`,
         createdBy:user.username, createdAt:nowTs()};
       setCashTransfers(prev => [wxn, ...(Array.isArray(prev)?prev:[])]);
@@ -28992,7 +28992,7 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed
                     )}
                     <label style={{display:"flex",alignItems:"center",gap:5,fontSize:12}}>
                       <input type="radio" checked={recoverTarget==="wallet"} onChange={()=>setRecoverTarget("wallet")} />
-                      Add to wallet (balance now {walletBal<0?"-":""}{fmt(Math.abs(walletBal))})
+                      Reduce wallet (balance now {walletBal<0?"-":""}{fmt(Math.abs(walletBal))}{walletBal===0?" — nothing to reduce":""})
                     </label>
                   </div>
                   <div style={{fontSize:11,color:"#666"}}>Pick vehicle balances below to apply toward this — manually select as many as needed:</div>
@@ -29023,7 +29023,7 @@ function EmpTripGroup({ empId, emp, empTrips, totalBal, pouchHeld=0, settledOwed
                   {recoverConfirm && (
                     <div style={{background:"#fef2f2",border:"1px solid #dc2626",borderRadius:8,padding:"10px",marginTop:4}}>
                       <div style={{fontSize:12,color:"#7f1d1d",marginBottom:8}}>
-                        Confirm: {fmt(recoverTotal)} from {recoverTrips.map(t=>t.truckNo).join(", ")} will be marked "paid against employee {recoverTarget}" (zeroing their balance due), and {recoverTarget==="wallet" ? `${emp?.name}'s wallet balance will increase by the same amount (${walletBal<0?"-":""}${fmt(Math.abs(walletBal))} → ${walletAfter(walletBal,recoverTotal)<0?"-":""}${fmt(Math.abs(walletAfter(walletBal,recoverTotal)))})` : `${emp?.name}'s loan balance will be reduced by the same amount`}. This cannot be easily undone.
+                        Confirm: {fmt(recoverTotal)} from {recoverTrips.map(t=>t.truckNo).join(", ")} will be marked "paid against employee {recoverTarget}" (zeroing their balance due), and {recoverTarget==="wallet" ? `${emp?.name}'s wallet balance will be reduced by the same amount, towards zero (${walletBal<0?"-":""}${fmt(Math.abs(walletBal))} → ${walletAfter(walletBal,recoverTotal)<0?"-":""}${fmt(Math.abs(walletAfter(walletBal,recoverTotal)))})` : `${emp?.name}'s loan balance will be reduced by the same amount`}. This cannot be easily undone.
                       </div>
                       <div style={{display:"flex",gap:8}}>
                         <button onClick={()=>setRecoverConfirm(false)}
