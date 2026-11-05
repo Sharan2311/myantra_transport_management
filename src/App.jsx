@@ -8,6 +8,7 @@ import { findPayment, normRef } from "./payment_finder.js";
 import { reconcileScreenshot } from "./payment_reconcile.js";
 import { findDieselDuplicates } from "./diesel_dupes.js";
 import { dieselReportHtml } from "./diesel_report.js";
+import { buildRecovery, recoveryReportHtml } from "./recovery_logic.js";
 import { payableAfterSkips, pouchHoldOf } from "./pay_selected_logic.js";
 import { normDI, partyGrFile, partyDocsMissing, matchInvoices, routeDroppedDocs } from "./party_files.js";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
@@ -646,7 +647,7 @@ function computeEffectiveFeatures(plan, overrides={}, rcFeatures={}) {
 
 // ─── ROLES ────────────────────────────────────────────────────────────────────
 const ROLES = {
-  owner:         {label:"Owner",               color:C.accent,  perms:["trips","inbound","gypsum","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","admin","driverPay","party_portal","unbilled_oversight","tasks","husk_entry","husk_view","husk_manage","husk_profit"]},
+  owner:         {label:"Owner",               color:C.accent,  perms:["trips","inbound","gypsum","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","admin","driverPay","party_portal","unbilled_oversight","tasks","husk_entry","husk_view","husk_manage","husk_profit","recovery"]},
   manager:       {label:"Manager",             color:C.blue,    perms:["trips","inbound","gypsum","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","driverPay","party_portal","unbilled_oversight","tasks"]},
   fleet_manager: {label:"Cement Fleet Manager",color:C.teal,    perms:["cement_trips","billing","diesel","driverPay_view"]},
   fleet_mgr_nd:  {label:"Fleet Mgr (No Diesel Req)",color:"#0891b2", perms:["cement_trips","billing","diesel_view","driverPay_view"]},
@@ -1342,6 +1343,7 @@ const MORE_TABS = [
   {id:"driverPay", icon:"🏧",label:"Driver Pay",     perm:"driverPay",    group:"money",   feat:"driver_pay"},
   {id:"settlement",icon:"💵",label:"Settlement",     perm:"settlement",   group:"money",   feat:"driver_pay"},
   {id:"tafal",     icon:"🤝",label:"TAFAL",          perm:"tafal",        group:"money",   feat:"tafal"},
+  {id:"recovery",  icon:"🔁",label:"Recovery",       perm:"recovery",     group:"money"},
   {id:"vehicles",  icon:"🚛",label:"Vehicles",       perm:"vehicles",     group:"fleet",   feat:"vehicles"},
   {id:"employees", icon:"👥",label:"Employees",      perm:"employees",    group:"fleet",   feat:"employees"},
   {id:"payments",  icon:"💰",label:"Payments",        perm:"payments",   group:"finance", feat:"payment_scan"},
@@ -1359,6 +1361,88 @@ const MORE_GROUPS = [
   {id:"finance", label:"Finance"},
   {id:"info",    label:"Reports & Admin"},
 ];
+function RecoveryMod({trips, vehicles, employees, cashTransfers, user, allTripsLoaded, loadingAllTrips, loadAllTrips}) {
+  const [empId, setEmpId] = useState("");
+  const [groupBy, setGroupBy] = useState("vehicle");
+  const [excluded, setExcluded] = useState(new Set());
+  const triedLoad = useRef(false);
+  // Trip counts decide which trucks are his, so every trip must be loaded (the app only loads the last 90 days by default).
+  useEffect(()=>{ if(!allTripsLoaded && !loadingAllTrips && !triedLoad.current){ triedLoad.current = true; loadAllTrips && loadAllTrips(); } },[allTripsLoaded, loadingAllTrips]);
+
+  const pickEmp = id => { setEmpId(id); setExcluded(new Set()); };
+  const full = empId ? buildRecovery({empId, employees, vehicles, trips, cashTransfers}) : null;
+  const r = empId ? buildRecovery({empId, employees, vehicles, trips, cashTransfers, excluded}) : null;
+  const toggle = id => setExcluded(prev=>{ const n=new Set(prev); n.has(id)?n.delete(id):n.add(id); return n; });
+  const generate = () => {
+    const html = recoveryReportHtml(r, {groupBy, company:RC.companyName||"", date:new Date().toLocaleDateString("en-IN")});
+    const w = window.open("","_blank");
+    if(!w){ alert("Pop-up blocked — allow pop-ups for this site to generate the PDF."); return; }
+    w.document.write(html); w.document.close();
+  };
+  const T = r?.totals;
+  const chip = (id,label)=>(
+    <button key={id} onClick={()=>setGroupBy(id)} style={{background:groupBy===id?C.teal:"transparent",border:`1.5px solid ${C.teal}`,borderRadius:20,color:groupBy===id?"#fff":C.teal,fontSize:11,fontWeight:700,padding:"4px 12px",cursor:"pointer"}}>{label}</button>
+  );
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      <div style={{fontSize:16,fontWeight:800,color:C.text}}>🔁 Recovery — pending per employee</div>
+      {!allTripsLoaded && (
+        <div style={{background:C.orange+"22",border:`1px solid ${C.orange}`,borderRadius:10,padding:"9px 12px",fontSize:12,color:C.text}}>
+          {loadingAllTrips ? "Loading all trips…" : "Only the last 90 days of trips are loaded, so trip counts below can be wrong."}
+          {!loadingAllTrips && <button onClick={loadAllTrips} style={{marginLeft:8,fontWeight:700,cursor:"pointer"}}>Load all trips</button>}
+        </div>
+      )}
+      <select value={empId} onChange={e=>pickEmp(e.target.value)}
+        style={{background:C.card,border:`1.5px solid ${empId?C.teal:C.border}`,borderRadius:10,color:C.text,padding:"10px 12px",fontSize:13}}>
+        <option value="">👤 Choose an employee…</option>
+        {(employees||[]).map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
+      </select>
+      {r && (<>
+        <div style={{background:C.card,border:`1.5px solid ${C.border}`,borderRadius:12,padding:12}}>
+          {[["Vehicle loans",T.vehicleLoanPending],["Vehicle shortage",T.shortagePending],[`${r.emp?.name||"Employee"}'s own loan`,T.empLoanPending],["Wallet owed",T.walletOwed]].map(([l,v])=>(
+            <div key={l} style={{display:"flex",justifyContent:"space-between",fontSize:13,padding:"3px 0",color:C.text}}><span>{l}</span><b>{fmt(v)}</b></div>
+          ))}
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:16,fontWeight:800,borderTop:`1px solid ${C.border}`,marginTop:6,paddingTop:6,color:C.accent}}><span>Total pending</span><span>{fmt(T.grand)}</span></div>
+          <div style={{fontSize:11,color:C.muted,marginTop:6}}>Current wallet balance: <b>{r.wallet.balance<0?"-":""}{fmt(Math.abs(r.wallet.balance))}</b>{r.wallet.balance<0?" (employee owes the company)":r.wallet.balance>0?" (employee holds company cash — not counted)":""}</div>
+        </div>
+        <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+          {chip("vehicle","By vehicle")}{chip("owner","By owner")}
+          <button onClick={()=>setExcluded(new Set())} style={{marginLeft:"auto",fontSize:11,cursor:"pointer"}}>Include all</button>
+          <button onClick={()=>setExcluded(new Set(full.trucks.map(t=>t.id)))} style={{fontSize:11,cursor:"pointer"}}>Exclude all</button>
+          <button onClick={generate} style={{background:"transparent",border:`1.5px solid ${C.accent}`,borderRadius:20,color:C.accent,fontSize:11,fontWeight:700,padding:"4px 10px",cursor:"pointer"}}>📄 Generate PDF</button>
+        </div>
+        <div style={{fontSize:11,color:C.muted}}>{r.trucks.length} of {r.candidateCount} vehicles included. Untick a vehicle to leave it out of the totals and the PDF.</div>
+        {full.trucks.map(t=>{
+          const on = !excluded.has(t.id);
+          return (
+            <label key={t.id} style={{display:"flex",gap:10,alignItems:"flex-start",background:C.card,border:`1.5px solid ${on?C.border:"transparent"}`,borderRadius:12,padding:10,opacity:on?1:0.5,cursor:"pointer"}}>
+              <input type="checkbox" checked={on} onChange={()=>toggle(t.id)} style={{marginTop:3}} />
+              <div style={{flex:1,fontSize:12,color:C.text}}>
+                <div style={{fontWeight:800,fontSize:13}}>{t.truckNo} <span style={{fontWeight:500,color:C.muted}}>· {t.ownerName||"no owner"}</span></div>
+                <div style={{color:C.muted}}>{t.tripsHim} of {t.tripsTotal} trips assigned to him · {t.reasons.join(", ")}{t.linkedOther>0?` · ${fmt(t.linkedOther)} of loan linked to another employee`:""}</div>
+                <div>Loan {fmt(t.loanGiven)} − recovered {fmt(t.loanRecovered)} = <b>{fmt(t.loanNet)}</b>{t.shortageOwed>0||t.shortageRecovered>0?` · Shortage pending ${fmt(t.shortagePending)}`:""}</div>
+              </div>
+            </label>
+          );
+        })}
+        {full.trucks.length===0 && <div style={{textAlign:"center",color:C.muted,padding:20}}>No vehicles with a loan or shortage are linked to this employee.</div>}
+        {groupBy==="owner" && r.owners.length>0 && (
+          <div style={{background:C.card,border:`1.5px solid ${C.border}`,borderRadius:12,padding:12,fontSize:12,color:C.text}}>
+            <div style={{fontWeight:800,marginBottom:4}}>Owner-wise (loan netted across the owner's included trucks)</div>
+            {r.owners.map(o=>(
+              <div key={o.owner} style={{display:"flex",justifyContent:"space-between",padding:"2px 0"}}>
+                <span>{o.owner} <span style={{color:C.muted}}>({o.trucks.length} truck{o.trucks.length>1?"s":""})</span></span>
+                <b>{fmt(o.loanPending)}{o.overRecovered>0?` (over-recovered ${fmt(o.overRecovered)})`:""}</b>
+              </div>
+            ))}
+          </div>
+        )}
+        {T.ownerNettingAdjustment!==0 && <div style={{fontSize:11,color:C.muted}}>Sum of trucks is {fmt(T.rawTruckLoanSum)}; owner netting adds {fmt(T.ownerNettingAdjustment)} (an owner's over-recovery on one truck offsets their other trucks, and a loan is never shown below 0 per owner — same rule as the Loan Dashboard).</div>}
+      </>)}
+    </div>
+  );
+}
+
 function MoreMenu({user, setTab, trips, driverPays, vehicles}) {
   // Compute badges for more menu items
   const pendingBills = (trips||[]).filter(isUnbilled).length;
@@ -2705,6 +2789,7 @@ function AppMain() {
         {tab==="billing"    && can(user,"billing")    && <Billing    {...sp} />}
         {tab==="settlement" && can(user,"settlement") && <Settlement {...sp} />}
         {tab==="tafal"      && can(user,"tafal")      && <TafalMod   {...sp} />}
+        {tab==="recovery"   && can(user,"recovery")   && <RecoveryMod {...sp} user={user} />}
         {tab==="diesel"     && can(user,"diesel")     && <DieselMod  {...sp} viewOnly={!canEdit(user,"diesel")} />}
         {tab==="pump_portal"&& can(user,"pump_portal")&& <PumpPortal {...sp} />}
         {tab==="party_portal"&&can(user,"party_portal")&&<PartyPortal {...sp} users={users} />}
