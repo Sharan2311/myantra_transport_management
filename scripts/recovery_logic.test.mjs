@@ -78,13 +78,14 @@ t("excluded vehicles drop out of every total", () => {
   assert.equal(r.totals.grand, 1000); assert.equal(r.excludedCount, 1); assert.equal(r.candidateCount, 2);
 });
 
-t("wallet: balance is signed; only a negative balance is owed; salary and tafal are ignored", () => {
+t("wallet: balance is signed and counted in full either way; salary and tafal are ignored", () => {
   const ct = [{ empId: E, amount: 5000 }, { empId: E, amount: -8000 }, { empId: E, type: "salary", amount: -99999 }, { empId: E, type: "tafal", amount: -99999 }, { empId: "Z", amount: -1 }];
   assert.equal(walletBalanceOf(ct, E), -3000);
   const r = buildRecovery({ empId: E, employees: [], vehicles: [], trips: [], cashTransfers: ct });
   assert.equal(r.wallet.balance, -3000); assert.equal(r.wallet.owed, 3000);
   const pos = buildRecovery({ empId: E, employees: [], vehicles: [], trips: [], cashTransfers: [{ empId: E, amount: 7000 }] });
-  assert.equal(pos.wallet.balance, 7000); assert.equal(pos.wallet.owed, 0); assert.equal(pos.totals.grand, 0);
+  assert.equal(pos.wallet.balance, 7000); assert.equal(pos.wallet.owed, 0); assert.equal(pos.wallet.counted, 7000); assert.equal(pos.totals.grand, 7000);
+  assert.equal(r.wallet.counted, 3000); assert.equal(r.totals.grand, 3000);
 });
 
 t("employee's own loan counts, never negative", () => {
@@ -94,7 +95,7 @@ t("employee's own loan counts, never negative", () => {
   assert.equal(buildRecovery({ empId: E, employees: [over], vehicles: [], trips: [], cashTransfers: [] }).empLoan.pending, 0);
 });
 
-t("grand total = vehicle loans + shortage + own loan + wallet owed", () => {
+t("grand total = vehicle loans + shortage + own loan + wallet balance", () => {
   const a = veh({ truckNo: "KA01B0001", loan: 10000, loanTxns: [given(10000)], shortageTxns: [{ type: "shortage", amount: 300 }] });
   const emp = { id: E, name: "S", loan: 5000, loanRecovered: 1000 };
   const r = buildRecovery({ empId: E, employees: [emp], vehicles: [a], trips: trips("KA01B0001", 1, 0), cashTransfers: [{ empId: E, amount: -700 }] });
