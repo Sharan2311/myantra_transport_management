@@ -199,6 +199,7 @@ const employeeFromDB = r => ({
   tafalExempt: r.tafal_exempt||false,
   pouchExempt: r.pouch_exempt||false,
   pouchAmount: r.pouch_amount!=null ? +r.pouch_amount : null,
+  holdScope: r.hold_scope==='all' ? 'all' : 'party',
   ownTrucksOnly: r.own_trucks_only||false,
   pouchDeadlineEnforced: r.pouch_deadline_enforced !== false, // default true
 })
@@ -211,6 +212,7 @@ const employeeToDB = e => ({
   tafal_exempt: e.tafalExempt||false,
   pouch_exempt: e.pouchExempt||false,
   pouch_amount: e.pouchAmount!=null && e.pouchAmount!=='' ? +e.pouchAmount : null,
+  hold_scope: e.holdScope==='all' ? 'all' : 'party',
   own_trucks_only: e.ownTrucksOnly||false,
   pouch_deadline_enforced: e.pouchDeadlineEnforced !== false,
 })
