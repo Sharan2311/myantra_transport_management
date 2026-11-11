@@ -1,5 +1,6 @@
 import { pouchAmountFor, holdAllAmountFor } from "./pouch_logic.js";
 import { tonnageByBlock } from "./tonnage_logic.js";
+import { shareFile } from "./share_file.js";
 import { includeInByEmployee, employeeStatement, statementHtml } from "./byemp_logic.js";
 import { draftStatus, searchAdvices } from "./advice_mail.js";
 import { checkInvoiceLine, extraDeductionItems, splitShortage, appInvoiceTotals, holdsByInvoice, cleanAdvices } from "./advice_check.js";
@@ -13603,10 +13604,18 @@ function BulkPaymentCheck({ vehicles, employees, user, log, reloadDriverPays }) 
 // ─── SCAN PAYMENT IMAGE ───────────────────────────────────────────────────────
 function ScanPaymentBtn({ onResult }) {
   const [scanning, setScanning] = useState(false);
+  const [lastFile, setLastFile] = useState(null); // kept so the same screenshot can be sent on to the WhatsApp group
   const inputRef = useRef();
+  const sendToGroup = async () => {
+    const r = await shareFile(navigator, lastFile);
+    if (r === "unsupported") alert("This browser can't share the image from here. Share it from your gallery as usual.");
+    else if (r === "failed") alert("Could not open the share sheet. Share it from your gallery as usual.");
+    else if (r === "shared") setLastFile(null);
+  };
 
   const scan = async (file) => {
     if (!file) return;
+    setLastFile(null);
     setScanning(true);
     try {
       const b64 = await new Promise((res, rej) => {
@@ -13623,6 +13632,7 @@ function ScanPaymentBtn({ onResult }) {
       const parsed = await resp.json();
       if (parsed.error) throw new Error(parsed.error);
       logScan("payment_scan", true, parsed._costInr||0);
+      if ((file.type||"").startsWith("image/")) setLastFile(file);
       onResult(parsed);
     } catch(e) {
       logScan("payment_scan", false, 0);
@@ -13634,9 +13644,16 @@ function ScanPaymentBtn({ onResult }) {
   };
 
   return (
-    <FileSourcePicker onFile={scan} accept="image/*,application/pdf"
-      label={scanning?"Reading…":"Scan Payment"}
-      color={C.purple||"#7c3aed"} icon="📷" compact={true} />
+    <span style={{display:"inline-flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+      <FileSourcePicker onFile={scan} accept="image/*,application/pdf"
+        label={scanning?"Reading…":"Scan Payment"}
+        color={C.purple||"#7c3aed"} icon="📷" compact={true} />
+      {lastFile && !scanning && (
+        <button type="button" onClick={sendToGroup}
+          style={{background:"#16a34a",border:"none",borderRadius:20,color:"#fff",fontSize:11,fontWeight:700,padding:"6px 12px",cursor:"pointer"}}>
+          📤 Send to WhatsApp group</button>
+      )}
+    </span>
   );
 }
 
