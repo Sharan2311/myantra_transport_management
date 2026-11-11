@@ -1,4 +1,5 @@
 import { pouchAmountFor, holdAllAmountFor } from "./pouch_logic.js";
+import { tonnageByBlock } from "./tonnage_logic.js";
 import { includeInByEmployee, employeeStatement, statementHtml } from "./byemp_logic.js";
 import { draftStatus, searchAdvices } from "./advice_mail.js";
 import { checkInvoiceLine, extraDeductionItems, splitShortage, appInvoiceTotals, holdsByInvoice, cleanAdvices } from "./advice_check.js";
@@ -648,7 +649,7 @@ function computeEffectiveFeatures(plan, overrides={}, rcFeatures={}) {
 
 // ─── ROLES ────────────────────────────────────────────────────────────────────
 const ROLES = {
-  owner:         {label:"Owner",               color:C.accent,  perms:["trips","inbound","gypsum","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","admin","driverPay","party_portal","unbilled_oversight","tasks","husk_entry","husk_view","husk_manage","husk_profit","recovery"]},
+  owner:         {label:"Owner",               color:C.accent,  perms:["trips","inbound","gypsum","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","admin","driverPay","party_portal","unbilled_oversight","tasks","husk_entry","husk_view","husk_manage","husk_profit","recovery","tonnage"]},
   manager:       {label:"Manager",             color:C.blue,    perms:["trips","inbound","gypsum","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","driverPay","party_portal","unbilled_oversight","tasks"]},
   fleet_manager: {label:"Cement Fleet Manager",color:C.teal,    perms:["cement_trips","billing","diesel","driverPay_view"]},
   fleet_mgr_nd:  {label:"Fleet Mgr (No Diesel Req)",color:"#0891b2", perms:["cement_trips","billing","diesel_view","driverPay_view"]},
@@ -1345,6 +1346,7 @@ const MORE_TABS = [
   {id:"settlement",icon:"💵",label:"Settlement",     perm:"settlement",   group:"money",   feat:"driver_pay"},
   {id:"tafal",     icon:"🤝",label:"TAFAL",          perm:"tafal",        group:"money",   feat:"tafal"},
   {id:"recovery",  icon:"🔁",label:"Recovery",       perm:"recovery",     group:"money"},
+  {id:"tonnage",   icon:"⚖️",label:"Tonnage by 10 days", perm:"tonnage",  group:"info"},
   {id:"vehicles",  icon:"🚛",label:"Vehicles",       perm:"vehicles",     group:"fleet",   feat:"vehicles"},
   {id:"employees", icon:"👥",label:"Employees",      perm:"employees",    group:"fleet",   feat:"employees"},
   {id:"payments",  icon:"💰",label:"Payments",        perm:"payments",   group:"finance", feat:"payment_scan"},
@@ -1362,6 +1364,71 @@ const MORE_GROUPS = [
   {id:"finance", label:"Finance"},
   {id:"info",    label:"Reports & Admin"},
 ];
+const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const monthLabel = m => `${MONTH_NAMES[+m.slice(5,7)-1]} ${m.slice(0,4)}`;
+const BLOCK_LABELS = ["1–10","11–20","21–end"];
+function TonnageMod({trips, allTripsLoaded, loadingAllTrips, loadAllTrips}) {
+  const triedLoad = useRef(false);
+  useEffect(()=>{ if(!allTripsLoaded && !loadingAllTrips && !triedLoad.current){ triedLoad.current = true; loadAllTrips && loadAllTrips(); } },[allTripsLoaded, loadingAllTrips]);
+  // LOCAL date (the app's today() is UTC and would flip a block a few hours early/late in India).
+  const n = new Date();
+  const localToday = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,"0")}-${String(n.getDate()).padStart(2,"0")}`;
+  const r = useMemo(()=>tonnageByBlock(trips, localToday),[trips, localToday]);
+  const tons = x => Number(x).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2});
+  const names = x => x.months.map(monthLabel).join(" & ");
+  const cell = {padding:"5px 6px",textAlign:"right",fontSize:11};
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      <div style={{fontSize:16,fontWeight:800,color:C.text}}>⚖️ Tonnage by 10 days</div>
+      {!allTripsLoaded && (
+        <div style={{background:C.orange+"22",border:`1px solid ${C.orange}`,borderRadius:10,padding:"9px 12px",fontSize:12,color:C.text}}>
+          {loadingAllTrips ? "Loading all trips…" : "Only the last 90 days of trips are loaded, so older months will be missing."}
+          {!loadingAllTrips && <button onClick={loadAllTrips} style={{marginLeft:8,fontWeight:700,cursor:"pointer"}}>Load all trips</button>}
+        </div>
+      )}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:8}}>
+        {r.summary.map(s=>(
+          <div key={s.block} style={{background:C.card,border:`1.5px solid ${C.border}`,borderRadius:12,padding:10}}>
+            <div style={{fontWeight:800,fontSize:12,color:C.text,marginBottom:4}}>Days {BLOCK_LABELS[s.block-1]}</div>
+            {s.highest ? <>
+              <div style={{fontSize:11,color:C.muted}}>Highest</div>
+              <div style={{fontSize:13,fontWeight:800,color:C.green}}>{names(s.highest)} · {tons(s.highest.tons)} t</div>
+              <div style={{fontSize:11,color:C.muted,marginTop:4}}>Lowest</div>
+              <div style={{fontSize:13,fontWeight:800,color:C.orange}}>{names(s.lowest)} · {tons(s.lowest.tons)} t</div>
+            </> : <div style={{fontSize:11,color:C.muted}}>No completed period yet</div>}
+          </div>
+        ))}
+      </div>
+      <div style={{background:C.card,border:`1.5px solid ${C.border}`,borderRadius:12,padding:10,overflowX:"auto"}}>
+        <table style={{width:"100%",borderCollapse:"collapse",color:C.text}}>
+          <thead><tr style={{color:C.muted}}>
+            <th style={{...cell,textAlign:"left"}}>Month</th>{BLOCK_LABELS.map(l=><th key={l} style={cell}>{l} (t)</th>)}<th style={cell}>Total (t)</th></tr></thead>
+          <tbody>
+            {r.months.map(m=>{
+              const total = m.blocks.reduce((a,b)=>a+b.tons,0);
+              return (
+                <tr key={m.month} style={{borderTop:`1px solid ${C.border}`}}>
+                  <td style={{...cell,textAlign:"left",fontWeight:700}}>{monthLabel(m.month)}</td>
+                  {m.blocks.map(b=>{
+                    const sm = r.summary[b.block-1];
+                    const isHi = b.complete && sm.highest?.months.includes(m.month), isLo = b.complete && sm.lowest?.months.includes(m.month);
+                    return <td key={b.block} style={{...cell,fontWeight:isHi||isLo?800:400,color:isHi?C.green:isLo?C.orange:b.complete?C.text:C.muted}}>
+                      {tons(b.tons)}{!b.complete && <span title="Period not finished yet"> …</span>}</td>;
+                  })}
+                  <td style={{...cell,fontWeight:700}}>{tons(total)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div style={{fontSize:10.5,color:C.muted,lineHeight:1.5}}>
+        Green = highest, orange = lowest of that 10-day period. "…" = period still running; it joins the ranking the day after it ends.
+        Counts all trips by trip date, in tons. Clinker bills{r.ignored.clinker?` (${r.ignored.clinker})`:""}, trips with an unreadable date{r.ignored.badDate?` (${r.ignored.badDate})`:""} and stray entries before the first real month{r.ignored.beforeStart?` (${r.ignored.beforeStart})`:""} are left out.
+      </div>
+    </div>
+  );
+}
 function RecoveryMod({trips, vehicles, employees, cashTransfers, user, allTripsLoaded, loadingAllTrips, loadAllTrips}) {
   const [empId, setEmpId] = useState("");
   const [groupBy, setGroupBy] = useState("vehicle");
@@ -2870,6 +2937,7 @@ function AppMain() {
         {tab==="settlement" && can(user,"settlement") && <Settlement {...sp} />}
         {tab==="tafal"      && can(user,"tafal")      && <TafalMod   {...sp} />}
         {tab==="recovery"   && can(user,"recovery")   && <RecoveryMod {...sp} user={user} />}
+        {tab==="tonnage"    && can(user,"tonnage")    && <TonnageMod {...sp} user={user} />}
         {tab==="diesel"     && can(user,"diesel")     && <DieselMod  {...sp} viewOnly={!canEdit(user,"diesel")} />}
         {tab==="pump_portal"&& can(user,"pump_portal")&& <PumpPortal {...sp} />}
         {tab==="party_portal"&&can(user,"party_portal")&&<PartyPortal {...sp} users={users} />}
