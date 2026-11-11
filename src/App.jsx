@@ -1,4 +1,5 @@
-import { pouchAmountFor } from "./pouch_logic.js";
+import { pouchAmountFor, holdAllAmountFor } from "./pouch_logic.js";
+import { tonnageByBlock } from "./tonnage_logic.js";
 import { includeInByEmployee, employeeStatement, statementHtml } from "./byemp_logic.js";
 import { draftStatus, searchAdvices } from "./advice_mail.js";
 import { checkInvoiceLine, extraDeductionItems, splitShortage, appInvoiceTotals, holdsByInvoice, cleanAdvices } from "./advice_check.js";
@@ -648,7 +649,7 @@ function computeEffectiveFeatures(plan, overrides={}, rcFeatures={}) {
 
 // ─── ROLES ────────────────────────────────────────────────────────────────────
 const ROLES = {
-  owner:         {label:"Owner",               color:C.accent,  perms:["trips","inbound","gypsum","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","admin","driverPay","party_portal","unbilled_oversight","tasks","husk_entry","husk_view","husk_manage","husk_profit","recovery"]},
+  owner:         {label:"Owner",               color:C.accent,  perms:["trips","inbound","gypsum","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","admin","driverPay","party_portal","unbilled_oversight","tasks","husk_entry","husk_view","husk_manage","husk_profit","recovery","tonnage"]},
   manager:       {label:"Manager",             color:C.blue,    perms:["trips","inbound","gypsum","billing","settlement","vehicles","employees","payments","reports","reminders","diesel","tafal","driverPay","party_portal","unbilled_oversight","tasks"]},
   fleet_manager: {label:"Cement Fleet Manager",color:C.teal,    perms:["cement_trips","billing","diesel","driverPay_view"]},
   fleet_mgr_nd:  {label:"Fleet Mgr (No Diesel Req)",color:"#0891b2", perms:["cement_trips","billing","diesel_view","driverPay_view"]},
@@ -1345,6 +1346,7 @@ const MORE_TABS = [
   {id:"settlement",icon:"💵",label:"Settlement",     perm:"settlement",   group:"money",   feat:"driver_pay"},
   {id:"tafal",     icon:"🤝",label:"TAFAL",          perm:"tafal",        group:"money",   feat:"tafal"},
   {id:"recovery",  icon:"🔁",label:"Recovery",       perm:"recovery",     group:"money"},
+  {id:"tonnage",   icon:"⚖️",label:"Tonnage by 10 days", perm:"tonnage",  group:"info"},
   {id:"vehicles",  icon:"🚛",label:"Vehicles",       perm:"vehicles",     group:"fleet",   feat:"vehicles"},
   {id:"employees", icon:"👥",label:"Employees",      perm:"employees",    group:"fleet",   feat:"employees"},
   {id:"payments",  icon:"💰",label:"Payments",        perm:"payments",   group:"finance", feat:"payment_scan"},
@@ -1362,6 +1364,71 @@ const MORE_GROUPS = [
   {id:"finance", label:"Finance"},
   {id:"info",    label:"Reports & Admin"},
 ];
+const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const monthLabel = m => `${MONTH_NAMES[+m.slice(5,7)-1]} ${m.slice(0,4)}`;
+const BLOCK_LABELS = ["1–10","11–20","21–end"];
+function TonnageMod({trips, allTripsLoaded, loadingAllTrips, loadAllTrips}) {
+  const triedLoad = useRef(false);
+  useEffect(()=>{ if(!allTripsLoaded && !loadingAllTrips && !triedLoad.current){ triedLoad.current = true; loadAllTrips && loadAllTrips(); } },[allTripsLoaded, loadingAllTrips]);
+  // LOCAL date (the app's today() is UTC and would flip a block a few hours early/late in India).
+  const n = new Date();
+  const localToday = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,"0")}-${String(n.getDate()).padStart(2,"0")}`;
+  const r = useMemo(()=>tonnageByBlock(trips, localToday),[trips, localToday]);
+  const tons = x => Number(x).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2});
+  const names = x => x.months.map(monthLabel).join(" & ");
+  const cell = {padding:"5px 6px",textAlign:"right",fontSize:11};
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      <div style={{fontSize:16,fontWeight:800,color:C.text}}>⚖️ Tonnage by 10 days</div>
+      {!allTripsLoaded && (
+        <div style={{background:C.orange+"22",border:`1px solid ${C.orange}`,borderRadius:10,padding:"9px 12px",fontSize:12,color:C.text}}>
+          {loadingAllTrips ? "Loading all trips…" : "Only the last 90 days of trips are loaded, so older months will be missing."}
+          {!loadingAllTrips && <button onClick={loadAllTrips} style={{marginLeft:8,fontWeight:700,cursor:"pointer"}}>Load all trips</button>}
+        </div>
+      )}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:8}}>
+        {r.summary.map(s=>(
+          <div key={s.block} style={{background:C.card,border:`1.5px solid ${C.border}`,borderRadius:12,padding:10}}>
+            <div style={{fontWeight:800,fontSize:12,color:C.text,marginBottom:4}}>Days {BLOCK_LABELS[s.block-1]}</div>
+            {s.highest ? <>
+              <div style={{fontSize:11,color:C.muted}}>Highest</div>
+              <div style={{fontSize:13,fontWeight:800,color:C.green}}>{names(s.highest)} · {tons(s.highest.tons)} t</div>
+              <div style={{fontSize:11,color:C.muted,marginTop:4}}>Lowest</div>
+              <div style={{fontSize:13,fontWeight:800,color:C.orange}}>{names(s.lowest)} · {tons(s.lowest.tons)} t</div>
+            </> : <div style={{fontSize:11,color:C.muted}}>No completed period yet</div>}
+          </div>
+        ))}
+      </div>
+      <div style={{background:C.card,border:`1.5px solid ${C.border}`,borderRadius:12,padding:10,overflowX:"auto"}}>
+        <table style={{width:"100%",borderCollapse:"collapse",color:C.text}}>
+          <thead><tr style={{color:C.muted}}>
+            <th style={{...cell,textAlign:"left"}}>Month</th>{BLOCK_LABELS.map(l=><th key={l} style={cell}>{l} (t)</th>)}<th style={cell}>Total (t)</th></tr></thead>
+          <tbody>
+            {r.months.map(m=>{
+              const total = m.blocks.reduce((a,b)=>a+b.tons,0);
+              return (
+                <tr key={m.month} style={{borderTop:`1px solid ${C.border}`}}>
+                  <td style={{...cell,textAlign:"left",fontWeight:700}}>{monthLabel(m.month)}</td>
+                  {m.blocks.map(b=>{
+                    const sm = r.summary[b.block-1];
+                    const isHi = b.complete && sm.highest?.months.includes(m.month), isLo = b.complete && sm.lowest?.months.includes(m.month);
+                    return <td key={b.block} style={{...cell,fontWeight:isHi||isLo?800:400,color:isHi?C.green:isLo?C.orange:b.complete?C.text:C.muted}}>
+                      {tons(b.tons)}{!b.complete && <span title="Period not finished yet"> …</span>}</td>;
+                  })}
+                  <td style={{...cell,fontWeight:700}}>{tons(total)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div style={{fontSize:10.5,color:C.muted,lineHeight:1.5}}>
+        Green = highest, orange = lowest of that 10-day period. "…" = period still running; it joins the ranking the day after it ends.
+        Counts all trips by trip date, in tons. Clinker bills{r.ignored.clinker?` (${r.ignored.clinker})`:""}, trips with an unreadable date{r.ignored.badDate?` (${r.ignored.badDate})`:""} and stray entries before the first real month{r.ignored.beforeStart?` (${r.ignored.beforeStart})`:""} are left out.
+      </div>
+    </div>
+  );
+}
 function RecoveryMod({trips, vehicles, employees, cashTransfers, user, allTripsLoaded, loadingAllTrips, loadAllTrips}) {
   const [empId, setEmpId] = useState("");
   const [groupBy, setGroupBy] = useState("vehicle");
@@ -2870,6 +2937,7 @@ function AppMain() {
         {tab==="settlement" && can(user,"settlement") && <Settlement {...sp} />}
         {tab==="tafal"      && can(user,"tafal")      && <TafalMod   {...sp} />}
         {tab==="recovery"   && can(user,"recovery")   && <RecoveryMod {...sp} user={user} />}
+        {tab==="tonnage"    && can(user,"tonnage")    && <TonnageMod {...sp} user={user} />}
         {tab==="diesel"     && can(user,"diesel")     && <DieselMod  {...sp} viewOnly={!canEdit(user,"diesel")} />}
         {tab==="pump_portal"&& can(user,"pump_portal")&& <PumpPortal {...sp} />}
         {tab==="party_portal"&&can(user,"party_portal")&&<PartyPortal {...sp} users={users} />}
@@ -3903,6 +3971,8 @@ function BatchDIScanner({ trips, vehicles, setVehicles, setTrips, settings, user
   // else the owner's global rate (settings.pouchPerTrip), else ₹700 fallback.
   // An employee-level pouch exemption (linked truck or assigned employee) wins over everything.
   const pouchAmt = (veh, assignedEmpId="") => pouchAmountFor({ veh, employees, assignedEmpId, settings });
+  // Hold on a NON-party trip: only for an employee set to "hold on all linked vehicles" (needs his amount).
+  const holdAllAmt = (veh, truckNo="", assignedEmpId="") => holdAllAmountFor({ veh: veh || { truckNo: String(truckNo||"").toUpperCase().trim() }, employees, assignedEmpId });
 
   // ── Raw scanned items (one per uploaded file) ────────────────────────────────
   // item: { id, file, status, extracted, error }
@@ -4179,8 +4249,8 @@ Rules:
               orderType: extracted._autoOrderType || "godown",
               ownerName: ((vehicles||[]).find(v=>v.truckNo===(extracted.truckNo||"").toUpperCase().replace(/\s/g,""))?.ownerName) || extracted.ownerName || "",
               pouchBalance: (() => {
-                if(extracted._autoOrderType !== "party") return 0;
                 const _pVeh = (vehicles||[]).find(v=>v.truckNo===(extracted.truckNo||"").toUpperCase().trim());
+                if(extracted._autoOrderType !== "party") return holdAllAmt(_pVeh, extracted.truckNo);
                 return pouchAmt(_pVeh);
               })(),
               partyDriverPhone: "",  // driver phone is manual entry
@@ -4710,8 +4780,8 @@ Rules:
           partyNumber: item.partyNumber || "",
           partyName: item.partyName || item.extracted?._partyName || "",
           pouchBalance: (() => {
-            if(item.orderType!=="party") return 0;
             const _pVeh2 = (vehicles||[]).find(v=>v.truckNo===truckNo);
+            if(item.orderType!=="party") return holdAllAmt(_pVeh2, truckNo, g.assignedEmpId||"");
             if(_pVeh2?.pouchExempt || employeePouchExemptFor(truckNo, employees, g.assignedEmpId||"")) return 0;
             return item.pouchBalance || pouchAmt(_pVeh2, g.assignedEmpId||"");
           })(),
@@ -4997,8 +5067,8 @@ Rules:
           partyNumber: (groupItems.find(x=>x.orderType==="party")?.partyNumber) || primary.partyNumber || "",
           partyName: (groupItems.find(x=>x.orderType==="party")?.partyName) || primary.partyName || primary.extracted?._partyName || "",
           pouchBalance: (() => {
-            if(!diLines.some(d=>d.orderType==="party")) return 0;
             const _pVeh3 = (vehicles||[]).find(v=>v.truckNo===truckNo);
+            if(!diLines.some(d=>d.orderType==="party")) return holdAllAmt(_pVeh3, truckNo, g.assignedEmpId||"");
             if(_pVeh3?.pouchExempt || employeePouchExemptFor(truckNo, employees, g.assignedEmpId||"")) return 0;
             return (groupItems.find(x=>x.orderType==="party")?.pouchBalance) ?? pouchAmt(_pVeh3, g.assignedEmpId||"");
           })(),
@@ -5515,7 +5585,10 @@ Rules:
                                 if(e.target.value==="party") {
                                   const _pv = (vehicles||[]).find(v=>v.truckNo===(g.truckNo||"").toUpperCase().trim());
                                   updateItem(item.id,"pouchBalance",pouchAmt(_pv, g.assignedEmpId||""));
-                                } else updateItem(item.id,"pouchBalance",0);
+                                } else {
+                                  const _pv = (vehicles||[]).find(v=>v.truckNo===(g.truckNo||"").toUpperCase().trim());
+                                  updateItem(item.id,"pouchBalance",holdAllAmt(_pv, g.truckNo, g.assignedEmpId||""));
+                                }
                               }}
                               style={{width:"100%",background:C.card,border:`1.5px solid ${C.border}`,
                                 borderRadius:8,color:C.text,padding:"7px 8px",fontSize:13,outline:"none"}}>
@@ -6148,6 +6221,13 @@ Rules:
                       if(_oldPouch !== _newPouch) {
                         setItems(prev => prev.map(x => ((g.diIds||[]).includes(x.id) && x.orderType==="party" && (x.pouchBalance==null || +x.pouchBalance===_oldPouch))
                           ? {...x, pouchBalance:_newPouch} : x));
+                      }
+                      // Non-party items: the hold follows the new employee's "hold on all vehicles" setting
+                      const _oldHold = holdAllAmt(_pvEmp, g.truckNo, g.assignedEmpId||"");
+                      const _newHold = holdAllAmt(_pvEmp, g.truckNo, newEmpId);
+                      if(_oldHold !== _newHold) {
+                        setItems(prev => prev.map(x => ((g.diIds||[]).includes(x.id) && x.orderType!=="party" && (+x.pouchBalance||0)===_oldHold)
+                          ? {...x, pouchBalance:_newHold} : x));
                       }
                     }
                   }}
@@ -24152,7 +24232,22 @@ function Employees({employees, setEmployees, trips, cashTransfers, setCashTransf
                     }}
                     placeholder="blank = default amount"
                     style={{width:170,background:C.card,border:`1.5px solid ${emp.pouchAmount!=null&&!emp.pouchExempt?C.purple:C.border}`,borderRadius:8,padding:"6px 10px",fontSize:12,color:C.text,outline:"none",opacity:emp.pouchExempt?0.4:1}}/>
-                  <span style={{fontSize:11,color:C.muted}}>Held on every NEW party trip on this employee's linked trucks (blank = default amount). Existing trips are not changed.</span>
+                  <span style={{fontSize:11,color:C.muted}}>{emp.holdScope==="all" ? "Held on every NEW trip (any order type) of this employee's linked trucks / trips assigned to him. Needs an amount. Existing trips are not changed." : "Held on every NEW party trip on this employee's linked trucks (blank = default amount). Existing trips are not changed."}</span>
+                </div>}
+                {!emp.pouchExempt && <div style={{display:"flex",alignItems:"center",gap:8,marginTop:10,flexWrap:"wrap"}}>
+                  <span style={{fontSize:12,color:C.muted,fontWeight:700}}>Hold applies to</span>
+                  {[["party","Party trips only"],["all","All trips of linked vehicles"]].map(([k,lbl])=>{
+                    const on = (emp.holdScope==="all"?"all":"party")===k;
+                    return <button key={k} onClick={()=>{
+                      if(k==="all" && (emp.pouchAmount==null || emp.pouchAmount==="")){ alert("Enter the hold amount first — 'All trips of linked vehicles' holds exactly that amount on every trip."); return; }
+                      setEmployees(prev => prev.map(x => {
+                        if(x.id!==trucksSheet) return x;
+                        const upd = {...x, holdScope:k};
+                        DB.saveEmployee(upd).catch(saveFail("saveEmployee holdScope:"));
+                        return upd;
+                      }));
+                    }} style={{padding:"6px 12px",borderRadius:8,border:`1.5px solid ${on?C.purple:C.border}`,background:on?C.purple+"22":"transparent",color:on?C.purple:C.muted,fontWeight:700,fontSize:12,cursor:"pointer"}}>{on?"✓ ":""}{lbl}</button>;
+                  })}
                 </div>}
               </div>
               {/* Truck visibility — owner decides per employee. ON: this employee's login sees only the
@@ -28294,7 +28389,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
   // the owner does not release the pouch; it closes the trip out entirely
   // (see the bulk "Mark Settled" action, which zeroes pouchBalance directly).
   const _hasMerged = tripPouchPayable(t);
-  const _pouchHold = (t.orderType==="party"&&!_hasMerged) ? (t.pouchBalance||0) : 0;
+  const _pouchHold = !_hasMerged ? (t.pouchBalance||0) : 0;
   const _deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)+(t.shortageRecovery||0)+(t.loanRecovery||0)+_pouchHold;
   const _netDue  = Math.max(0, _diGross - _deducts);
   const _paidSoFar = (driverPays||[]).filter(p=>p.tripId===t.id).reduce((s,p)=>s+(p.amount||0),0);
@@ -28339,7 +28434,7 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
   // Pouch is held; it can be added to a request only after the FIRST payment on this trip, and
   // it is unticked by default. Once released (t.pouchReleased) it is already part of the balance.
   const _pouchAmt = (t.pouchBalance||0);
-  const _canIncludePouch = t.orderType==="party" && _pouchAmt>0 && !t.pouchReleased && _paidSoFar>0 && !isEditing;
+  const _canIncludePouch = _pouchAmt>0 && !t.pouchReleased && _paidSoFar>0 && !isEditing;
   const [includePouch, setIncludePouch] = useState(false);
   const togglePouch = on => { setIncludePouch(on); setAmount(a => String(Math.max(0, (+a||0) + (on ? _pouchAmt : -_pouchAmt)))); };
   const [notes,      setNotes]      = useState(editingReq?.notes||"");
@@ -28552,11 +28647,11 @@ function RequestPaymentSheet({trip, vehicles, setVehicles, employees, paymentReq
 
         {/* Amount */}
         <Field label="Amount ₹ *" value={amount} onChange={setAmount} type="number" />
-        {t.orderType==="party" && _pouchAmt>0 && !t.pouchReleased && (
+        {_pouchAmt>0 && !t.pouchReleased && (
           <label style={{display:"flex",alignItems:"center",gap:10,background:C.teal+"11",border:`1px solid ${C.teal}44`,borderRadius:10,padding:"10px 12px",opacity:_canIncludePouch?1:0.6}}>
             <input type="checkbox" checked={includePouch} disabled={!_canIncludePouch} onChange={e=>togglePouch(e.target.checked)} style={{width:18,height:18}} />
             <span style={{fontSize:13,color:C.text}}>
-              Include party pouch balance <b>₹{_pouchAmt.toLocaleString("en-IN")}</b>
+              Include held balance <b>₹{_pouchAmt.toLocaleString("en-IN")}</b>
               <span style={{display:"block",fontSize:11,color:C.muted}}>{_paidSoFar>0 ? "Held so far — tick to request it with this payment." : "Available only after the first payment on this trip is done."}</span>
             </span>
           </label>
@@ -29794,7 +29889,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
     // that upload, so this is the one legitimate case where a genuinely new,
     // unpaid amount can exist on an already-"settled" trip. Don't block that.
     const hasGenuinePouchClaim = (t) => {
-      return t.orderType==="party" && tripPouchPayable(t) && (t.pouchBalance||0)>0;
+      return tripPouchPayable(t) && (t.pouchBalance||0)>0;
     };
     if (list.some(t => t.driverSettled && !hasGenuinePouchClaim(t))) {
       alert("This trip is already marked as settled — no further payment can be requested for it.");
@@ -29869,7 +29964,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
     // (or the trip is billed with an invoice no.) — same rule as
     // RequestPaymentSheet and the auto-settle check, so every Driver Pay
     // total agrees with what a payment request would show.
-    const pouchHold = (t.orderType==="party" && !tripPouchPayable(t)) ? (t.pouchBalance||0) : 0;
+    const pouchHold = !tripPouchPayable(t) ? (t.pouchBalance||0) : 0;
     const deducts  = (t.advance||0)+(t.tafal||0)
                    +(t.dieselEstimate||0)+((t.shortage||0)*(t.givenRate||0))
                    +(t.shortageRecovery||0)+(t.loanRecovery||0)+pouchHold;
@@ -30045,7 +30140,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
   React.useEffect(() => {
     const tripForLR = (lrNo) => (trips||[]).find(x=>x.lrNo && x.lrNo===lrNo) || null;
     const hasGenuinePouchClaim = (t) => {
-      return t.orderType==="party" && tripPouchPayable(t) && (t.pouchBalance||0)>0;
+      return tripPouchPayable(t) && (t.pouchBalance||0)>0;
     };
     const balanceForTrip = (t) => {
       const gross = (t.diLines&&t.diLines.length>1)
@@ -30053,7 +30148,7 @@ function DriverPayments({trips, setTrips, fyTrips, driverPays, setDriverPays, ve
         : (t.qty||0)*(t.givenRate||0);
       // Pouch counts toward netDue once merged — same rule as RequestPaymentSheet
       // — so a fully-paid main balance doesn't mask a genuinely outstanding pouch.
-      const pouchHold = (t.orderType==="party" && !tripPouchPayable(t)) ? (t.pouchBalance||0) : 0;
+      const pouchHold = !tripPouchPayable(t) ? (t.pouchBalance||0) : 0;
       const deducts = (t.advance||0)+(t.tafal||0)+(t.dieselEstimate||0)
         +((t.shortage||0)*(t.givenRate||0))+(t.shortageRecovery||0)+(t.loanRecovery||0)+pouchHold;
       const netDue = Math.max(0, gross - deducts);
@@ -30958,7 +31053,7 @@ This will auto-recover in the next trip.`);
             {t.balance>0&&!t.driverSettled&&(
               <Btn onClick={()=>requestPaymentGuarded(t, t)} sm outline color={C.purple}>📋 Request Payment</Btn>
             )}
-            {t.balance<=0 && !t.driverSettled && t.orderType==="party" && (t.pouchHold||0)>0 && (t.paidSoFar||0)>0 && (
+            {t.balance<=0 && !t.driverSettled && (t.pouchHold||0)>0 && (t.paidSoFar||0)>0 && (
               <Btn onClick={()=>requestPaymentGuarded(t, t)} sm outline color={C.teal}>📋 Request pouch ₹{(t.pouchHold||0).toLocaleString("en-IN")}</Btn>
             )}
             {/* A trip can settle on its main balance before the sealed invoice/
@@ -30966,7 +31061,7 @@ This will auto-recover in the next trip.`);
                 upload, so this is the one case a "settled" trip can still have a
                 genuine, unpaid amount. t.balance itself won't reflect this (it's
                 never pouch-aware), so this checks pouchBalance directly instead. */}
-            {t.driverSettled && t.orderType==="party" && (t.pouchBalance||0)>0 && tripPouchPayable(t) && (
+            {t.driverSettled && (t.pouchBalance||0)>0 && tripPouchPayable(t) && (
               <Btn onClick={()=>requestPaymentGuarded(t, t)} sm outline color={C.purple}>📋 Request Payment</Btn>
             )}
             {/* Settled trip with an unpaid balance: only the owner can pay it off

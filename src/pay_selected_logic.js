@@ -2,10 +2,11 @@
 // Must agree with the Driver Pay screen's balance (tripWithBalance), which HOLDS BACK the party pouch until it is
 // released — otherwise the sheet shows more than the amount selected and the held pouch is paid out by mistake.
 
-// Pouch held on a trip: unreleased party trip → its pouch balance, otherwise 0.
+// Amount held on a trip: its pouch balance until released (party trips, and — for employees set to hold on all
+// vehicles — any trip that was saved with a hold), otherwise 0.
 export const pouchHoldOf = t => {
   if (typeof t?.pouchHold === "number") return t.pouchHold;
-  return (t?.orderType === "party" && !t?.pouchReleased) ? (+t?.pouchBalance || 0) : 0;
+  return !t?.pouchReleased ? (+t?.pouchBalance || 0) : 0;
 };
 
 export function payableAfterSkips(t, s = {}) {
