@@ -17,7 +17,7 @@ export function tripFigures(t, paidAll = 0) {
   const gross = lines.length > 1
     ? lines.reduce((s, d) => s + (+d.qty || 0) * (+d.givenRate || 0), 0)
     : (+t?.qty || 0) * (+t?.givenRate || 0);
-  const pouchHold = (t?.orderType === "party" && !t?.pouchReleased) ? (+t?.pouchBalance || 0) : 0;
+  const pouchHold = !t?.pouchReleased ? (+t?.pouchBalance || 0) : 0;
   const otherDeducts = (+t?.advance || 0) + (+t?.tafal || 0) + (+t?.dieselEstimate || 0)
     + (+t?.shortage || 0) * (+t?.givenRate || 0) + (+t?.shortageRecovery || 0) + (+t?.loanRecovery || 0);
   const netDue = Math.max(0, gross - (otherDeducts + pouchHold));

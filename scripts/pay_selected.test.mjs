@@ -11,7 +11,12 @@ const trip = (o = {}) => ({ id: "t", orderType: "party", gross: 21000, advance: 
 
 t("pouch hold: unreleased party trip holds the pouch", () => assert.equal(pouchHoldOf(trip()), 700));
 t("pouch hold: released party pouch is not held", () => assert.equal(pouchHoldOf(trip({ pouchReleased: true, pouchHold: undefined })), 0));
-t("pouch hold: godown never holds", () => assert.equal(pouchHoldOf(trip({ orderType: "godown", pouchHold: undefined })), 0));
+t("pouch hold: a godown trip with no hold saved holds nothing", () => assert.equal(pouchHoldOf(trip({ orderType: "godown", pouchBalance: 0, pouchHold: undefined })), 0));
+t("hold on all vehicles: a godown trip saved with a hold is held until released", () => {
+  assert.equal(pouchHoldOf(trip({ orderType: "godown", pouchBalance: 1000, pouchHold: undefined })), 1000);
+  assert.equal(pouchHoldOf(trip({ orderType: "godown", pouchBalance: 1000, pouchReleased: true, pouchHold: undefined })), 0);
+  assert.equal(payableAfterSkips(trip({ orderType: "godown", pouchBalance: 1000, pouchHold: undefined }), {}).payable, 16452 + 700 - 1000);
+});
 
 t("payable with no skips equals the balance shown before pressing Pay Selected (the bug)", () => {
   const p = payableAfterSkips(trip(), {});

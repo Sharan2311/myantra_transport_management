@@ -36,3 +36,19 @@ export const pouchAmountFor = ({ veh, employees, assignedEmpId, settings }) => {
   if (veh?.pouchOverride != null) return veh.pouchOverride;
   return settings?.pouchPerTrip ?? 700;
 };
+
+// ── Hold on ALL trips of an employee's vehicles (not only party trips) ─────────────────────────────────────
+// Employee setting holdScope: "party" (default — the pouch applies to party trips only, as before) or "all"
+// (the employee's pouch amount is held on EVERY new trip of his linked trucks / trips assigned to him, whatever the
+// order type). Needs an amount; the employee's Exempt switch and a vehicle's exempt flag still give 0.
+export const holdAllAmountFor = ({ veh, employees, assignedEmpId }) => {
+  const truckNo = veh?.truckNo;
+  if (pouchEmployeeFor(truckNo, employees, assignedEmpId, e => e.pouchExempt)) return 0;
+  if (veh?.pouchExempt) return 0;
+  const emp = pouchEmployeeFor(truckNo, employees, assignedEmpId, e => e.holdScope === "all" && hasAmount(e));
+  return emp ? +emp.pouchAmount : 0;
+};
+
+// Amount to hold on a NEW trip / DI of this order type.
+export const holdAmountFor = ({ orderType, veh, employees, assignedEmpId, settings }) =>
+  orderType === "party" ? pouchAmountFor({ veh, employees, assignedEmpId, settings }) : holdAllAmountFor({ veh, employees, assignedEmpId });
