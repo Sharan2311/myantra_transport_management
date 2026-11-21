@@ -6,7 +6,8 @@ const amountOf = (r) => {
   if (r.confirmedAmount != null || r.confirmedCash != null) return (+diesel || 0) + (+cash || 0);
   return +r.amount || 0;
 };
-export const hasBill = (r) => !!(String(r.receiptNo || '').trim() || r.receiptImagePath);
+// A request counts as having its bill when a receipt number/photo is on it, or it was settled against the pump's own statement.
+export const hasBill = (r) => !!(String(r.receiptNo || '').trim() || r.receiptImagePath || r.status === "reconciled");
 const checkable = (r) => r.status === "confirmed" || r.status === "attached";
 
 export const groupRequestsByDay = (requests) => {
