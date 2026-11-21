@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { groupRequestsByDay } from "../src/diesel_by_day.js";
+import { groupRequestsByDay, hasBill } from "../src/diesel_by_day.js";
 const tests = [];
 const test = (n, f) => tests.push([n, f]);
 const R = (o) => ({ indentNo: 1, truckNo: "T1", date: "2026-11-20", amount: 1000, status: "confirmed", ownerVerified: false, pumpId: "P1", ...o });
@@ -36,6 +36,11 @@ test("a request with a bad or missing date goes to an 'Unknown date' group at th
   const g = groupRequestsByDay([R({ date: "" }), R({ indentNo: 2, date: "2026-11-21" })]);
   assert.equal(g[g.length - 1].date, "");
   assert.equal(g[0].date, "2026-11-21");
+});
+test("noBill counts requests with neither a receipt number nor a receipt photo", () => {
+  const g = groupRequestsByDay([R({ indentNo: 1 }), R({ indentNo: 2, receiptNo: "K0589" }), R({ indentNo: 3, receiptImagePath: "x/1.jpg" })]);
+  assert.equal(g[0].noBill, 1);
+  assert.equal(hasBill(R({ receiptNo: "  " })), false);
 });
 test("empty / missing input gives no groups", () => {
   assert.deepEqual(groupRequestsByDay([]), []);

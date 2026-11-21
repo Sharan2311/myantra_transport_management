@@ -6,6 +6,7 @@ const amountOf = (r) => {
   if (r.confirmedAmount != null || r.confirmedCash != null) return (+diesel || 0) + (+cash || 0);
   return +r.amount || 0;
 };
+export const hasBill = (r) => !!(String(r.receiptNo || '').trim() || r.receiptImagePath);
 const checkable = (r) => r.status === "confirmed" || r.status === "attached";
 
 export const groupRequestsByDay = (requests) => {
@@ -23,6 +24,7 @@ export const groupRequestsByDay = (requests) => {
       total: items.reduce((s, r) => s + amountOf(r), 0),
       checked: items.filter((r) => checkable(r) && r.ownerVerified).length,
       open: items.filter((r) => r.status === "open").length,
+      noBill: items.filter((r) => !hasBill(r)).length,
     };
   });
   days.sort((a, b) => (a.date === "" ? 1 : b.date === "" ? -1 : b.date.localeCompare(a.date)));
