@@ -18761,6 +18761,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                     <div style={{flex:1,minWidth:0}}>
                       <div style={{fontWeight:800,fontSize:13}}>#{r.indentNo} · {r.truckNo}</div>
                       <div style={{fontSize:11,color:C.muted}}>{pump?pump.name:"—"}{r.lrNo?` · LR ${r.lrNo}`:""}</div>
+                      <div style={{fontSize:10.5,color:C.muted}}>Created {r.createdAt||"—"}{r.requestedBy?` · by ${r.requestedBy}`:""}</div>
                     </div>
                     <div style={{textAlign:"right"}}>
                       <div style={{fontWeight:800,fontSize:13}}>{fmt(amt)}</div>
