@@ -42,6 +42,9 @@ test("noBill counts requests with neither a receipt number nor a receipt photo",
   assert.equal(g[0].noBill, 1);
   assert.equal(hasBill(R({ receiptNo: "  " })), false);
 });
+test("a request reconciled against the pump statement is not flagged as missing its bill", () => {
+  assert.equal(hasBill(R({ status: "reconciled" })), true);
+});
 test("empty / missing input gives no groups", () => {
   assert.deepEqual(groupRequestsByDay([]), []);
   assert.deepEqual(groupRequestsByDay(undefined), []);

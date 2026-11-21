@@ -19893,7 +19893,22 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                 No diesel requests yet. Create one above before dispatching a truck.
               </div>
             )}
-            {[...drFilteredReqs].sort((a,b)=>b.indentNo-a.indentNo).map(req=>{
+            {groupRequestsByDay(drFilteredReqs).flatMap(day=>[{__day:day}, ...day.items]).map(req=>{
+              if(req.__day){
+                const d = req.__day;
+                const lbl = d.date ? new Date(d.date+"T00:00:00").toLocaleDateString("en-IN",{weekday:"short",day:"2-digit",month:"short",year:"numeric"}) : "Unknown date";
+                return (
+                  <div key={"day-"+(d.date||"none")} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                    background:C.border+"66",borderRadius:10,padding:"8px 12px",marginTop:6}}>
+                    <div style={{fontWeight:800,fontSize:13}}>📅 {lbl}</div>
+                    <div style={{fontSize:11,color:C.muted,textAlign:"right"}}>
+                      {d.count} request{d.count===1?"":"s"} · <b style={{color:C.text}}>{fmt(d.total)}</b>
+                      {d.open>0 && <span style={{color:C.orange}}> · {d.open} open</span>}
+                      {d.noBill>0 && <span style={{color:C.red}}> · {d.noBill} no bill</span>}
+                    </div>
+                  </div>
+                );
+              }
               const pump    = pumps.find(p=>p.id===req.pumpId);
               const statusColor = req.status==="attached"?(req.confirmedAmount!=null?C.green:"#d97706"):req.status==="confirmed"?C.teal:C.orange;
               // amount is always diesel+cash total
@@ -19919,6 +19934,10 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                         {(req.requestedBy||req.createdBy)&&(
                           <span style={{color:C.muted}}>{" · "}By: <b style={{color:C.text}}>{req.requestedBy||req.createdBy}</b></span>
                         )}
+                      </div>
+                      <div style={{color:C.muted,fontSize:10.5,marginTop:1}}>
+                        Created {req.createdAt||"—"}
+                        {!hasBill(req) && <span style={{color:C.red,fontWeight:700}}>{" · No bill"}</span>}
                       </div>
                       {(req.dieselAmount||req.cashAmount) ? (
                         <div style={{color:C.muted,fontSize:11,marginTop:2,display:"flex",gap:8}}>
