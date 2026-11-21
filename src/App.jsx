@@ -1,5 +1,8 @@
 import { pouchAmountFor, holdAllAmountFor } from "./pouch_logic.js";
 import { tonnageByBlock } from "./tonnage_logic.js";
+import { shareFile } from "./share_file.js";
+import { groupRequestsByDay, hasBill } from "./diesel_by_day.js";
+import { matchBatch, confirmUpdate, dieselOf } from "./bill_match.js";
 import { includeInByEmployee, employeeStatement, statementHtml } from "./byemp_logic.js";
 import { draftStatus, searchAdvices } from "./advice_mail.js";
 import { checkInvoiceLine, extraDeductionItems, splitShortage, appInvoiceTotals, holdsByInvoice, cleanAdvices } from "./advice_check.js";
@@ -13119,6 +13122,156 @@ async function compressReceiptImage(file, maxDim = 1600, quality = 0.75) {
   }
 }
 
+// ─── BULK BILL UPLOAD (owner) ─────────────────────────────────────────────────
+// Pick many pump-bill photos at once. Each is read, then matched to ONE open diesel request by vehicle + exact diesel amount
+// + same pump + date within 1 day (src/bill_match.js). Nothing is confirmed until the owner taps Confirm. Bills that match
+// no request (including bills of a request that was served in parts) are flagged "Diesel request not found" and can be
+// checked and approved by hand.
+function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, log }) {
+  const [items, setItems]   = useState([]);          // {id,file,url,state:"scanning"|"done"|"error",data,error}
+  const [done, setDone]     = useState({});          // itemId -> {indentNo, truckNo}
+  const [busy, setBusy]     = useState({});          // itemId -> true while saving
+  const [errs, setErrs]     = useState({});          // itemId -> message (a failed save is always shown)
+  const [manual, setManual] = useState({});          // itemId -> {open:bool, reqId, reason, allOpen:bool}
+  const inputRef = useRef(null);
+
+  const scanOne = async (it) => {
+    try {
+      if(!it.file.type.startsWith("image/")) throw new Error("Not an image");
+      const compressed = await compressReceiptImage(it.file);
+      const base64 = await new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result.split(",")[1]); r.onerror=()=>rej(new Error("Read failed")); r.readAsDataURL(compressed); });
+      const resp = await fetch("/.netlify/functions/scan-diesel-receipt",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({base64,anthropicKey:RC.anthropicKey,mediaType:compressed.type})});
+      const data = await resp.json();
+      if(!resp.ok||data.error){ logScan("diesel_receipt_scan",false,0); throw new Error(data.error||"Could not read the bill"); }
+      logScan("diesel_receipt_scan",true,data._costInr||0);
+      setItems(prev=>prev.map(x=>x.id===it.id?{...x,state:"done",data,compressed}:x));
+    } catch(e) {
+      setItems(prev=>prev.map(x=>x.id===it.id?{...x,state:"error",error:e.message||String(e)}:x));
+    }
+  };
+  const onPick = async (e) => {
+    const files = Array.from(e.target.files||[]);
+    e.target.value = "";
+    if(!files.length) return;
+    const fresh = files.map((f,i)=>({id:`b${Date.now()}_${i}`,file:f,url:URL.createObjectURL(f),state:"scanning"}));
+    setItems(prev=>[...fresh,...prev]);
+    // two at a time: quick, but kind to the scan service
+    const queue=[...fresh];
+    const worker = async()=>{ while(queue.length){ await scanOne(queue.shift()); } };
+    await Promise.all([worker(),worker()]);
+  };
+
+  const pumpMatches = (name, r) => { const p=pumps.find(x=>x.id===r.pumpId); return p ? pumpNamesMatch(name, p.name) : false; };
+  const live = items.filter(i=>i.state==="done" && !done[i.id]);
+  const results = useMemo(()=>matchBatch(
+    live.map(i=>({id:i.id, vehicleNo:i.data.vehicleNo, amount:i.data.amount, date:i.data.date, pumpName:i.data.pumpName, receiptNo:i.data.receiptNo})),
+    dieselRequests, {pumpMatches}),[items, done, dieselRequests, pumps]);
+  const resOf = id => results.find(r=>r.bill.id===id);
+
+  const confirmOn = async (item, request, {amount, receiptNo, reason, method, extra=[]}) => {
+    setErrs(p=>({...p,[item.id]:""}));
+    const cur = dieselRequests.find(r=>r.id===request.id);
+    if(!cur || cur.status!=="open"){ setErrs(p=>({...p,[item.id]:`Indent #${request.indentNo} is no longer open — it was changed by someone else. Nothing was saved.`})); return; }
+    setBusy(p=>({...p,[item.id]:true}));
+    try {
+      const path = await DB.uploadDieselReceipt(cur.id, item.compressed||item.file);
+      const upd = {...confirmUpdate(cur,{amount,receiptNo,bill:item.data,by:user?.name||user?.username||"",at:nowTs(),method,reason}), receiptImagePath:path};
+      await DB.saveDieselRequest(upd);
+      setDieselRequests(prev=>prev.map(r=>r.id===upd.id?upd:r));
+      log && log("BILL CONFIRM", `Indent #${cur.indentNo} · ${cur.truckNo} · ${method} · Diesel ₹${amount} · Receipt ${receiptNo||"-"}${reason?` · ${reason}`:""}`);
+      setDone(p=>{ const n={...p,[item.id]:{indentNo:cur.indentNo,truckNo:cur.truckNo}}; extra.forEach(x=>{n[x]={indentNo:cur.indentNo,truckNo:cur.truckNo,part:true};}); return n; });
+    } catch(e) {
+      saveFail("bulkBillConfirm:")(e);
+      setErrs(p=>({...p,[item.id]:"NOT SAVED — "+(e.message||e)+". The request is still open."}));
+    } finally { setBusy(p=>({...p,[item.id]:false})); }
+  };
+
+  const chip = (t,c) => <span style={{fontSize:10.5,fontWeight:800,color:c,background:c+"22",borderRadius:6,padding:"2px 7px"}}>{t}</span>;
+  const row = (l,v) => <div style={{display:"flex",justifyContent:"space-between",fontSize:12}}><span style={{color:C.muted}}>{l}</span><span style={{fontWeight:700}}>{v||"—"}</span></div>;
+  const reqLine = r => `#${r.indentNo} · ${r.truckNo} · ₹${Number(dieselOf(r)).toLocaleString("en-IN")} · ${r.date}`;
+
+  const counts = results.reduce((a,r)=>{ a[r.state]=(a[r.state]||0)+1; return a; },{});
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      <div style={{background:C.card,borderRadius:10,padding:"10px 14px",color:C.muted,fontSize:12,lineHeight:1.5}}>
+        Pick all the pump bill photos together. Each bill is read and matched to one open request (vehicle, exact diesel amount, same pump, date within 1 day).
+        Nothing is confirmed until you tap <b>Confirm</b>. Bills with no match are flagged <b style={{color:C.red}}>Diesel request not found</b> for you to check.
+      </div>
+      <input ref={inputRef} type="file" accept="image/*" multiple onChange={onPick} style={{display:"none"}}/>
+      <button onClick={()=>inputRef.current&&inputRef.current.click()}
+        style={{background:C.orange,border:"none",borderRadius:12,color:"#fff",fontWeight:800,fontSize:14,padding:"14px",cursor:"pointer"}}>
+        📥 Select bill photos
+      </button>
+      {items.length>0 && (
+        <div style={{fontSize:12,color:C.muted}}>
+          {items.length} bill{items.length===1?"":"s"} · <span style={{color:C.green}}>{counts.match||0} match</span> · <span style={{color:C.red}}>{(counts.not_found||0)+(counts.duplicate_receipt||0)+(counts.unreadable||0)+(counts.ambiguous||0)} need a look</span> · {Object.keys(done).length} confirmed
+        </div>
+      )}
+      {items.map(it=>{
+        const d = it.data||{};
+        const r = resOf(it.id);
+        const dn = done[it.id];
+        const m = manual[it.id]||{};
+        const me = (patch)=>setManual(p=>({...p,[it.id]:{...(p[it.id]||{}),...patch}}));
+        return (
+          <div key={it.id} style={{background:C.card,borderRadius:12,border:`1.5px solid ${dn?C.green+"88":r?.state==="match"?C.green+"66":C.border}`,padding:12,display:"flex",gap:12}}>
+            <img src={it.url} alt="bill" style={{width:84,height:112,objectFit:"cover",borderRadius:8,flexShrink:0,background:C.bg}}/>
+            <div style={{flex:1,minWidth:0,display:"flex",flexDirection:"column",gap:5}}>
+              {it.state==="scanning" && <div style={{color:C.orange,fontWeight:800,fontSize:13}}>🤖 Reading bill…</div>}
+              {it.state==="error" && <div style={{color:C.red,fontSize:12}}>Could not read this bill: {it.error}</div>}
+              {it.state==="done" && <>
+                {row("Vehicle",d.vehicleNo)}{row("Amount",d.amount!=null?"₹"+Number(d.amount).toLocaleString("en-IN"):"")}{row("Date",d.date)}{row("Pump",d.pumpName)}{row("Receipt no.",d.receiptNo)}
+                {dn && <div>{chip(dn.part?`✓ Part of Indent #${dn.indentNo} (confirmed)`:`✓ Confirmed Indent #${dn.indentNo} · ${dn.truckNo}`,C.green)}</div>}
+                {!dn && r?.state==="match" && <>
+                  <div>{chip("Matches "+reqLine(r.request),C.green)}</div>
+                  <button disabled={busy[it.id]} onClick={()=>confirmOn(it,r.request,{amount:d.amount,receiptNo:d.receiptNo,method:"bulk_receipt"})}
+                    style={{background:C.green,border:"none",borderRadius:8,color:"#fff",fontWeight:800,fontSize:13,padding:"9px",cursor:"pointer",opacity:busy[it.id]?0.6:1}}>
+                    {busy[it.id]?"Saving…":"✓ Confirm Indent #"+r.request.indentNo}</button>
+                </>}
+                {!dn && r?.state==="duplicate_receipt" && <div>{chip(`Receipt ${d.receiptNo} already used${r.request?` on Indent #${r.request.indentNo} (${r.request.truckNo})`:" in this batch"}`,C.red)}</div>}
+                {!dn && r?.state==="unreadable" && <div>{chip("Could not read vehicle or amount — retake the photo",C.red)}</div>}
+                {!dn && (r?.state==="not_found"||r?.state==="ambiguous") && <>
+                  <div>{chip(r.state==="ambiguous"?"More than one request fits — choose":"Diesel request not found",C.red)}</div>
+                  {r.splitHint && <div style={{fontSize:11.5,color:C.orange,fontWeight:700}}>These bills add up to Indent #{r.splitHint.indentNo} ({r.splitHint.billIds.length} bills) — may be one request served in parts.</div>}
+                  {!m.open && <button onClick={()=>me({open:true,reqId:r.candidates?.[0]?.id||r.sameVehicle?.[0]?.id||""})}
+                    style={{background:"transparent",border:`1.5px solid ${C.blue}`,borderRadius:8,color:C.blue,fontWeight:700,fontSize:12,padding:"7px",cursor:"pointer"}}>Check manually</button>}
+                  {m.open && (()=>{
+                    const pool = r.state==="ambiguous" ? r.candidates : (m.allOpen ? dieselRequests.filter(x=>x.status==="open") : r.sameVehicle);
+                    const sel = pool.find(x=>x.id===m.reqId);
+                    const diff = sel ? Math.round((d.amount-dieselOf(sel))*100)/100 : 0;
+                    const splitBills = r.splitHint && sel && sel.id===r.splitHint.requestId ? r.splitHint.billIds.map(id=>items.find(x=>x.id===id)).filter(Boolean) : null;
+                    const splitTotal = splitBills ? splitBills.reduce((s,x)=>s+(+x.data.amount||0),0) : 0;
+                    return (
+                      <div style={{display:"flex",flexDirection:"column",gap:6,background:C.bg,borderRadius:8,padding:8}}>
+                        {pool.length===0 && <div style={{fontSize:12,color:C.muted}}>No open request for this vehicle. {!m.allOpen && <span onClick={()=>me({allOpen:true})} style={{color:C.blue,cursor:"pointer",fontWeight:700}}>Show all open requests</span>}</div>}
+                        {pool.map(x=>(
+                          <label key={x.id} style={{display:"flex",gap:6,alignItems:"center",fontSize:12,cursor:"pointer"}}>
+                            <input type="radio" name={"mr"+it.id} checked={m.reqId===x.id} onChange={()=>me({reqId:x.id})}/>{reqLine(x)}
+                          </label>))}
+                        {pool.length>0 && !m.allOpen && r.state!=="ambiguous" && <span onClick={()=>me({allOpen:true})} style={{fontSize:11,color:C.blue,cursor:"pointer",fontWeight:700}}>Show all open requests</span>}
+                        {sel && !splitBills && diff!==0 && <div style={{fontSize:12,color:C.red,fontWeight:700}}>Bill is ₹{Math.abs(diff).toLocaleString("en-IN")} {diff>0?"MORE":"LESS"} than the request. The request will be confirmed at the BILL amount (₹{Number(d.amount).toLocaleString("en-IN")}).</div>}
+                        {sel && (diff!==0||splitBills) && <input value={m.reason||""} onChange={e=>me({reason:e.target.value})} placeholder="Reason (required)"
+                          style={{border:`1px solid ${C.border}`,borderRadius:6,padding:"6px 8px",fontSize:12,background:C.card,color:C.text}}/>}
+                        {sel && splitBills && <div style={{fontSize:12,color:C.muted}}>Confirms Indent #{sel.indentNo} at ₹{splitTotal.toLocaleString("en-IN")} from {splitBills.length} bills ({splitBills.map(x=>x.data.receiptNo||"?").join(" + ")}). Only this bill's photo is stored on the request.</div>}
+                        <button disabled={!sel||busy[it.id]||((diff!==0||splitBills)&&!(m.reason||"").trim())}
+                          onClick={()=>splitBills
+                            ? confirmOn(it,sel,{amount:splitTotal,receiptNo:splitBills.map(x=>x.data.receiptNo||"?").join(" + "),reason:`Served in ${splitBills.length} bills: `+splitBills.map(x=>`${x.data.receiptNo||"?"} ₹${x.data.amount}`).join(" + ")+" — "+m.reason.trim(),method:"bulk_receipt_split",extra:splitBills.filter(x=>x.id!==it.id).map(x=>x.id)})
+                            : confirmOn(it,sel,{amount:d.amount,receiptNo:d.receiptNo,reason:diff!==0?`Manual approval, bill ₹${d.amount} vs request ₹${dieselOf(sel)} — `+m.reason.trim():"Manually approved from bill upload",method:"bulk_receipt_manual"})}
+                          style={{background:C.green,border:"none",borderRadius:8,color:"#fff",fontWeight:800,fontSize:12.5,padding:"9px",cursor:"pointer",opacity:(!sel||busy[it.id]||((diff!==0||splitBills)&&!(m.reason||"").trim()))?0.5:1}}>
+                          {busy[it.id]?"Saving…":splitBills?"Approve split & confirm Indent #"+sel.indentNo:"Approve & confirm"+(sel?" Indent #"+sel.indentNo:"")}</button>
+                      </div>);
+                  })()}
+                </>}
+                {errs[it.id] && <div style={{color:C.red,fontSize:12,fontWeight:700,background:C.red+"11",borderRadius:6,padding:"6px 8px"}}>{errs[it.id]}</div>}
+              </>}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function DieselReceiptScan({ selected, pumps, dieselRequests=[], cashAmount, user, log, onBack, onConfirmed, onPendingReview }) {
   const [state, setState] = useState("idle"); // idle|compressing|reading|scanning|uploading|saving|error
   const [error, setError] = useState("");
@@ -13603,10 +13756,18 @@ function BulkPaymentCheck({ vehicles, employees, user, log, reloadDriverPays }) 
 // ─── SCAN PAYMENT IMAGE ───────────────────────────────────────────────────────
 function ScanPaymentBtn({ onResult }) {
   const [scanning, setScanning] = useState(false);
+  const [lastFile, setLastFile] = useState(null); // kept so the same screenshot can be sent on to the WhatsApp group
   const inputRef = useRef();
+  const sendToGroup = async () => {
+    const r = await shareFile(navigator, lastFile);
+    if (r === "unsupported") alert("This browser can't share the image from here. Share it from your gallery as usual.");
+    else if (r === "failed") alert("Could not open the share sheet. Share it from your gallery as usual.");
+    else if (r === "shared") setLastFile(null);
+  };
 
   const scan = async (file) => {
     if (!file) return;
+    setLastFile(null);
     setScanning(true);
     try {
       const b64 = await new Promise((res, rej) => {
@@ -13623,6 +13784,7 @@ function ScanPaymentBtn({ onResult }) {
       const parsed = await resp.json();
       if (parsed.error) throw new Error(parsed.error);
       logScan("payment_scan", true, parsed._costInr||0);
+      if ((file.type||"").startsWith("image/")) setLastFile(file);
       onResult(parsed);
     } catch(e) {
       logScan("payment_scan", false, 0);
@@ -13634,9 +13796,16 @@ function ScanPaymentBtn({ onResult }) {
   };
 
   return (
-    <FileSourcePicker onFile={scan} accept="image/*,application/pdf"
-      label={scanning?"Reading…":"Scan Payment"}
-      color={C.purple||"#7c3aed"} icon="📷" compact={true} />
+    <span style={{display:"inline-flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+      <FileSourcePicker onFile={scan} accept="image/*,application/pdf"
+        label={scanning?"Reading…":"Scan Payment"}
+        color={C.purple||"#7c3aed"} icon="📷" compact={true} />
+      {lastFile && !scanning && (
+        <button type="button" onClick={sendToGroup}
+          style={{background:"#16a34a",border:"none",borderRadius:20,color:"#fff",fontSize:11,fontWeight:700,padding:"6px 12px",cursor:"pointer"}}>
+          📤 Send to WhatsApp group</button>
+      )}
+    </span>
   );
 }
 
@@ -17466,6 +17635,9 @@ function DuplicateDieselPanel({ dieselRequests, trips, log, setDieselRequests })
 
 function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, driverPays, setDriverPays, user, log, viewOnly=false, dieselRequests=[], setDieselRequests, dieselRequestsReady=false, settings, actionItems=[], setActionItems, navTarget, setNavTarget}) {
   const [view,        setView]        = useState("requests");
+  const [dayPump, setDayPump] = useState("all");      // By Day view: pump filter
+  const [dayShow, setDayShow] = useState("all");      // By Day view: all | not_checked | open
+  const [dayCount, setDayCount] = useState(7);        // By Day view: how many days to show
   // Daily verification checklist — owner-only, one-time permanent mark per
   // request ("I personally checked this request's attachment and amount").
   const [verifyFilter, setVerifyFilter] = useState("not_checked"); // all | checked | not_checked
@@ -18685,6 +18857,8 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
         {id:"lrmap",    label:"LR ↔ Indent", color:C.teal||C.purple},
         ...(user.role==="owner"?[{id:"reconcile", label:"🔍 Reconcile", color:C.red}]:[]),
         {id:"history",  label:"Alerts", color:C.muted},
+        ...(user.role==="owner"?[{id:"days", label:"📅 By Day", color:C.teal}]:[]),
+        ...(user.role==="owner"?[{id:"bills", label:"📥 Bills", color:C.orange}]:[]),
         ...(user.role==="owner"?[{id:"verify", label:`Verify (${verifiedCount}/${verifiableTotal})`, color:C.purple}]:[]),
         ...(user.role==="owner"?[{id:"dupes", label:`🧹 Duplicates${dupDeletableCount>0?` (${dupDeletableCount})`:""}`, color:dupDeletableCount>0?C.red:C.muted}]:[]),
       ]} active={view} onSelect={setView} />
@@ -18694,6 +18868,81 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
       )}
 
       {/* ── DAILY VERIFICATION CHECKLIST — owner only ── */}
+      {view==="bills" && user.role==="owner" && (
+        <BulkBillsPanel dieselRequests={dieselRequests} setDieselRequests={setDieselRequests} pumps={pumps} user={user} log={log} />
+      )}
+
+      {view==="days" && user.role==="owner" && (()=>{
+        const all = (dieselRequests||[]).filter(r=>dayPump==="all"||r.pumpId===dayPump);
+        const shown = all.filter(r=>dayShow==="all" || (dayShow==="open" ? r.status==="open" : dayShow==="no_bill" ? !hasBill(r) : ((r.status==="confirmed"||r.status==="attached") && !r.ownerVerified)));
+        const days = groupRequestsByDay(shown);
+        const real = days.filter(d=>d.date);
+        const visible = [...real.slice(0,dayCount), ...days.filter(d=>!d.date)];
+        const dayLabel = d => { if(!d) return "Unknown date"; const dt=new Date(d+"T00:00:00"); return dt.toLocaleDateString("en-IN",{weekday:"short",day:"2-digit",month:"short",year:"numeric"}); };
+        const stChip = r => r.status==="open" ? {t:"OPEN",c:C.orange} : r.status==="attached" ? {t:"LR attached",c:C.green} : r.status==="confirmed" ? {t:"Confirmed · no LR",c:C.blue} : {t:String(r.status||"").toUpperCase(),c:C.muted};
+        return (
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          <div style={{background:C.card,borderRadius:10,padding:"10px 14px",color:C.muted,fontSize:12}}>
+            Every diesel request, day by day. Tick each one against the pump group; open requests are the ones still waiting for a bill.
+          </div>
+          <div style={{display:"flex",gap:6}}>
+            {[["all","All"],["no_bill","No bill"],["not_checked","Not checked"],["open","Open only"]].map(([k,l])=>(
+              <button key={k} onClick={()=>setDayShow(k)}
+                style={{flex:1,padding:"6px 4px",borderRadius:8,cursor:"pointer",fontWeight:700,fontSize:11,
+                  background:dayShow===k?C.teal:"transparent",border:`1.5px solid ${C.teal}`,color:dayShow===k?"#fff":C.teal}}>{l}</button>
+            ))}
+          </div>
+          <select value={dayPump} onChange={e=>setDayPump(e.target.value)}
+            style={{width:"100%",background:C.card,border:`1.5px solid ${C.border}`,borderRadius:8,padding:"8px 10px",fontSize:13,color:C.text,outline:"none"}}>
+            <option value="all">All Pumps</option>
+            {pumps.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+          {visible.length===0 && <div style={{textAlign:"center",color:C.muted,padding:32}}>No requests match this filter</div>}
+          {visible.map(d=>(
+            <div key={d.date||"none"} style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,overflow:"hidden"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",background:C.border+"55"}}>
+                <div style={{fontWeight:800,fontSize:13}}>{dayLabel(d.date)}</div>
+                <div style={{fontSize:11,color:C.muted,textAlign:"right"}}>
+                  {d.count} request{d.count===1?"":"s"} · <b style={{color:C.text}}>{fmt(d.total)}</b>
+                  <br/>{d.checked} checked{d.open>0 && <span style={{color:C.orange}}> · {d.open} open</span>}{d.noBill>0 && <span style={{color:C.red}}> · {d.noBill} no bill</span>}
+                </div>
+              </div>
+              {d.items.map(r=>{
+                const st = stChip(r);
+                const canTick = r.status==="confirmed"||r.status==="attached";
+                const amt = r.confirmedAmount!=null||r.confirmedCash!=null ? (+r.confirmedAmount||0)+(+r.confirmedCash||0) : (+r.amount||0);
+                const pump = pumps.find(p=>p.id===r.pumpId);
+                return (
+                  <div key={r.id} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 14px",borderTop:`1px solid ${C.border}`}}>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontWeight:800,fontSize:13}}>#{r.indentNo} · {r.truckNo}</div>
+                      <div style={{fontSize:11,color:C.muted}}>{pump?pump.name:"—"}{r.lrNo?` · LR ${r.lrNo}`:""}</div>
+                      <div style={{fontSize:10.5,color:C.muted}}>Created {r.createdAt||"—"}{r.requestedBy?` · by ${r.requestedBy}`:""}</div>
+                    </div>
+                    <div style={{textAlign:"right"}}>
+                      <div style={{fontWeight:800,fontSize:13}}>{fmt(amt)}</div>
+                      <div style={{fontSize:10,fontWeight:700,color:st.c}}>{st.t}{!hasBill(r) && <span style={{color:C.red}}> · No bill</span>}</div>
+                    </div>
+                    {canTick
+                      ? <button onClick={()=>markOwnerVerified(r,!r.ownerVerified)} title={r.ownerVerified?"Checked - tap to undo":"Tap when you have checked it"}
+                          style={{width:30,height:30,borderRadius:8,cursor:"pointer",fontWeight:800,fontSize:15,flexShrink:0,
+                            background:r.ownerVerified?C.green:"transparent",border:`1.5px solid ${r.ownerVerified?C.green:C.border}`,color:r.ownerVerified?"#fff":C.muted}}>✓</button>
+                      : <div style={{width:30,flexShrink:0}}/>}
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+          {real.length>dayCount && (
+            <button onClick={()=>setDayCount(n=>n+14)}
+              style={{padding:"10px",borderRadius:10,border:`1.5px solid ${C.blue}`,background:"transparent",color:C.blue,fontWeight:700,fontSize:12,cursor:"pointer"}}>
+              Show earlier days ({real.length-dayCount} more)
+            </button>
+          )}
+        </div>
+        );
+      })()}
+
       {view==="verify" && user.role==="owner" && (
         <div style={{display:"flex",flexDirection:"column",gap:12}}>
           <div style={{background:C.card,borderRadius:10,padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
