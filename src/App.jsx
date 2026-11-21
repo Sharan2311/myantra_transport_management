@@ -1,6 +1,7 @@
 import { pouchAmountFor, holdAllAmountFor } from "./pouch_logic.js";
 import { tonnageByBlock } from "./tonnage_logic.js";
 import { shareFile } from "./share_file.js";
+import { groupRequestsByDay } from "./diesel_by_day.js";
 import { includeInByEmployee, employeeStatement, statementHtml } from "./byemp_logic.js";
 import { draftStatus, searchAdvices } from "./advice_mail.js";
 import { checkInvoiceLine, extraDeductionItems, splitShortage, appInvoiceTotals, holdsByInvoice, cleanAdvices } from "./advice_check.js";
@@ -17483,6 +17484,9 @@ function DuplicateDieselPanel({ dieselRequests, trips, log, setDieselRequests })
 
 function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, driverPays, setDriverPays, user, log, viewOnly=false, dieselRequests=[], setDieselRequests, dieselRequestsReady=false, settings, actionItems=[], setActionItems, navTarget, setNavTarget}) {
   const [view,        setView]        = useState("requests");
+  const [dayPump, setDayPump] = useState("all");      // By Day view: pump filter
+  const [dayShow, setDayShow] = useState("all");      // By Day view: all | not_checked | open
+  const [dayCount, setDayCount] = useState(7);        // By Day view: how many days to show
   // Daily verification checklist — owner-only, one-time permanent mark per
   // request ("I personally checked this request's attachment and amount").
   const [verifyFilter, setVerifyFilter] = useState("not_checked"); // all | checked | not_checked
@@ -18702,6 +18706,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
         {id:"lrmap",    label:"LR ↔ Indent", color:C.teal||C.purple},
         ...(user.role==="owner"?[{id:"reconcile", label:"🔍 Reconcile", color:C.red}]:[]),
         {id:"history",  label:"Alerts", color:C.muted},
+        ...(user.role==="owner"?[{id:"days", label:"📅 By Day", color:C.teal}]:[]),
         ...(user.role==="owner"?[{id:"verify", label:`Verify (${verifiedCount}/${verifiableTotal})`, color:C.purple}]:[]),
         ...(user.role==="owner"?[{id:"dupes", label:`🧹 Duplicates${dupDeletableCount>0?` (${dupDeletableCount})`:""}`, color:dupDeletableCount>0?C.red:C.muted}]:[]),
       ]} active={view} onSelect={setView} />
@@ -18711,6 +18716,76 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
       )}
 
       {/* ── DAILY VERIFICATION CHECKLIST — owner only ── */}
+      {view==="days" && user.role==="owner" && (()=>{
+        const all = (dieselRequests||[]).filter(r=>dayPump==="all"||r.pumpId===dayPump);
+        const shown = all.filter(r=>dayShow==="all" || (dayShow==="open" ? r.status==="open" : ((r.status==="confirmed"||r.status==="attached") && !r.ownerVerified)));
+        const days = groupRequestsByDay(shown);
+        const real = days.filter(d=>d.date);
+        const visible = [...real.slice(0,dayCount), ...days.filter(d=>!d.date)];
+        const dayLabel = d => { if(!d) return "Unknown date"; const dt=new Date(d+"T00:00:00"); return dt.toLocaleDateString("en-IN",{weekday:"short",day:"2-digit",month:"short",year:"numeric"}); };
+        const stChip = r => r.status==="open" ? {t:"OPEN",c:C.orange} : r.status==="attached" ? {t:"LR attached",c:C.green} : r.status==="confirmed" ? {t:"Confirmed · no LR",c:C.blue} : {t:String(r.status||"").toUpperCase(),c:C.muted};
+        return (
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          <div style={{background:C.card,borderRadius:10,padding:"10px 14px",color:C.muted,fontSize:12}}>
+            Every diesel request, day by day. Tick each one against the pump group; open requests are the ones still waiting for a bill.
+          </div>
+          <div style={{display:"flex",gap:6}}>
+            {[["all","All"],["not_checked","Not checked"],["open","Open only"]].map(([k,l])=>(
+              <button key={k} onClick={()=>setDayShow(k)}
+                style={{flex:1,padding:"6px 4px",borderRadius:8,cursor:"pointer",fontWeight:700,fontSize:11,
+                  background:dayShow===k?C.teal:"transparent",border:`1.5px solid ${C.teal}`,color:dayShow===k?"#fff":C.teal}}>{l}</button>
+            ))}
+          </div>
+          <select value={dayPump} onChange={e=>setDayPump(e.target.value)}
+            style={{width:"100%",background:C.card,border:`1.5px solid ${C.border}`,borderRadius:8,padding:"8px 10px",fontSize:13,color:C.text,outline:"none"}}>
+            <option value="all">All Pumps</option>
+            {pumps.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+          {visible.length===0 && <div style={{textAlign:"center",color:C.muted,padding:32}}>No requests match this filter</div>}
+          {visible.map(d=>(
+            <div key={d.date||"none"} style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,overflow:"hidden"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",background:C.border+"55"}}>
+                <div style={{fontWeight:800,fontSize:13}}>{dayLabel(d.date)}</div>
+                <div style={{fontSize:11,color:C.muted,textAlign:"right"}}>
+                  {d.count} request{d.count===1?"":"s"} · <b style={{color:C.text}}>{fmt(d.total)}</b>
+                  <br/>{d.checked} checked{d.open>0 && <span style={{color:C.orange}}> · {d.open} open</span>}
+                </div>
+              </div>
+              {d.items.map(r=>{
+                const st = stChip(r);
+                const canTick = r.status==="confirmed"||r.status==="attached";
+                const amt = r.confirmedAmount!=null||r.confirmedCash!=null ? (+r.confirmedAmount||0)+(+r.confirmedCash||0) : (+r.amount||0);
+                const pump = pumps.find(p=>p.id===r.pumpId);
+                return (
+                  <div key={r.id} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 14px",borderTop:`1px solid ${C.border}`}}>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontWeight:800,fontSize:13}}>#{r.indentNo} · {r.truckNo}</div>
+                      <div style={{fontSize:11,color:C.muted}}>{pump?pump.name:"—"}{r.lrNo?` · LR ${r.lrNo}`:""}</div>
+                    </div>
+                    <div style={{textAlign:"right"}}>
+                      <div style={{fontWeight:800,fontSize:13}}>{fmt(amt)}</div>
+                      <div style={{fontSize:10,fontWeight:700,color:st.c}}>{st.t}</div>
+                    </div>
+                    {canTick
+                      ? <button onClick={()=>markOwnerVerified(r,!r.ownerVerified)} title={r.ownerVerified?"Checked - tap to undo":"Tap when you have checked it"}
+                          style={{width:30,height:30,borderRadius:8,cursor:"pointer",fontWeight:800,fontSize:15,flexShrink:0,
+                            background:r.ownerVerified?C.green:"transparent",border:`1.5px solid ${r.ownerVerified?C.green:C.border}`,color:r.ownerVerified?"#fff":C.muted}}>✓</button>
+                      : <div style={{width:30,flexShrink:0}}/>}
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+          {real.length>dayCount && (
+            <button onClick={()=>setDayCount(n=>n+14)}
+              style={{padding:"10px",borderRadius:10,border:`1.5px solid ${C.blue}`,background:"transparent",color:C.blue,fontWeight:700,fontSize:12,cursor:"pointer"}}>
+              Show earlier days ({real.length-dayCount} more)
+            </button>
+          )}
+        </div>
+        );
+      })()}
+
       {view==="verify" && user.role==="owner" && (
         <div style={{display:"flex",flexDirection:"column",gap:12}}>
           <div style={{background:C.card,borderRadius:10,padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
