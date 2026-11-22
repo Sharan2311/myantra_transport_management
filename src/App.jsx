@@ -3,7 +3,7 @@ import { tonnageByBlock } from "./tonnage_logic.js";
 import { shareFile } from "./share_file.js";
 import { groupRequestsByDay, hasBill } from "./diesel_by_day.js";
 import { matchBatch, confirmUpdate, attachUpdate, pumpNameMatches, dieselOf, deleteBlockReason } from "./bill_match.js";
-import { retryNet } from "./net_retry.js";
+import { retryNet, bytesToBase64, settleAfterNetFail } from "./net_retry.js";
 import { includeInByEmployee, employeeStatement, statementHtml } from "./byemp_logic.js";
 import { draftStatus, searchAdvices } from "./advice_mail.js";
 import { checkInvoiceLine, extraDeductionItems, splitShortage, appInvoiceTotals, holdsByInvoice, cleanAdvices } from "./advice_check.js";
@@ -13140,8 +13140,10 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
     try {
       if(!it.file.type.startsWith("image/")) throw new Error("Not an image");
       const compressed = await compressReceiptImage(it.file);
-      const base64 = await new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result.split(",")[1]); r.onerror=()=>rej(new Error("Read failed")); r.readAsDataURL(compressed); });
-      const resp = await fetch("/.netlify/functions/scan-diesel-receipt",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({base64,anthropicKey:RC.anthropicKey,mediaType:compressed.type})});
+      let base64;
+      try { base64 = bytesToBase64(new Uint8Array(await compressed.arrayBuffer())); }
+      catch(e) { throw new Error("Could not read the photo ("+(e.name||"error")+"). Choose this photo again"); }
+      const resp = await retryNet(()=>fetch("/.netlify/functions/scan-diesel-receipt",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({base64,anthropicKey:RC.anthropicKey,mediaType:compressed.type})}));
       const data = await resp.json();
       if(!resp.ok||data.error){ logScan("diesel_receipt_scan",false,0); throw new Error(data.error||"Could not read the bill"); }
       logScan("diesel_receipt_scan",true,data._costInr||0);
@@ -13154,10 +13156,23 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
     const input = e.target;
     const files = Array.from(input.files||[]);
     if(!files.length) return;
-    const fresh = files.map((f,i)=>({id:`b${Date.now()}_${i}`,file:f,url:URL.createObjectURL(f),state:"scanning"}));
+    // Copy every photo into memory FIRST, one at a time. Phones can drop the link to a picked photo a little later,
+    // which showed up as "Read failed" and could not be fixed by trying again.
+    const fresh = [];
+    for(let i=0;i<files.length;i++){
+      const f = files[i];
+      const id = `b${Date.now()}_${i}`;
+      try {
+        const buf = await f.arrayBuffer();
+        const mem = new File([buf], f.name||"bill.jpg", {type: f.type||"image/jpeg"});
+        fresh.push({id,file:mem,url:URL.createObjectURL(mem),state:"scanning"});
+      } catch(err) {
+        fresh.push({id,file:f,url:"",state:"error",error:"Could not read this photo from the phone ("+(err.name||"error")+"). Choose it again",unreadable:true});
+      }
+    }
     setItems(prev=>[...fresh,...prev]);
     // two at a time: quick, but kind to the scan service
-    const queue=[...fresh];
+    const queue=fresh.filter(x=>x.state==="scanning");
     const worker = async()=>{ while(queue.length){ await scanOne(queue.shift()); } };
     await Promise.all([worker(),worker()]);
     input.value = ""; // cleared only after every file is read (clearing earlier makes iPhone files unreadable -> "Read failed")
@@ -13178,11 +13193,13 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
     const attachOnly = cur.status!=="open"; // already confirmed by the pump: only add the bill as proof, status and amounts untouched
     setBusy(p=>({...p,[item.id]:true}));
     try {
-      let path;
-      try { path = await retryNet(()=>DB.uploadDieselReceipt(cur.id, item.compressed||item.file)); }
+      // fixed file name per bill, so a retry overwrites the same file instead of leaving copies behind
+      const fname = "bill-"+(String(receiptNo||item.id).replace(/[^A-Za-z0-9]/g,"")||item.id)+".jpg";
+      const path = cur.id+"/"+fname;
+      try { await settleAfterNetFail(()=>DB.uploadDieselReceipt(cur.id, item.compressed||item.file, fname), ()=>DB.dieselReceiptExists(cur.id, fname)); }
       catch(e) { throw new Error("The bill photo could not be uploaded ("+(e.message||e)+"). Check the internet and tap again"); }
       const upd = {...(attachOnly ? attachUpdate(cur,{receiptNo,bill:item.data,method,note:reason}) : confirmUpdate(cur,{amount,receiptNo,bill:item.data,by:user?.name||user?.username||"",at:nowTs(),method,reason})), receiptImagePath:path};
-      try { await retryNet(()=>DB.saveDieselRequest(upd)); }
+      try { await settleAfterNetFail(()=>DB.saveDieselRequest(upd), async()=>{ const row=await DB.getDieselRequestRow(upd.id); return !!row && row.receipt_image_path===path && (row.receipt_no||"")===(upd.receiptNo||""); }); }
       catch(e) { throw new Error("The request could not be saved ("+(e.message||e)+")"); }
       setDieselRequests(prev=>prev.map(r=>r.id===upd.id?upd:r));
       log && log("BILL CONFIRM", `Indent #${cur.indentNo} · ${cur.truckNo} · ${method} · Diesel ₹${amount} · Receipt ${receiptNo||"-"}${reason?` · ${reason}`:""}`);
@@ -13202,7 +13219,7 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
     if(!window.confirm(`Delete duplicate indent #${cur.indentNo} · ${cur.truckNo} · ₹${Number(dieselOf(cur)).toLocaleString("en-IN")} · ${cur.date} (${cur.status}, raised by ${cur.requestedBy||"?"} ${cur.createdAt||""})?${warn}\n\nThis cannot be undone.`)) return;
     setBusy(p=>({...p,[itemId]:true}));
     try {
-      await DB.deleteDieselRequestVerified(cur.id);
+      await settleAfterNetFail(()=>DB.deleteDieselRequestVerified(cur.id), async()=>!(await DB.getDieselRequestRow(cur.id)));
       setDieselRequests(prev=>(prev||[]).filter(r=>r.id!==cur.id));
       log && log("DIESEL REQUEST DELETED", `Indent #${cur.indentNo} · ${cur.truckNo} · ${cur.date} · ₹${dieselOf(cur)} (${cur.status}) deleted as a duplicate from the bills screen`);
       setManual(p=>({...p,[itemId]:{...(p[itemId]||{}),reqId:""}}));
@@ -13246,7 +13263,9 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
               {it.state==="scanning" && <div style={{color:C.orange,fontWeight:800,fontSize:13}}>🤖 Reading bill…</div>}
               {it.state==="error" && <>
                 <div style={{color:C.red,fontSize:12}}>Could not read this bill: {it.error}</div>
-                <button onClick={()=>retry(it)} style={{background:"transparent",border:`1.5px solid ${C.blue}`,borderRadius:8,color:C.blue,fontWeight:700,fontSize:12,padding:"7px",cursor:"pointer"}}>↻ Try again</button></>}
+                {it.unreadable
+                  ? <div style={{fontSize:11.5,color:C.muted}}>Tap <b>📥 Select bill photos</b> and choose this photo again.</div>
+                  : <button onClick={()=>retry(it)} style={{background:"transparent",border:`1.5px solid ${C.blue}`,borderRadius:8,color:C.blue,fontWeight:700,fontSize:12,padding:"7px",cursor:"pointer"}}>↻ Try again</button>}</>}
               {it.state==="done" && <>
                 {row("Vehicle",d.vehicleNo)}{row("Amount",d.amount!=null?"₹"+Number(d.amount).toLocaleString("en-IN"):"")}{row("Date",d.date)}{row("Pump",d.pumpName)}{row("Receipt no.",d.receiptNo)}
                 {dn && <div>{chip(dn.part?`✓ Part of Indent #${dn.indentNo} (confirmed)`:`✓ Confirmed Indent #${dn.indentNo} · ${dn.truckNo}`,C.green)}</div>}

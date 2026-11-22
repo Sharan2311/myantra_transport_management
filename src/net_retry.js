@@ -13,3 +13,25 @@ export async function retryNet(fn, { tries = 3, delayMs = 700 } = {}) {
   }
   throw last;
 }
+
+// Base64 of raw bytes without FileReader (which fails on some phones) and without a huge string spread.
+export function bytesToBase64(u8) {
+  let bin = "";
+  for (let i = 0; i < u8.length; i += 0x8000) bin += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+// On a flaky phone connection the server can finish the job while the reply is lost, so the app shows "Failed to
+// fetch" although it worked. After a NETWORK failure only, ask the database whether the change really happened.
+// Returns "done" (no failure), or "verified" (failed to hear back, but the database confirms it). Anything else throws
+// the ORIGINAL error: a failed or unverifiable save is never reported as success.
+export async function settleAfterNetFail(action, verify) {
+  try { await action(); return "done"; }
+  catch (e) {
+    if (!isNetworkError(e)) throw e;
+    let ok = false;
+    try { ok = !!(await retryNet(verify, { tries: 2, delayMs: 500 })); } catch { ok = false; }
+    if (ok) return "verified";
+    throw e;
+  }
+}
