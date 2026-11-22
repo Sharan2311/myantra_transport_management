@@ -4,6 +4,7 @@ import { shareFile } from "./share_file.js";
 import { groupRequestsByDay, hasBill } from "./diesel_by_day.js";
 import { matchBatch, confirmUpdate, attachUpdate, pumpNameMatches, dieselOf, deleteBlockReason } from "./bill_match.js";
 import { retryNet, bytesToBase64, settleAfterNetFail } from "./net_retry.js";
+import { extractDriveId, parseDriveLink, setDriveFolders, getDriveRoot, DRIVE_KEYS } from "./drive_config.js";
 import { includeInByEmployee, employeeStatement, statementHtml } from "./byemp_logic.js";
 import { draftStatus, searchAdvices } from "./advice_mail.js";
 import { checkInvoiceLine, extraDeductionItems, splitShortage, appInvoiceTotals, holdsByInvoice, cleanAdvices } from "./advice_check.js";
@@ -1351,6 +1352,7 @@ const MORE_TABS = [
   {id:"tafal",     icon:"🤝",label:"TAFAL",          perm:"tafal",        group:"money",   feat:"tafal"},
   {id:"recovery",  icon:"🔁",label:"Recovery",       perm:"recovery",     group:"money"},
   {id:"tonnage",   icon:"⚖️",label:"Tonnage by 10 days", perm:"tonnage",  group:"info"},
+  {id:"drivefolders", icon:"📁",label:"Drive folders", perm:"admin",       group:"info"},
   {id:"vehicles",  icon:"🚛",label:"Vehicles",       perm:"vehicles",     group:"fleet",   feat:"vehicles"},
   {id:"employees", icon:"👥",label:"Employees",      perm:"employees",    group:"fleet",   feat:"employees"},
   {id:"payments",  icon:"💰",label:"Payments",        perm:"payments",   group:"finance", feat:"payment_scan"},
@@ -1371,6 +1373,69 @@ const MORE_GROUPS = [
 const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const monthLabel = m => `${MONTH_NAMES[+m.slice(5,7)-1]} ${m.slice(0,4)}`;
 const BLOCK_LABELS = ["1–10","11–20","21–end"];
+// ─── DRIVE FOLDERS (owner) ───────────────────────────────────────────────────
+// Which Google Drive folder each "Google Drive" button opens. Saved in the database settings, so it can be changed here
+// at any time without touching the code. Empty = the default folder. A folder only opens if it has been shared (Viewer)
+// with the app's Google service account; "Test" shows whether it does.
+function DriveFoldersMod({settings, setSettings, user, log}) {
+  const cur = settings?.driveFolders || {};
+  const [vals, setVals]   = useState(()=>Object.fromEntries(DRIVE_KEYS.map(k=>[k.key, cur[k.key]||""])));
+  const [errs, setErrs]   = useState({});
+  const [tests, setTests] = useState({});
+  const [saved, setSaved] = useState("");
+  const dirty = DRIVE_KEYS.some(k=>(vals[k.key]||"").trim()!==(cur[k.key]||"").trim());
+  const save = () => {
+    const e = {}, out = {};
+    DRIVE_KEYS.forEach(k=>{ const r=parseDriveLink(vals[k.key]); if(!r.ok) e[k.key]=r.error; else if(r.id) out[k.key]=String(vals[k.key]).trim(); });
+    setErrs(e);
+    if(Object.keys(e).length){ setSaved(""); return; }
+    setSettings({...(settings||{}), driveFolders: out});
+    log && log("DRIVE FOLDERS", Object.keys(out).map(k=>k).join(", ")||"all default");
+    setSaved("Saved. If the red 'save failed' banner appears at the top, the change was NOT saved.");
+  };
+  const test = async (key) => {
+    const r = parseDriveLink(vals[key]);
+    if(!r.ok){ setTests(t=>({...t,[key]:{bad:true,msg:r.error}})); return; }
+    const id = r.id || GDRIVE_ROOT_ID;
+    setTests(t=>({...t,[key]:{msg:"Checking…"}}));
+    try {
+      const resp = await fetch("/.netlify/functions/proxy-drive",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"list",folderId:id})});
+      const d = await resp.json();
+      if(!resp.ok||d.error) throw new Error(d.error||"Could not open the folder");
+      setTests(t=>({...t,[key]:{ok:true,msg:`✓ Opens fine — ${d.items.length} item${d.items.length===1?"":"s"} inside`}}));
+    } catch(err) {
+      setTests(t=>({...t,[key]:{bad:true,msg:"✗ "+(err.message||err)+". Share this folder with the app's Google service account (Viewer) and test again."}}));
+    }
+  };
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      <div style={{color:C.blue,fontWeight:800,fontSize:16}}>📁 Google Drive folders</div>
+      <div style={{background:C.card,borderRadius:10,padding:"10px 14px",color:C.muted,fontSize:12,lineHeight:1.5}}>
+        Paste the link of the Drive <b>folder</b> each button should open. Leave empty to use the default folder.
+        Each folder must be shared with the app's Google service account as <b>Viewer</b>, otherwise it will not open. Use <b>Test</b> to check.
+      </div>
+      {DRIVE_KEYS.map(k=>(
+        <div key={k.key} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:12,display:"flex",flexDirection:"column",gap:6}}>
+          <div style={{fontWeight:800,fontSize:13,color:C.text}}>{k.label}</div>
+          <div style={{fontSize:11,color:C.muted}}>{k.hint}</div>
+          <input value={vals[k.key]} onChange={e=>{setVals(v=>({...v,[k.key]:e.target.value})); setErrs(x=>({...x,[k.key]:""})); setTests(t=>({...t,[k.key]:null})); setSaved("");}}
+            placeholder="https://drive.google.com/drive/folders/…" autoCapitalize="off" autoCorrect="off"
+            style={{border:`1px solid ${errs[k.key]?C.red:C.border}`,borderRadius:8,padding:"9px 10px",fontSize:12.5,background:C.bg,color:C.text}}/>
+          {errs[k.key] && <div style={{color:C.red,fontSize:12,fontWeight:700}}>{errs[k.key]}</div>}
+          <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+            <button onClick={()=>test(k.key)} style={{background:"transparent",border:`1.5px solid ${C.blue}`,borderRadius:8,color:C.blue,fontWeight:700,fontSize:12,padding:"6px 12px",cursor:"pointer"}}>Test</button>
+            {!(vals[k.key]||"").trim() && <span style={{fontSize:11,color:C.muted}}>Using the default folder</span>}
+            {tests[k.key] && <span style={{fontSize:12,fontWeight:700,color:tests[k.key].ok?C.green:tests[k.key].bad?C.red:C.muted}}>{tests[k.key].msg}</span>}
+          </div>
+        </div>
+      ))}
+      <button disabled={!dirty} onClick={save}
+        style={{background:C.green,border:"none",borderRadius:12,color:"#fff",fontWeight:800,fontSize:14,padding:"13px",cursor:"pointer",opacity:dirty?1:0.5}}>Save folders</button>
+      {saved && <div style={{fontSize:12,color:C.muted}}>{saved}</div>}
+    </div>
+  );
+}
+
 function TonnageMod({trips, allTripsLoaded, loadingAllTrips, loadAllTrips}) {
   const triedLoad = useRef(false);
   useEffect(()=>{ if(!allTripsLoaded && !loadingAllTrips && !triedLoad.current){ triedLoad.current = true; loadAllTrips && loadAllTrips(); } },[allTripsLoaded, loadingAllTrips]);
@@ -2497,6 +2562,7 @@ function AppMain() {
     });
   };
 
+  setDriveFolders(settings?.driveFolders); // folders each Google Drive button opens (set in Drive folders)
   const dbSetSettings = (val) => {
     log("EDIT SETTINGS", typeof val==="object"?JSON.stringify(val).slice(0,100):"updated");
     setSettings(val);
@@ -2942,6 +3008,7 @@ function AppMain() {
         {tab==="tafal"      && can(user,"tafal")      && <TafalMod   {...sp} />}
         {tab==="recovery"   && can(user,"recovery")   && <RecoveryMod {...sp} user={user} />}
         {tab==="tonnage"    && can(user,"tonnage")    && <TonnageMod {...sp} user={user} />}
+        {tab==="drivefolders" && can(user,"admin")    && <DriveFoldersMod settings={settings} setSettings={dbSetSettings} user={user} log={log} />}
         {tab==="diesel"     && can(user,"diesel")     && <DieselMod  {...sp} viewOnly={!canEdit(user,"diesel")} />}
         {tab==="pump_portal"&& can(user,"pump_portal")&& <PumpPortal {...sp} />}
         {tab==="party_portal"&&can(user,"party_portal")&&<PartyPortal {...sp} users={users} />}
@@ -5337,7 +5404,7 @@ Rules:
             📁 Local / Camera
           </button>
           <button onClick={async()=>{
-              try { await openGoogleDrivePicker(f=>addFiles([f])); }
+              try { await openGoogleDrivePicker(f=>addFiles([f]), "trips"); }
               catch(e) { alert("Google Drive: "+(e.message||"Could not open.")); }
             }}
             style={{flex:1,background:"#1a73e822",border:"1.5px solid #1a73e866",
@@ -6738,15 +6805,9 @@ function MergeDISheet({ conflict, onMerge, onSeparate, onCancel, isOwner=false }
 // Root folder ID — your M Yantra Drive folder
 const GDRIVE_ROOT_ID = "1xa6W-u-Q91u5QDS_AFPhrXzmwdjc2QEf";
 
-function extractDriveId(url) {
-  const m1 = url.match(/\/folders\/([a-zA-Z0-9_-]{20,})/);
-  const m2 = url.match(/\/d\/([a-zA-Z0-9_-]{20,})/);
-  const m3 = url.match(/[?&]id=([a-zA-Z0-9_-]{20,})/);
-  return (m1||m2||m3)?.[1] || null;
-}
-
 // Opens a full folder-browser modal. User navigates folders, clicks a file to import.
-function openGoogleDrivePicker(onFile) {
+function openGoogleDrivePicker(onFile, driveKey) {
+  const ROOT_ID = getDriveRoot(driveKey, GDRIVE_ROOT_ID); // folder set by the owner for this screen, else the default
   return new Promise((resolve, reject) => {
     // ── Build modal DOM ──────────────────────────────────────────────────────
     const S = {
@@ -6789,7 +6850,7 @@ function openGoogleDrivePicker(onFile) {
     closeBtn.onclick = () => { close(); reject(new Error("cancelled")); };
 
     // ── State ────────────────────────────────────────────────────────────────
-    const stack = [{ id: GDRIVE_ROOT_ID, name: `${RC.companyName} Drive` }];
+    const stack = [{ id: ROOT_ID, name: `${RC.companyName} Drive` }];
 
     // ── Render breadcrumb ────────────────────────────────────────────────────
     const renderBc = () => {
@@ -6894,20 +6955,20 @@ function openGoogleDrivePicker(onFile) {
     };
 
     // ── Start at root ─────────────────────────────────────────────────────────
-    loadFolder(GDRIVE_ROOT_ID);
+    loadFolder(ROOT_ID);
   });
 }
 
 
 // ─── FILE SOURCE PICKER — reusable Local + Google Drive button pair ───────────
 // Usage: <FileSourcePicker onFile={fn} accept="image/*,application/pdf" label="Upload" color={C.blue} />
-function FileSourcePicker({ onFile, accept="image/*,application/pdf", label="Upload", color, icon="📎", compact=false }) {
+function FileSourcePicker({ onFile, accept="image/*,application/pdf", label="Upload", color, icon="📎", compact=false, driveKey }) {
   const inputRef = useRef();
   const [gdLoading, setGdLoading] = useState(false);
 
   const handleDrive = async () => {
     setGdLoading(true);
-    try { await openGoogleDrivePicker(onFile); }
+    try { await openGoogleDrivePicker(onFile, driveKey); }
     catch(e) { alert("Google Drive: " + (e.message||"Could not open. Check popup blocker.")); }
     finally { setGdLoading(false); }
   };
@@ -7194,7 +7255,7 @@ Rules:
             {onInvoice ? "Drop the DI / GR copy and the invoice together — the invoice is attached by DI number" : "Take a photo or upload PDF — AI will fill all fields"}
           </div>
           {multiPicker}
-          <FileSourcePicker onFile={handleFile} accept="image/*,application/pdf"
+          <FileSourcePicker driveKey={"trips"} onFile={handleFile} accept="image/*,application/pdf"
             label={onInvoice ? "Single file: photo or PDF" : "Take photo or upload PDF"} color={C.blue} icon="📄" />
           {error && <div style={{color:C.red, fontSize:12, marginTop:4}}>{error}</div>}
           {noticeBox}
@@ -7507,7 +7568,7 @@ function PartyDocUpload({ tripId, grFileRef, invoiceFileRef, onDone, onBack }) {
         </div>
       ))}
       <div style={{marginTop:files.length>0?8:0}}>
-        <FileSourcePicker onFile={onAdd} accept="image/*,application/pdf"
+        <FileSourcePicker driveKey={"trips"} onFile={onAdd} accept="image/*,application/pdf"
           label={files.length>0?`+ Add another ${label}`:`Upload ${label}`}
           color={color} icon="📎" />
       </div>
@@ -8134,7 +8195,7 @@ function BatchReceiptSheet({ batchId, trips, setTrips, onClose, log }) {
                 cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
           </div>
         ) : (
-          <FileSourcePicker onFile={pick} accept="application/pdf,image/*"
+          <FileSourcePicker driveKey={"trips"} onFile={pick} accept="application/pdf,image/*"
             label="Upload Reply Email PDF" color={C.green} icon="📧" />
         )}
       </div>
@@ -8250,7 +8311,7 @@ function ReceiptUploadSheet({ trip, onMerge, onClose }) {
                 cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
           </div>
         ) : (
-          <FileSourcePicker onFile={pick} accept="application/pdf,image/*"
+          <FileSourcePicker driveKey={"trips"} onFile={pick} accept="application/pdf,image/*"
             label="Tap to upload Reply Email PDF" color={C.green} icon="📧" />
         )}
       </div>
@@ -8388,7 +8449,7 @@ function SealedInvoiceSheet({ trip, onMerge, onClose, embedded=false }) {
                   style={{background:"none",border:"none",color:C.red,fontSize:16,cursor:"pointer",marginLeft:6}}>�</button>
               </div>
             ))}
-            <FileSourcePicker onFile={f=>addFileToDI(diIdx,f)} accept="image/*,application/pdf"
+            <FileSourcePicker driveKey={"trips"} onFile={f=>addFileToDI(diIdx,f)} accept="image/*,application/pdf"
               label={diFiles[diIdx]?.length>0?"+ Add page":"Upload sealed invoice for this DI"}
               color={C.orange} icon="🏷️" />
           </div>
@@ -8408,7 +8469,7 @@ function SealedInvoiceSheet({ trip, onMerge, onClose, embedded=false }) {
                 style={{background:"none",border:"none",color:C.red,fontSize:16,cursor:"pointer",marginLeft:6}}>�</button>
             </div>
           ))}
-          <FileSourcePicker onFile={f=>addFileToDI(0,f)} accept="image/*,application/pdf"
+          <FileSourcePicker driveKey={"trips"} onFile={f=>addFileToDI(0,f)} accept="image/*,application/pdf"
             label={singleFiles.length>0?"+ Add another page":"Upload sealed invoice"}
             color={C.orange} icon="🏷️" />
         </div>
@@ -13857,7 +13918,7 @@ function ScanPaymentBtn({ onResult }) {
 
   return (
     <span style={{display:"inline-flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
-      <FileSourcePicker onFile={scan} accept="image/*,application/pdf"
+      <FileSourcePicker driveKey={"payments"} onFile={scan} accept="image/*,application/pdf"
         label={scanning?"Reading…":"Scan Payment"}
         color={C.purple||"#7c3aed"} icon="📷" compact={true} />
       {lastFile && !scanning && (
@@ -27062,7 +27123,7 @@ function Payments({payments, setPayments, trips, setTrips, fyTrips, vehicles, se
                     <div style={{fontSize:24,marginBottom:4}}>{btn.icon}</div>
                     <div style={{color:C.text,fontWeight:600,fontSize:13,marginBottom:4}}>{btn.label}</div>
                     <div style={{fontSize:11,color:C.muted,marginBottom:10}}>{btn.sub}</div>
-                    <FileSourcePicker onFile={f=>handleScan(f,btn.type)} accept=".pdf,image/*"
+                    <FileSourcePicker driveKey={btn.type==="invoice"?"invoices":"advices"} onFile={f=>handleScan(f,btn.type)} accept=".pdf,image/*"
                       label={btn.label} color={"#1565c0"} compact={true} />
                   </div>
                 ))}
@@ -30922,7 +30983,7 @@ This will auto-recover in the next trip.`);
         <div style={{color:C.blue,fontWeight:800,fontSize:16}}>🏧 Driver Payments</div>
         {viewOnly
           ? <span style={{background:C.orange+"22",color:C.orange,fontSize:11,fontWeight:700,borderRadius:8,padding:"4px 10px"}}>👁 View Only</span>
-          : <FileSourcePicker onFile={scanGlobal} accept="image/*,application/pdf"
+          : <FileSourcePicker driveKey={"payments"} onFile={scanGlobal} accept="image/*,application/pdf"
               label={scanningGlobal?"Reading…":"Scan Payment"}
               color={C.purple||"#7c3aed"} icon="📷" compact={true} />
         }
