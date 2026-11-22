@@ -1,9 +1,9 @@
+import { normReceipt, billsDiffer, receiptClashes } from "./bill_identity.js";
 // Match scanned pump bills to OPEN diesel requests. Pure functions, unit-tested (scripts/bill_match.test.mjs).
 // Rules (owner, 21 Nov 2026): vehicle + exact diesel amount + same pump + bill date within 1 day of the request.
 // A bill never confirms anything by itself: the screen only SUGGESTS and the owner taps Confirm.
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 const norm = (v) => String(v || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
-const normReceipt = (s) => String(s || "").trim().toUpperCase();
 const money = (x) => Math.round((+x || 0) * 100) / 100;
 export const dieselOf = (r) => money(r.dieselAmount ?? r.amount);
 
@@ -49,16 +49,21 @@ const fits = (bill, r, ctx) =>
 
 export function matchBatch(bills, requests, ctx) {
   const claimed = new Set();
-  const seenReceipts = new Set();
+  const seenBills = [];
   const out = [];
   for (const bill of bills || []) {
     const rn = normReceipt(bill.receiptNo);
     if (!(+bill.amount > 0) || !norm(bill.vehicleNo)) { out.push({ bill, state: "unreadable" }); continue; }
+    let notices = [];
     if (rn) {
-      const used = (requests || []).find((r) => String(r.receiptNo || "").split("+").map(normReceipt).includes(rn));
-      if (used || seenReceipts.has(rn)) { out.push({ bill, state: "duplicate_receipt", request: used || null }); continue; }
-      seenReceipts.add(rn);
+      // the receipt number alone is not proof of a duplicate (the pump has printed the same number on different bills)
+      const rc = receiptClashes(bill, requests, null);
+      const earlier = seenBills.find((b) => normReceipt(b.receiptNo) === rn && !billsDiffer(b, bill));
+      if (rc.clash || earlier) { out.push({ bill, state: "duplicate_receipt", request: rc.clash || null }); continue; }
+      notices = rc.notices;
+      seenBills.push(bill);
     }
+    const mark = out.length;
     const cands = (requests || []).filter((r) => !claimed.has(r.id) && fits(bill, r, ctx) && dieselOf(r) === money(bill.amount));
     if (cands.length === 1) { claimed.add(cands[0].id); out.push({ bill, state: "match", request: cands[0] }); }
     else if (cands.length > 1) out.push({ bill, state: "ambiguous", candidates: cands });
@@ -68,6 +73,8 @@ export function matchBatch(bills, requests, ctx) {
       if (near.length === 1) out.push({ bill, state: "near_match", request: near[0], reason: "date" });
       else out.push({ bill, state: "not_found", sameVehicle: (requests || []).filter((r) => !claimed.has(r.id) && eligible(r) && vehicleMatches(bill.vehicleNo, r.truckNo)) });
     }
+    // same receipt number on another request, but provably a different bill: allowed, shown to the owner
+    if (notices.length) for (let i = mark; i < out.length; i++) out[i].notices = notices;
   }
   // Split bills: several unmatched bills for one vehicle whose amounts add up exactly to one open request.
   const lost = out.filter((o) => o.state === "not_found");

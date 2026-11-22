@@ -4,6 +4,7 @@ import { shareFile } from "./share_file.js";
 import { groupRequestsByDay, hasBill } from "./diesel_by_day.js";
 import { matchBatch, confirmUpdate, attachUpdate, pumpNameMatches, dieselOf, deleteBlockReason } from "./bill_match.js";
 import { retryNet, bytesToBase64, settleAfterNetFail } from "./net_retry.js";
+import { receiptClashes } from "./bill_identity.js";
 import { extractDriveId, parseDriveLink, setDriveFolders, getDriveRoot, DRIVE_KEYS } from "./drive_config.js";
 import { includeInByEmployee, employeeStatement, statementHtml } from "./byemp_logic.js";
 import { draftStatus, searchAdvices } from "./advice_mail.js";
@@ -13343,7 +13344,8 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
                     style={{background:C.orange,border:"none",borderRadius:8,color:"#fff",fontWeight:800,fontSize:13,padding:"9px",cursor:"pointer",opacity:busy[it.id]?0.6:1}}>
                     {busy[it.id]?"Saving…":"I checked the bill — "+(r.request.status==="open"?"confirm":"attach")+" Indent #"+r.request.indentNo}</button>
                 </>}
-                {!dn && r?.state==="duplicate_receipt" && <div>{chip(`Receipt ${d.receiptNo} already used${r.request?` on Indent #${r.request.indentNo} (${r.request.truckNo})`:" in this batch"}`,C.red)}</div>}
+                {!dn && r?.state==="duplicate_receipt" && <div>{chip(`This bill is already used${r.request?` on Indent #${r.request.indentNo} (${r.request.truckNo})`:" in this batch"} — same receipt ${d.receiptNo}, vehicle and amount`,C.red)}</div>}
+                {!dn && r?.notices?.length>0 && <div style={{fontSize:11.5,color:C.muted}}>Receipt no. {d.receiptNo} also appears on {r.notices.map(n=>`Indent #${n.indentNo} (${n.truckNo}${n.extractedAmount!=null?`, ₹${Number(n.extractedAmount).toLocaleString("en-IN")}`:""})`).join(", ")} — a different vehicle/amount, so this is treated as a different bill.</div>}
                 {!dn && r?.state==="unreadable" && <div>{chip("Could not read vehicle or amount — retake the photo",C.red)}</div>}
                 {!dn && (r?.state==="not_found"||r?.state==="ambiguous") && <>
                   <div>{chip(r.state==="ambiguous"?"More than one request fits — choose":"Diesel request not found",C.red)}</div>
@@ -13428,9 +13430,10 @@ function DieselReceiptScan({ selected, pumps, dieselRequests=[], cashAmount, use
 
       // Duplicate receipt number check — a receipt can only be attached to one diesel request
       if (data.receiptNo) {
-        const dup = dieselRequests.find(r => r.id !== selected.id && r.receiptNo && normReceiptNo(r.receiptNo) === normReceiptNo(data.receiptNo));
+        // The receipt number alone is not proof of a duplicate: only when the vehicle and amount don't prove it is a different bill
+        const dup = receiptClashes({receiptNo:data.receiptNo, vehicleNo:data.vehicleNo, amount:data.amount}, dieselRequests, selected.id).clash;
         if (dup) {
-          setError(`Receipt #${data.receiptNo} is already attached to Indent #${dup.indentNo} (${dup.truckNo}) — status: ${dup.status.toUpperCase()}. This receipt can't be used again.`);
+          setError(`Receipt #${data.receiptNo} is already attached to Indent #${dup.indentNo} (${dup.truckNo}) — status: ${dup.status.toUpperCase()}. This bill (same receipt number, vehicle and amount) can't be used again.`);
           setState("error");
           return;
         }
@@ -17491,9 +17494,9 @@ function DieselReceiptReviewCard({ req, pumps, dieselRequests=[], user, log, vie
     if (!date) { alert("Date is required"); return; }
     // Safety net — duplicate should already have been blocked at upload time, but re-check here too
     if (req.receiptNo) {
-      const dup = dieselRequests.find(r => r.id !== req.id && r.receiptNo && normReceiptNo(r.receiptNo) === normReceiptNo(req.receiptNo));
+      const dup = receiptClashes({receiptNo:req.receiptNo, vehicleNo:vehicleNo||req.extractedVehicleNo, amount:req.extractedAmount}, dieselRequests, req.id).clash;
       if (dup) {
-        alert(`Receipt #${req.receiptNo} is already attached to Indent #${dup.indentNo} (${dup.truckNo}) — status: ${dup.status.toUpperCase()}. This receipt can't be approved for two requests.`);
+        alert(`Receipt #${req.receiptNo} is already attached to Indent #${dup.indentNo} (${dup.truckNo}) — status: ${dup.status.toUpperCase()}. This bill (same receipt number, vehicle and amount) can't be approved for two requests.`);
         return;
       }
     }
