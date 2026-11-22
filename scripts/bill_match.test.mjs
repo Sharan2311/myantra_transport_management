@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { vehicleMatches, dateWithin, matchBatch, confirmUpdate, attachUpdate, pumpNameMatches } from "../src/bill_match.js";
+import { vehicleMatches, dateWithin, matchBatch, confirmUpdate, attachUpdate, pumpNameMatches, deleteBlockReason } from "../src/bill_match.js";
 const tests = []; const test = (n, f) => tests.push([n, f]);
 const req = (o) => ({ id: "r" + (o.indentNo || 1), indentNo: 1, truckNo: "KA28AB7880", pumpId: "P1", date: "2026-11-21", amount: 32000, dieselAmount: 32000, cashAmount: 0, status: "open", receiptNo: "", ...o });
 const bill = (o) => ({ id: "b1", vehicleNo: "7880", amount: 32000, date: "2026-11-21", pumpName: "SHREE VAISHNAVI F/S", receiptNo: "K0589", ...o });
@@ -145,6 +145,19 @@ test("confirmUpdate records a reason when the amount changed", () => {
   const r0 = req({ amount: 18000, dieselAmount: 18000, cashAmount: 0 });
   const u = confirmUpdate(r0, { amount: 18000, receiptNo: "S1 + S2", bill: bill({}), by: "S", at: "t", method: "bulk_receipt_manual", reason: "Served in 2 bills" });
   assert.equal(u.confirmedReason, "Served in 2 bills");
+});
+
+test("deleteBlockReason: open or pump-confirmed requests with no bill and no LR may be deleted", () => {
+  assert.equal(deleteBlockReason(req({ status: "open" })), "");
+  assert.equal(deleteBlockReason(req({ status: "confirmed" })), "");
+});
+test("deleteBlockReason: never for attached/reconciled, or ones holding a bill or an LR", () => {
+  assert.match(deleteBlockReason(req({ status: "attached" })), /attached/i);
+  assert.match(deleteBlockReason(req({ status: "reconciled" })), /reconciled/i);
+  assert.match(deleteBlockReason(req({ status: "confirmed", receiptNo: "K1" })), /bill/i);
+  assert.match(deleteBlockReason(req({ status: "open", receiptImagePath: "a/b.jpg" })), /bill/i);
+  assert.match(deleteBlockReason(req({ status: "open", lrNo: "SKLC1" })), /LR/);
+  assert.match(deleteBlockReason(req({ status: "open", tripId: "t1" })), /LR|trip/i);
 });
 let ok = 0;
 for (const [n, f] of tests) { try { await f(); console.log("ok -", n); ok++; } catch (e) { console.log("not ok -", n, e.message); process.exitCode = 1; } }
