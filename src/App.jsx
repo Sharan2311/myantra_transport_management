@@ -4,6 +4,9 @@ import { shareFile } from "./share_file.js";
 import { groupRequestsByDay, hasBill } from "./diesel_by_day.js";
 import { matchBatch, confirmUpdate, attachUpdate, pumpNameMatches, dieselOf, deleteBlockReason } from "./bill_match.js";
 import { retryNet, bytesToBase64, settleAfterNetFail } from "./net_retry.js";
+import { receiptClashes } from "./bill_identity.js";
+import { lastEmployeeForVehicle } from "./emp_history.js";
+import { isImportable, runPool } from "./drive_multi.js";
 import { extractDriveId, parseDriveLink, setDriveFolders, getDriveRoot, DRIVE_KEYS } from "./drive_config.js";
 import { includeInByEmployee, employeeStatement, statementHtml } from "./byemp_logic.js";
 import { draftStatus, searchAdvices } from "./advice_mail.js";
@@ -4435,6 +4438,8 @@ Rules:
         .filter(r => normTruckG(r.truckNo)===normTruckG(truckNo) && r.status==="confirmed")
         .sort((a,b)=>(b.date||"").localeCompare(a.date||"") || (b.createdAt||"").localeCompare(a.createdAt||""));
       const autoReqG = confirmedReqsG.length >= 1 ? confirmedReqsG[0] : null;
+      // Employee: the one on this vehicle's latest trip. A vehicle with no history stays blank for the user to choose.
+      const autoEmpG = lastEmployeeForVehicle(trips, truckNo, new Set((employees||[]).map(e=>e.id)));
       const autoIndentNo = autoReqG ? String(autoReqG.indentNo) : "";
       const autoDiesel   = autoReqG ? String(((autoReqG.dieselAmount??autoReqG.amount)||0)+(autoReqG.cashAmount||0)) : "0";
       return {
@@ -4444,7 +4449,7 @@ Rules:
         client,
         tafal: (() => {
           const gVehT = (vehicles||[]).find(v=>v.truckNo===truckNo);
-          return String(tafalAmountFor(gVehT, employees, settings));
+          return String(tafalAmountFor(gVehT, employees, settings, autoEmpG?.empId||""));
         })(),
         diesel: autoDiesel,
         dieselIndentNo: autoIndentNo,
@@ -4454,11 +4459,28 @@ Rules:
         loanRecovery: String(autoLoanG),
         driverPhone: vehG?.driverPhone || "",
         ownerName: vehG?.ownerName || firstItem?.extracted?.ownerName || "",
-        assignedEmpId: "",
+        assignedEmpId: autoEmpG?.empId || "",
+        _empAuto: autoEmpG,
         _autoAttachedReqId: autoReqG?.id || null,
       };
     });
     setGroups(newGroups);
+    // The auto-picked employee drives the same defaults as picking him by hand: party pouch and non-party hold
+    {
+      const upd = {};
+      newGroups.forEach(g => {
+        if(!g.assignedEmpId) return;
+        const pv = (vehicles||[]).find(v=>v.truckNo===g.truckNo);
+        const oldP = pouchAmt(pv, ""), newP = pouchAmt(pv, g.assignedEmpId);
+        const oldH = holdAllAmt(pv, g.truckNo, ""), newH = holdAllAmt(pv, g.truckNo, g.assignedEmpId);
+        (g.diIds||[]).forEach(id => { upd[id] = {oldP, newP, oldH, newH}; });
+      });
+      if(Object.keys(upd).length) setItems(prev => prev.map(x => {
+        const u = upd[x.id]; if(!u) return x;
+        if(x.orderType==="party") return (u.oldP!==u.newP && (x.pouchBalance==null || +x.pouchBalance===u.oldP)) ? {...x, pouchBalance:u.newP} : x;
+        return (u.oldH!==u.newH && (+x.pouchBalance||0)===u.oldH) ? {...x, pouchBalance:u.newH} : x;
+      }));
+    }
     setGroupsBuilt(true);
   }, [scanningNow, items.length, groupsBuilt]);
 
@@ -4496,6 +4518,7 @@ Rules:
           advance:"0", cashEmpId:"",
           shortageRecovery:String(autoSR2), loanRecovery:String(autoLR2),
           ownerName:g.ownerName||"",
+          assignedEmpId:g.assignedEmpId||"", _empAuto:g._empAuto||null,
           _splitFrom:gid,
           _autoAttachedReqId: autoReqS?.id || null,
         };
@@ -5048,7 +5071,7 @@ Rules:
             // via [BATCH TIMING] logs + pg_stat_activity showing nothing
             // running server-side during the hang — the request was stuck
             // client-side, not in Postgres).
-            try { await DB.saveVehicle(upd); } catch(e) { saveFail("saveVehicle batch DI recovery:")(e); }
+            if(JSON.stringify(upd)!==JSON.stringify(_veh0)) { try { await DB.saveVehicle(upd); } catch(e) { saveFail("saveVehicle batch DI recovery:")(e); } } // unchanged ledger → no write
           }
         }
         log("BATCH TRIP",`LR:${lrNo} DI:${ex.diNo} ${truckNo} ${ex.qty}MT [${item.orderType}]`);
@@ -5273,7 +5296,7 @@ Rules:
             const upd = syncTripRecoveryToVehicle(_veh1, trip);
             _vehWork.set(truckNo, upd);
             setVehicles(prev=>prev.map(veh=>veh.truckNo===truckNo?upd:veh));
-            try { await DB.saveVehicle(upd); } catch(e) { saveFail("saveVehicle batch multi-DI recovery:")(e); }
+            if(JSON.stringify(upd)!==JSON.stringify(_veh1)) { try { await DB.saveVehicle(upd); } catch(e) { saveFail("saveVehicle batch multi-DI recovery:")(e); } } // unchanged ledger → no write
           }
         }
         log("BATCH MULTI-DI",`LR:${lrNo} ${allDiNos} ${truckNo} ${totalQty}MT`);
@@ -5404,7 +5427,7 @@ Rules:
             📁 Local / Camera
           </button>
           <button onClick={async()=>{
-              try { await openGoogleDrivePicker(f=>addFiles([f]), "trips"); }
+              try { await openGoogleDrivePicker(null, "trips", {multi:true, onFiles:addFiles}); }
               catch(e) { alert("Google Drive: "+(e.message||"Could not open.")); }
             }}
             style={{flex:1,background:"#1a73e822",border:"1.5px solid #1a73e866",
@@ -6309,6 +6332,12 @@ Rules:
                       <option key={e.id} value={e.id}>{e.name}{e.role?` (${e.role})`:""}</option>
                     ))}
                   </select>
+                  {g._empAuto && g.assignedEmpId===g._empAuto.empId && (
+                    <div style={{fontSize:10.5,color:C.teal,marginTop:3}}>✓ Auto-selected from this vehicle's last trip{g._empAuto.lrNo?` (LR ${g._empAuto.lrNo}`:" ("}{g._empAuto.date?`, ${g._empAuto.date}`:""}). Change it if needed.</div>
+                  )}
+                  {!g.assignedEmpId && !g._empAuto && (
+                    <div style={{fontSize:10.5,color:C.orange,marginTop:3}}>New vehicle — no earlier trip found. Please select the employee.</div>
+                  )}
                 </div>
               )}
 
@@ -6806,7 +6835,9 @@ function MergeDISheet({ conflict, onMerge, onSeparate, onCancel, isOwner=false }
 const GDRIVE_ROOT_ID = "1xa6W-u-Q91u5QDS_AFPhrXzmwdjc2QEf";
 
 // Opens a full folder-browser modal. User navigates folders, clicks a file to import.
-function openGoogleDrivePicker(onFile, driveKey) {
+// multi mode (opts.multi): tick several files, or take every PDF/image in the folder, then opts.onFiles(files) gets them all.
+function openGoogleDrivePicker(onFile, driveKey, opts={}) {
+  const multi = !!opts.multi;
   const ROOT_ID = getDriveRoot(driveKey, GDRIVE_ROOT_ID); // folder set by the owner for this screen, else the default
   return new Promise((resolve, reject) => {
     // ── Build modal DOM ──────────────────────────────────────────────────────
@@ -6838,7 +6869,11 @@ function openGoogleDrivePicker(onFile, driveKey) {
 
     // Footer — status + error
     const footer = document.createElement("div"); footer.style.cssText = S.footer;
-    footer.innerHTML = `<div id="gd-status" style="color:#64748b;font-size:12px;text-align:center;"></div>`;
+    footer.innerHTML = `<div id="gd-status" style="color:#64748b;font-size:12px;text-align:center;"></div>` + (multi ? `
+      <div style="display:flex;gap:8px;margin-top:8px;">
+        <button id="gd-all" style="flex:1;background:#e8f0fa;border:1px solid #ccddf0;color:#0a1f3a;border-radius:8px;padding:9px;font-size:12px;font-weight:700;cursor:pointer;">☑ All PDFs/images here</button>
+        <button id="gd-import" style="flex:1;background:#1a7f37;border:none;color:#fff;border-radius:8px;padding:9px;font-size:12px;font-weight:800;cursor:pointer;opacity:.5;" disabled>Import 0 files</button>
+      </div>` : "");
 
     box.appendChild(hdr); box.appendChild(bc); box.appendChild(list); box.appendChild(footer);
     overlay.appendChild(box);
@@ -6846,6 +6881,32 @@ function openGoogleDrivePicker(onFile, driveKey) {
 
     const statusEl = footer.querySelector("#gd-status");
     const closeBtn = hdr.querySelector("#gd-close");
+    const allBtn = footer.querySelector("#gd-all");
+    const importBtn = footer.querySelector("#gd-import");
+    const selected = new Map();          // multi mode: file id -> item (kept while you move between folders)
+    let currentItems = [];
+    let importing = false;
+    const downloadItem = async (item) => {
+      const res = await fetch("/.netlify/functions/proxy-drive", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "download", fileId: item.id, fileName: item.name, mimeType: item.mimeType }),
+      });
+      const data = await res.json();
+      if(data.error) throw new Error(data.error);
+      const byteStr = atob(data.base64);
+      const ab = new ArrayBuffer(byteStr.length);
+      const ia = new Uint8Array(ab);
+      for(let i=0;i<byteStr.length;i++) ia[i]=byteStr.charCodeAt(i);
+      return new File([new Blob([ab], {type: item.mimeType||"application/octet-stream"})], item.name, {type: item.mimeType||"application/octet-stream"});
+    };
+    const refreshMulti = () => {
+      if(!multi) return;
+      importBtn.textContent = `Import ${selected.size} file${selected.size===1?"":"s"}`;
+      importBtn.disabled = importing || selected.size===0;
+      importBtn.style.opacity = importBtn.disabled ? ".5" : "1";
+      list.querySelectorAll("[data-fid]").forEach(r => { const on = selected.has(r.dataset.fid); r.style.background = on ? "#dff3e4" : "none"; const c = r.querySelector("[data-check]"); if(c) c.textContent = on ? "☑" : "☐"; });
+    };
     const close = () => { document.body.removeChild(overlay); };
     closeBtn.onclick = () => { close(); reject(new Error("cancelled")); };
 
@@ -6894,6 +6955,7 @@ function openGoogleDrivePicker(onFile, driveKey) {
 
     // ── Render file/folder list ───────────────────────────────────────────────
     const renderItems = (items) => {
+      currentItems = items;
       list.innerHTML = "";
       if(items.length === 0) {
         list.innerHTML = `<div style="color:#64748b;padding:30px;text-align:center;font-size:13px;">📂 Empty folder</div>`;
@@ -6912,8 +6974,9 @@ function openGoogleDrivePicker(onFile, driveKey) {
         row.innerHTML = `
           <span style="font-size:20px;flex-shrink:0;">${icon}</span>
           <span style="color:#0a1f3a;font-size:13px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${item.name}</span>
-          ${item.isFolder ? '<span style="color:#64748b;font-size:12px;">›</span>' : '<span style="color:#1a73e8;font-size:11px;font-weight:700;">SELECT</span>'}
+          ${item.isFolder ? '<span style="color:#64748b;font-size:12px;">›</span>' : (multi ? (isImportable(item) ? '<span data-check style="font-size:18px;color:#1a7f37;">☐</span>' : '<span style="color:#94a3b8;font-size:10px;">not a PDF/image</span>') : '<span style="color:#1a73e8;font-size:11px;font-weight:700;">SELECT</span>')}
         `;
+        if(multi && !item.isFolder) row.dataset.fid = item.id;
         row.onmouseover = () => row.style.background = "#e8f0fa";
         row.onmouseout  = () => row.style.background = "none";
 
@@ -6922,24 +6985,18 @@ function openGoogleDrivePicker(onFile, driveKey) {
             stack.push({ id: item.id, name: item.name });
             loadFolder(item.id);
           };
+        } else if(multi) {
+          row.onclick = () => {
+            if(!isImportable(item) || importing) return;
+            if(selected.has(item.id)) selected.delete(item.id); else selected.set(item.id, item);
+            refreshMulti();
+          };
         } else {
           row.onclick = async () => {
             statusEl.textContent = "⏳ Downloading " + item.name + "…";
             row.disabled = true;
             try {
-              const res = await fetch("/.netlify/functions/proxy-drive", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ action: "download", fileId: item.id, fileName: item.name, mimeType: item.mimeType }),
-              });
-              const data = await res.json();
-              if(data.error) throw new Error(data.error);
-              const byteStr = atob(data.base64);
-              const ab = new ArrayBuffer(byteStr.length);
-              const ia = new Uint8Array(ab);
-              for(let i=0;i<byteStr.length;i++) ia[i]=byteStr.charCodeAt(i);
-              const blob = new Blob([ab], {type: item.mimeType||"application/octet-stream"});
-              const file = new File([blob], item.name, {type: item.mimeType||"application/octet-stream"});
+              const file = await downloadItem(item);
               close();
               onFile(file);
               resolve();
@@ -6952,7 +7009,31 @@ function openGoogleDrivePicker(onFile, driveKey) {
         list.appendChild(row);
       });
       statusEl.textContent = `${items.length} item${items.length!==1?"s":""}`;
+      refreshMulti();
     };
+
+    if(multi) {
+      // "All PDFs/images here" ticks every importable file in this folder (press again to untick them)
+      allBtn.onclick = () => {
+        if(importing) return;
+        const here = currentItems.filter(isImportable);
+        const allOn = here.length>0 && here.every(it => selected.has(it.id));
+        here.forEach(it => allOn ? selected.delete(it.id) : selected.set(it.id, it));
+        refreshMulti();
+      };
+      importBtn.onclick = async () => {
+        if(importing || selected.size===0) return;
+        importing = true; refreshMulti();
+        const picked = [...selected.values()];
+        statusEl.textContent = `⏳ Downloading 0/${picked.length}…`;
+        const { results, failures } = await runPool(picked, downloadItem, 3, (d, t) => { statusEl.textContent = `⏳ Downloading ${d}/${t}…`; });
+        const files = results.filter(Boolean);
+        close();
+        if(files.length) opts.onFiles && opts.onFiles(files);
+        if(failures.length) alert(`${failures.length} file${failures.length===1?"":"s"} could not be downloaded from Drive and ${failures.length===1?"was":"were"} NOT added:\n\n` + failures.map(f=>`• ${f.item.name}: ${f.error}`).join("\n"));
+        resolve();
+      };
+    }
 
     // ── Start at root ─────────────────────────────────────────────────────────
     loadFolder(ROOT_ID);
@@ -13343,7 +13424,8 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
                     style={{background:C.orange,border:"none",borderRadius:8,color:"#fff",fontWeight:800,fontSize:13,padding:"9px",cursor:"pointer",opacity:busy[it.id]?0.6:1}}>
                     {busy[it.id]?"Saving…":"I checked the bill — "+(r.request.status==="open"?"confirm":"attach")+" Indent #"+r.request.indentNo}</button>
                 </>}
-                {!dn && r?.state==="duplicate_receipt" && <div>{chip(`Receipt ${d.receiptNo} already used${r.request?` on Indent #${r.request.indentNo} (${r.request.truckNo})`:" in this batch"}`,C.red)}</div>}
+                {!dn && r?.state==="duplicate_receipt" && <div>{chip(`This bill is already used${r.request?` on Indent #${r.request.indentNo} (${r.request.truckNo})`:" in this batch"} — same receipt ${d.receiptNo}, vehicle and amount`,C.red)}</div>}
+                {!dn && r?.notices?.length>0 && <div style={{fontSize:11.5,color:C.muted}}>Receipt no. {d.receiptNo} also appears on {r.notices.map(n=>`Indent #${n.indentNo} (${n.truckNo}${n.extractedAmount!=null?`, ₹${Number(n.extractedAmount).toLocaleString("en-IN")}`:""})`).join(", ")} — a different vehicle/amount, so this is treated as a different bill.</div>}
                 {!dn && r?.state==="unreadable" && <div>{chip("Could not read vehicle or amount — retake the photo",C.red)}</div>}
                 {!dn && (r?.state==="not_found"||r?.state==="ambiguous") && <>
                   <div>{chip(r.state==="ambiguous"?"More than one request fits — choose":"Diesel request not found",C.red)}</div>
@@ -13428,9 +13510,10 @@ function DieselReceiptScan({ selected, pumps, dieselRequests=[], cashAmount, use
 
       // Duplicate receipt number check — a receipt can only be attached to one diesel request
       if (data.receiptNo) {
-        const dup = dieselRequests.find(r => r.id !== selected.id && r.receiptNo && normReceiptNo(r.receiptNo) === normReceiptNo(data.receiptNo));
+        // The receipt number alone is not proof of a duplicate: only when the vehicle and amount don't prove it is a different bill
+        const dup = receiptClashes({receiptNo:data.receiptNo, vehicleNo:data.vehicleNo, amount:data.amount}, dieselRequests, selected.id).clash;
         if (dup) {
-          setError(`Receipt #${data.receiptNo} is already attached to Indent #${dup.indentNo} (${dup.truckNo}) — status: ${dup.status.toUpperCase()}. This receipt can't be used again.`);
+          setError(`Receipt #${data.receiptNo} is already attached to Indent #${dup.indentNo} (${dup.truckNo}) — status: ${dup.status.toUpperCase()}. This bill (same receipt number, vehicle and amount) can't be used again.`);
           setState("error");
           return;
         }
@@ -17491,9 +17574,9 @@ function DieselReceiptReviewCard({ req, pumps, dieselRequests=[], user, log, vie
     if (!date) { alert("Date is required"); return; }
     // Safety net — duplicate should already have been blocked at upload time, but re-check here too
     if (req.receiptNo) {
-      const dup = dieselRequests.find(r => r.id !== req.id && r.receiptNo && normReceiptNo(r.receiptNo) === normReceiptNo(req.receiptNo));
+      const dup = receiptClashes({receiptNo:req.receiptNo, vehicleNo:vehicleNo||req.extractedVehicleNo, amount:req.extractedAmount}, dieselRequests, req.id).clash;
       if (dup) {
-        alert(`Receipt #${req.receiptNo} is already attached to Indent #${dup.indentNo} (${dup.truckNo}) — status: ${dup.status.toUpperCase()}. This receipt can't be approved for two requests.`);
+        alert(`Receipt #${req.receiptNo} is already attached to Indent #${dup.indentNo} (${dup.truckNo}) — status: ${dup.status.toUpperCase()}. This bill (same receipt number, vehicle and amount) can't be approved for two requests.`);
         return;
       }
     }
