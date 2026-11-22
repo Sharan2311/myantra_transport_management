@@ -159,6 +159,29 @@ test("deleteBlockReason: never for attached/reconciled, or ones holding a bill o
   assert.match(deleteBlockReason(req({ status: "open", lrNo: "SKLC1" })), /LR/);
   assert.match(deleteBlockReason(req({ status: "open", tripId: "t1" })), /LR|trip/i);
 });
+test("same receipt number as a stored bill but a different vehicle/amount is NOT a duplicate; the owner gets a notice", () => {
+  const stored = req({ indentNo: 9, status: "confirmed", receiptNo: "K0596", extractedVehicleNo: "5499", extractedAmount: 15396, receiptImagePath: "x.jpg" });
+  const target = req({ indentNo: 10, truckNo: "KA28AB8840", amount: 10000, dieselAmount: 10000 });
+  const [r] = matchBatch([bill({ vehicleNo: "8840", amount: 10000, receiptNo: "K0596" })], [stored, target], ctx);
+  assert.equal(r.state, "match"); assert.equal(r.request.indentNo, 10);
+  assert.equal(r.notices.length, 1); assert.equal(r.notices[0].indentNo, 9);
+});
+test("the same bill uploaded again (same receipt, vehicle, amount) is still a duplicate", () => {
+  const stored = req({ indentNo: 9, status: "confirmed", receiptNo: "K0596", extractedVehicleNo: "5499", extractedAmount: 15396, receiptImagePath: "x.jpg" });
+  const [r] = matchBatch([bill({ vehicleNo: "5499", amount: 15396, receiptNo: "K0596" })], [stored], ctx);
+  assert.equal(r.state, "duplicate_receipt"); assert.equal(r.request.indentNo, 9);
+});
+test("two bills in one batch with the same receipt number but different vehicle/amount are both fine", () => {
+  const a = req({ indentNo: 1, truckNo: "TS07UH5499", amount: 15396, dieselAmount: 15396 });
+  const b = req({ indentNo: 2, truckNo: "KA28AB8840", amount: 10000, dieselAmount: 10000 });
+  const res = matchBatch([bill({ id: "b1", vehicleNo: "5499", amount: 15396, receiptNo: "K0596" }), bill({ id: "b2", vehicleNo: "8840", amount: 10000, receiptNo: "K0596" })], [a, b], ctx);
+  assert.deepEqual(res.map((r) => r.state), ["match", "match"]);
+});
+test("the same bill twice in one batch: second is a duplicate", () => {
+  const a = req({ indentNo: 1, truckNo: "TS07UH5499", amount: 15396, dieselAmount: 15396 });
+  const res = matchBatch([bill({ id: "b1", vehicleNo: "5499", amount: 15396, receiptNo: "K0596" }), bill({ id: "b2", vehicleNo: "5499", amount: 15396, receiptNo: "K0596" })], [a], ctx);
+  assert.equal(res[1].state, "duplicate_receipt");
+});
 let ok = 0;
 for (const [n, f] of tests) { try { await f(); console.log("ok -", n); ok++; } catch (e) { console.log("not ok -", n, e.message); process.exitCode = 1; } }
 console.log(ok + " tests passed");
