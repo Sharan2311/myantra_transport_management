@@ -844,9 +844,10 @@ export const DB = {
     if(error && !error.message?.includes('duplicate key')) throw error;
   },
   // Diesel receipt image storage — private bucket, signed URLs only (same pattern as trip-files)
-  uploadDieselReceipt: async (requestId, file) => {
+  // `name` (optional) gives the photo a fixed file name so a retry overwrites instead of piling up copies.
+  uploadDieselReceipt: async (requestId, file, name) => {
     const ext = (file.name||'').split('.').pop() || 'jpg';
-    const path = `${requestId}/${Date.now()}.${ext}`;
+    const path = name ? `${requestId}/${name}` : `${requestId}/${Date.now()}.${ext}`;
     const { error } = await supabase.storage.from('diesel-receipts').upload(path, file, { upsert: true });
     if(error) {
       if (error.message?.includes('Bucket not found')) {
@@ -855,6 +856,17 @@ export const DB = {
       throw error;
     }
     return path;
+  },
+  // Used after a "Failed to fetch" to learn what the database really holds (the server may have finished while the reply was lost).
+  getDieselRequestRow: async (id) => {
+    const { data, error } = await supabase.from('mye_diesel_requests').select('id,status,receipt_no,receipt_image_path').eq('id', id).maybeSingle();
+    if(error) throw error;
+    return data || null;
+  },
+  dieselReceiptExists: async (requestId, name) => {
+    const { data, error } = await supabase.storage.from('diesel-receipts').list(requestId, { search: name });
+    if(error) throw error;
+    return (data||[]).some(f => f.name === name);
   },
   getDieselReceiptUrl: async (path, expiresIn = 3600) => {
     const { data, error } = await supabase.storage.from('diesel-receipts').createSignedUrl(path, expiresIn);
