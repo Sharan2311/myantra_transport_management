@@ -2,7 +2,7 @@ import { pouchAmountFor, holdAllAmountFor } from "./pouch_logic.js";
 import { tonnageByBlock } from "./tonnage_logic.js";
 import { shareFile } from "./share_file.js";
 import { groupRequestsByDay, hasBill } from "./diesel_by_day.js";
-import { matchBatch, confirmUpdate, dieselOf } from "./bill_match.js";
+import { matchBatch, confirmUpdate, attachUpdate, pumpNameMatches, dieselOf } from "./bill_match.js";
 import { includeInByEmployee, employeeStatement, statementHtml } from "./byemp_logic.js";
 import { draftStatus, searchAdvices } from "./advice_mail.js";
 import { checkInvoiceLine, extraDeductionItems, splitShortage, appInvoiceTotals, holdsByInvoice, cleanAdvices } from "./advice_check.js";
@@ -13150,8 +13150,8 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
     }
   };
   const onPick = async (e) => {
-    const files = Array.from(e.target.files||[]);
-    e.target.value = "";
+    const input = e.target;
+    const files = Array.from(input.files||[]);
     if(!files.length) return;
     const fresh = files.map((f,i)=>({id:`b${Date.now()}_${i}`,file:f,url:URL.createObjectURL(f),state:"scanning"}));
     setItems(prev=>[...fresh,...prev]);
@@ -13159,9 +13159,11 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
     const queue=[...fresh];
     const worker = async()=>{ while(queue.length){ await scanOne(queue.shift()); } };
     await Promise.all([worker(),worker()]);
+    input.value = ""; // cleared only after every file is read (clearing earlier makes iPhone files unreadable -> "Read failed")
   };
+  const retry = async (it) => { setItems(prev=>prev.map(x=>x.id===it.id?{...x,state:"scanning",error:""}:x)); await scanOne(it); };
 
-  const pumpMatches = (name, r) => { const p=pumps.find(x=>x.id===r.pumpId); return p ? pumpNamesMatch(name, p.name) : false; };
+  const pumpMatches = (name, r) => { const p=pumps.find(x=>x.id===r.pumpId); return p ? (pumpNamesMatch(name, p.name) || pumpNameMatches(name, p.name)) : false; };
   const live = items.filter(i=>i.state==="done" && !done[i.id]);
   const results = useMemo(()=>matchBatch(
     live.map(i=>({id:i.id, vehicleNo:i.data.vehicleNo, amount:i.data.amount, date:i.data.date, pumpName:i.data.pumpName, receiptNo:i.data.receiptNo})),
@@ -13171,18 +13173,19 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
   const confirmOn = async (item, request, {amount, receiptNo, reason, method, extra=[]}) => {
     setErrs(p=>({...p,[item.id]:""}));
     const cur = dieselRequests.find(r=>r.id===request.id);
-    if(!cur || cur.status!=="open"){ setErrs(p=>({...p,[item.id]:`Indent #${request.indentNo} is no longer open — it was changed by someone else. Nothing was saved.`})); return; }
+    if(!cur || !(cur.status==="open" || ((cur.status==="confirmed"||cur.status==="attached") && !(String(cur.receiptNo||"").trim()||cur.receiptImagePath)))){ setErrs(p=>({...p,[item.id]:`Indent #${request.indentNo} was changed by someone else (now ${cur?cur.status:"missing"}). Nothing was saved.`})); return; }
+    const attachOnly = cur.status!=="open"; // already confirmed by the pump: only add the bill as proof, status and amounts untouched
     setBusy(p=>({...p,[item.id]:true}));
     try {
       const path = await DB.uploadDieselReceipt(cur.id, item.compressed||item.file);
-      const upd = {...confirmUpdate(cur,{amount,receiptNo,bill:item.data,by:user?.name||user?.username||"",at:nowTs(),method,reason}), receiptImagePath:path};
+      const upd = {...(attachOnly ? attachUpdate(cur,{receiptNo,bill:item.data,method,note:reason}) : confirmUpdate(cur,{amount,receiptNo,bill:item.data,by:user?.name||user?.username||"",at:nowTs(),method,reason})), receiptImagePath:path};
       await DB.saveDieselRequest(upd);
       setDieselRequests(prev=>prev.map(r=>r.id===upd.id?upd:r));
       log && log("BILL CONFIRM", `Indent #${cur.indentNo} · ${cur.truckNo} · ${method} · Diesel ₹${amount} · Receipt ${receiptNo||"-"}${reason?` · ${reason}`:""}`);
       setDone(p=>{ const n={...p,[item.id]:{indentNo:cur.indentNo,truckNo:cur.truckNo}}; extra.forEach(x=>{n[x]={indentNo:cur.indentNo,truckNo:cur.truckNo,part:true};}); return n; });
     } catch(e) {
       saveFail("bulkBillConfirm:")(e);
-      setErrs(p=>({...p,[item.id]:"NOT SAVED — "+(e.message||e)+". The request is still open."}));
+      setErrs(p=>({...p,[item.id]:"NOT SAVED — "+(e.message||e)+". Nothing was changed on the request."}));
     } finally { setBusy(p=>({...p,[item.id]:false})); }
   };
 
@@ -13218,15 +13221,24 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
             <img src={it.url} alt="bill" style={{width:84,height:112,objectFit:"cover",borderRadius:8,flexShrink:0,background:C.bg}}/>
             <div style={{flex:1,minWidth:0,display:"flex",flexDirection:"column",gap:5}}>
               {it.state==="scanning" && <div style={{color:C.orange,fontWeight:800,fontSize:13}}>🤖 Reading bill…</div>}
-              {it.state==="error" && <div style={{color:C.red,fontSize:12}}>Could not read this bill: {it.error}</div>}
+              {it.state==="error" && <>
+                <div style={{color:C.red,fontSize:12}}>Could not read this bill: {it.error}</div>
+                <button onClick={()=>retry(it)} style={{background:"transparent",border:`1.5px solid ${C.blue}`,borderRadius:8,color:C.blue,fontWeight:700,fontSize:12,padding:"7px",cursor:"pointer"}}>↻ Try again</button></>}
               {it.state==="done" && <>
                 {row("Vehicle",d.vehicleNo)}{row("Amount",d.amount!=null?"₹"+Number(d.amount).toLocaleString("en-IN"):"")}{row("Date",d.date)}{row("Pump",d.pumpName)}{row("Receipt no.",d.receiptNo)}
                 {dn && <div>{chip(dn.part?`✓ Part of Indent #${dn.indentNo} (confirmed)`:`✓ Confirmed Indent #${dn.indentNo} · ${dn.truckNo}`,C.green)}</div>}
                 {!dn && r?.state==="match" && <>
-                  <div>{chip("Matches "+reqLine(r.request),C.green)}</div>
+                  <div>{chip("Matches "+reqLine(r.request),C.green)}{r.request.status!=="open" && <span style={{marginLeft:6}}>{chip("already confirmed by pump — bill will be attached",C.blue)}</span>}</div>
                   <button disabled={busy[it.id]} onClick={()=>confirmOn(it,r.request,{amount:d.amount,receiptNo:d.receiptNo,method:"bulk_receipt"})}
                     style={{background:C.green,border:"none",borderRadius:8,color:"#fff",fontWeight:800,fontSize:13,padding:"9px",cursor:"pointer",opacity:busy[it.id]?0.6:1}}>
-                    {busy[it.id]?"Saving…":"✓ Confirm Indent #"+r.request.indentNo}</button>
+                    {busy[it.id]?"Saving…":(r.request.status==="open"?"✓ Confirm Indent #":"📎 Attach bill to Indent #")+r.request.indentNo}</button>
+                </>}
+                {!dn && r?.state==="near_match" && <>
+                  <div>{chip("Check date: bill "+(d.date||"?")+" vs request "+r.request.date,C.orange)}</div>
+                  <div style={{fontSize:11.5,color:C.muted}}>Vehicle, pump and amount match {reqLine(r.request)}; only the date differs. Look at the bill photo before approving.</div>
+                  <button disabled={busy[it.id]} onClick={()=>confirmOn(it,r.request,{amount:d.amount,receiptNo:d.receiptNo,method:"bulk_receipt_manual",reason:`Date on bill ${d.date||"?"} differs from request ${r.request.date}; approved after checking the bill`})}
+                    style={{background:C.orange,border:"none",borderRadius:8,color:"#fff",fontWeight:800,fontSize:13,padding:"9px",cursor:"pointer",opacity:busy[it.id]?0.6:1}}>
+                    {busy[it.id]?"Saving…":"I checked the bill — "+(r.request.status==="open"?"confirm":"attach")+" Indent #"+r.request.indentNo}</button>
                 </>}
                 {!dn && r?.state==="duplicate_receipt" && <div>{chip(`Receipt ${d.receiptNo} already used${r.request?` on Indent #${r.request.indentNo} (${r.request.truckNo})`:" in this batch"}`,C.red)}</div>}
                 {!dn && r?.state==="unreadable" && <div>{chip("Could not read vehicle or amount — retake the photo",C.red)}</div>}
