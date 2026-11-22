@@ -40,7 +40,24 @@ exports.handler = async (event) => {
       const { folderId } = body;
       if (!folderId) return { statusCode: 400, body: JSON.stringify({ error: "folderId required" }) };
 
+      // Drive answers a listing of a folder this account cannot see with an EMPTY list (no error), which looks like
+      // an empty folder. Look the folder up first so "not shared" is reported as such.
+      let folderMeta;
+      try {
+        folderMeta = (await drive.files.get({ fileId: folderId, fields: "id,name,mimeType", supportsAllDrives: true })).data;
+      } catch (e) {
+        const who = (() => { try { return JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON).client_email; } catch { return "the service account"; } })();
+        return { statusCode: 200, headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ error: `This folder is not shared with the app. In Google Drive, share it (Viewer) with ${who}.` }) };
+      }
+      if (folderMeta.mimeType === "application/vnd.google-apps.shortcut") {
+        return { statusCode: 200, headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ error: "This link is a shortcut, not a real folder. Open the original folder and copy its link." }) };
+      }
+
       const res = await drive.files.list({
+        supportsAllDrives: true,
+        includeItemsFromAllDrives: true,
         q: `'${folderId}' in parents and trashed=false`,
         fields: "files(id,name,mimeType,size,modifiedTime)",
         orderBy: "folder,name",
