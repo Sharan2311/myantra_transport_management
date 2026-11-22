@@ -2,7 +2,8 @@ import { pouchAmountFor, holdAllAmountFor } from "./pouch_logic.js";
 import { tonnageByBlock } from "./tonnage_logic.js";
 import { shareFile } from "./share_file.js";
 import { groupRequestsByDay, hasBill } from "./diesel_by_day.js";
-import { matchBatch, confirmUpdate, attachUpdate, pumpNameMatches, dieselOf } from "./bill_match.js";
+import { matchBatch, confirmUpdate, attachUpdate, pumpNameMatches, dieselOf, deleteBlockReason } from "./bill_match.js";
+import { retryNet } from "./net_retry.js";
 import { includeInByEmployee, employeeStatement, statementHtml } from "./byemp_logic.js";
 import { draftStatus, searchAdvices } from "./advice_mail.js";
 import { checkInvoiceLine, extraDeductionItems, splitShortage, appInvoiceTotals, holdsByInvoice, cleanAdvices } from "./advice_check.js";
@@ -13177,9 +13178,12 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
     const attachOnly = cur.status!=="open"; // already confirmed by the pump: only add the bill as proof, status and amounts untouched
     setBusy(p=>({...p,[item.id]:true}));
     try {
-      const path = await DB.uploadDieselReceipt(cur.id, item.compressed||item.file);
+      let path;
+      try { path = await retryNet(()=>DB.uploadDieselReceipt(cur.id, item.compressed||item.file)); }
+      catch(e) { throw new Error("The bill photo could not be uploaded ("+(e.message||e)+"). Check the internet and tap again"); }
       const upd = {...(attachOnly ? attachUpdate(cur,{receiptNo,bill:item.data,method,note:reason}) : confirmUpdate(cur,{amount,receiptNo,bill:item.data,by:user?.name||user?.username||"",at:nowTs(),method,reason})), receiptImagePath:path};
-      await DB.saveDieselRequest(upd);
+      try { await retryNet(()=>DB.saveDieselRequest(upd)); }
+      catch(e) { throw new Error("The request could not be saved ("+(e.message||e)+")"); }
       setDieselRequests(prev=>prev.map(r=>r.id===upd.id?upd:r));
       log && log("BILL CONFIRM", `Indent #${cur.indentNo} · ${cur.truckNo} · ${method} · Diesel ₹${amount} · Receipt ${receiptNo||"-"}${reason?` · ${reason}`:""}`);
       setDone(p=>{ const n={...p,[item.id]:{indentNo:cur.indentNo,truckNo:cur.truckNo}}; extra.forEach(x=>{n[x]={indentNo:cur.indentNo,truckNo:cur.truckNo,part:true};}); return n; });
@@ -13187,6 +13191,25 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
       saveFail("bulkBillConfirm:")(e);
       setErrs(p=>({...p,[item.id]:"NOT SAVED — "+(e.message||e)+". Nothing was changed on the request."}));
     } finally { setBusy(p=>({...p,[item.id]:false})); }
+  };
+
+  const deleteReq = async (x, itemId) => {
+    setErrs(p=>({...p,[itemId]:""}));
+    const cur = dieselRequests.find(r=>r.id===x.id) || x;
+    const why = deleteBlockReason(cur);
+    if(why){ setErrs(p=>({...p,[itemId]:why})); return; }
+    const warn = cur.status==="confirmed" ? "\n\n⚠ The pump has ALREADY CONFIRMED this request (the driver may have been served against it). Delete it only if it is a duplicate and its twin stays." : "";
+    if(!window.confirm(`Delete duplicate indent #${cur.indentNo} · ${cur.truckNo} · ₹${Number(dieselOf(cur)).toLocaleString("en-IN")} · ${cur.date} (${cur.status}, raised by ${cur.requestedBy||"?"} ${cur.createdAt||""})?${warn}\n\nThis cannot be undone.`)) return;
+    setBusy(p=>({...p,[itemId]:true}));
+    try {
+      await DB.deleteDieselRequestVerified(cur.id);
+      setDieselRequests(prev=>(prev||[]).filter(r=>r.id!==cur.id));
+      log && log("DIESEL REQUEST DELETED", `Indent #${cur.indentNo} · ${cur.truckNo} · ${cur.date} · ₹${dieselOf(cur)} (${cur.status}) deleted as a duplicate from the bills screen`);
+      setManual(p=>({...p,[itemId]:{...(p[itemId]||{}),reqId:""}}));
+    } catch(e) {
+      saveFail("bulkBillDeleteDuplicate:")(e);
+      setErrs(p=>({...p,[itemId]:"NOT DELETED — "+(e.message||e)}));
+    } finally { setBusy(p=>({...p,[itemId]:false})); }
   };
 
   const chip = (t,c) => <span style={{fontSize:10.5,fontWeight:800,color:c,background:c+"22",borderRadius:6,padding:"2px 7px"}}>{t}</span>;
@@ -13255,11 +13278,17 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
                     const splitTotal = splitBills ? splitBills.reduce((s,x)=>s+(+x.data.amount||0),0) : 0;
                     return (
                       <div style={{display:"flex",flexDirection:"column",gap:6,background:C.bg,borderRadius:8,padding:8}}>
-                        {pool.length===0 && <div style={{fontSize:12,color:C.muted}}>No open request for this vehicle. {!m.allOpen && <span onClick={()=>me({allOpen:true})} style={{color:C.blue,cursor:"pointer",fontWeight:700}}>Show all open requests</span>}</div>}
+                        {pool.length===0 && <div style={{fontSize:12,color:C.muted}}>No open request for this vehicle in this app. {!m.allOpen && <span onClick={()=>me({allOpen:true})} style={{color:C.blue,cursor:"pointer",fontWeight:700}}>Show all open requests</span>}</div>}
                         {pool.map(x=>(
-                          <label key={x.id} style={{display:"flex",gap:6,alignItems:"center",fontSize:12,cursor:"pointer"}}>
-                            <input type="radio" name={"mr"+it.id} checked={m.reqId===x.id} onChange={()=>me({reqId:x.id})}/>{reqLine(x)}
-                          </label>))}
+                          <div key={x.id} style={{display:"flex",gap:6,alignItems:"center",justifyContent:"space-between"}}>
+                            <label style={{display:"flex",gap:6,alignItems:"center",fontSize:12,cursor:"pointer",flex:1}}>
+                              <input type="radio" name={"mr"+it.id} checked={m.reqId===x.id} onChange={()=>me({reqId:x.id})}/>
+                              <span>{reqLine(x)} <span style={{color:C.muted}}>· {x.status}{x.createdAt?` · ${x.createdAt}`:""}</span></span>
+                            </label>
+                            {user?.role==="owner" && <button disabled={busy[it.id]} onClick={()=>deleteReq(x,it.id)} title="Delete this duplicate request"
+                              style={{background:"transparent",border:`1px solid ${C.red}`,borderRadius:6,color:C.red,fontSize:11,fontWeight:700,padding:"4px 8px",cursor:"pointer",flexShrink:0}}>🗑 Delete</button>}
+                          </div>))}
+                        {r.state==="ambiguous" && pool.length>1 && <div style={{fontSize:11,color:C.orange}}>These requests look identical (same vehicle, amount and date). Pick the one to keep; the owner can delete the duplicate.</div>}
                         {pool.length>0 && !m.allOpen && r.state!=="ambiguous" && <span onClick={()=>me({allOpen:true})} style={{fontSize:11,color:C.blue,cursor:"pointer",fontWeight:700}}>Show all open requests</span>}
                         {sel && !splitBills && diff!==0 && <div style={{fontSize:12,color:C.red,fontWeight:700}}>Bill is ₹{Math.abs(diff).toLocaleString("en-IN")} {diff>0?"MORE":"LESS"} than the request. The request will be confirmed at the BILL amount (₹{Number(d.amount).toLocaleString("en-IN")}).</div>}
                         {sel && (diff!==0||splitBills) && <input value={m.reason||""} onChange={e=>me({reason:e.target.value})} placeholder="Reason (required)"

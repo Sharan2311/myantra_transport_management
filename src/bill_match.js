@@ -129,3 +129,12 @@ export const attachUpdate = (req, { receiptNo, bill, method, note }) => ({
   amountNote: note || req.amountNote,
   confirmationMethod: req.confirmationMethod || method || "bulk_receipt",
 });
+
+// Owner "delete this duplicate" from the bills screen: only requests nothing depends on. Returns "" when allowed,
+// otherwise the reason it is not allowed.
+export const deleteBlockReason = (r) => {
+  if (r.status !== "open" && r.status !== "confirmed") return `This request is ${r.status}; it can't be deleted from here.`;
+  if (String(r.receiptNo || "").trim() || r.receiptImagePath) return "This request already has a bill attached.";
+  if (r.lrNo || r.tripId) return "This request is linked to an LR / trip.";
+  return "";
+};
