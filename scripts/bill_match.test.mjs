@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { vehicleMatches, dateWithin, matchBatch, confirmUpdate } from "../src/bill_match.js";
+import { vehicleMatches, dateWithin, matchBatch, confirmUpdate, attachUpdate, pumpNameMatches } from "../src/bill_match.js";
 const tests = []; const test = (n, f) => tests.push([n, f]);
 const req = (o) => ({ id: "r" + (o.indentNo || 1), indentNo: 1, truckNo: "KA28AB7880", pumpId: "P1", date: "2026-11-21", amount: 32000, dieselAmount: 32000, cashAmount: 0, status: "open", receiptNo: "", ...o });
 const bill = (o) => ({ id: "b1", vehicleNo: "7880", amount: 32000, date: "2026-11-21", pumpName: "SHREE VAISHNAVI F/S", receiptNo: "K0589", ...o });
@@ -39,13 +39,49 @@ test("wrong pump -> not found", () => {
   const [r] = matchBatch([bill({ pumpName: "OTHER PUMP" })], [req({})], ctx);
   assert.equal(r.state, "not_found");
 });
-test("date more than 1 day away -> not found", () => {
+test("date more than 1 day away is never an auto match (only a near_match to review)", () => {
   const [r] = matchBatch([bill({ date: "2026-11-25" })], [req({})], ctx);
-  assert.equal(r.state, "not_found");
+  assert.equal(r.state, "near_match");
 });
-test("only open requests are candidates", () => {
+test("a request already confirmed by the pump but with no bill yet is matched (bill is only attached)", () => {
   const [r] = matchBatch([bill({})], [req({ status: "confirmed" })], ctx);
-  assert.equal(r.state, "not_found");
+  assert.equal(r.state, "match");
+  assert.equal(r.request.status, "confirmed");
+});
+test("an attached request with no bill is also matched", () => {
+  assert.equal(matchBatch([bill({})], [req({ status: "attached" })], ctx)[0].state, "match");
+});
+test("a request that already has a bill, or is reconciled/cancelled, is never a candidate", () => {
+  assert.equal(matchBatch([bill({})], [req({ status: "confirmed", receiptNo: "K1" })], ctx)[0].state, "not_found");
+  assert.equal(matchBatch([bill({})], [req({ status: "attached", receiptImagePath: "x/1.jpg" })], ctx)[0].state, "not_found");
+  assert.equal(matchBatch([bill({})], [req({ status: "reconciled" })], ctx)[0].state, "not_found");
+});
+test("date read wrongly (bill 27 Nov vs request 21 Nov) but vehicle, pump and amount match exactly -> near_match to review", () => {
+  const [r] = matchBatch([bill({ date: "2026-11-27" })], [req({})], ctx);
+  assert.equal(r.state, "near_match");
+  assert.equal(r.request.indentNo, 1);
+});
+test("near_match needs exactly one candidate", () => {
+  assert.equal(matchBatch([bill({ date: "2026-11-27" })], [req({ indentNo: 1 }), req({ indentNo: 2 })], ctx)[0].state, "not_found");
+});
+test("pump name misread by one letter still matches (SHREF vs SHREE)", () => {
+  assert.equal(pumpNameMatches("SHREF VAISHNAVI F/S SEDAN ROAD KODLA", "SHREE VAISHNAVI F/S"), true);
+  assert.equal(pumpNameMatches("SHREE VAISHNAVI F/S SEDAM ROAD KODLA", "SHREE VAISHNAVI F/S"), true);
+});
+test("different pumps do not match", () => {
+  assert.equal(pumpNameMatches("SHREE VAISHNAVI F/S", "SBReddy"), false);
+  assert.equal(pumpNameMatches("SLV GURMITKAL", "SHREE VAISHNAVI F/S"), false);
+  assert.equal(pumpNameMatches("", "SHREE VAISHNAVI F/S"), false);
+  assert.equal(pumpNameMatches("SHREE", "SHREE VAISHNAVI F/S"), false);
+});
+test("attachUpdate keeps status and every amount, only adds the bill details", () => {
+  const r0 = req({ status: "confirmed", dieselAmount: 14000, amount: 14000, confirmedAmount: 14000, confirmedCash: 0, pin: "****" });
+  const u = attachUpdate(r0, { receiptNo: "K0656", bill: bill({ amount: 14000 }), method: "bulk_receipt" });
+  assert.equal(u.status, "confirmed");
+  assert.equal(u.amount, 14000);
+  assert.equal(u.confirmedAmount, 14000);
+  assert.equal(u.receiptNo, "K0656");
+  assert.equal(r0.receiptNo, "");
 });
 test("two open requests fit one bill -> ambiguous, never auto-picked", () => {
   const [r] = matchBatch([bill({})], [req({ indentNo: 1 }), req({ indentNo: 2 })], ctx);
