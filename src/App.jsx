@@ -19924,7 +19924,9 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                   // reusing #1, an old deleted test entry's number, instead of continuing
                   // the real sequence. This flag comes from useDB's own ready signal
                   // (same one already used elsewhere in this file for an identical race).
-                  const _ready   = _truck && _diesel && _cash && _pump && dieselRequestsReady;
+                  // A confirmed request for this vehicle blocks a new one — shown up front so no click is wasted.
+                  const _blocked = _truck ? confirmedBlock(dieselRequests, drTruckNo) : null;
+                  const _ready   = _truck && _diesel && _cash && _pump && dieselRequestsReady && !_blocked;
                   const checks = [
                     {ok:_truck,  msg:"Truck number (min 6 chars)"},
                     {ok:_diesel, msg:"Diesel amount > ₹0"},
@@ -19934,6 +19936,13 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                   ];
                   return (
                     <>
+                      {_blocked && (
+                        <div style={{background:C.red+"11",border:`1.5px solid ${C.red}`,borderRadius:10,padding:"10px 12px",
+                          color:C.red,fontSize:12,fontWeight:700,lineHeight:1.5}}>
+                          ⛔ {_blocked.message}
+                          <div style={{marginTop:4,color:C.text,fontWeight:800}}>Confirmed request: Indent #{_blocked.indentNo} · {drTruckNo.trim().toUpperCase()}</div>
+                        </div>
+                      )}
                       {!_ready && (
                         <div style={{background:C.bg,borderRadius:8,padding:"8px 12px",
                           display:"flex",flexDirection:"column",gap:4}}>
@@ -19952,7 +19961,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                         disabled={!_ready||drBusy}
                         style={{opacity:_ready?1:0.4,cursor:_ready?"pointer":"not-allowed",
                           transition:"opacity 0.2s"}}>
-                        {!dieselRequestsReady ? "⏳ Loading existing indents…" : drBusy ? "⏳ Creating…" : `⛽ Generate Indent #${nextNo||"—"} + Driver PIN`}
+                        {!dieselRequestsReady ? "⏳ Loading existing indents…" : _blocked ? `⛔ Indent #${_blocked.indentNo} is confirmed for this vehicle` : drBusy ? "⏳ Creating…" : `⛽ Generate Indent #${nextNo||"—"} + Driver PIN`}
                       </Btn>
                     </>
                   );
