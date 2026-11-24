@@ -6871,7 +6871,7 @@ function openGoogleDrivePicker(onFile, driveKey, opts={}) {
     const footer = document.createElement("div"); footer.style.cssText = S.footer;
     footer.innerHTML = `<div id="gd-status" style="color:#64748b;font-size:12px;text-align:center;"></div>` + (multi ? `
       <div style="display:flex;gap:8px;margin-top:8px;">
-        <button id="gd-all" style="flex:1;background:#e8f0fa;border:1px solid #ccddf0;color:#0a1f3a;border-radius:8px;padding:9px;font-size:12px;font-weight:700;cursor:pointer;">☑ All PDFs/images here</button>
+        <button id="gd-all" style="flex:1;background:#e8f0fa;border:1px solid #ccddf0;color:#0a1f3a;border-radius:8px;padding:9px;font-size:12px;font-weight:700;cursor:pointer;">☑ Select all</button>
         <button id="gd-import" style="flex:1;background:#1a7f37;border:none;color:#fff;border-radius:8px;padding:9px;font-size:12px;font-weight:800;cursor:pointer;opacity:.5;" disabled>Import 0 files</button>
       </div>` : "");
 
@@ -6903,6 +6903,10 @@ function openGoogleDrivePicker(onFile, driveKey, opts={}) {
     const refreshMulti = () => {
       if(!multi) return;
       importBtn.textContent = `Import ${selected.size} file${selected.size===1?"":"s"}`;
+      const _here = currentItems.filter(isImportable);
+      const _allOn = _here.length>0 && _here.every(it => selected.has(it.id));
+      allBtn.textContent = _here.length===0 ? "No PDFs/images here" : (_allOn ? `☐ Deselect all (${_here.length})` : `☑ Select all (${_here.length})`);
+      allBtn.disabled = importing || _here.length===0; allBtn.style.opacity = allBtn.disabled ? ".5" : "1";
       importBtn.disabled = importing || selected.size===0;
       importBtn.style.opacity = importBtn.disabled ? ".5" : "1";
       list.querySelectorAll("[data-fid]").forEach(r => { const on = selected.has(r.dataset.fid); r.style.background = on ? "#dff3e4" : "none"; const c = r.querySelector("[data-check]"); if(c) c.textContent = on ? "☑" : "☐"; });
@@ -6959,6 +6963,7 @@ function openGoogleDrivePicker(onFile, driveKey, opts={}) {
       list.innerHTML = "";
       if(items.length === 0) {
         list.innerHTML = `<div style="color:#64748b;padding:30px;text-align:center;font-size:13px;">📂 Empty folder</div>`;
+        refreshMulti();
         return;
       }
       // Folders first, then files
