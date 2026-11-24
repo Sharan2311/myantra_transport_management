@@ -784,8 +784,16 @@ export const DB = {
         trip_id: null, lr_no: null,
         created_by: record.createdBy, created_at: record.createdAt,
       };
-      const { error } = await supabase.from('mye_diesel_requests').insert(dbRow);
+      let error = null;
+      try { ({ error } = await supabase.from('mye_diesel_requests').insert(dbRow)); }
+      catch(e) { error = { message: String(e?.message || e), code: 'NETWORK' }; }
       if(!error) return { success: true, record, attempts: attempt+1 };
+      // The reply may have been lost (or this is a repeat of the same form) while the row WAS saved under this id —
+      // look it up before reporting a failure, so one filled form never turns into two requests.
+      try {
+        const { data: existing } = await supabase.from('mye_diesel_requests').select('id,indent_no').eq('id', record.id).maybeSingle();
+        if(existing) return { success: true, record: { ...record, indentNo: existing.indent_no }, attempts: attempt+1, alreadySaved: true };
+      } catch(_) { /* could not verify — fall through and report the original error */ }
       // 23505 = unique_violation. Only retry if it's specifically the
       // indent_no constraint — any other error should surface immediately.
       const isIndentConflict = error.code === '23505' && (error.message||'').includes('indent_no');

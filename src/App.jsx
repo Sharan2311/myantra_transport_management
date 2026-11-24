@@ -6,6 +6,13 @@ import { matchBatch, confirmUpdate, attachUpdate, pumpNameMatches, dieselOf, del
 import { retryNet, bytesToBase64, settleAfterNetFail } from "./net_retry.js";
 import { receiptClashes } from "./bill_identity.js";
 import { lastEmployeeForVehicle } from "./emp_history.js";
+import { confirmedBlock, sameFormAlready } from "./diesel_create_guard.js";
+
+// One filled diesel-request form = one request. The lock stops a second click while the first is still saving; the id
+// is kept until the save is confirmed, so a retry after a lost reply can never insert a second row.
+let _drInFlight = false;
+let _drFormId = null;
+let _drFormSig = "";
 import { isImportable, runPool } from "./drive_multi.js";
 import { extractDriveId, parseDriveLink, setDriveFolders, getDriveRoot, DRIVE_KEYS } from "./drive_config.js";
 import { includeInByEmployee, employeeStatement, statementHtml } from "./byemp_logic.js";
@@ -17895,6 +17902,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
   const [staleAlertsOpen, setStaleAlertsOpen] = useState(false);
   const [drSheet,        setDrSheet]        = useState(false);
   const [drTruckNo,      setDrTruckNo]      = useState("");
+  const [drBusy,         setDrBusy]         = useState(false);
   const [drAmount,       setDrAmount]       = useState("");
   const [drDieselAmt,    setDrDieselAmt]    = useState(""); // diesel component
   const [drCashAmt,      setDrCashAmt]      = useState(""); // cash component
@@ -19717,9 +19725,21 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
           if (dieselComp <= 0) { alert("Diesel amount is required and must be greater than ₹0"); return; }
           if (drCashAmt === "") { alert("Cash amount is required — enter 0 if no cash is being given"); return; }
           if (!drPumpId)       { alert("Select a Petrol Pump — it is mandatory for diesel requests"); return; }
+          // A confirmed request (diesel already issued, no LR yet) blocks a new one for this vehicle.
+          const _blk = confirmedBlock(dieselRequests, drTruckNo);
+          if (_blk) { alert(`${_blk.message}\n\n(Existing confirmed request: Indent #${_blk.indentNo} · ${drTruckNo.trim().toUpperCase()})`); return; }
+          // Same form filled again (e.g. after a refresh): ask before making a second identical request.
+          const _same = sameFormAlready(dieselRequests, {truckNo:drTruckNo, pumpId:drPumpId, date:today(), dieselAmount:dieselComp, cashAmount:cashComp});
+          if (_same && !window.confirm(`An open request with the same vehicle, pump and amounts already exists (Indent #${_same.indentNo}).\n\nCreate another one anyway?`)) return;
+          if (_drInFlight) return;            // second click while the first is still saving
+          _drInFlight = true; setDrBusy(true);
+          try {
           const pin = genUniquePinForTruck(drTruckNo);
+          const _sig = [drTruckNo.trim().toUpperCase(), dieselComp, cashComp, drPumpId].join("|");
+          if (!_drFormId || _drFormSig !== _sig) { _drFormId = uid(); _drFormSig = _sig; }   // edited form = new form
+          const formId = _drFormId;
           const buildRecord = (indentNo) => ({
-            id:uid(), indentNo,
+            id:formId, indentNo,
             truckNo:drTruckNo.trim().toUpperCase(),
             pumpId:drPumpId||null,
             amount:totalAmt,
@@ -19734,11 +19754,12 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
           // starting guess; the DB is the actual source of truth on conflict.
           const result = await DB.createDieselRequestSafe(buildRecord, nextNo);
           if(!result.success) {
-            alert("Could not create diesel request: " + result.error);
+            alert(result.error && result.error.startsWith("Either delete existing confirmed") ? result.error : "Could not create diesel request: " + result.error);
             return;
           }
+          _drFormId = null;                   // saved — the next filled form gets its own id
           const req = result.record;
-          setDieselRequests(p=>[req,...(p||[])]);
+          setDieselRequests(p=>(p||[]).some(x=>x.id===req.id) ? p : [req,...(p||[])]);
           // Auto-create vehicle if truck is new (truckNo only, no phone required here)
           const tn = req.truckNo;
           if(tn && typeof setVehicles==="function" && !(vehicles||[]).find(v=>v.truckNo===tn)) {
@@ -19750,9 +19771,10 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
             if(DB.saveVehicle) DB.saveVehicle(nv).catch(()=>{});
             log("AUTO-CREATE VEHICLE",`${tn} (from diesel indent)`);
           }
-          log("DIESEL REQUEST",`Indent #${nextNo} · ${req.truckNo} · ₹${req.amount} (⛽₹${dieselComp} 💵₹${cashComp})`);
-          setDrPinDisplay(pin); setDrLastIndentNo(nextNo);
+          log("DIESEL REQUEST",`Indent #${req.indentNo} · ${req.truckNo} · ₹${req.amount} (⛽₹${dieselComp} 💵₹${cashComp})`);
+          setDrPinDisplay(pin); setDrLastIndentNo(req.indentNo);
           setDrTruckNo(""); setDrAmount(""); setDrDieselAmt(""); setDrCashAmt(""); setDrPumpId("");
+          } finally { _drInFlight = false; setDrBusy(false); }
         };
 
         return (
@@ -19926,11 +19948,11 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                         </div>
                       )}
                       <Btn onClick={createRequest} full
-                        color={_ready?C.teal:C.muted}
-                        disabled={!_ready}
+                        color={_ready&&!drBusy?C.teal:C.muted}
+                        disabled={!_ready||drBusy}
                         style={{opacity:_ready?1:0.4,cursor:_ready?"pointer":"not-allowed",
                           transition:"opacity 0.2s"}}>
-                        {!dieselRequestsReady ? "⏳ Loading existing indents…" : `⛽ Generate Indent #${nextNo||"—"} + Driver PIN`}
+                        {!dieselRequestsReady ? "⏳ Loading existing indents…" : drBusy ? "⏳ Creating…" : `⛽ Generate Indent #${nextNo||"—"} + Driver PIN`}
                       </Btn>
                     </>
                   );
