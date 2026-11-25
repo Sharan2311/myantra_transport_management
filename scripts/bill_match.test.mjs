@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { vehicleMatches, dateWithin, matchBatch, confirmUpdate, attachUpdate, pumpNameMatches, deleteBlockReason } from "../src/bill_match.js";
+import { vehicleMatches, dateWithin, matchBatch, confirmUpdate, attachUpdate, pumpNameMatches, deleteBlockReason, defaultRequestPick, withCorrectedAmount } from "../src/bill_match.js";
 const tests = []; const test = (n, f) => tests.push([n, f]);
 const req = (o) => ({ id: "r" + (o.indentNo || 1), indentNo: 1, truckNo: "KA28AB7880", pumpId: "P1", date: "2026-11-21", amount: 32000, dieselAmount: 32000, cashAmount: 0, status: "open", receiptNo: "", ...o });
 const bill = (o) => ({ id: "b1", vehicleNo: "7880", amount: 32000, date: "2026-11-21", pumpName: "SHREE VAISHNAVI F/S", receiptNo: "K0589", ...o });
@@ -181,6 +181,24 @@ test("the same bill twice in one batch: second is a duplicate", () => {
   const a = req({ indentNo: 1, truckNo: "TS07UH5499", amount: 15396, dieselAmount: 15396 });
   const res = matchBatch([bill({ id: "b1", vehicleNo: "5499", amount: 15396, receiptNo: "K0596" }), bill({ id: "b2", vehicleNo: "5499", amount: 15396, receiptNo: "K0596" })], [a], ctx);
   assert.equal(res[1].state, "duplicate_receipt");
+});
+test("manual check pre-selects the open request, not an old attached one of the same vehicle", () => {
+  const att = req({ indentNo: 727, truckNo: "MH25AJ4078", status: "attached", amount: 19270, dieselAmount: 19270 });
+  const open = req({ indentNo: 2190, truckNo: "MH25AJ4078", amount: 19700, dieselAmount: 19700 });
+  assert.equal(defaultRequestPick({ sameVehicle: [att, open] }), open.id);
+  assert.equal(defaultRequestPick({ sameVehicle: [att] }), "");
+  assert.equal(defaultRequestPick({ candidates: [open, att], sameVehicle: [] }), open.id);
+  assert.equal(defaultRequestPick(null), "");
+});
+test("a corrected amount keeps the original scan and re-matches", () => {
+  const d = withCorrectedAmount({ vehicleNo: "4078", amount: 9700 }, "19,700");
+  assert.equal(d.amount, 19700); assert.equal(d.scanAmount, 9700); assert.equal(d.edited, true);
+  const again = withCorrectedAmount(d, "19700.50"); assert.equal(again.scanAmount, 9700);
+  assert.equal(withCorrectedAmount(d, "").amount, null);
+  assert.equal(withCorrectedAmount({ amount: 500 }, "500").edited, false);
+  const a = req({ indentNo: 2190, truckNo: "MH25AJ4078", amount: 19700, dieselAmount: 19700 });
+  const b = (amt) => matchBatch([bill({ id: "b1", vehicleNo: "4078", amount: amt, receiptNo: "K0749" })], [a], ctx)[0].state;
+  assert.notEqual(b(9700), "match"); assert.equal(b(d.amount), "match");
 });
 let ok = 0;
 for (const [n, f] of tests) { try { await f(); console.log("ok -", n); ok++; } catch (e) { console.log("not ok -", n, e.message); process.exitCode = 1; } }
