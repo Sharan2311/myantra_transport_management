@@ -2,7 +2,7 @@ import { pouchAmountFor, holdAllAmountFor } from "./pouch_logic.js";
 import { tonnageByBlock } from "./tonnage_logic.js";
 import { shareFile } from "./share_file.js";
 import { groupRequestsByDay, hasBill } from "./diesel_by_day.js";
-import { matchBatch, confirmUpdate, attachUpdate, pumpNameMatches, dieselOf, deleteBlockReason } from "./bill_match.js";
+import { matchBatch, confirmUpdate, attachUpdate, pumpNameMatches, dieselOf, deleteBlockReason, defaultRequestPick, withCorrectedAmount } from "./bill_match.js";
 import { retryNet, bytesToBase64, settleAfterNetFail } from "./net_retry.js";
 import { receiptClashes } from "./bill_identity.js";
 import { lastEmployeeForVehicle } from "./emp_history.js";
@@ -13422,11 +13422,22 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
                   ? <div style={{fontSize:11.5,color:C.muted}}>Tap <b>📥 Select bill photos</b> and choose this photo again.</div>
                   : <button onClick={()=>retry(it)} style={{background:"transparent",border:`1.5px solid ${C.blue}`,borderRadius:8,color:C.blue,fontWeight:700,fontSize:12,padding:"7px",cursor:"pointer"}}>↻ Try again</button>}</>}
               {it.state==="done" && <>
-                {row("Vehicle",d.vehicleNo)}{row("Amount",d.amount!=null?"₹"+Number(d.amount).toLocaleString("en-IN"):"")}{row("Date",d.date)}{row("Pump",d.pumpName)}{row("Receipt no.",d.receiptNo)}
+                {row("Vehicle",d.vehicleNo)}{row("Amount",d.amount!=null?"₹"+Number(d.amount).toLocaleString("en-IN"):"")}
+                {d.edited && <div style={{fontSize:11,color:C.orange,fontWeight:700}}>✎ Corrected by hand (scan read ₹{d.scanAmount!=null?Number(d.scanAmount).toLocaleString("en-IN"):"?"})</div>}
+                {!dn && (m.editAmt!==undefined
+                  ? <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                      <input type="number" inputMode="decimal" autoFocus value={m.editAmt} onChange={e=>me({editAmt:e.target.value})} placeholder="Amount on the bill"
+                        style={{flex:1,border:`1px solid ${C.border}`,borderRadius:6,padding:"6px 8px",fontSize:13,background:C.bg,color:C.text,minWidth:0}}/>
+                      <button onClick={()=>{ setItems(prev=>prev.map(x=>x.id===it.id?{...x,data:withCorrectedAmount(x.data,m.editAmt)}:x)); me({editAmt:undefined,reqId:undefined}); }}
+                        style={{background:C.blue,border:"none",borderRadius:6,color:"#fff",fontWeight:700,fontSize:12,padding:"7px 10px",cursor:"pointer"}}>Use</button>
+                      <button onClick={()=>me({editAmt:undefined})} style={{background:"transparent",border:"none",color:C.muted,fontSize:14,cursor:"pointer"}}>✕</button>
+                    </div>
+                  : <span onClick={()=>me({editAmt:d.amount!=null?String(d.amount):""})} style={{fontSize:11.5,color:C.blue,cursor:"pointer",fontWeight:700}}>✎ Amount wrong? Fix it</span>)}
+                {row("Date",d.date)}{row("Pump",d.pumpName)}{row("Receipt no.",d.receiptNo)}
                 {dn && <div>{chip(dn.part?`✓ Part of Indent #${dn.indentNo} (confirmed)`:`✓ Confirmed Indent #${dn.indentNo} · ${dn.truckNo}`,C.green)}</div>}
                 {!dn && r?.state==="match" && <>
                   <div>{chip("Matches "+reqLine(r.request),C.green)}{r.request.status!=="open" && <span style={{marginLeft:6}}>{chip("already confirmed by pump — bill will be attached",C.blue)}</span>}</div>
-                  <button disabled={busy[it.id]} onClick={()=>confirmOn(it,r.request,{amount:d.amount,receiptNo:d.receiptNo,method:"bulk_receipt"})}
+                  <button disabled={busy[it.id]} onClick={()=>confirmOn(it,r.request,{amount:d.amount,receiptNo:d.receiptNo,method:d.edited?"bulk_receipt_manual":"bulk_receipt",reason:d.edited?`Scan read ₹${d.scanAmount}, amount corrected by hand to ₹${d.amount} from the bill photo`:undefined})}
                     style={{background:C.green,border:"none",borderRadius:8,color:"#fff",fontWeight:800,fontSize:13,padding:"9px",cursor:"pointer",opacity:busy[it.id]?0.6:1}}>
                     {busy[it.id]?"Saving…":(r.request.status==="open"?"✓ Confirm Indent #":"📎 Attach bill to Indent #")+r.request.indentNo}</button>
                 </>}
@@ -13443,7 +13454,7 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
                 {!dn && (r?.state==="not_found"||r?.state==="ambiguous") && <>
                   <div>{chip(r.state==="ambiguous"?"More than one request fits — choose":"Diesel request not found",C.red)}</div>
                   {r.splitHint && <div style={{fontSize:11.5,color:C.orange,fontWeight:700}}>These bills add up to Indent #{r.splitHint.indentNo} ({r.splitHint.billIds.length} bills) — may be one request served in parts.</div>}
-                  {!m.open && <button onClick={()=>me({open:true,reqId:r.candidates?.[0]?.id||r.sameVehicle?.[0]?.id||""})}
+                  {!m.open && <button onClick={()=>me({open:true,reqId:defaultRequestPick(r)})}
                     style={{background:"transparent",border:`1.5px solid ${C.blue}`,borderRadius:8,color:C.blue,fontWeight:700,fontSize:12,padding:"7px",cursor:"pointer"}}>Check manually</button>}
                   {m.open && (()=>{
                     const pool = r.state==="ambiguous" ? r.candidates : (m.allOpen ? dieselRequests.filter(x=>x.status==="open") : r.sameVehicle);
@@ -13460,9 +13471,12 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
                               <input type="radio" name={"mr"+it.id} checked={m.reqId===x.id} onChange={()=>me({reqId:x.id})}/>
                               <span>{reqLine(x)} <span style={{color:C.muted}}>· {x.status}{x.createdAt?` · ${x.createdAt}`:""}</span></span>
                             </label>
-                            {user?.role==="owner" && <button disabled={busy[it.id]} onClick={()=>deleteReq(x,it.id)} title="Delete this duplicate request"
-                              style={{background:"transparent",border:`1px solid ${C.red}`,borderRadius:6,color:C.red,fontSize:11,fontWeight:700,padding:"4px 8px",cursor:"pointer",flexShrink:0}}>🗑 Delete</button>}
+                            {user?.role==="owner" && (deleteBlockReason(x)
+                              ? <span title={deleteBlockReason(x)} style={{fontSize:10.5,color:C.muted,fontWeight:700,flexShrink:0,textAlign:"right",maxWidth:92}}>can't delete · {x.status}{(x.lrNo||x.tripId)?" to LR":""}</span>
+                              : <button disabled={busy[it.id]} onClick={()=>deleteReq(x,it.id)} title="Delete this duplicate request"
+                              style={{background:"transparent",border:`1px solid ${C.red}`,borderRadius:6,color:C.red,fontSize:11,fontWeight:700,padding:"4px 8px",cursor:"pointer",flexShrink:0}}>🗑 Delete</button>)}
                           </div>))}
+                        {errs[it.id] && <div style={{color:C.red,fontSize:12,fontWeight:700,background:C.red+"11",borderRadius:6,padding:"6px 8px"}}>{errs[it.id]}</div>}
                         {r.state==="ambiguous" && pool.length>1 && <div style={{fontSize:11,color:C.orange}}>These requests look identical (same vehicle, amount and date). Pick the one to keep; the owner can delete the duplicate.</div>}
                         {pool.length>0 && !m.allOpen && r.state!=="ambiguous" && <span onClick={()=>me({allOpen:true})} style={{fontSize:11,color:C.blue,cursor:"pointer",fontWeight:700}}>Show all open requests</span>}
                         {sel && !splitBills && diff!==0 && <div style={{fontSize:12,color:C.red,fontWeight:700}}>Bill is ₹{Math.abs(diff).toLocaleString("en-IN")} {diff>0?"MORE":"LESS"} than the request. The request will be confirmed at the BILL amount (₹{Number(d.amount).toLocaleString("en-IN")}).</div>}
@@ -13478,7 +13492,7 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
                       </div>);
                   })()}
                 </>}
-                {errs[it.id] && <div style={{color:C.red,fontSize:12,fontWeight:700,background:C.red+"11",borderRadius:6,padding:"6px 8px"}}>{errs[it.id]}</div>}
+                {errs[it.id] && !m.open && <div style={{color:C.red,fontSize:12,fontWeight:700,background:C.red+"11",borderRadius:6,padding:"6px 8px"}}>{errs[it.id]}</div>}
               </>}
             </div>
           </div>
