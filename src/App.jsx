@@ -7,6 +7,7 @@ import { retryNet, bytesToBase64, settleAfterNetFail } from "./net_retry.js";
 import { receiptClashes } from "./bill_identity.js";
 import { lastEmployeeForVehicle } from "./emp_history.js";
 import { confirmedBlock, sameFormAlready } from "./diesel_create_guard.js";
+import { applyRequestToLoan, canAddToLoan } from "./diesel_loan.js";
 
 // One filled diesel-request form = one request. The lock stops a second click while the first is still saving; the id
 // is kept until the save is confirmed, so a retry after a lost reply can never insert a second row.
@@ -2793,7 +2794,7 @@ function AppMain() {
     const toEscalate = []; // 7+ days, still no LR, has an assignable employee — convert to loan
     open.forEach(ai => {
       const req = (dieselRequests||[]).find(r => String(r.indentNo)===ai.dieselIndentNo);
-      if(!req || req.lrNo) { toClear.push(ai); return; }
+      if(!req || req.lrNo || req.loanAdded) { toClear.push(ai); return; }
       const created = new Date(ai.createdAt);
       if(isNaN(created) || created > sevenDaysAgo) return; // not due yet
       if(!ai.empId) return; // no employee to charge — leave open for manual handling
@@ -4442,7 +4443,7 @@ Rules:
       // pre-fill suggestion had the identical unnormalized-comparison bug.
       const normTruckG = s => String(s||"").replace(/\s+/g,"").toUpperCase();
       const confirmedReqsG = (dieselRequests||[])
-        .filter(r => normTruckG(r.truckNo)===normTruckG(truckNo) && r.status==="confirmed")
+        .filter(r => normTruckG(r.truckNo)===normTruckG(truckNo) && (r.status==="confirmed" && !r.loanAdded))
         .sort((a,b)=>(b.date||"").localeCompare(a.date||"") || (b.createdAt||"").localeCompare(a.createdAt||""));
       const autoReqG = confirmedReqsG.length >= 1 ? confirmedReqsG[0] : null;
       // Employee: the one on this vehicle's latest trip. A vehicle with no history stays blank for the user to choose.
@@ -4516,7 +4517,7 @@ Rules:
         const shortDed2 = vehT2?.shortageDeductPerTrip||0;
         const autoSR2 = shortBal2<=0?0:(shortDed2>0?Math.min(shortDed2,shortBal2):shortBal2);
         const autoReqS = (dieselRequests||[])
-          .filter(r => r.truckNo===g.truckNo && r.status==="confirmed")[0] || null;
+          .filter(r => r.truckNo===g.truckNo && (r.status==="confirmed" && !r.loanAdded))[0] || null;
         const solo = {
           id:uid(), truckNo:g.truckNo, diIds:[itemId],
           client:g.client, tafal:g.tafal,
@@ -4972,7 +4973,7 @@ Rules:
         }
         // ── Mark pre-filled diesel indent as "attached" ───────────────────
         if (g.dieselIndentNo.trim() && typeof setDieselRequests === "function" && !noDieselGroupIds.has(g.id)) {
-          const preReq = (dieselRequests||[]).find(r => String(r.indentNo)===g.dieselIndentNo.trim() && r.status==="confirmed" && !claimedDieselIdsThisBatch.has(r.id));
+          const preReq = (dieselRequests||[]).find(r => String(r.indentNo)===g.dieselIndentNo.trim() && (r.status==="confirmed" && !r.loanAdded) && !claimedDieselIdsThisBatch.has(r.id));
           if (preReq) {
               claimedDieselIdsThisBatch.add(preReq.id);
               const updPreReq = {...preReq, status:"attached", tripId:trip.id, lrNo};
@@ -4992,7 +4993,7 @@ Rules:
           // .trim().toUpperCase(), but the trip's own truckNo variable here
           // is a raw, unnormalized assignment from the form/OCR extraction).
           const normTruck = s => String(s||"").replace(/\s+/g,"").toUpperCase();
-          const confirmedReqs = (dieselRequests||[]).filter(r => r.status==="confirmed" && !claimedDieselIdsThisBatch.has(r.id));
+          const confirmedReqs = (dieselRequests||[]).filter(r => (r.status==="confirmed" && !r.loanAdded) && !claimedDieselIdsThisBatch.has(r.id));
           // Most recent first — if a truck has multiple confirmed requests,
           // always attach the newest one (by date, then by createdAt as a
           // tiebreaker for same-day requests).
@@ -5003,10 +5004,10 @@ Rules:
           if (!truckMatch) {
             // Also check older/open requests for manual owner override
             // Show truck-specific indents first; only fall back to other trucks if none found
-            const sametruckUnattached = (dieselRequests||[]).filter(r => r.status==="confirmed" && !claimedDieselIdsThisBatch.has(r.id) && normTruck(r.truckNo)===normTruck(truckNo));
+            const sametruckUnattached = (dieselRequests||[]).filter(r => (r.status==="confirmed" && !r.loanAdded) && !claimedDieselIdsThisBatch.has(r.id) && normTruck(r.truckNo)===normTruck(truckNo));
             const allUnattached = sametruckUnattached.length > 0
               ? sametruckUnattached
-              : (dieselRequests||[]).filter(r => r.status==="confirmed" && !claimedDieselIdsThisBatch.has(r.id));
+              : (dieselRequests||[]).filter(r => (r.status==="confirmed" && !r.loanAdded) && !claimedDieselIdsThisBatch.has(r.id));
             const isOtherTruckFallback = sametruckUnattached.length === 0;
             if (allUnattached.length > 0) {
               const listStr = allUnattached.map(r=>{
@@ -5228,17 +5229,17 @@ Rules:
         if (typeof setDieselRequests === "function" && !noDieselGroupIds.has(g.id)) {
           // Same normalization fix as the single-trip save path above.
           const normTruck2 = s => String(s||"").replace(/\s+/g,"").toUpperCase();
-          const confirmedReqs = (dieselRequests||[]).filter(r => r.status==="confirmed" && !claimedDieselIdsThisBatch.has(r.id));
+          const confirmedReqs = (dieselRequests||[]).filter(r => (r.status==="confirmed" && !r.loanAdded) && !claimedDieselIdsThisBatch.has(r.id));
           const truckMatches = confirmedReqs.filter(r => normTruck2(r.truckNo)===normTruck2(truckNo))
             .sort((a,b)=>(b.date||"").localeCompare(a.date||"") || (b.createdAt||"").localeCompare(a.createdAt||""));
           const truckMatch = truckMatches[0];
           let chosenReq = truckMatch;
           if (!truckMatch) {
             // Show truck-specific indents first; only fall back to other trucks if none found
-            const sametruckUnattached = (dieselRequests||[]).filter(r => r.status==="confirmed" && !claimedDieselIdsThisBatch.has(r.id) && normTruck2(r.truckNo)===normTruck2(truckNo));
+            const sametruckUnattached = (dieselRequests||[]).filter(r => (r.status==="confirmed" && !r.loanAdded) && !claimedDieselIdsThisBatch.has(r.id) && normTruck2(r.truckNo)===normTruck2(truckNo));
             const allUnattached = sametruckUnattached.length > 0
               ? sametruckUnattached
-              : (dieselRequests||[]).filter(r => r.status==="confirmed" && !claimedDieselIdsThisBatch.has(r.id));
+              : (dieselRequests||[]).filter(r => (r.status==="confirmed" && !r.loanAdded) && !claimedDieselIdsThisBatch.has(r.id));
             const isOtherTruckFallback = sametruckUnattached.length === 0;
             if (allUnattached.length > 0) {
               const listStr = allUnattached.map(r=>{
@@ -6088,7 +6089,7 @@ Rules:
                 // Unattached requests for this truck (not yet on any LR)
                 const availReqs = (dieselRequests||[]).filter(r=>
                   r.truckNo===g.truckNo &&
-                  r.status==="confirmed" &&  // only confirmed requests can be attached
+                  (r.status==="confirmed" && !r.loanAdded) &&  // only confirmed requests can be attached
                   !r.tripId && !r.lrNo
                 );
                 const alreadyAttached = displayReq != null;
@@ -6166,7 +6167,7 @@ Rules:
                       const lev=(a,b)=>{const m=a.length,n=b.length,dp=Array.from({length:m+1},(_,i)=>Array.from({length:n+1},(_,j)=>i?j?0:i:j));for(let i=1;i<=m;i++)for(let j=1;j<=n;j++)dp[i][j]=a[i-1]===b[j-1]?dp[i-1][j-1]:1+Math.min(dp[i-1][j],dp[i][j-1],dp[i-1][j-1]);return dp[m][n];};
                       const trk = g.truckNo.toUpperCase();
                       const fuzzy = (dieselRequests||[]).filter(r=>
-                        r.status==="confirmed" && !r.tripId && !r.lrNo &&  // only confirmed
+                        (r.status==="confirmed" && !r.loanAdded) && !r.tripId && !r.lrNo &&  // only confirmed
                         r.truckNo!==trk && lev(r.truckNo,trk)<=2
                       ).slice(0,3);
                       if(!fuzzy.length) return null;
@@ -9125,7 +9126,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     if (t.dieselIndentNo && typeof setDieselRequests === "function") {
       const indentNo = parseInt(t.dieselIndentNo, 10);
       const matchReq = (dieselRequests||[]).find(r =>
-        r.indentNo === indentNo && r.status==="confirmed" // only confirmed requests can attach
+        r.indentNo === indentNo && (r.status==="confirmed" && !r.loanAdded) // only confirmed requests can attach
       );
       if (matchReq) {
         const updReq = {...matchReq, status:"attached", tripId:t.id, lrNo:t.lrNo||""};
@@ -9139,7 +9140,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
     if (t.dieselIndentNo2 && typeof setDieselRequests === "function") {
       const indentNo2 = parseInt(t.dieselIndentNo2, 10);
       const matchReq2 = (dieselRequests||[]).find(r =>
-        r.indentNo === indentNo2 && (r.status==="confirmed" || (r.status==="attached" && r.lrNo===t.lrNo))
+        r.indentNo === indentNo2 && ((r.status==="confirmed" && !r.loanAdded) || (r.status==="attached" && r.lrNo===t.lrNo))
       );
       if (matchReq2) {
         const updReq2 = {...matchReq2, status:"attached", tripId:t.id, lrNo:t.lrNo||""};
@@ -9283,7 +9284,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       if (effIndentNo) {
         const indentNo = parseInt(effIndentNo, 10);
         const matchReq = (dieselRequests||[]).find(r =>
-          r.indentNo === indentNo && r.status==="confirmed" // only confirmed requests can attach
+          r.indentNo === indentNo && (r.status==="confirmed" && !r.loanAdded) // only confirmed requests can attach
         );
         if (matchReq) {
           const updReq = {...matchReq, status:"attached", tripId:editSheet.id, lrNo:editSheet.lrNo||""};
@@ -9308,7 +9309,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
       if (effIndentNo2) {
         const indentNo2 = parseInt(effIndentNo2, 10);
         const matchReq2 = (dieselRequests||[]).find(r =>
-          r.indentNo === indentNo2 && r.status==="confirmed"
+          r.indentNo === indentNo2 && (r.status==="confirmed" && !r.loanAdded)
         );
         if (matchReq2) {
           const updReq2 = {...matchReq2, status:"attached", tripId:editSheet.id, lrNo:editSheet.lrNo||""};
@@ -10872,7 +10873,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                           if (t.dieselIndentNo && typeof setDieselRequests === "function") {
                             const indentNo = parseInt(t.dieselIndentNo, 10);
                             const matchReq = (dieselRequests||[]).find(r =>
-                              r.indentNo === indentNo && r.status==="confirmed"
+                              r.indentNo === indentNo && (r.status==="confirmed" && !r.loanAdded)
                             );
                             if (matchReq) {
                               const updReq = {...matchReq, status:"attached", tripId:t.id, lrNo:t.lrNo||""};
@@ -10885,7 +10886,7 @@ function Trips({trips, setTrips, fyTrips, selectedClient, vehicles, setVehicles,
                           if (t.dieselIndentNo2 && typeof setDieselRequests === "function") {
                             const indentNo2 = parseInt(t.dieselIndentNo2, 10);
                             const matchReq2 = (dieselRequests||[]).find(r =>
-                              r.indentNo === indentNo2 && (r.status==="confirmed" || (r.status==="attached" && r.lrNo===t.lrNo))
+                              r.indentNo === indentNo2 && ((r.status==="confirmed" && !r.loanAdded) || (r.status==="attached" && r.lrNo===t.lrNo))
                             );
                             if (matchReq2) {
                               const updReq2 = {...matchReq2, status:"attached", tripId:t.id, lrNo:t.lrNo||""};
@@ -11335,7 +11336,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
     if(f.dieselIndentNo && f.dieselIndentNo.trim()) return;
     // Only look at CONFIRMED requests for silent auto-attach
     const confirmed = (dieselRequests||[]).filter(r =>
-      r.truckNo === truck && r.status === "confirmed"
+      r.truckNo === truck && (r.status === "confirmed" && !r.loanAdded)
     );
     if(confirmed.length === 1) {
       // Exactly one confirmed request — auto-attach silently
@@ -11799,7 +11800,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
         );
         // Only confirmed + already-attached requests can interact with trips
         const allOpen = (dieselRequests||[]).filter(r=>
-          r.status==="confirmed" ||
+          (r.status==="confirmed" && !r.loanAdded) ||
           (r.status==="attached" && val && String(r.indentNo)===val)
         );
         const truckReqs = (dieselRequests||[])
@@ -11869,9 +11870,9 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
             })}
 
             {/* ── Confirmed requests — tap to attach ── */}
-            {truckReqs.filter(r=>r.status==="confirmed").length>0 && (
+            {truckReqs.filter(r=>(r.status==="confirmed" && !r.loanAdded)).length>0 && (
               <div style={{display:"flex",flexDirection:"column",gap:4}}>
-                {truckReqs.filter(r=>r.status==="confirmed").map(r=>{
+                {truckReqs.filter(r=>(r.status==="confirmed" && !r.loanAdded)).map(r=>{
                   const amt = r.confirmedAmount??r.amount;
                   const isSel = val===String(r.indentNo);
                   const canInteract = isOwner || (!wasScanned && !f.driverSettled); // always interactable — diesel only from requests
@@ -11936,7 +11937,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
                   🔄 Override — all available indents
                   <span style={{fontSize:10,fontWeight:400,color:C.muted}}>(owner only — use to fix wrong attachment)</span>
                 </div>
-                {[...truckReqs.filter(r=>r.status==="confirmed"),...otherReqs.filter(r=>r.status==="confirmed")]
+                {[...truckReqs.filter(r=>(r.status==="confirmed" && !r.loanAdded)),...otherReqs.filter(r=>(r.status==="confirmed" && !r.loanAdded))]
                   .sort((a,b)=>{
                     const sameA=a.truckNo===truck?1:0, sameB=b.truckNo===truck?1:0;
                     if(sameA!==sameB)return sameB-sameA;
@@ -11948,7 +11949,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
                     </div>
                   ) : (
                     <SearchableIndentSelect
-                      options={[...truckReqs.filter(r=>r.status==="confirmed"),...otherReqs.filter(r=>r.status==="confirmed")]
+                      options={[...truckReqs.filter(r=>(r.status==="confirmed" && !r.loanAdded)),...otherReqs.filter(r=>(r.status==="confirmed" && !r.loanAdded))]
                         .sort((a,b)=>{
                           const sA=a.truckNo===truck?1:0,sB=b.truckNo===truck?1:0;
                           if(sA!==sB)return sB-sA;
@@ -12041,7 +12042,7 @@ function TripForm({f, ff, isIn, ac, vehicles, settings, onTruckChange, onSubmit,
         // and excluding anything attached elsewhere unless it's already slot 2.
         const candidates2 = (dieselRequests||[]).filter(r =>
           r.truckNo===truck && String(r.indentNo)!==val1 &&
-          (r.status==="confirmed" || (r.status==="attached" && val2 && String(r.indentNo)===val2)));
+          ((r.status==="confirmed" && !r.loanAdded) || (r.status==="attached" && val2 && String(r.indentNo)===val2)));
         const dupTrip2 = trips.find(t=>t.id!==f.id && (
           (t.dieselIndentNo &&t.dieselIndentNo.trim()===val2) ||
           (t.dieselIndentNo2&&t.dieselIndentNo2.trim()===val2)));
@@ -18291,6 +18292,36 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
     sendNoLrActionItem(req);
   };
 
+  // Owner-only: add a confirmed (not attached) request to the VEHICLE's loan and keep the request on record.
+  // Vehicle is saved first; if the request save then fails, the vehicle is put back — nothing is left half done.
+  const addRequestToVehicleLoan = async (req) => {
+    if(user?.role!=="owner") { alert("Only the owner can add this to the vehicle loan."); return; }
+    const why = canAddToLoan(req);
+    if(why) { alert(why); return; }
+    const tn = String(req.truckNo||"").replace(/\s+/g,"").toUpperCase();
+    const veh = (vehicles||[]).find(v=>String(v.truckNo||"").replace(/\s+/g,"").toUpperCase()===tn);
+    if(!veh) { alert(`Vehicle ${req.truckNo} is not in the vehicle list. Add the vehicle first, then add this to its loan.`); return; }
+    const amt = pumpOwedAmount(req);
+    if(!window.confirm(`Add ₹${amt.toLocaleString("en-IN")} to the loan of ${veh.truckNo}?\n\nIndent #${req.indentNo} stays on record as confirmed, with a note, and cannot be attached to an LR afterwards. The vehicle can then get a new diesel request.`)) return;
+    let r;
+    try { r = applyRequestToLoan(veh, req, {amount:amt, by:user?.name||user?.username, at:new Date().toISOString(), date:today()}); }
+    catch(e) { alert("Could not add to loan: "+e.message); return; }
+    try { await DB.saveVehicle(r.vehicle); }
+    catch(e) { alert("Failed to save the vehicle loan — nothing was changed.\n"+e.message); return; }
+    try { await DB.saveDieselRequest(r.request); }
+    catch(e) {
+      try { await DB.saveVehicle(veh); } catch(_) {}
+      alert("Failed to save the diesel request — the loan was NOT added.\n"+e.message);
+      return;
+    }
+    setVehicles(prev=>(prev||[]).map(v=>v.id===veh.id||v.truckNo===veh.truckNo?r.vehicle:v));
+    setDieselRequests(prev=>(prev||[]).map(x=>x.id===req.id?r.request:x));
+    // the "no LR for 7 days → employee loan" item for this request must not charge it a second time
+    const _ai = (actionItems||[]).filter(ai=>ai.type==="diesel_no_lr" && ai.dieselIndentNo===String(req.indentNo));
+    if(_ai.length && setActionItems){ setActionItems(prev=>(prev||[]).filter(ai=>!_ai.some(x=>x.id===ai.id))); _ai.forEach(ai=>DB.deleteActionItem(ai.id).catch(saveFail("deleteActionItem diesel_no_lr:"))); }
+    log&&log("DIESEL REQUEST → VEHICLE LOAN", `Indent #${req.indentNo} · ${req.truckNo} · ₹${amt} added to vehicle loan by ${user?.name||user?.username}`);
+  };
+
   // Owner-only delete of a diesel request from the Verify tab.
   const deleteVerifyRequest = (req) => {
     if(user?.role!=="owner") { alert("Only the owner can delete requests."); return; }
@@ -19278,6 +19309,18 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                           📨 Notify Employee — Add Vehicle & Attach
                         </button>
                       )
+                    )}
+                    {r.loanAdded && (
+                      <div style={{marginTop:6,background:C.orange+"18",border:`1px solid ${C.orange}66`,borderRadius:8,padding:"6px 10px",color:C.orange,fontSize:11,fontWeight:700}}>
+                        💰 ₹{(r.loanAddedAmount||0).toLocaleString("en-IN")} added to vehicle loan{r.loanAddedBy?` by ${r.loanAddedBy}`:""} · kept as confirmed, cannot be attached to an LR
+                      </div>
+                    )}
+                    {user.role==="owner" && !canAddToLoan(r) && (
+                      <button onClick={()=>addRequestToVehicleLoan(r)}
+                        style={{marginTop:8,padding:"6px 12px",borderRadius:8,border:`1.5px solid ${C.red}`,
+                          background:"transparent",color:C.red,fontWeight:700,fontSize:11,cursor:"pointer"}}>
+                        💰 Add ₹{pumpOwedAmount(r).toLocaleString("en-IN")} to Vehicle Loan
+                      </button>
                     )}
                     {/* Free-text remark — owner only, for anything that doesn't fit a structured field */}
                     {user.role==="owner" && (()=>{
