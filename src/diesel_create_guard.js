@@ -3,11 +3,11 @@ export const CONFIRMED_BLOCK_MSG = "Either delete existing confirmed diesel requ
 
 export const normTruck = (s) => String(s || "").replace(/\s+/g, "").toUpperCase();
 
-// A confirmed request (pump has issued the diesel, no LR attached yet) blocks a new one for the same vehicle.
+// A confirmed request (pump has issued the diesel, no LR attached yet, not added to the loan) blocks a new one for the same vehicle.
 export function confirmedBlock(requests, truckNo) {
   const t = normTruck(truckNo);
   if (!t) return null;
-  const hit = (requests || []).find((r) => r && r.status === "confirmed" && normTruck(r.truckNo) === t);
+  const hit = (requests || []).find((r) => r && r.status === "confirmed" && !r.loanAdded && normTruck(r.truckNo) === t);
   return hit ? { message: CONFIRMED_BLOCK_MSG, indentNo: hit.indentNo } : null;
 }
 

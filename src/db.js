@@ -753,6 +753,10 @@ export const DB = {
         // that doesn't fit a structured field — e.g. "raised on wrong pump,
         // corrected" or "driver confirmed by phone".
         remark: r.remark||'',
+        loanAdded: r.loan_added===true,
+        loanAddedAmount: r.loan_added_amount!=null ? +(r.loan_added_amount) : null,
+        loanAddedBy: r.loan_added_by||'',
+        loanAddedAt: r.loan_added_at||'',
       }));
     } catch(e) { console.warn('mye_diesel_requests not ready:', e.message); return []; }
   },
@@ -848,6 +852,10 @@ export const DB = {
       owner_verified_by: r.ownerVerifiedBy||'',
       owner_verified_at: r.ownerVerifiedAt||'',
       remark: r.remark||'',
+      loan_added: r.loanAdded===true,
+      loan_added_amount: r.loanAddedAmount??null,
+      loan_added_by: r.loanAddedBy||null,
+      loan_added_at: r.loanAddedAt||null,
     }, { onConflict: 'id', ignoreDuplicates: false });
     if(error && !error.message?.includes('duplicate key')) throw error;
   },
