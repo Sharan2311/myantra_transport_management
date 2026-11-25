@@ -145,3 +145,20 @@ export const deleteBlockReason = (r) => {
   if (r.lrNo || r.tripId) return "This request is linked to an LR / trip.";
   return "";
 };
+
+// Which request to pre-select when the owner taps "Check manually". Never an LR-attached request by default
+// (an old attached request of the same vehicle is almost never the right one); open first, then confirmed.
+export const defaultRequestPick = (res) => {
+  if (res && res.candidates && res.candidates.length) return res.candidates[0].id;
+  const pool = (res && res.sameVehicle) || [];
+  const pick = pool.find((r) => r.status === "open") || pool.find((r) => r.status === "confirmed");
+  return pick ? pick.id : "";
+};
+
+// A hand-corrected scan amount. Keeps the original scan so the correction stays visible.
+export const withCorrectedAmount = (data, text) => {
+  const n = Number(String(text).replace(/[^0-9.]/g, ""));
+  const orig = data.scanAmount != null ? data.scanAmount : data.amount;
+  if (!(n > 0)) return { ...data, amount: null, scanAmount: orig, edited: true };
+  return { ...data, amount: Math.round(n * 100) / 100, scanAmount: orig, edited: n !== orig };
+};
