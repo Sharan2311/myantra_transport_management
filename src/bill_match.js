@@ -162,3 +162,46 @@ export const withCorrectedAmount = (data, text) => {
   if (!(n > 0)) return { ...data, amount: null, scanAmount: orig, edited: true };
   return { ...data, amount: Math.round(n * 100) / 100, scanAmount: orig, edited: n !== orig };
 };
+
+// ---- Grouping several bills of one vehicle onto ONE diesel request (owner verifies, then merges) ----
+// A bill is groupable when it was read (vehicle + amount) and is not already used on another request.
+export const groupable = (b) => !!(b && +b.amount > 0 && norm(b.vehicleNo));
+
+// Groups of 2+ bills of the same vehicle. A bill that shows only the last digits joins the one full number that ends with them.
+export function groupBillsByVehicle(bills) {
+  const list = (bills || []).filter(groupable);
+  const fulls = [...new Set(list.map((b) => norm(b.vehicleNo)).filter((k) => k.length > 4))];
+  const map = new Map();
+  for (const b of list) {
+    let k = norm(b.vehicleNo);
+    if (k.length <= 4) { const m = fulls.filter((f) => f.endsWith(k)); if (m.length === 1) k = m[0]; }
+    if (!map.has(k)) map.set(k, []);
+    map.get(k).push(b);
+  }
+  return [...map.entries()].filter(([, v]) => v.length >= 2).map(([key, v]) => ({
+    key, vehicleNo: v.map((b) => b.vehicleNo).sort((a, c) => norm(c).length - norm(a).length)[0], bills: v,
+  }));
+}
+
+// Requests a group of bills can be merged onto: same vehicle, open or confirmed-without-a-bill. Open first, then the exact total.
+export function groupCandidates(requests, vehicleNo, total) {
+  const t = money(total);
+  return (requests || []).filter((r) => eligible(r) && vehicleMatches(vehicleNo, r.truckNo))
+    .sort((a, b) => (dieselOf(b) === t) - (dieselOf(a) === t) || (b.status === "open") - (a.status === "open"));
+}
+
+// Checks the owner sees before merging. diff = total of the bills minus the request. Any difference, or a bill whose
+// pump / date / vehicle does not fit the request, means a written reason is required (same rule as any manual approval).
+export function groupCheck(bills, request, ctx) {
+  const total = money((bills || []).reduce((s, b) => s + money(b.amount), 0));
+  if (!request) return { total, diff: 0, issues: [], needsReason: false, exact: false };
+  const diff = money(total - dieselOf(request));
+  const issues = [];
+  for (const b of bills || []) {
+    const who = b.receiptNo || "bill";
+    if (!vehicleMatches(b.vehicleNo, request.truckNo)) issues.push(`${who}: vehicle ${b.vehicleNo || "?"} is not ${request.truckNo}`);
+    if (!ctx.pumpMatches(b.pumpName, request)) issues.push(`${who}: pump "${b.pumpName || "?"}" differs from the request's pump`);
+    if (!dateWithin(b.date, request.date)) issues.push(`${who}: date ${b.date || "?"} is more than 1 day from the request (${request.date})`);
+  }
+  return { total, diff, issues, needsReason: diff !== 0 || issues.length > 0, exact: diff === 0 && issues.length === 0 };
+}

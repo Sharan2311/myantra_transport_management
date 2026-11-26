@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { vehicleMatches, dateWithin, matchBatch, confirmUpdate, attachUpdate, pumpNameMatches, deleteBlockReason, defaultRequestPick, withCorrectedAmount } from "../src/bill_match.js";
+import { vehicleMatches, dateWithin, matchBatch, confirmUpdate, attachUpdate, pumpNameMatches, deleteBlockReason, defaultRequestPick, withCorrectedAmount, groupBillsByVehicle, groupCandidates, groupCheck, groupable } from "../src/bill_match.js";
 const tests = []; const test = (n, f) => tests.push([n, f]);
 const req = (o) => ({ id: "r" + (o.indentNo || 1), indentNo: 1, truckNo: "KA28AB7880", pumpId: "P1", date: "2026-11-21", amount: 32000, dieselAmount: 32000, cashAmount: 0, status: "open", receiptNo: "", ...o });
 const bill = (o) => ({ id: "b1", vehicleNo: "7880", amount: 32000, date: "2026-11-21", pumpName: "SHREE VAISHNAVI F/S", receiptNo: "K0589", ...o });
@@ -199,6 +199,35 @@ test("a corrected amount keeps the original scan and re-matches", () => {
   const a = req({ indentNo: 2190, truckNo: "MH25AJ4078", amount: 19700, dieselAmount: 19700 });
   const b = (amt) => matchBatch([bill({ id: "b1", vehicleNo: "4078", amount: amt, receiptNo: "K0749" })], [a], ctx)[0].state;
   assert.notEqual(b(9700), "match"); assert.equal(b(d.amount), "match");
+});
+test("bills of one vehicle are grouped; a last-4 bill joins the one full number; singles are not groups", () => {
+  const bs = [bill({ id: "a", vehicleNo: "KA28AB7880", amount: 10000 }), bill({ id: "b", vehicleNo: "7880", amount: 22000 }), bill({ id: "c", vehicleNo: "TS07UH5499", amount: 5000 }), bill({ id: "d", vehicleNo: "", amount: 5 }), bill({ id: "e", vehicleNo: "7880", amount: 0 })];
+  const g = groupBillsByVehicle(bs);
+  assert.equal(g.length, 1); assert.deepEqual(g[0].bills.map((b) => b.id), ["a", "b"]); assert.equal(g[0].vehicleNo, "KA28AB7880");
+  assert.equal(groupable(bs[3]), false); assert.equal(groupable(bs[4]), false);
+});
+test("two different trucks ending in the same 4 digits are not silently merged with a short bill", () => {
+  const g = groupBillsByVehicle([bill({ id: "a", vehicleNo: "KA28AB7880", amount: 1 }), bill({ id: "b", vehicleNo: "TS07UH7880", amount: 1 }), bill({ id: "c", vehicleNo: "7880", amount: 1 })]);
+  assert.equal(g.length, 0);
+});
+test("group check: exact total has no reason needed; any difference or odd bill needs one", () => {
+  const r = req({ indentNo: 9, amount: 32000, dieselAmount: 32000 });
+  const ok = groupCheck([bill({ amount: 20000, receiptNo: "A1" }), bill({ amount: 12000, receiptNo: "A2" })], r, ctx);
+  assert.equal(ok.total, 32000); assert.equal(ok.diff, 0); assert.equal(ok.exact, true); assert.equal(ok.needsReason, false);
+  const less = groupCheck([bill({ amount: 20000 }), bill({ amount: 11000 })], r, ctx);
+  assert.equal(less.diff, -1000); assert.equal(less.needsReason, true);
+  const odd = groupCheck([bill({ amount: 20000 }), bill({ amount: 12000, pumpName: "OTHER PUMP", date: "2026-11-25" })], r, ctx);
+  assert.equal(odd.diff, 0); assert.equal(odd.needsReason, true); assert.equal(odd.issues.length, 2);
+  assert.equal(groupCheck([bill({ amount: 20000 })], null, ctx).needsReason, false);
+});
+test("group candidates: same vehicle, never an attached/billed request; open and exact total first", () => {
+  const exactConfirmed = req({ indentNo: 1, status: "confirmed", amount: 32000, dieselAmount: 32000 });
+  const openOther = req({ indentNo: 2, amount: 9000, dieselAmount: 9000 });
+  const openExact = req({ indentNo: 3, amount: 32000, dieselAmount: 32000 });
+  const attached = req({ indentNo: 4, status: "attached", amount: 32000, dieselAmount: 32000, lrNo: "LR1", receiptNo: "X" });
+  const other = req({ indentNo: 5, truckNo: "TS07UH5499", amount: 32000, dieselAmount: 32000 });
+  const c = groupCandidates([exactConfirmed, openOther, openExact, attached, other], "KA28AB7880", 32000);
+  assert.deepEqual(c.map((r) => r.indentNo), [3, 1, 2]);
 });
 let ok = 0;
 for (const [n, f] of tests) { try { await f(); console.log("ok -", n); ok++; } catch (e) { console.log("not ok -", n, e.message); process.exitCode = 1; } }
