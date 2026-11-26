@@ -31,3 +31,16 @@ export function applyRequestToLoan(vehicle, req, { amount, by, at, date }) {
   const newReq = { ...req, loanAdded: true, loanAddedAmount: amt, loanAddedBy: by, loanAddedAt: at, remark };
   return { vehicle: newVehicle, request: newReq, txn };
 }
+
+// Confirmed requests that never got an LR ("not attached"). recovered = the owner added it to the vehicle loan.
+// Not recovered first, oldest first, so the ones that need action are at the top.
+export function unattachedConfirmed(requests, nowMs = Date.now()) {
+  const list = (requests || [])
+    .filter((r) => r && r.status === "confirmed" && !r.lrNo && !r.tripId)
+    .map((r) => {
+      const t = Date.parse(`${r.date}T00:00:00+05:30`);
+      const ageDays = Number.isFinite(t) ? Math.max(0, Math.floor((nowMs - t) / 86400000)) : null;
+      return { req: r, recovered: r.loanAdded === true, ageDays };
+    });
+  return list.sort((a, b) => (a.recovered - b.recovered) || ((b.ageDays ?? -1) - (a.ageDays ?? -1)));
+}
