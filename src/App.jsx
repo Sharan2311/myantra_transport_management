@@ -7,7 +7,7 @@ import { retryNet, bytesToBase64, settleAfterNetFail } from "./net_retry.js";
 import { receiptClashes } from "./bill_identity.js";
 import { lastEmployeeForVehicle } from "./emp_history.js";
 import { confirmedBlock, sameFormAlready } from "./diesel_create_guard.js";
-import { applyRequestToLoan, canAddToLoan } from "./diesel_loan.js";
+import { applyRequestToLoan, canAddToLoan, unattachedConfirmed } from "./diesel_loan.js";
 
 // One filled diesel-request form = one request. The lock stops a second click while the first is still saving; the id
 // is kept until the save is confirmed, so a retry after a lost reply can never insert a second row.
@@ -17866,6 +17866,7 @@ function DuplicateDieselPanel({ dieselRequests, trips, log, setDieselRequests })
 
 function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, driverPays, setDriverPays, user, log, viewOnly=false, dieselRequests=[], setDieselRequests, dieselRequestsReady=false, settings, actionItems=[], setActionItems, navTarget, setNavTarget}) {
   const [view,        setView]        = useState("requests");
+  const [unattachedFilter, setUnattachedFilter] = useState("notrec");
   const [dayPump, setDayPump] = useState("all");      // By Day view: pump filter
   const [dayShow, setDayShow] = useState("all");      // By Day view: all | not_checked | open
   const [dayCount, setDayCount] = useState(7);        // By Day view: how many days to show
@@ -18242,6 +18243,8 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
     w.document.write(html); w.document.close();
   };
   const dupDeletableCount = user.role==="owner" ? findDieselDuplicates(dieselRequests, trips).deletable.length : 0;
+  const unattachedList = user.role==="owner" ? unattachedConfirmed(dieselRequests) : [];
+  const unattachedPending = unattachedList.filter(x=>!x.recovered).length;
 
   const markOwnerVerified = (req, value) => {
     if(user?.role!=="owner") { alert("Only the owner can mark requests as checked."); return; }
@@ -19122,8 +19125,45 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
         ...(user.role==="owner"?[{id:"days", label:"📅 By Day", color:C.teal}]:[]),
         ...(user.role==="owner"?[{id:"bills", label:"📥 Bills", color:C.orange}]:[]),
         ...(user.role==="owner"?[{id:"verify", label:`Verify (${verifiedCount}/${verifiableTotal})`, color:C.purple}]:[]),
+        ...(user.role==="owner"?[{id:"unattached", label:`⏳ Not Attached (${unattachedPending})`, color:unattachedPending>0?C.red:C.muted}]:[]),
         ...(user.role==="owner"?[{id:"dupes", label:`🧹 Duplicates${dupDeletableCount>0?` (${dupDeletableCount})`:""}`, color:dupDeletableCount>0?C.red:C.muted}]:[]),
       ]} active={view} onSelect={setView} />
+
+      {view==="unattached" && user.role==="owner" && (()=>{
+        const notRec = unattachedList.filter(x=>!x.recovered), rec = unattachedList.filter(x=>x.recovered);
+        const sum = a => a.reduce((t,x)=>t+(pumpOwedAmount(x.req)||0),0);
+        const shown = unattachedFilter==="recovered" ? rec : unattachedFilter==="all" ? unattachedList : notRec;
+        return (
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+            <div style={{background:C.card,borderRadius:10,padding:"10px 14px",color:C.muted,fontSize:12,lineHeight:1.5}}>
+              Diesel the pump has <b>confirmed</b> but that was never attached to an LR. <b style={{color:C.green}}>Recovered</b> means the owner added it to the vehicle's loan.
+              A request leaves this list when it is attached to an LR or deleted.
+            </div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              {[["notrec",`Not recovered (${notRec.length}) · ₹${sum(notRec).toLocaleString("en-IN")}`,C.red],["recovered",`Recovered (${rec.length}) · ₹${sum(rec).toLocaleString("en-IN")}`,C.green],["all",`All (${unattachedList.length})`,C.muted]].map(([k,l,c])=>(
+                <button key={k} onClick={()=>setUnattachedFilter(k)} style={{padding:"6px 12px",borderRadius:20,fontSize:12,fontWeight:700,cursor:"pointer",
+                  border:`1.5px solid ${unattachedFilter===k?c:C.border}`,background:unattachedFilter===k?c+"22":"transparent",color:unattachedFilter===k?c:C.muted}}>{l}</button>))}
+            </div>
+            {shown.length===0 && <div style={{color:C.muted,fontSize:13,padding:"18px 0",textAlign:"center"}}>Nothing here.</div>}
+            {shown.map(({req,recovered,ageDays})=>(
+              <div key={req.id} style={{background:C.card,borderRadius:12,border:`1.5px solid ${recovered?C.green+"66":C.red+"66"}`,padding:12,display:"flex",flexDirection:"column",gap:4}}>
+                <div style={{display:"flex",justifyContent:"space-between",gap:8}}>
+                  <div style={{fontWeight:800,fontSize:14}}><span style={{color:C.orange}}>#{req.indentNo}</span>{" · "}{req.truckNo}</div>
+                  <div style={{fontWeight:800,fontSize:15,color:C.teal}}>₹{(pumpOwedAmount(req)||0).toLocaleString("en-IN")}</div>
+                </div>
+                <div style={{color:C.muted,fontSize:12}}>{req.date}{ageDays!=null?` · ${ageDays} day${ageDays===1?"":"s"} ago`:""}{(req.requestedBy||req.createdBy)?` · By: ${req.requestedBy||req.createdBy}`:""}{req.receiptNo?` · Receipt ${req.receiptNo}`:""}</div>
+                {recovered
+                  ? <div style={{color:C.green,fontSize:12,fontWeight:800}}>✓ Recovered — ₹{(req.loanAddedAmount||0).toLocaleString("en-IN")} added to vehicle loan{req.loanAddedBy?` by ${req.loanAddedBy}`:""}</div>
+                  : <div style={{color:C.red,fontSize:12,fontWeight:800}}>✗ Not recovered — diesel given, no LR attached{ageDays!=null&&ageDays>=3?` for ${ageDays} days`:""}</div>}
+                {req.remark && <div style={{color:C.muted,fontSize:11.5}}>📝 {req.remark}</div>}
+                {!recovered && (
+                  <button onClick={()=>addRequestToVehicleLoan(req)}
+                    style={{marginTop:6,padding:"7px 12px",borderRadius:8,border:`1.5px solid ${C.red}`,background:"transparent",color:C.red,fontWeight:700,fontSize:12,cursor:"pointer",alignSelf:"flex-start"}}>
+                    💰 Add ₹{(pumpOwedAmount(req)||0).toLocaleString("en-IN")} to Vehicle Loan</button>)}
+              </div>))}
+          </div>
+        );
+      })()}
 
       {view==="dupes" && user.role==="owner" && (
         <DuplicateDieselPanel dieselRequests={dieselRequests} trips={trips} log={log} setDieselRequests={setDieselRequests} />
@@ -20277,6 +20317,13 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                       {req.lrNo && (
                         <div style={{color:C.green,fontSize:11,marginTop:2}}>✓ Attached to LR {req.lrNo}</div>
                       )}
+                      {req.status==="confirmed" && !req.lrNo && !req.tripId && (req.loanAdded
+                        ? <div style={{marginTop:4,background:C.green+"14",border:`1px solid ${C.green}66`,borderRadius:8,padding:"6px 10px",color:C.green,fontSize:11,fontWeight:700,lineHeight:1.45}}>
+                            ✓ Not attached to an LR on purpose — ₹{(req.loanAddedAmount||0).toLocaleString("en-IN")} was added to the vehicle loan{req.loanAddedBy?` by ${req.loanAddedBy}`:""}. Recovered.
+                          </div>
+                        : <div style={{marginTop:4,background:C.red+"11",border:`1px solid ${C.red}66`,borderRadius:8,padding:"6px 10px",color:C.red,fontSize:11,fontWeight:700,lineHeight:1.45}}>
+                            ⚠ Diesel given but not attached to any LR yet — not recovered. See the “Not Attached” tab.
+                          </div>)}
                       {req.status==="reconciled" && (
                         <div style={{color:C.purple,fontSize:11,marginTop:2,fontWeight:700}}>
                           🔍 Reconciled via pump statement
