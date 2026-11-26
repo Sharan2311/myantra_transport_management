@@ -60,6 +60,11 @@ test("unattached list handles empty and bad dates", () => {
   assert.deepEqual(unattachedConfirmed(null), []);
   assert.equal(unattachedConfirmed([{ ...REQ, date: "garbage" }])[0].ageDays, null);
 });
+test("the loan entry is a GIVEN loan (not shown as a recovery) and its reason is in ref, where the loan screen shows it", () => {
+  const t = applyRequestToLoan(VEH, REQ, A).txn;
+  assert.equal(t.type, "given"); assert.ok(t.ref.startsWith(LOAN_NOTE)); assert.ok(t.ref.includes("TS08UF0786") && t.ref.includes("2148"));
+  assert.equal(t.amount, 15000);
+});
 let ok = 0;
 for (const [n, f] of tests) { try { await f(); console.log("ok -", n); ok++; } catch (e) { console.log("not ok -", n, e.message); process.exitCode = 1; } }
 console.log(ok + " tests passed");

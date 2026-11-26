@@ -21,8 +21,11 @@ export function applyRequestToLoan(vehicle, req, { amount, by, at, date }) {
   if (!(amt > 0)) throw new Error("Amount must be more than 0");
   const id = loanTxnId(req.id);
   const old = (vehicle.loanTxns || []).find((t) => t.id === id);
-  const txn = { id, type: "loan", date, amount: amt, lrNo: "",
-    note: `Diesel indent #${req.indentNo} (${req.truckNo}) — extra diesel filled, not loaded. Added to loan by ${by}.` };
+  // type "given": the loan screens show only "given" as a loan taken (any other type is shown as a Recovery), and the
+  // loan screens show `ref` as the reason, so the extra-diesel message goes there.
+  const why = `${LOAN_NOTE} ${String(req.truckNo || "").toUpperCase()} — Indent #${req.indentNo}`;
+  const txn = { id, type: "given", date, amount: amt, lrNo: "", ref: why,
+    note: `${why}. Added to loan by ${by}.` };
   const newVehicle = { ...vehicle,
     loan: (vehicle.loan || 0) + amt - (old ? old.amount || 0 : 0),
     loanTxns: [...(vehicle.loanTxns || []).filter((t) => t.id !== id), txn] };
