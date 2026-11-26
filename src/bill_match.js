@@ -205,3 +205,28 @@ export function groupCheck(bills, request, ctx) {
   }
   return { total, diff, issues, needsReason: diff !== 0 || issues.length > 0, exact: diff === 0 && issues.length === 0 };
 }
+
+// ---- Hand-corrected vehicle number (the scan misread the plate) ----
+// Only a truck the app knows is accepted, so a typo can never match nothing silently.
+export const knownTruck = (text, trucks) => {
+  const k = norm(text);
+  if (!k) return "";
+  return (trucks || []).find((t) => norm(t) === k) || "";
+};
+// Trucks to suggest while typing: the digits typed may be anywhere in the number (last 4 is the usual case).
+export const truckSuggestions = (text, trucks, limit = 8) => {
+  const k = norm(text);
+  if (k.length < 2) return [];
+  return [...new Set((trucks || []).filter((t) => norm(t).includes(k)))].slice(0, limit);
+};
+export const withCorrectedVehicle = (data, truckNo) => {
+  const orig = data.scanVehicleNo != null ? data.scanVehicleNo : data.vehicleNo;
+  return { ...data, vehicleNo: truckNo, scanVehicleNo: orig, vehEdited: norm(truckNo) !== norm(orig) };
+};
+// One sentence for the request's audit trail describing every hand correction made to a scanned bill ("" if none).
+export const editNote = (d) => {
+  const parts = [];
+  if (d && d.vehEdited) parts.push(`vehicle read as ${d.scanVehicleNo || "?"}, corrected by hand to ${d.vehicleNo}`);
+  if (d && d.edited) parts.push(`amount read as ₹${d.scanAmount != null ? d.scanAmount : "?"}, corrected by hand to ₹${d.amount}`);
+  return parts.length ? "Scan " + parts.join("; ") + " (checked against the bill photo)" : "";
+};
