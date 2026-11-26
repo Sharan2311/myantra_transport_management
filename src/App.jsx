@@ -2,12 +2,12 @@ import { pouchAmountFor, holdAllAmountFor } from "./pouch_logic.js";
 import { tonnageByBlock } from "./tonnage_logic.js";
 import { shareFile } from "./share_file.js";
 import { groupRequestsByDay, hasBill } from "./diesel_by_day.js";
-import { matchBatch, confirmUpdate, attachUpdate, pumpNameMatches, dieselOf, deleteBlockReason, defaultRequestPick, withCorrectedAmount } from "./bill_match.js";
+import { matchBatch, confirmUpdate, attachUpdate, pumpNameMatches, dieselOf, deleteBlockReason, defaultRequestPick, withCorrectedAmount, groupBillsByVehicle, groupCandidates, groupCheck, groupable } from "./bill_match.js";
 import { retryNet, bytesToBase64, settleAfterNetFail } from "./net_retry.js";
 import { receiptClashes } from "./bill_identity.js";
 import { lastEmployeeForVehicle } from "./emp_history.js";
 import { confirmedBlock, sameFormAlready } from "./diesel_create_guard.js";
-import { applyRequestToLoan, canAddToLoan } from "./diesel_loan.js";
+import { applyRequestToLoan, canAddToLoan, unattachedConfirmed } from "./diesel_loan.js";
 
 // One filled diesel-request form = one request. The lock stops a second click while the first is still saving; the id
 // is kept until the save is confirmed, so a retry after a lost reply can never insert a second row.
@@ -13251,6 +13251,27 @@ function PumpSlipScanner({ pumps, trips, user, onResults }) {
 // storage upload into a multi-minute wait. Downscaling to ~1600px + JPEG ~0.75
 // keeps the receipt perfectly readable (by both a human and the AI) while
 // cutting typical file size by 80-95%.
+// Joins several bill photos top-to-bottom into ONE jpeg, so a request served by several bills shows every bill in its single photo.
+// Throws (never silently drops a photo) if any photo cannot be read.
+async function stitchBillPhotos(files, width = 1200) {
+  const imgs = [];
+  for (const f of files) {
+    imgs.push(await new Promise((res, rej) => {
+      const url = URL.createObjectURL(f); const im = new Image();
+      im.onload = () => { URL.revokeObjectURL(url); res(im); };
+      im.onerror = () => { URL.revokeObjectURL(url); rej(new Error("a bill photo could not be read")); };
+      im.src = url;
+    }));
+  }
+  const hs = imgs.map(im => Math.round(im.height * width / im.width));
+  const gap = 12, total = hs.reduce((a, b) => a + b, 0) + gap * (imgs.length - 1);
+  const canvas = document.createElement("canvas"); canvas.width = width; canvas.height = total;
+  const g = canvas.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, width, total);
+  let y = 0; imgs.forEach((im, i) => { g.drawImage(im, 0, y, width, hs[i]); y += hs[i] + gap; });
+  const blob = await new Promise(res => canvas.toBlob(res, "image/jpeg", 0.72));
+  if (!blob) throw new Error("the joined photo could not be made");
+  return new File([blob], "bills.jpg", { type: "image/jpeg" });
+}
 async function compressReceiptImage(file, maxDim = 1600, quality = 0.75) {
   if (!file.type.startsWith("image/") || file.type === "image/svg+xml") return file;
   try {
@@ -13289,6 +13310,8 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
   const [busy, setBusy]     = useState({});          // itemId -> true while saving
   const [errs, setErrs]     = useState({});          // itemId -> message (a failed save is always shown)
   const [manual, setManual] = useState({});          // itemId -> {open:bool, reqId, reason, allOpen:bool}
+  const [showGroups, setShowGroups] = useState(false);
+  const [grp, setGrp] = useState({});                 // vehicle key -> {off:{billId:true}, reqId, reason, checkedSig}
   const inputRef = useRef(null);
 
   const scanOne = async (it) => {
@@ -13341,7 +13364,7 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
     dieselRequests, {pumpMatches}),[items, done, dieselRequests, pumps]);
   const resOf = id => results.find(r=>r.bill.id===id);
 
-  const confirmOn = async (item, request, {amount, receiptNo, reason, method, extra=[]}) => {
+  const confirmOn = async (item, request, {amount, receiptNo, reason, method, extra=[], photos=null, billData=null}) => {
     setErrs(p=>({...p,[item.id]:""}));
     const cur = dieselRequests.find(r=>r.id===request.id);
     if(!cur || !(cur.status==="open" || ((cur.status==="confirmed"||cur.status==="attached") && !(String(cur.receiptNo||"").trim()||cur.receiptImagePath)))){ setErrs(p=>({...p,[item.id]:`Indent #${request.indentNo} was changed by someone else (now ${cur?cur.status:"missing"}). Nothing was saved.`})); return; }
@@ -13349,11 +13372,16 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
     setBusy(p=>({...p,[item.id]:true}));
     try {
       // fixed file name per bill, so a retry overwrites the same file instead of leaving copies behind
-      const fname = "bill-"+(String(receiptNo||item.id).replace(/[^A-Za-z0-9]/g,"")||item.id)+".jpg";
+      const bd = billData||item.data;
+      const joined = photos && photos.length>1;
+      const fname = joined ? "bills-"+(photos.map(p=>String(p.data.receiptNo||p.id).replace(/[^A-Za-z0-9]/g,"")).sort().join("-").slice(0,80)||item.id)+".jpg"
+                           : "bill-"+(String(receiptNo||item.id).replace(/[^A-Za-z0-9]/g,"")||item.id)+".jpg";
       const path = cur.id+"/"+fname;
-      try { await settleAfterNetFail(()=>DB.uploadDieselReceipt(cur.id, item.compressed||item.file, fname), ()=>DB.dieselReceiptExists(cur.id, fname)); }
+      let upFile = item.compressed||item.file;
+      if(joined){ try { upFile = await stitchBillPhotos(photos.map(p=>p.compressed||p.file)); } catch(e) { throw new Error("The bill photos could not be joined ("+(e.message||e)+")"); } }
+      try { await settleAfterNetFail(()=>DB.uploadDieselReceipt(cur.id, upFile, fname), ()=>DB.dieselReceiptExists(cur.id, fname)); }
       catch(e) { throw new Error("The bill photo could not be uploaded ("+(e.message||e)+"). Check the internet and tap again"); }
-      const upd = {...(attachOnly ? attachUpdate(cur,{receiptNo,bill:item.data,method,note:reason}) : confirmUpdate(cur,{amount,receiptNo,bill:item.data,by:user?.name||user?.username||"",at:nowTs(),method,reason})), receiptImagePath:path};
+      const upd = {...(attachOnly ? attachUpdate(cur,{receiptNo,bill:bd,method,note:reason}) : confirmUpdate(cur,{amount,receiptNo,bill:bd,by:user?.name||user?.username||"",at:nowTs(),method,reason})), receiptImagePath:path};
       try { await settleAfterNetFail(()=>DB.saveDieselRequest(upd), async()=>{ const row=await DB.getDieselRequestRow(upd.id); return !!row && row.receipt_image_path===path && (row.receipt_no||"")===(upd.receiptNo||""); }); }
       catch(e) { throw new Error("The request could not be saved ("+(e.message||e)+")"); }
       setDieselRequests(prev=>prev.map(r=>r.id===upd.id?upd:r));
@@ -13389,6 +13417,68 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
   const reqLine = r => `#${r.indentNo} · ${r.truckNo} · ₹${Number(dieselOf(r)).toLocaleString("en-IN")} · ${r.date}`;
 
   const counts = results.reduce((a,r)=>{ a[r.state]=(a[r.state]||0)+1; return a; },{});
+  // ---- group several bills of one vehicle onto one request ----
+  const gBills = live.filter(i=>{ const r=resOf(i.id); return r && r.state!=="unreadable" && r.state!=="duplicate_receipt" && groupable(i.data); }).map(i=>({...i.data,id:i.id}));
+  const groups = groupBillsByVehicle(gBills);
+  const gSet = (key,patch)=>setGrp(p=>({...p,[key]:{...(p[key]||{}),...patch}}));
+  const fmt = n => "₹"+Number(n).toLocaleString("en-IN");
+  const renderGroup = (G) => {
+    const g = grp[G.key]||{};
+    const incl = G.bills.filter(b=>!(g.off||{})[b.id]);
+    const total = Math.round(incl.reduce((s,b)=>s+(+b.amount||0),0)*100)/100;
+    const cands = groupCandidates(dieselRequests, G.vehicleNo, total);
+    const dflt = cands.find(x=>dieselOf(x)===total);
+    const sel = cands.find(x=>x.id===(g.reqId!==undefined?g.reqId:dflt?.id));
+    const chk = groupCheck(incl, sel, {pumpMatches});
+    const sig = incl.map(b=>b.id+":"+b.amount).join(",")+"|"+(sel?.id||"")+"|"+total;
+    const verified = g.checkedSig===sig;
+    const firstItem = incl.length ? items.find(x=>x.id===incl[0].id) : null;
+    const reasonOk = !chk.needsReason || (g.reason||"").trim().length>0;
+    const can = !!sel && incl.length>=2 && verified && reasonOk && !(firstItem&&busy[firstItem.id]);
+    const go = () => {
+      const its = incl.map(b=>items.find(x=>x.id===b.id));
+      const joinedNo = incl.map(b=>b.receiptNo||"?").join(" + ");
+      const base = `Served in ${incl.length} bills: `+incl.map(b=>`${b.receiptNo||"?"} ${fmt(b.amount)}`).join(" + ")+` = ${fmt(total)}`;
+      const why = base+(chk.diff!==0?` (request was ${fmt(dieselOf(sel))})`:"")+((g.reason||"").trim()?" — "+g.reason.trim():"");
+      confirmOn(its[0], sel, {amount:total, receiptNo:joinedNo, reason:why, method:"bulk_receipt_group", extra:its.slice(1).map(x=>x.id), photos:its, billData:{...incl[0], vehicleNo:G.vehicleNo, amount:total, receiptNo:joinedNo}});
+    };
+    return (
+      <div key={G.key} style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.blue}66`,padding:12,display:"flex",flexDirection:"column",gap:8}}>
+        <div style={{fontWeight:800,fontSize:13}}>🚛 {G.vehicleNo} · {G.bills.length} bills</div>
+        <div style={{display:"flex",flexDirection:"column",gap:6}}>
+          {G.bills.map(b=>{ const itx = items.find(x=>x.id===b.id); const on = !(g.off||{})[b.id]; return (
+            <label key={b.id} style={{display:"flex",gap:8,alignItems:"center",fontSize:12,cursor:"pointer",opacity:on?1:0.5}}>
+              <input type="checkbox" checked={on} onChange={()=>gSet(G.key,{off:{...(g.off||{}),[b.id]:on}})}/>
+              <img src={itx?.url} alt="bill" onClick={e=>{ e.preventDefault(); itx?.url && window.open(itx.url,"_blank"); }} style={{width:46,height:62,objectFit:"cover",borderRadius:6,background:C.bg,flexShrink:0}}/>
+              <span style={{lineHeight:1.45}}><b>{fmt(b.amount)}</b> · Receipt {b.receiptNo||"—"}<br/><span style={{color:C.muted}}>{b.date||"no date"} · {b.pumpName||"no pump"}{b.edited?" · ✎ amount corrected":""}</span></span>
+            </label>); })}
+        </div>
+        <div style={{fontSize:13,fontWeight:800}}>Total of ticked bills: {fmt(total)}</div>
+        <div style={{display:"flex",flexDirection:"column",gap:4}}>
+          {cands.length===0 && <div style={{fontSize:12,color:C.red}}>No open (or confirmed-without-bill) request for this vehicle.</div>}
+          {cands.map(x=>(
+            <label key={x.id} style={{display:"flex",gap:6,alignItems:"center",fontSize:12,cursor:"pointer"}}>
+              <input type="radio" name={"gr"+G.key} checked={sel?.id===x.id} onChange={()=>gSet(G.key,{reqId:x.id})}/>
+              <span>{reqLine(x)} <span style={{color:C.muted}}>· {x.status}</span>{dieselOf(x)===total && <span style={{color:C.green,fontWeight:800}}> · total matches</span>}</span>
+            </label>))}
+        </div>
+        {sel && (chk.diff===0
+          ? <div style={{fontSize:12,color:C.green,fontWeight:700}}>✓ Bills add up to the request ({fmt(total)}).</div>
+          : <div style={{fontSize:12,color:C.red,fontWeight:700}}>Bills are {fmt(Math.abs(chk.diff))} {chk.diff>0?"MORE":"LESS"} than the request ({fmt(dieselOf(sel))}). The request will be confirmed at the bills' total ({fmt(total)}){sel.status!=="open"?" — it was already confirmed by the pump, so its amount stays and your reason is only noted":""}.</div>)}
+        {chk.issues.map((t,i)=><div key={i} style={{fontSize:11.5,color:C.orange,fontWeight:700}}>⚠ {t}</div>)}
+        {sel && chk.needsReason && <input value={g.reason||""} onChange={e=>gSet(G.key,{reason:e.target.value})} placeholder="Reason (required)"
+          style={{border:`1px solid ${C.border}`,borderRadius:6,padding:"6px 8px",fontSize:12,background:C.bg,color:C.text}}/>}
+        <label style={{display:"flex",gap:6,alignItems:"flex-start",fontSize:12,cursor:"pointer",fontWeight:700}}>
+          <input type="checkbox" checked={verified} disabled={!sel||incl.length<2} onChange={e=>gSet(G.key,{checkedSig:e.target.checked?sig:""})}/>
+          <span>I checked each bill photo above: these {incl.length} bills belong to this one request.</span>
+        </label>
+        <div style={{fontSize:11,color:C.muted}}>All {incl.length} photos are joined into one picture stored on the request. Wrong amount? Fix it on that bill's card below, then come back.</div>
+        {firstItem && errs[firstItem.id] && <div style={{color:C.red,fontSize:12,fontWeight:700,background:C.red+"11",borderRadius:6,padding:"6px 8px"}}>{errs[firstItem.id]}</div>}
+        <button disabled={!can} onClick={go}
+          style={{background:C.green,border:"none",borderRadius:8,color:"#fff",fontWeight:800,fontSize:13,padding:"10px",cursor:can?"pointer":"default",opacity:can?1:0.5}}>
+          {firstItem&&busy[firstItem.id]?"Saving…":`Merge ${incl.length} bills into${sel?" Indent #"+sel.indentNo:" a request"}`}</button>
+      </div>);
+  };
   return (
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
       <div style={{background:C.card,borderRadius:10,padding:"10px 14px",color:C.muted,fontSize:12,lineHeight:1.5}}>
@@ -13400,6 +13490,13 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
         style={{background:C.orange,border:"none",borderRadius:12,color:"#fff",fontWeight:800,fontSize:14,padding:"14px",cursor:"pointer"}}>
         📥 Select bill photos
       </button>
+      {groups.length>0 && (
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          <button onClick={()=>setShowGroups(v=>!v)} style={{background:"transparent",border:`1.5px solid ${C.blue}`,borderRadius:10,color:C.blue,fontWeight:800,fontSize:13,padding:"10px",cursor:"pointer"}}>
+            🧩 {showGroups?"Hide":"Group"} bills of one vehicle ({groups.length} vehicle{groups.length===1?"":"s"} with 2+ bills)</button>
+          {showGroups && groups.map(renderGroup)}
+        </div>
+      )}
       {items.length>0 && (
         <div style={{fontSize:12,color:C.muted}}>
           {items.length} bill{items.length===1?"":"s"} · <span style={{color:C.green}}>{counts.match||0} match</span> · <span style={{color:C.red}}>{(counts.not_found||0)+(counts.duplicate_receipt||0)+(counts.unreadable||0)+(counts.ambiguous||0)} need a look</span> · {Object.keys(done).length} confirmed
@@ -17866,6 +17963,7 @@ function DuplicateDieselPanel({ dieselRequests, trips, log, setDieselRequests })
 
 function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, setIndents, pumpPayments, setPumpPayments, pumps, setPumps, driverPays, setDriverPays, user, log, viewOnly=false, dieselRequests=[], setDieselRequests, dieselRequestsReady=false, settings, actionItems=[], setActionItems, navTarget, setNavTarget}) {
   const [view,        setView]        = useState("requests");
+  const [unattachedFilter, setUnattachedFilter] = useState("notrec");
   const [dayPump, setDayPump] = useState("all");      // By Day view: pump filter
   const [dayShow, setDayShow] = useState("all");      // By Day view: all | not_checked | open
   const [dayCount, setDayCount] = useState(7);        // By Day view: how many days to show
@@ -18242,6 +18340,8 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
     w.document.write(html); w.document.close();
   };
   const dupDeletableCount = user.role==="owner" ? findDieselDuplicates(dieselRequests, trips).deletable.length : 0;
+  const unattachedList = user.role==="owner" ? unattachedConfirmed(dieselRequests) : [];
+  const unattachedPending = unattachedList.filter(x=>!x.recovered).length;
 
   const markOwnerVerified = (req, value) => {
     if(user?.role!=="owner") { alert("Only the owner can mark requests as checked."); return; }
@@ -19122,8 +19222,45 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
         ...(user.role==="owner"?[{id:"days", label:"📅 By Day", color:C.teal}]:[]),
         ...(user.role==="owner"?[{id:"bills", label:"📥 Bills", color:C.orange}]:[]),
         ...(user.role==="owner"?[{id:"verify", label:`Verify (${verifiedCount}/${verifiableTotal})`, color:C.purple}]:[]),
+        ...(user.role==="owner"?[{id:"unattached", label:`⏳ Not Attached (${unattachedPending})`, color:unattachedPending>0?C.red:C.muted}]:[]),
         ...(user.role==="owner"?[{id:"dupes", label:`🧹 Duplicates${dupDeletableCount>0?` (${dupDeletableCount})`:""}`, color:dupDeletableCount>0?C.red:C.muted}]:[]),
       ]} active={view} onSelect={setView} />
+
+      {view==="unattached" && user.role==="owner" && (()=>{
+        const notRec = unattachedList.filter(x=>!x.recovered), rec = unattachedList.filter(x=>x.recovered);
+        const sum = a => a.reduce((t,x)=>t+(pumpOwedAmount(x.req)||0),0);
+        const shown = unattachedFilter==="recovered" ? rec : unattachedFilter==="all" ? unattachedList : notRec;
+        return (
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+            <div style={{background:C.card,borderRadius:10,padding:"10px 14px",color:C.muted,fontSize:12,lineHeight:1.5}}>
+              Diesel the pump has <b>confirmed</b> but that was never attached to an LR. <b style={{color:C.green}}>Recovered</b> means the owner added it to the vehicle's loan.
+              A request leaves this list when it is attached to an LR or deleted.
+            </div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              {[["notrec",`Not recovered (${notRec.length}) · ₹${sum(notRec).toLocaleString("en-IN")}`,C.red],["recovered",`Recovered (${rec.length}) · ₹${sum(rec).toLocaleString("en-IN")}`,C.green],["all",`All (${unattachedList.length})`,C.muted]].map(([k,l,c])=>(
+                <button key={k} onClick={()=>setUnattachedFilter(k)} style={{padding:"6px 12px",borderRadius:20,fontSize:12,fontWeight:700,cursor:"pointer",
+                  border:`1.5px solid ${unattachedFilter===k?c:C.border}`,background:unattachedFilter===k?c+"22":"transparent",color:unattachedFilter===k?c:C.muted}}>{l}</button>))}
+            </div>
+            {shown.length===0 && <div style={{color:C.muted,fontSize:13,padding:"18px 0",textAlign:"center"}}>Nothing here.</div>}
+            {shown.map(({req,recovered,ageDays})=>(
+              <div key={req.id} style={{background:C.card,borderRadius:12,border:`1.5px solid ${recovered?C.green+"66":C.red+"66"}`,padding:12,display:"flex",flexDirection:"column",gap:4}}>
+                <div style={{display:"flex",justifyContent:"space-between",gap:8}}>
+                  <div style={{fontWeight:800,fontSize:14}}><span style={{color:C.orange}}>#{req.indentNo}</span>{" · "}{req.truckNo}</div>
+                  <div style={{fontWeight:800,fontSize:15,color:C.teal}}>₹{(pumpOwedAmount(req)||0).toLocaleString("en-IN")}</div>
+                </div>
+                <div style={{color:C.muted,fontSize:12}}>{req.date}{ageDays!=null?` · ${ageDays} day${ageDays===1?"":"s"} ago`:""}{(req.requestedBy||req.createdBy)?` · By: ${req.requestedBy||req.createdBy}`:""}{req.receiptNo?` · Receipt ${req.receiptNo}`:""}</div>
+                {recovered
+                  ? <div style={{color:C.green,fontSize:12,fontWeight:800}}>✓ Recovered — ₹{(req.loanAddedAmount||0).toLocaleString("en-IN")} added to vehicle loan{req.loanAddedBy?` by ${req.loanAddedBy}`:""}</div>
+                  : <div style={{color:C.red,fontSize:12,fontWeight:800}}>✗ Not recovered — diesel given, no LR attached{ageDays!=null&&ageDays>=3?` for ${ageDays} days`:""}</div>}
+                {req.remark && <div style={{color:C.muted,fontSize:11.5}}>📝 {req.remark}</div>}
+                {!recovered && (
+                  <button onClick={()=>addRequestToVehicleLoan(req)}
+                    style={{marginTop:6,padding:"7px 12px",borderRadius:8,border:`1.5px solid ${C.red}`,background:"transparent",color:C.red,fontWeight:700,fontSize:12,cursor:"pointer",alignSelf:"flex-start"}}>
+                    💰 Add ₹{(pumpOwedAmount(req)||0).toLocaleString("en-IN")} to Vehicle Loan</button>)}
+              </div>))}
+          </div>
+        );
+      })()}
 
       {view==="dupes" && user.role==="owner" && (
         <DuplicateDieselPanel dieselRequests={dieselRequests} trips={trips} log={log} setDieselRequests={setDieselRequests} />
@@ -20277,6 +20414,13 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                       {req.lrNo && (
                         <div style={{color:C.green,fontSize:11,marginTop:2}}>✓ Attached to LR {req.lrNo}</div>
                       )}
+                      {req.status==="confirmed" && !req.lrNo && !req.tripId && (req.loanAdded
+                        ? <div style={{marginTop:4,background:C.green+"14",border:`1px solid ${C.green}66`,borderRadius:8,padding:"6px 10px",color:C.green,fontSize:11,fontWeight:700,lineHeight:1.45}}>
+                            ✓ Not attached to an LR on purpose — ₹{(req.loanAddedAmount||0).toLocaleString("en-IN")} was added to the vehicle loan{req.loanAddedBy?` by ${req.loanAddedBy}`:""}. Recovered.
+                          </div>
+                        : <div style={{marginTop:4,background:C.red+"11",border:`1px solid ${C.red}66`,borderRadius:8,padding:"6px 10px",color:C.red,fontSize:11,fontWeight:700,lineHeight:1.45}}>
+                            ⚠ Diesel given but not attached to any LR yet — not recovered. See the “Not Attached” tab.
+                          </div>)}
                       {req.status==="reconciled" && (
                         <div style={{color:C.purple,fontSize:11,marginTop:2,fontWeight:700}}>
                           🔍 Reconciled via pump statement

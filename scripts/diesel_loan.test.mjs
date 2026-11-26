@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { applyRequestToLoan, canAddToLoan, LOAN_NOTE, loanTxnId } from "../src/diesel_loan.js";
+import { applyRequestToLoan, canAddToLoan, LOAN_NOTE, loanTxnId, unattachedConfirmed } from "../src/diesel_loan.js";
 import { confirmedBlock } from "../src/diesel_create_guard.js";
 const tests = []; const test = (n, f) => tests.push([n, f]);
 const REQ = { id: "R1", indentNo: 2148, truckNo: "TS08UF0786", status: "confirmed", amount: 15000, remark: "" };
@@ -41,6 +41,24 @@ test("only confirmed, unattached, not-yet-added requests can be added", () => {
 test("after the loan is added, the confirmed request no longer blocks a new request", () => {
   assert.ok(confirmedBlock([REQ], "TS08UF0786"));
   assert.equal(confirmedBlock([{ ...REQ, loanAdded: true }], "TS08UF0786"), null);
+});
+test("unattached list: only confirmed without LR; not recovered first, oldest first", () => {
+  const now = Date.parse("2026-11-26T09:00:00+05:30");
+  const L = unattachedConfirmed([
+    { ...REQ, id: "a", indentNo: 1, date: "2026-11-25" },
+    { ...REQ, id: "b", indentNo: 2, date: "2026-11-20" },
+    { ...REQ, id: "c", indentNo: 3, date: "2026-11-10", loanAdded: true },
+    { ...REQ, id: "d", indentNo: 4, status: "attached", lrNo: "SK1", date: "2026-11-01" },
+    { ...REQ, id: "e", indentNo: 5, status: "open", date: "2026-11-01" },
+    { ...REQ, id: "f", indentNo: 6, lrNo: "SK2", date: "2026-11-02" },
+  ], now);
+  assert.deepEqual(L.map((x) => x.req.indentNo), [2, 1, 3]);
+  assert.deepEqual(L.map((x) => x.recovered), [false, false, true]);
+  assert.deepEqual(L.map((x) => x.ageDays), [6, 1, 16]);
+});
+test("unattached list handles empty and bad dates", () => {
+  assert.deepEqual(unattachedConfirmed(null), []);
+  assert.equal(unattachedConfirmed([{ ...REQ, date: "garbage" }])[0].ageDays, null);
 });
 let ok = 0;
 for (const [n, f] of tests) { try { await f(); console.log("ok -", n); ok++; } catch (e) { console.log("not ok -", n, e.message); process.exitCode = 1; } }
