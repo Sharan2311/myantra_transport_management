@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { vehicleMatches, dateWithin, matchBatch, confirmUpdate, attachUpdate, pumpNameMatches, deleteBlockReason, defaultRequestPick, withCorrectedAmount, groupBillsByVehicle, groupCandidates, groupCheck, groupable } from "../src/bill_match.js";
+import { vehicleMatches, dateWithin, matchBatch, confirmUpdate, attachUpdate, pumpNameMatches, deleteBlockReason, defaultRequestPick, withCorrectedAmount, groupBillsByVehicle, groupCandidates, groupCheck, groupable, knownTruck, truckSuggestions, withCorrectedVehicle, editNote } from "../src/bill_match.js";
 const tests = []; const test = (n, f) => tests.push([n, f]);
 const req = (o) => ({ id: "r" + (o.indentNo || 1), indentNo: 1, truckNo: "KA28AB7880", pumpId: "P1", date: "2026-11-21", amount: 32000, dieselAmount: 32000, cashAmount: 0, status: "open", receiptNo: "", ...o });
 const bill = (o) => ({ id: "b1", vehicleNo: "7880", amount: 32000, date: "2026-11-21", pumpName: "SHREE VAISHNAVI F/S", receiptNo: "K0589", ...o });
@@ -228,6 +228,27 @@ test("group candidates: same vehicle, never an attached/billed request; open and
   const other = req({ indentNo: 5, truckNo: "TS07UH5499", amount: 32000, dieselAmount: 32000 });
   const c = groupCandidates([exactConfirmed, openOther, openExact, attached, other], "KA28AB7880", 32000);
   assert.deepEqual(c.map((r) => r.indentNo), [3, 1, 2]);
+});
+test("vehicle fix: only a known truck is accepted; suggestions match any part of the number; original scan is kept", () => {
+  const trucks = ["MH25AJ4078", "TS07UH5499", "KA28AB7880", "TS34TA5400"];
+  assert.equal(knownTruck("ts 07 uh-5499", trucks), "TS07UH5499"); assert.equal(knownTruck("TS07UH549", trucks), ""); assert.equal(knownTruck("", trucks), "");
+  assert.deepEqual(truckSuggestions("5499", trucks), ["TS07UH5499"]); assert.deepEqual(truckSuggestions("7", trucks), []);
+  const d = withCorrectedVehicle({ vehicleNo: "TS07UH549", amount: 100 }, "TS07UH5499");
+  assert.equal(d.vehicleNo, "TS07UH5499"); assert.equal(d.scanVehicleNo, "TS07UH549"); assert.equal(d.vehEdited, true);
+  assert.equal(withCorrectedVehicle(d, "KA28AB7880").scanVehicleNo, "TS07UH549");
+  assert.equal(withCorrectedVehicle({ vehicleNo: "TS07UH5499" }, "TS07UH5499").vehEdited, false);
+});
+test("after the vehicle is corrected the bill matches that vehicle's request; before it, it did not", () => {
+  const a = req({ indentNo: 7, truckNo: "TS07UH5499", amount: 15396, dieselAmount: 15396 });
+  const b = (v) => matchBatch([bill({ id: "b1", vehicleNo: v, amount: 15396, receiptNo: "K0667" })], [a], ctx)[0];
+  assert.equal(b("TS07UH5489").state, "not_found"); assert.deepEqual(b("TS07UH5489").sameVehicle, []);
+  const fixed = withCorrectedVehicle({ vehicleNo: "TS07UH5489" }, "TS07UH5499");
+  assert.equal(b(fixed.vehicleNo).state, "match");
+});
+test("audit note names every hand correction and is empty when there is none", () => {
+  assert.equal(editNote({ amount: 5 }), "");
+  const n = editNote({ vehEdited: true, scanVehicleNo: "5489", vehicleNo: "TS07UH5499", edited: true, scanAmount: 9700, amount: 19700 });
+  assert.ok(n.includes("5489") && n.includes("TS07UH5499") && n.includes("9700") && n.includes("19700"));
 });
 let ok = 0;
 for (const [n, f] of tests) { try { await f(); console.log("ok -", n); ok++; } catch (e) { console.log("not ok -", n, e.message); process.exitCode = 1; } }
