@@ -2,7 +2,7 @@ import { pouchAmountFor, holdAllAmountFor } from "./pouch_logic.js";
 import { tonnageByBlock } from "./tonnage_logic.js";
 import { shareFile } from "./share_file.js";
 import { groupRequestsByDay, hasBill } from "./diesel_by_day.js";
-import { matchBatch, confirmUpdate, attachUpdate, pumpNameMatches, dieselOf, deleteBlockReason, defaultRequestPick, withCorrectedAmount, groupBillsByVehicle, groupCandidates, groupCheck, groupable } from "./bill_match.js";
+import { matchBatch, confirmUpdate, attachUpdate, pumpNameMatches, dieselOf, deleteBlockReason, defaultRequestPick, withCorrectedAmount, groupBillsByVehicle, groupCandidates, groupCheck, groupable, knownTruck, truckSuggestions, withCorrectedVehicle, editNote } from "./bill_match.js";
 import { retryNet, bytesToBase64, settleAfterNetFail } from "./net_retry.js";
 import { receiptClashes } from "./bill_identity.js";
 import { lastEmployeeForVehicle } from "./emp_history.js";
@@ -13304,7 +13304,7 @@ async function compressReceiptImage(file, maxDim = 1600, quality = 0.75) {
 // + same pump + date within 1 day (src/bill_match.js). Nothing is confirmed until the owner taps Confirm. Bills that match
 // no request (including bills of a request that was served in parts) are flagged "Diesel request not found" and can be
 // checked and approved by hand.
-function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, log }) {
+function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], vehicles=[], user, log }) {
   const [items, setItems]   = useState([]);          // {id,file,url,state:"scanning"|"done"|"error",data,error}
   const [done, setDone]     = useState({});          // itemId -> {indentNo, truckNo}
   const [busy, setBusy]     = useState({});          // itemId -> true while saving
@@ -13358,6 +13358,7 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
   const retry = async (it) => { setItems(prev=>prev.map(x=>x.id===it.id?{...x,state:"scanning",error:""}:x)); await scanOne(it); };
 
   const pumpMatches = (name, r) => { const p=pumps.find(x=>x.id===r.pumpId); return p ? (pumpNamesMatch(name, p.name) || pumpNameMatches(name, p.name)) : false; };
+  const trucks = useMemo(()=>[...new Set([...(vehicles||[]).map(v=>v.truckNo),...(dieselRequests||[]).map(r=>r.truckNo)].filter(Boolean))],[vehicles,dieselRequests]);
   const live = items.filter(i=>i.state==="done" && !done[i.id]);
   const results = useMemo(()=>matchBatch(
     live.map(i=>({id:i.id, vehicleNo:i.data.vehicleNo, amount:i.data.amount, date:i.data.date, pumpName:i.data.pumpName, receiptNo:i.data.receiptNo})),
@@ -13520,6 +13521,21 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
                   : <button onClick={()=>retry(it)} style={{background:"transparent",border:`1.5px solid ${C.blue}`,borderRadius:8,color:C.blue,fontWeight:700,fontSize:12,padding:"7px",cursor:"pointer"}}>↻ Try again</button>}</>}
               {it.state==="done" && <>
                 {row("Vehicle",d.vehicleNo)}{row("Amount",d.amount!=null?"₹"+Number(d.amount).toLocaleString("en-IN"):"")}
+                {d.vehEdited && <div style={{fontSize:11,color:C.orange,fontWeight:700}}>✎ Vehicle corrected by hand (scan read {d.scanVehicleNo||"?"})</div>}
+                {!dn && (m.editVeh!==undefined
+                  ? <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                      <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                        <input list={"trk"+it.id} autoFocus value={m.editVeh} onChange={e=>me({editVeh:e.target.value.toUpperCase(),vehErr:""})} placeholder="Type vehicle no. or last 4 digits"
+                          style={{flex:1,border:`1px solid ${C.border}`,borderRadius:6,padding:"6px 8px",fontSize:13,background:C.bg,color:C.text,minWidth:0}}/>
+                        <datalist id={"trk"+it.id}>{truckSuggestions(m.editVeh,trucks).map(t=><option key={t} value={t}/>)}</datalist>
+                        <button onClick={()=>{ const t=knownTruck(m.editVeh,trucks); if(!t){ me({vehErr:"Not a vehicle in this app. Pick one from the list that appears while typing."}); return; }
+                            setItems(prev=>prev.map(x=>x.id===it.id?{...x,data:withCorrectedVehicle(x.data,t)}:x)); me({editVeh:undefined,vehErr:"",open:false,reqId:undefined}); }}
+                          style={{background:C.blue,border:"none",borderRadius:6,color:"#fff",fontWeight:700,fontSize:12,padding:"7px 10px",cursor:"pointer"}}>Use</button>
+                        <button onClick={()=>me({editVeh:undefined,vehErr:""})} style={{background:"transparent",border:"none",color:C.muted,fontSize:14,cursor:"pointer"}}>✕</button>
+                      </div>
+                      {m.vehErr && <div style={{fontSize:11.5,color:C.red,fontWeight:700}}>{m.vehErr}</div>}
+                    </div>
+                  : <span onClick={()=>me({editVeh:""})} style={{fontSize:11.5,color:C.blue,cursor:"pointer",fontWeight:700}}>✎ Vehicle wrong? Fix it</span>)}
                 {d.edited && <div style={{fontSize:11,color:C.orange,fontWeight:700}}>✎ Corrected by hand (scan read ₹{d.scanAmount!=null?Number(d.scanAmount).toLocaleString("en-IN"):"?"})</div>}
                 {!dn && (m.editAmt!==undefined
                   ? <div style={{display:"flex",gap:6,alignItems:"center"}}>
@@ -13534,14 +13550,14 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
                 {dn && <div>{chip(dn.part?`✓ Part of Indent #${dn.indentNo} (confirmed)`:`✓ Confirmed Indent #${dn.indentNo} · ${dn.truckNo}`,C.green)}</div>}
                 {!dn && r?.state==="match" && <>
                   <div>{chip("Matches "+reqLine(r.request),C.green)}{r.request.status!=="open" && <span style={{marginLeft:6}}>{chip("already confirmed by pump — bill will be attached",C.blue)}</span>}</div>
-                  <button disabled={busy[it.id]} onClick={()=>confirmOn(it,r.request,{amount:d.amount,receiptNo:d.receiptNo,method:d.edited?"bulk_receipt_manual":"bulk_receipt",reason:d.edited?`Scan read ₹${d.scanAmount}, amount corrected by hand to ₹${d.amount} from the bill photo`:undefined})}
+                  <button disabled={busy[it.id]} onClick={()=>confirmOn(it,r.request,{amount:d.amount,receiptNo:d.receiptNo,method:(d.edited||d.vehEdited)?"bulk_receipt_manual":"bulk_receipt",reason:editNote(d)||undefined})}
                     style={{background:C.green,border:"none",borderRadius:8,color:"#fff",fontWeight:800,fontSize:13,padding:"9px",cursor:"pointer",opacity:busy[it.id]?0.6:1}}>
                     {busy[it.id]?"Saving…":(r.request.status==="open"?"✓ Confirm Indent #":"📎 Attach bill to Indent #")+r.request.indentNo}</button>
                 </>}
                 {!dn && r?.state==="near_match" && <>
                   <div>{chip("Check date: bill "+(d.date||"?")+" vs request "+r.request.date,C.orange)}</div>
                   <div style={{fontSize:11.5,color:C.muted}}>Vehicle, pump and amount match {reqLine(r.request)}; only the date differs. Look at the bill photo before approving.</div>
-                  <button disabled={busy[it.id]} onClick={()=>confirmOn(it,r.request,{amount:d.amount,receiptNo:d.receiptNo,method:"bulk_receipt_manual",reason:`Date on bill ${d.date||"?"} differs from request ${r.request.date}; approved after checking the bill`})}
+                  <button disabled={busy[it.id]} onClick={()=>confirmOn(it,r.request,{amount:d.amount,receiptNo:d.receiptNo,method:"bulk_receipt_manual",reason:`Date on bill ${d.date||"?"} differs from request ${r.request.date}; approved after checking the bill`+(editNote(d)?". "+editNote(d):"")})}
                     style={{background:C.orange,border:"none",borderRadius:8,color:"#fff",fontWeight:800,fontSize:13,padding:"9px",cursor:"pointer",opacity:busy[it.id]?0.6:1}}>
                     {busy[it.id]?"Saving…":"I checked the bill — "+(r.request.status==="open"?"confirm":"attach")+" Indent #"+r.request.indentNo}</button>
                 </>}
@@ -13583,7 +13599,7 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], user, 
                         <button disabled={!sel||busy[it.id]||((diff!==0||splitBills)&&!(m.reason||"").trim())}
                           onClick={()=>splitBills
                             ? confirmOn(it,sel,{amount:splitTotal,receiptNo:splitBills.map(x=>x.data.receiptNo||"?").join(" + "),reason:`Served in ${splitBills.length} bills: `+splitBills.map(x=>`${x.data.receiptNo||"?"} ₹${x.data.amount}`).join(" + ")+" — "+m.reason.trim(),method:"bulk_receipt_split",extra:splitBills.filter(x=>x.id!==it.id).map(x=>x.id)})
-                            : confirmOn(it,sel,{amount:d.amount,receiptNo:d.receiptNo,reason:diff!==0?`Manual approval, bill ₹${d.amount} vs request ₹${dieselOf(sel)} — `+m.reason.trim():"Manually approved from bill upload",method:"bulk_receipt_manual"})}
+                            : confirmOn(it,sel,{amount:d.amount,receiptNo:d.receiptNo,reason:diff!==0?`Manual approval, bill ₹${d.amount} vs request ₹${dieselOf(sel)} — `+m.reason.trim()+(editNote(d)?". "+editNote(d):""):"Manually approved from bill upload"+(editNote(d)?". "+editNote(d):""),method:"bulk_receipt_manual"})}
                           style={{background:C.green,border:"none",borderRadius:8,color:"#fff",fontWeight:800,fontSize:12.5,padding:"9px",cursor:"pointer",opacity:(!sel||busy[it.id]||((diff!==0||splitBills)&&!(m.reason||"").trim()))?0.5:1}}>
                           {busy[it.id]?"Saving…":splitBills?"Approve split & confirm Indent #"+sel.indentNo:"Approve & confirm"+(sel?" Indent #"+sel.indentNo:"")}</button>
                       </div>);
@@ -19268,7 +19284,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
 
       {/* ── DAILY VERIFICATION CHECKLIST — owner only ── */}
       {view==="bills" && user.role==="owner" && (
-        <BulkBillsPanel dieselRequests={dieselRequests} setDieselRequests={setDieselRequests} pumps={pumps} user={user} log={log} />
+        <BulkBillsPanel dieselRequests={dieselRequests} setDieselRequests={setDieselRequests} pumps={pumps} vehicles={vehicles} user={user} log={log} />
       )}
 
       {view==="days" && user.role==="owner" && (()=>{
