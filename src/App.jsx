@@ -13441,7 +13441,7 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], vehicl
       const joinedNo = incl.map(b=>b.receiptNo||"?").join(" + ");
       const base = `Served in ${incl.length} bills: `+incl.map(b=>`${b.receiptNo||"?"} ${fmt(b.amount)}`).join(" + ")+` = ${fmt(total)}`;
       const why = base+(chk.diff!==0?` (request was ${fmt(dieselOf(sel))})`:"")+((g.reason||"").trim()?" — "+g.reason.trim():"");
-      confirmOn(its[0], sel, {amount:total, receiptNo:joinedNo, reason:why, method:"bulk_receipt_group", extra:its.slice(1).map(x=>x.id), photos:its, billData:{...incl[0], vehicleNo:G.vehicleNo, amount:total, receiptNo:joinedNo}});
+      confirmOn(its[0], sel, {amount:total, receiptNo:joinedNo, reason:why, method:"bulk_receipt_group", extra:its.slice(1).map(x=>x.id), photos:its, billData:{...incl[0], vehicleNo:G.vehicleNo, amount:total, receiptNo:joinedNo, nozzleNo:incl.every(b=>!b.nozzleNo)?null:incl.map(b=>b.nozzleNo||"-").join(" + ")}});
     };
     return (
       <div key={G.key} style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.blue}66`,padding:12,display:"flex",flexDirection:"column",gap:8}}>
@@ -13698,6 +13698,7 @@ function DieselReceiptScan({ selected, pumps, dieselRequests=[], cashAmount, use
           extractedAmount:     data.amount,
           extractedDate:       data.date,
           extractedPumpName:   data.pumpName,
+          extractedNozzle:     data.nozzleNo||null,
           vehicleMismatch:     false,
           pumpMismatch:        false,
           dateMismatch:        false,
@@ -13724,6 +13725,7 @@ function DieselReceiptScan({ selected, pumps, dieselRequests=[], cashAmount, use
         extractedAmount:    data.amount,
         extractedDate:      data.date,
         extractedPumpName:  data.pumpName,
+        extractedNozzle:    data.nozzleNo||null,
         vehicleMismatch, pumpMismatch, dateMismatch,
         confirmationMethod: "receipt_scan",
       };
@@ -16972,7 +16974,7 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
     if(!window.confirm(`Clear the uploaded receipt for indent #${req.indentNo} (${req.truckNo})?\n\nThe request itself stays — you'll be able to upload a new photo. This can't be undone.`)) return;
     const cleared = {...req,
       receiptImagePath:"", receiptNo:"",
-      extractedVehicleNo:"", extractedAmount:null, extractedDate:"", extractedPumpName:"",
+      extractedVehicleNo:"", extractedAmount:null, extractedDate:"", extractedPumpName:"", extractedNozzle:"",
       vehicleMismatch:false, pumpMismatch:false, dateMismatch:false,
       confirmationMethod:"",
       rejectedReason:"", rejectedBy:"", rejectedAt:"",
@@ -17714,7 +17716,7 @@ function DieselReceiptReviewCard({ req, pumps, dieselRequests=[], user, log, vie
     if (!date) { alert("Date is required"); return; }
     // Safety net — duplicate should already have been blocked at upload time, but re-check here too
     if (req.receiptNo) {
-      const dup = receiptClashes({receiptNo:req.receiptNo, vehicleNo:vehicleNo||req.extractedVehicleNo, amount:req.extractedAmount}, dieselRequests, req.id).clash;
+      const dup = receiptClashes({receiptNo:req.receiptNo, nozzleNo:req.extractedNozzle, vehicleNo:vehicleNo||req.extractedVehicleNo, amount:req.extractedAmount}, dieselRequests, req.id).clash;
       if (dup) {
         alert(`Receipt #${req.receiptNo} is already attached to Indent #${dup.indentNo} (${dup.truckNo}) — status: ${dup.status.toUpperCase()}. This bill (same receipt number, vehicle and amount) can't be approved for two requests.`);
         return;
@@ -17769,6 +17771,7 @@ function DieselReceiptReviewCard({ req, pumps, dieselRequests=[], user, log, vie
         extractedAmount:    null,
         extractedDate:      "",
         extractedPumpName:  "",
+        extractedNozzle:    "",
         vehicleMismatch:    false,
         pumpMismatch:       false,
         dateMismatch:       false,
