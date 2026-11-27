@@ -4,7 +4,7 @@ import { shareFile } from "./share_file.js";
 import { groupRequestsByDay, hasBill } from "./diesel_by_day.js";
 import { matchBatch, confirmUpdate, attachUpdate, pumpNameMatches, dieselOf, deleteBlockReason, defaultRequestPick, withCorrectedAmount, groupBillsByVehicle, groupCandidates, groupCheck, groupable, knownTruck, truckSuggestions, withCorrectedVehicle, editNote } from "./bill_match.js";
 import { retryNet, bytesToBase64, settleAfterNetFail } from "./net_retry.js";
-import { receiptClashes } from "./bill_identity.js";
+import { receiptClashes, receiptLabel } from "./bill_identity.js";
 import { lastEmployeeForVehicle } from "./emp_history.js";
 import { confirmedBlock, sameFormAlready } from "./diesel_create_guard.js";
 import { applyRequestToLoan, canAddToLoan, unattachedConfirmed } from "./diesel_loan.js";
@@ -13451,7 +13451,7 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], vehicl
             <label key={b.id} style={{display:"flex",gap:8,alignItems:"center",fontSize:12,cursor:"pointer",opacity:on?1:0.5}}>
               <input type="checkbox" checked={on} onChange={()=>gSet(G.key,{off:{...(g.off||{}),[b.id]:on}})}/>
               <img src={itx?.url} alt="bill" onClick={e=>{ e.preventDefault(); itx?.url && window.open(itx.url,"_blank"); }} style={{width:46,height:62,objectFit:"cover",borderRadius:6,background:C.bg,flexShrink:0}}/>
-              <span style={{lineHeight:1.45}}><b>{fmt(b.amount)}</b> · Receipt {b.receiptNo||"—"}<br/><span style={{color:C.muted}}>{b.date||"no date"} · {b.pumpName||"no pump"}{b.edited?" · ✎ amount corrected":""}</span></span>
+              <span style={{lineHeight:1.45}}><b>{fmt(b.amount)}</b> · Receipt {receiptLabel(b.receiptNo,b.nozzleNo)||"—"}<br/><span style={{color:C.muted}}>{b.date||"no date"} · {b.pumpName||"no pump"}{b.edited?" · ✎ amount corrected":""}</span></span>
             </label>); })}
         </div>
         <div style={{fontSize:13,fontWeight:800}}>Total of ticked bills: {fmt(total)}</div>
@@ -13546,7 +13546,7 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], vehicl
                       <button onClick={()=>me({editAmt:undefined})} style={{background:"transparent",border:"none",color:C.muted,fontSize:14,cursor:"pointer"}}>✕</button>
                     </div>
                   : <span onClick={()=>me({editAmt:d.amount!=null?String(d.amount):""})} style={{fontSize:11.5,color:C.blue,cursor:"pointer",fontWeight:700}}>✎ Amount wrong? Fix it</span>)}
-                {row("Date",d.date)}{row("Pump",d.pumpName)}{row("Receipt no.",d.receiptNo)}
+                {row("Date",d.date)}{row("Pump",d.pumpName)}{row("Receipt no.",receiptLabel(d.receiptNo,d.nozzleNo))}
                 {dn && <div>{chip(dn.part?`✓ Part of Indent #${dn.indentNo} (confirmed)`:`✓ Confirmed Indent #${dn.indentNo} · ${dn.truckNo}`,C.green)}</div>}
                 {!dn && r?.state==="match" && <>
                   <div>{chip("Matches "+reqLine(r.request),C.green)}{r.request.status!=="open" && <span style={{marginLeft:6}}>{chip("already confirmed by pump — bill will be attached",C.blue)}</span>}</div>
@@ -13561,8 +13561,8 @@ function BulkBillsPanel({ dieselRequests=[], setDieselRequests, pumps=[], vehicl
                     style={{background:C.orange,border:"none",borderRadius:8,color:"#fff",fontWeight:800,fontSize:13,padding:"9px",cursor:"pointer",opacity:busy[it.id]?0.6:1}}>
                     {busy[it.id]?"Saving…":"I checked the bill — "+(r.request.status==="open"?"confirm":"attach")+" Indent #"+r.request.indentNo}</button>
                 </>}
-                {!dn && r?.state==="duplicate_receipt" && <div>{chip(`This bill is already used${r.request?` on Indent #${r.request.indentNo} (${r.request.truckNo})`:" in this batch"} — same receipt ${d.receiptNo}, vehicle and amount`,C.red)}</div>}
-                {!dn && r?.notices?.length>0 && <div style={{fontSize:11.5,color:C.muted}}>Receipt no. {d.receiptNo} also appears on {r.notices.map(n=>`Indent #${n.indentNo} (${n.truckNo}${n.extractedAmount!=null?`, ₹${Number(n.extractedAmount).toLocaleString("en-IN")}`:""})`).join(", ")} — a different vehicle/amount, so this is treated as a different bill.</div>}
+                {!dn && r?.state==="duplicate_receipt" && <div>{chip(`This bill is already used${r.request?` on Indent #${r.request.indentNo} (${r.request.truckNo})`:" in this batch"} — same receipt ${receiptLabel(d.receiptNo,d.nozzleNo)}, vehicle and amount`,C.red)}</div>}
+                {!dn && r?.notices?.length>0 && <div style={{fontSize:11.5,color:C.muted}}>Receipt no. {receiptLabel(d.receiptNo,d.nozzleNo)} also appears on {r.notices.map(n=>`Indent #${n.indentNo} (${n.truckNo}${n.extractedAmount!=null?`, ₹${Number(n.extractedAmount).toLocaleString("en-IN")}`:""}${n.extractedNozzle?`, nozzle ${n.extractedNozzle}`:""})`).join(", ")} — a different vehicle, amount or nozzle, so this is treated as a different bill.</div>}
                 {!dn && r?.state==="unreadable" && <div>{chip("Could not read vehicle or amount — retake the photo",C.red)}</div>}
                 {!dn && (r?.state==="not_found"||r?.state==="ambiguous") && <>
                   <div>{chip(r.state==="ambiguous"?"More than one request fits — choose":"Diesel request not found",C.red)}</div>
@@ -13708,7 +13708,7 @@ function DieselReceiptScan({ selected, pumps, dieselRequests=[], cashAmount, use
         };
         setState("saving");
         await DB.saveDieselRequest(updReq);
-        log("PUMP CONFIRM", `Indent #${selected.indentNo} · ${selected.truckNo} · Receipt scan · Diesel ₹${confDiesel} Cash ₹${confCash} Total ₹${confTotal}${data.receiptNo?` · Receipt #${data.receiptNo}`:""}`);
+        log("PUMP CONFIRM", `Indent #${selected.indentNo} · ${selected.truckNo} · Receipt scan · Diesel ₹${confDiesel} Cash ₹${confCash} Total ₹${confTotal}${data.receiptNo?` · Receipt #${receiptLabel(data.receiptNo,data.nozzleNo)}`:""}`);
         onConfirmed(updReq, { changed: dieselChanged||cashChanged, dieselChanged, cashChanged, origDiesel, origCash });
         return;
       }
@@ -17102,7 +17102,7 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
           <td class="amount">&#8377;${(r.amount||0).toLocaleString("en-IN")}</td>
           <td>${r.dieselAmount ? "&#8377;"+r.dieselAmount.toLocaleString("en-IN") : "&#8212;"}</td>
           <td>${r.cashAmount   ? "&#8377;"+r.cashAmount.toLocaleString("en-IN")   : "&#8212;"}</td>
-          <td>${r.receiptNo||"&#8212;"}</td>
+          <td>${receiptLabel(r.receiptNo,r.extractedNozzle)||"&#8212;"}</td>
           <td>${r.lrNo||"&#8212;"}</td>
           <td class="${statusClass}">${r.status.toUpperCase()}</td>
         </tr>`;
@@ -17548,7 +17548,7 @@ function PumpPortal({dieselRequests=[], setDieselRequests, pumps=[], pumpPayment
               )}
               <div style={{color:C.muted,fontSize:12,marginBottom:16}}>
                 Indent #{confirmed.indentNo} · {confirmed.truckNo}<br/>This indent is now locked. PIN is no longer valid.
-                {confirmed.confirmationMethod==="receipt_scan" && <div style={{marginTop:4}}>📷 Confirmed via receipt scan{confirmed.receiptNo?` · Receipt #${confirmed.receiptNo}`:""}</div>}
+                {confirmed.confirmationMethod==="receipt_scan" && <div style={{marginTop:4}}>📷 Confirmed via receipt scan{confirmed.receiptNo?` · Receipt #${receiptLabel(confirmed.receiptNo,confirmed.extractedNozzle)}`:""}</div>}
               </div>
               <Btn onClick={()=>{ setConfirmed(null); setStep("list"); setActiveTab("open"); }} full color={C.teal}>← Back to Requests</Btn>
             </div>
@@ -19267,7 +19267,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                   <div style={{fontWeight:800,fontSize:14}}><span style={{color:C.orange}}>#{req.indentNo}</span>{" · "}{req.truckNo}</div>
                   <div style={{fontWeight:800,fontSize:15,color:C.teal}}>₹{(pumpOwedAmount(req)||0).toLocaleString("en-IN")}</div>
                 </div>
-                <div style={{color:C.muted,fontSize:12}}>{req.date}{ageDays!=null?` · ${ageDays} day${ageDays===1?"":"s"} ago`:""}{(req.requestedBy||req.createdBy)?` · By: ${req.requestedBy||req.createdBy}`:""}{req.receiptNo?` · Receipt ${req.receiptNo}`:""}</div>
+                <div style={{color:C.muted,fontSize:12}}>{req.date}{ageDays!=null?` · ${ageDays} day${ageDays===1?"":"s"} ago`:""}{(req.requestedBy||req.createdBy)?` · By: ${req.requestedBy||req.createdBy}`:""}{req.receiptNo?` · Receipt ${receiptLabel(req.receiptNo,req.extractedNozzle)}`:""}</div>
                 {recovered
                   ? <div style={{color:C.green,fontSize:12,fontWeight:800}}>✓ Recovered — ₹{(req.loanAddedAmount||0).toLocaleString("en-IN")} added to vehicle loan{req.loanAddedBy?` by ${req.loanAddedBy}`:""}</div>
                   : <div style={{color:C.red,fontSize:12,fontWeight:800}}>✗ Not recovered — diesel given, no LR attached{ageDays!=null&&ageDays>=3?` for ${ageDays} days`:""}</div>}
@@ -20410,7 +20410,7 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                             <div style={{marginTop:2,color:C.text}}>
                               {req.confirmedBy && <span>Confirmed by: <b>{req.confirmedBy}</b></span>}
                               {req.confirmedBy && req.receiptNo && <span>{" · "}</span>}
-                              {req.receiptNo && <span>Receipt #: <b>{req.receiptNo}</b></span>}
+                              {req.receiptNo && <span>Receipt #: <b>{receiptLabel(req.receiptNo,req.extractedNozzle)}</b></span>}
                             </div>
                           )}
                           {(req.originalDieselAmount!=null||req.originalCashAmount!=null) && (
