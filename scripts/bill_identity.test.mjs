@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { normReceipt, last4, billsDiffer, receiptClashes, normNozzle } from "../src/bill_identity.js";
+import { normReceipt, last4, billsDiffer, receiptClashes, normNozzle, receiptLabel } from "../src/bill_identity.js";
 const tests = []; const test = (n, f) => tests.push([n, f]);
 // the two real bills from the pump: SAME receipt number K0596, different vehicle / amount / date
 const A = { receiptNo: "K0596", vehicleNo: "5499", amount: 15396, date: "2026-11-21" };
@@ -74,6 +74,12 @@ test("a different receipt number never clashes", () => {
 });
 test("no receipt number on the bill -> nothing to compare", () => {
   const r = receiptClashes({ ...A, receiptNo: "" }, [reqOf({})], "other"); assert.equal(r.clash, null);
+});
+test("what the screens show: receipt + nozzle; groups per part; unknown nozzle shows the receipt only", () => {
+  assert.equal(receiptLabel("K0713", "01"), "K0713 · Nozzle 1");
+  assert.equal(receiptLabel("K0712 + K0713", "01 + 02"), "K0712 (nozzle 1) + K0713 (nozzle 2)");
+  assert.equal(receiptLabel("K0715", null), "K0715"); assert.equal(receiptLabel("K0715", ""), "K0715");
+  assert.equal(receiptLabel("K1 + K2", "1 + -"), "K1 (nozzle 1) + K2"); assert.equal(receiptLabel("", "1"), ""); assert.equal(receiptLabel(null, null), "");
 });
 let ok = 0;
 for (const [n, f] of tests) { try { await f(); console.log("ok -", n); ok++; } catch (e) { console.log("not ok -", n, e.message); process.exitCode = 1; } }
