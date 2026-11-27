@@ -11,12 +11,15 @@ handwritten notes.
 
 Extract exactly these fields:
 1. vehicleNo — the "Vehicle No" field. Uppercase, remove all spaces/hyphens (e.g. "KA 56 5567" -> "KA565567").
-2. amount — the "Amount(Rs)" field. Number only, no ₹, no commas (e.g. "07000.00" -> 7000).
+2. amount — the "Amount(Rs)" field, written as a plain number WITHOUT leading zeros and without ₹ or commas
+   (e.g. "07000.00" -> 7000.00, "00271.73" -> 271.73, "09949.00" -> 9949.00). Never write leading zeros.
 3. date — the "Date" field, converted to YYYY-MM-DD. Receipts show DD/MM/YY (e.g. "10/07/26" -> "2026-07-10").
 4. pumpName — the pump/outlet name and location, usually printed below the company logo
    (e.g. "KHASA MATH CIRCLE GURMITKAL"). Do not include the oil company brand name
-   (HP/IOC/BPCL) itself, just the outlet name/location line.
-5. receiptNo — the "Receipt No." field, exactly as printed (e.g. "G0649").
+   (HP/IOC/BPCL) itself, and do not include lines like "Duplicate Receipt Copy" or "Welcomes You":
+   just the outlet name/location lines.
+5. receiptNo — the value on the line that starts with "Receipt No." (a short code such as "G0649" or "K0713").
+   It is NOT the "FCC ID" (a long number of 15+ digits printed on the next line). Never use the FCC ID.
 
 STRICT RULES:
 - Only extract from the PRINTED receipt. Never read handwritten numbers/names into these fields.
@@ -33,6 +36,21 @@ Return ONLY this JSON, no markdown, no explanation:
   "pumpName": "<outlet name or null>",
   "receiptNo": "<string or null>"
 }`;
+
+// The model sometimes copies the printed amount with its leading zeros ("amount": 09949.00), which is not valid JSON.
+// Take the JSON object out of the reply, strip leading zeros from numbers, then parse. Returns null if it still cannot be read.
+function parseReceiptText(text) {
+  let t = String(text || "").replace(/```json|```/g, "").trim();
+  const a = t.indexOf("{"), b = t.lastIndexOf("}");
+  if (a < 0 || b <= a) return null;
+  t = t.slice(a, b + 1).replace(/(:\s*)0+(?=\d)/g, "$1");
+  try { const o = JSON.parse(t); return o && typeof o === "object" ? o : null; } catch (e) { return null; }
+}
+function cleanPumpName(name) {
+  return String(name).replace(/duplicate\s+receipt\s+copy/ig, "").replace(/welcomes\s+you/ig, "").replace(/\s+/g, " ").trim() || null;
+}
+exports.parseReceiptText = parseReceiptText;
+exports.cleanPumpName = cleanPumpName;
 
 exports.handler = async (event) => {
   if (event.httpMethod !== "POST") {
@@ -91,13 +109,15 @@ exports.handler = async (event) => {
     }
 
     const text = (data.content || []).find(b => b.type === "text")?.text || "";
-    const clean = text.replace(/```json|```/g, "").trim();
 
-    let parsed;
-    try { parsed = JSON.parse(clean); }
-    catch (e) {
+    const parsed = parseReceiptText(text);
+    if (!parsed) {
       return { statusCode: 200, body: JSON.stringify({ error: "Could not read the receipt. Please upload a clearer image." }) };
     }
+
+    // A pump's own wording is not part of the outlet name; a long all-digit "receipt no" is the FCC ID, not the receipt number.
+    if (parsed.pumpName) parsed.pumpName = cleanPumpName(parsed.pumpName);
+    if (parsed.receiptNo != null && /^\d{10,}$/.test(String(parsed.receiptNo).replace(/\s/g, ""))) parsed.receiptNo = null;
 
     // Normalise vehicleNo
     if (parsed.vehicleNo) {
