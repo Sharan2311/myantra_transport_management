@@ -20,6 +20,7 @@ Extract exactly these fields:
    just the outlet name/location lines.
 5. receiptNo — the value on the line that starts with "Receipt No." (a short code such as "G0649" or "K0713").
    It is NOT the "FCC ID" (a long number of 15+ digits printed on the next line). Never use the FCC ID.
+6. nozzleNo — the value of the "Nozzle No." line (e.g. "01" or "02"), as printed. null if there is no such line.
 
 STRICT RULES:
 - Only extract from the PRINTED receipt. Never read handwritten numbers/names into these fields.
@@ -34,7 +35,8 @@ Return ONLY this JSON, no markdown, no explanation:
   "amount": <number or null>,
   "date": "<YYYY-MM-DD or null>",
   "pumpName": "<outlet name or null>",
-  "receiptNo": "<string or null>"
+  "receiptNo": "<string or null>",
+  "nozzleNo": "<string or null>"
 }`;
 
 // The model sometimes copies the printed amount with its leading zeros ("amount": 09949.00), which is not valid JSON.
@@ -118,6 +120,9 @@ exports.handler = async (event) => {
     // A pump's own wording is not part of the outlet name; a long all-digit "receipt no" is the FCC ID, not the receipt number.
     if (parsed.pumpName) parsed.pumpName = cleanPumpName(parsed.pumpName);
     if (parsed.receiptNo != null && /^\d{10,}$/.test(String(parsed.receiptNo).replace(/\s/g, ""))) parsed.receiptNo = null;
+
+    // Nozzle: digits only ("01" and "1" are the same nozzle); optional, never required
+    if (parsed.nozzleNo != null) { const z = String(parsed.nozzleNo).replace(/\D/g, ""); parsed.nozzleNo = z || null; }
 
     // Normalise vehicleNo
     if (parsed.vehicleNo) {
