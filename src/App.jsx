@@ -19335,6 +19335,14 @@ function DieselMod({trips, setTrips, vehicles, setVehicles, employees, indents, 
                     <div style={{flex:1,minWidth:0}}>
                       <div style={{fontWeight:800,fontSize:13}}>#{r.indentNo} · {r.truckNo}</div>
                       <div style={{fontSize:11,color:C.muted}}>{pump?pump.name:"—"}{r.lrNo?` · LR ${r.lrNo}`:""}</div>
+                      {r.receiptNo && <div style={{fontSize:11,color:C.text,fontWeight:700}}>🧾 Bill {receiptLabel(r.receiptNo,r.extractedNozzle)}</div>}
+                      {r.status==="confirmed" && !r.lrNo && !r.tripId && (r.loanAdded
+                        ? <div style={{marginTop:3,background:C.green+"14",border:`1px solid ${C.green}66`,borderRadius:8,padding:"4px 8px",color:C.green,fontSize:10.5,fontWeight:700,lineHeight:1.4}}>
+                            ✓ Not attached to an LR on purpose — {fmt(r.loanAddedAmount||0)} was added to the vehicle loan{r.loanAddedBy?` by ${r.loanAddedBy}`:""}. Recovered.
+                          </div>
+                        : <div style={{marginTop:3,background:C.red+"11",border:`1px solid ${C.red}66`,borderRadius:8,padding:"4px 8px",color:C.red,fontSize:10.5,fontWeight:700,lineHeight:1.4}}>
+                            ⚠ Diesel given but not attached to any LR yet — not recovered. See the “Not Attached” tab.
+                          </div>)}
                       <div style={{fontSize:10.5,color:C.muted}}>Created {r.createdAt||"—"}{r.requestedBy?` · by ${r.requestedBy}`:""}</div>
                     </div>
                     <div style={{textAlign:"right"}}>
