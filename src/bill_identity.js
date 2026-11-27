@@ -58,3 +58,13 @@ export function receiptClashes(bill, requests, selfId) {
   }
   return out;
 }
+
+// What the screens show for a bill's identity: receipt number plus nozzle. "K0713 · Nozzle 1"; for a group
+// "K0712 (nozzle 1) + K0713 (nozzle 2)" (nozzles in the same order as the receipts). Unknown nozzle: just the receipt number.
+export function receiptLabel(receiptNo, nozzleNo) {
+  const rs = String(receiptNo ?? "").split("+").map((s) => s.trim());
+  const nz = nozParts(nozzleNo);
+  if (!rs.some(Boolean)) return "";
+  if (rs.length === 1) return nz[0] ? `${rs[0]} · Nozzle ${nz[0]}` : rs[0];
+  return rs.filter(Boolean).map((r, i) => (nz[i] ? `${r} (nozzle ${nz[i]})` : r)).join(" + ");
+}
